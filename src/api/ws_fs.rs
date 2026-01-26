@@ -271,7 +271,7 @@ impl Handler<ListDir> for FsWebSocket {
                     path: path_str,
                     entries,
                 };
-                let _ = addr.do_send(SendResponse { response });
+                addr.do_send(SendResponse { response });
             }
             .into_actor(self),
         );
@@ -304,7 +304,7 @@ impl Handler<ReadFile> for FsWebSocket {
                         message: format!("Failed to read file: {}", e),
                     },
                 };
-                let _ = addr.do_send(SendResponse { response });
+                addr.do_send(SendResponse { response });
             }
             .into_actor(self),
         );
@@ -330,18 +330,16 @@ impl Handler<WriteFile> for FsWebSocket {
         ctx.spawn(
             async move {
                 // Create parent directories if needed
-                if let Some(parent) = validated_path.parent() {
-                    if !parent.exists() {
-                        if let Err(e) = fs::create_dir_all(parent).await {
-                            let _ = addr.do_send(SendResponse {
+                if let Some(parent) = validated_path.parent()
+                    && !parent.exists()
+                        && let Err(e) = fs::create_dir_all(parent).await {
+                            addr.do_send(SendResponse {
                                 response: FsResponse::Error {
                                     message: format!("Failed to create directories: {}", e),
                                 },
                             });
                             return;
                         }
-                    }
-                }
 
                 let response = match fs::write(&validated_path, content).await {
                     Ok(()) => FsResponse::WriteSuccess { path: path_str },
@@ -349,7 +347,7 @@ impl Handler<WriteFile> for FsWebSocket {
                         message: format!("Failed to write file: {}", e),
                     },
                 };
-                let _ = addr.do_send(SendResponse { response });
+                addr.do_send(SendResponse { response });
             }
             .into_actor(self),
         );
@@ -379,7 +377,7 @@ impl Handler<MkDir> for FsWebSocket {
                         message: format!("Failed to create directory: {}", e),
                     },
                 };
-                let _ = addr.do_send(SendResponse { response });
+                addr.do_send(SendResponse { response });
             }
             .into_actor(self),
         );
@@ -418,7 +416,7 @@ impl Handler<DeletePath> for FsWebSocket {
                         },
                     }
                 };
-                let _ = addr.do_send(SendResponse { response });
+                addr.do_send(SendResponse { response });
             }
             .into_actor(self),
         );
@@ -460,7 +458,7 @@ impl Handler<RenamePath> for FsWebSocket {
                         message: format!("Failed to rename: {}", e),
                     },
                 };
-                let _ = addr.do_send(SendResponse { response });
+                addr.do_send(SendResponse { response });
             }
             .into_actor(self),
         );
@@ -532,12 +530,10 @@ async fn list_directory(path: &Path, recursive: bool) -> Vec<FileEntry> {
                 entries.push(file_entry);
             }
         }
-    } else {
-        if let Ok(mut dir) = fs::read_dir(path).await {
-            while let Ok(Some(entry)) = dir.next_entry().await {
-                if let Some(file_entry) = path_to_file_entry(&entry.path()) {
-                    entries.push(file_entry);
-                }
+    } else if let Ok(mut dir) = fs::read_dir(path).await {
+        while let Ok(Some(entry)) = dir.next_entry().await {
+            if let Some(file_entry) = path_to_file_entry(&entry.path()) {
+                entries.push(file_entry);
             }
         }
     }

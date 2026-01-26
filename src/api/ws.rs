@@ -108,7 +108,7 @@ impl Handler<ExecuteAgent> for AgentWebSocket {
                         let ws_msg = WsResponse::Event { data: event };
                         if let Ok(json) = serde_json::to_string(&ws_msg) {
                             // Ignore send failures (actor may be stopping)
-                            let _ = addr_for_closure.do_send(SendText { text: json });
+                            addr_for_closure.do_send(SendText { text: json });
                         }
                     },
                 )
@@ -118,7 +118,7 @@ impl Handler<ExecuteAgent> for AgentWebSocket {
                     Ok(_) => {
                         let done_msg = WsResponse::Done;
                         if let Ok(json) = serde_json::to_string(&done_msg) {
-                            let _ = addr.do_send(SendText { text: json });
+                            addr.do_send(SendText { text: json });
                         }
                     }
                     Err(e) => {
@@ -126,7 +126,7 @@ impl Handler<ExecuteAgent> for AgentWebSocket {
                             message: e.to_string(),
                         };
                         if let Ok(json) = serde_json::to_string(&error_msg) {
-                            let _ = addr.do_send(SendText { text: json });
+                            addr.do_send(SendText { text: json });
                         }
                     }
                 }

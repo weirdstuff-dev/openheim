@@ -82,13 +82,12 @@ impl ToolExecutor for SystemToolExecutor {
                     .ok_or_else(|| Error::ParseError("Missing 'content' argument".to_string()))?;
 
                 // Ensure parent directories exist if provided.
-                if let Some(parent) = Path::new(path).parent() {
-                    if !parent.as_os_str().is_empty() {
+                if let Some(parent) = Path::new(path).parent()
+                    && !parent.as_os_str().is_empty() {
                         fs::create_dir_all(parent)
                             .await
                             .map_err(Error::IoError)?;
                     }
-                }
 
                 fs::write(path, content).await.map_err(Error::IoError)?;
                 Ok(format!("Successfully wrote to {}", path))
