@@ -158,7 +158,7 @@ where
             let mut tool_results = Vec::new();
 
             for tool_call in tool_calls {
-                // Use references where possible to avoid cloning
+                // Store references to avoid accessing fields multiple times
                 let tool_name = &tool_call.function.name;
                 let arguments = &tool_call.function.arguments;
                 

@@ -47,6 +47,6 @@ fn main() {
     println!("\nAfter optimization:");
     println!("- Tools initialized once on first call");
     println!("- Subsequent calls just return a &'static [Tool] reference");
-    println!("- Memory saved: ~{:.1}MB for {} calls", 
+    println!("- Memory saved: ~{:.2}KB for {} calls", 
              (iterations as f64 * 1.5) / 1024.0, iterations);
 }
