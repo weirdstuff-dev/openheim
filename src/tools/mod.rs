@@ -1,15 +1,14 @@
-#![allow(clippy::redundant_clone)]
-
 pub mod executor;
 
 pub use executor::{SystemToolExecutor, ToolExecutor};
 
 use crate::error::{Error, Result};
 use crate::core::models::{FunctionDefinition, Tool};
+use once_cell::sync::Lazy;
 use serde_json::json;
 use tokio::runtime::Runtime;
 
-pub fn get_available_tools() -> Vec<Tool> {
+static AVAILABLE_TOOLS: Lazy<Vec<Tool>> = Lazy::new(|| {
     vec![
         Tool {
             tool_type: "function".to_string(),
@@ -67,6 +66,10 @@ pub fn get_available_tools() -> Vec<Tool> {
             },
         },
     ]
+});
+
+pub fn get_available_tools() -> &'static [Tool] {
+    &AVAILABLE_TOOLS
 }
 
 pub async fn execute_tool(name: &str, arguments: &str) -> Result<String> {
