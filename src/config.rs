@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -24,6 +25,19 @@ impl AgentConfig {
             api_key: self.api_key.clone(),
             model: self.model.clone(),
             max_iterations,
+        }
+    }
+    
+    pub fn arc_with_max_iterations(self: &Arc<Self>, max_iterations: usize) -> Arc<Self> {
+        if self.max_iterations == max_iterations {
+            Arc::clone(self)
+        } else {
+            Arc::new(Self {
+                api_base: self.api_base.clone(),
+                api_key: self.api_key.clone(),
+                model: self.model.clone(),
+                max_iterations,
+            })
         }
     }
 }

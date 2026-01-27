@@ -1461,6 +1461,7 @@ dependencies = [
  "async-trait",
  "clap",
  "notify",
+ "once_cell",
  "reqwest",
  "rustyline",
  "serde",

@@ -89,7 +89,7 @@ pub async fn run_agent(
             println!("--- Iteration {} ---", iteration + 1);
         }
 
-        let choice = call_llm(&llm, &messages, &tools).await?;
+        let choice = call_llm(&llm, &messages, tools).await?;
         messages.push(choice.message.clone());
 
         if let Some(tool_calls) = &choice.message.tool_calls {
@@ -151,30 +151,34 @@ where
             iteration: iteration + 1,
         });
 
-        let choice = call_llm(&llm, &messages, &tools).await?;
+        let choice = call_llm(&llm, &messages, tools).await?;
         messages.push(choice.message.clone());
 
         if let Some(tool_calls) = &choice.message.tool_calls {
             let mut tool_results = Vec::new();
 
             for tool_call in tool_calls {
+                // Store references to avoid accessing fields multiple times
+                let tool_name = &tool_call.function.name;
+                let arguments = &tool_call.function.arguments;
+                
                 callback(StreamEvent::ToolCall {
-                    tool_name: tool_call.function.name.clone(),
-                    arguments: tool_call.function.arguments.clone(),
+                    tool_name: tool_name.clone(),
+                    arguments: arguments.clone(),
                 });
 
                 let result = tool_executor
-                    .execute(&tool_call.function.name, &tool_call.function.arguments)
+                    .execute(tool_name, arguments)
                     .await?;
 
                 callback(StreamEvent::ToolResult {
-                    tool_name: tool_call.function.name.clone(),
+                    tool_name: tool_name.clone(),
                     result: result.clone(),
                 });
 
                 tool_results.push(ToolExecutionResult {
-                    tool_name: tool_call.function.name.clone(),
-                    arguments: tool_call.function.arguments.clone(),
+                    tool_name: tool_name.clone(),
+                    arguments: arguments.clone(),
                     result: result.clone(),
                 });
 
@@ -248,7 +252,7 @@ pub async fn run_agent_with_history(
             println!("--- Iteration {} ---", iteration + 1);
         }
 
-        let choice = call_llm(&llm, messages, &tools).await?;
+        let choice = call_llm(&llm, messages, tools).await?;
         messages.push(choice.message.clone());
 
         if let Some(tool_calls) = &choice.message.tool_calls {
