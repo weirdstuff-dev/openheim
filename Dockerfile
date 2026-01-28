@@ -33,17 +33,26 @@ RUN apt-get update && apt-get install -y \
 # Copy the built binary from builder
 COPY --from=builder /workspace/target/release/openheim /usr/local/bin/openheim
 
-# Create a non-root user
+# Copy entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Create a non-root user with home directory for config
 RUN useradd -m -u 1000 openheim && \
     chown -R openheim:openheim /workspace
 
 USER openheim
+
+# Create config directory (will be used if no volume mounted)
+RUN mkdir -p /home/openheim/.openheim
 
 # Expose the API port
 EXPOSE 8080
 
 # Set environment variables
 ENV RUST_LOG=info
+
+ENTRYPOINT ["docker-entrypoint.sh"]
 
 # Default to API mode
 CMD ["openheim", "--api-mode"]
