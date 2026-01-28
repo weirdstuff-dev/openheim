@@ -19,8 +19,8 @@ pub struct Args {
     #[arg(short, long, help = "The prompt to send to the LLM (CLI mode)")]
     pub query: Option<String>,
 
-    #[arg(long, default_value = "10", help = "Maximum number of agent iterations")]
-    pub max_iterations: usize,
+    #[arg(long, help = "Maximum number of agent iterations (overrides config)")]
+    pub max_iterations: Option<usize>,
 
     #[arg(long, help = "Run in API server mode instead of CLI mode")]
     pub api_mode: bool,
@@ -34,14 +34,14 @@ pub struct Args {
     #[arg(long, default_value = "8080", help = "API server port")]
     pub port: u16,
 
-    #[arg(long, default_value = "", help = "LLM API base URL (or set OPENAI_API_BASE)")]
-    pub api_base: String,
+    #[arg(long, help = "Model name to use (must be configured in a provider)")]
+    pub model: Option<String>,
 
-    #[arg(long, default_value = "", help = "LLM API key (or set OPENAI_API_KEY)")]
-    pub api_key: String,
+    #[arg(long, help = "List all configured providers and models")]
+    pub list: bool,
 
-    #[arg(long, default_value = "", help = "LLM model name (or set OPENAI_MODEL)")]
-    pub model: String,
+    #[arg(long, help = "Initialize config file at ~/.openheim/config.toml")]
+    pub init: bool,
 }
 
 pub async fn run_agent_mode(client: &Client, config: &AgentConfig) -> Result<()> {

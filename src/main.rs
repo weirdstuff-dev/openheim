@@ -1,13 +1,12 @@
 use anyhow::Result;
 use clap::Parser;
 use reqwest::Client;
-use std::env;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use openheim::{
     api,
     cli::{self, Args},
-    AgentConfig,
+    config::{init_config, load_config},
 };
 
 #[actix_web::main]
@@ -17,26 +16,55 @@ async fn main() -> Result<()> {
     fmt::Subscriber::builder().with_env_filter(env_filter).init();
 
     let args = Args::parse();
+
+    if args.init {
+        match init_config() {
+            Ok(path) => {
+                println!("Config file created at {}", path.display());
+                println!("Edit it to configure your LLM providers.");
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
+    let app_config = match load_config() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if args.list {
+        print!("{}", app_config.list_models());
+        return Ok(());
+    }
+
+    let mut agent_config = match app_config.resolve(args.model.as_deref()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if let Some(max_iter) = args.max_iterations {
+        agent_config.max_iterations = max_iter;
+    }
+
     let client = Client::new();
 
-    let api_base = env::var("OPENAI_API_BASE").unwrap_or_else(|_| args.api_base.clone());
-    let api_key = env::var("OPENAI_API_KEY").unwrap_or_else(|_| args.api_key.clone());
-    if api_key.trim().is_empty() {
-        eprintln!("Error: OPENAI_API_KEY must be provided via environment variable OPENAI_API_KEY or the --api-key flag.");
-        std::process::exit(1);
-    }
-    let model = env::var("OPENAI_MODEL").unwrap_or_else(|_| args.model.clone());
-
-    let config = AgentConfig::new(api_base, api_key, model, args.max_iterations);
-
     if args.api_mode {
-        api::start_api_server(args.host, args.port, client, config).await?;
+        api::start_api_server(args.host, args.port, client, agent_config, app_config).await?;
     } else if args.agent_mode {
-        cli::run_agent_mode(&client, &config).await?;
+        cli::run_agent_mode(&client, &agent_config).await?;
     } else {
-        cli::run_single_prompt(&client, &config, &args).await?;
+        cli::run_single_prompt(&client, &agent_config, &args).await?;
     }
 
     Ok(())
 }
-

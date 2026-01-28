@@ -1,0 +1,75 @@
+use super::types::{AgentConfig, AppConfig};
+
+impl AppConfig {
+    pub fn resolve(&self, model_name: Option<&str>) -> anyhow::Result<AgentConfig> {
+        match model_name {
+            Some(name) => self.resolve_model(name),
+            None => self.resolve_default(),
+        }
+    }
+    
+    fn resolve_default(&self) -> anyhow::Result<AgentConfig> {
+        let provider = self.providers.get(&self.default_provider).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Default provider '{}' not found in config. Available providers: {}",
+                self.default_provider,
+                self.provider_names()
+            )
+        })?;
+        Ok(AgentConfig {
+            api_base: provider.api_base.clone(),
+            api_key: provider.resolve_api_key(),
+            model: provider.default_model.clone(),
+            max_iterations: self.max_iterations,
+        })
+    }
+
+    fn resolve_model(&self, model_name: &str) -> anyhow::Result<AgentConfig> {
+        for (_name, provider) in &self.providers {
+            if provider.models.contains(&model_name.to_string()) {
+                return Ok(AgentConfig {
+                    api_base: provider.api_base.clone(),
+                    api_key: provider.resolve_api_key(),
+                    model: model_name.to_string(),
+                    max_iterations: self.max_iterations,
+                });
+            }
+        }
+        anyhow::bail!(
+            "Model '{}' not found in any provider. Run `openheim --list` to see available models.",
+            model_name
+        );
+    }
+
+    pub fn list_models(&self) -> String {
+        let mut out = String::from("Configured providers:\n");
+        for (name, provider) in &self.providers {
+            let is_default = name == &self.default_provider;
+            let suffix = if is_default { " (default)" } else { "" };
+            out.push_str(&format!("\n  {}{}\n", name, suffix));
+            out.push_str(&format!("    api_base: {}\n", provider.api_base));
+
+            let models: Vec<String> = provider
+                .models
+                .iter()
+                .map(|m| {
+                    if m == &provider.default_model {
+                        format!("{} (default)", m)
+                    } else {
+                        m.clone()
+                    }
+                })
+                .collect();
+            out.push_str(&format!("    models:   {}\n", models.join(", ")));
+        }
+        out
+    }
+
+    fn provider_names(&self) -> String {
+        self.providers
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
