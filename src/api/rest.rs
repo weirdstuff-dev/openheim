@@ -1,9 +1,10 @@
 use actix_web::{web, HttpResponse, Responder};
+use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::core::agent::run_agent;
-use crate::config::AgentConfig;
+use crate::config::{AgentConfig, AppConfig, resolve_client_and_config};
 use crate::core::models::AgentResult;
 use crate::core::llm::LlmClient;
 use crate::tools::ToolExecutor;
@@ -11,12 +12,11 @@ use crate::tools::ToolExecutor;
 #[derive(Debug, Deserialize)]
 pub struct AgentRequest {
     pub prompt: String,
-    #[serde(default = "default_max_iterations")]
-    pub max_iterations: usize,
-}
-
-fn default_max_iterations() -> usize {
-    10
+    #[serde(default)]
+    pub max_iterations: Option<usize>,
+    /// Optional model name. If provided, resolves against AppConfig to pick the right provider.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -30,13 +30,31 @@ pub struct AgentResponse {
 
 pub async fn execute_agent(
     req: web::Json<AgentRequest>,
-    llm: web::Data<Arc<dyn LlmClient>>,
+    default_llm: web::Data<Arc<dyn LlmClient>>,
     executor: web::Data<Arc<dyn ToolExecutor>>,
     config: web::Data<AgentConfig>,
+    app_config: web::Data<AppConfig>,
+    http_client: web::Data<ReqwestClient>,
 ) -> impl Responder {
-    let agent_config = config.with_max_iterations(req.max_iterations);
+    // Resolve the LLM client: use per-request model if specified, otherwise use the default
+    let (llm_client, agent_config) = match resolve_client_and_config(
+        req.model.as_deref(),
+        req.max_iterations,
+        app_config.get_ref(),
+        http_client.get_ref(),
+        default_llm.get_ref().clone(),
+        config.get_ref(),
+    ) {
+        Ok((client, config)) => (client, config),
+        Err(e) => {
+            return HttpResponse::BadRequest().json(AgentResponse {
+                success: false,
+                result: None,
+                error: Some(e),
+            });
+        }
+    };
 
-    let llm_client = llm.get_ref().clone();
     let tool_executor = executor.get_ref().clone();
 
     match run_agent(llm_client, tool_executor, &agent_config, &req.prompt, false).await {

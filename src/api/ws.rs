@@ -1,11 +1,12 @@
 use actix::{Actor, ActorContext, AsyncContext, Handler, Message as ActixMessage, StreamHandler, WrapFuture};
 use actix_web::{web, Error, HttpRequest, HttpResponse};
 use actix_web_actors::ws;
+use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::core::agent::run_agent_streaming;
-use crate::config::AgentConfig;
+use crate::config::{AgentConfig, AppConfig, resolve_client_and_config};
 use crate::core::llm::LlmClient;
 use crate::core::models::StreamEvent;
 use crate::tools::ToolExecutor;
@@ -13,12 +14,11 @@ use crate::tools::ToolExecutor;
 #[derive(Debug, Deserialize)]
 pub struct WsRequest {
     pub prompt: String,
-    #[serde(default = "default_max_iterations")]
-    pub max_iterations: usize,
-}
-
-fn default_max_iterations() -> usize {
-    10
+    #[serde(default)]
+    pub max_iterations: Option<usize>,
+    /// Optional model name to override the default.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -41,6 +41,8 @@ pub struct AgentWebSocket {
     llm: Arc<dyn LlmClient>,
     executor: Arc<dyn ToolExecutor>,
     config: AgentConfig,
+    app_config: AppConfig,
+    http_client: ReqwestClient,
 }
 
 impl AgentWebSocket {
@@ -48,11 +50,15 @@ impl AgentWebSocket {
         llm: Arc<dyn LlmClient>,
         executor: Arc<dyn ToolExecutor>,
         config: AgentConfig,
+        app_config: AppConfig,
+        http_client: ReqwestClient,
     ) -> Self {
         Self {
             llm,
             executor,
             config,
+            app_config,
+            http_client,
         }
     }
 
@@ -60,6 +66,17 @@ impl AgentWebSocket {
         if let Ok(json) = serde_json::to_string(&msg) {
             ctx.text(json);
         }
+    }
+
+    fn resolve_request(&self, req: &WsRequest) -> Result<(Arc<dyn LlmClient>, AgentConfig), String> {
+        resolve_client_and_config(
+            req.model.as_deref(),
+            req.max_iterations,
+            &self.app_config,
+            &self.http_client,
+            self.llm.clone(),
+            &self.config,
+        )
     }
 }
 
@@ -77,19 +94,19 @@ impl Actor for AgentWebSocket {
 #[derive(ActixMessage)]
 #[rtype(result = "()")]
 struct ExecuteAgent {
+    llm: Arc<dyn LlmClient>,
+    config: AgentConfig,
     prompt: String,
-    max_iterations: usize,
 }
 
 impl Handler<ExecuteAgent> for AgentWebSocket {
     type Result = ();
 
     fn handle(&mut self, msg: ExecuteAgent, ctx: &mut Self::Context) {
-        // Clone handles we'll move into the async task.
-        let llm = self.llm.clone();
+        let llm = msg.llm;
         let executor = self.executor.clone();
-        let config = self.config.with_max_iterations(msg.max_iterations);
-        let prompt = msg.prompt.clone();
+        let config = msg.config;
+        let prompt = msg.prompt;
 
         // Actor address to send back text messages
         let addr = ctx.address();
@@ -156,10 +173,19 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for AgentWebSocket {
             Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
             Ok(ws::Message::Text(text)) => match serde_json::from_str::<WsRequest>(&text) {
                 Ok(req) => {
-                    ctx.notify(ExecuteAgent {
-                        prompt: req.prompt,
-                        max_iterations: req.max_iterations,
-                    });
+                    match self.resolve_request(&req) {
+                        Ok((llm, config)) => {
+                            ctx.notify(ExecuteAgent {
+                                llm,
+                                config,
+                                prompt: req.prompt,
+                            });
+                        }
+                        Err(e) => {
+                            let error = WsResponse::Error { message: e };
+                            self.send_json(&error, ctx);
+                        }
+                    }
                 }
                 Err(e) => {
                     let error = WsResponse::Error {
@@ -183,11 +209,15 @@ pub async fn ws_handler(
     llm: web::Data<Arc<dyn LlmClient>>,
     executor: web::Data<Arc<dyn ToolExecutor>>,
     config: web::Data<AgentConfig>,
+    app_config: web::Data<AppConfig>,
+    http_client: web::Data<ReqwestClient>,
 ) -> Result<HttpResponse, Error> {
     let ws = AgentWebSocket::new(
         llm.get_ref().clone(),
         executor.get_ref().clone(),
         config.get_ref().clone(),
+        app_config.get_ref().clone(),
+        http_client.get_ref().clone(),
     );
     ws::start(ws, &req, stream)
 }

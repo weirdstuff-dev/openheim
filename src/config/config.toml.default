@@ -1,0 +1,36 @@
+# Openheim Configuration Example
+# Copy this file to ~/.openheim/config.toml and customize
+
+# Default LLM provider to use
+default_provider = "openai"
+
+# Maximum number of agent iterations (can be overridden with --max-iterations)
+max_iterations = 10
+
+# OpenAI Configuration
+[providers.openai]
+api_base = "https://api.openai.com/v1/chat/completions"
+default_model = "gpt-4"
+models = ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
+env_var = "OPENAI_API_KEY"
+# api_key = "sk-..."  # Not recommended - use environment variable instead
+
+# Anthropic Claude Configuration
+[providers.anthropic]
+api_base = "https://api.anthropic.com/v1/messages"
+default_model = "claude-3-5-sonnet"
+models = ["claude-3-5-sonnet", "claude-3-opus", "claude-3-haiku"]
+env_var = "ANTHROPIC_API_KEY"
+
+# Custom/Generic OpenAI-compatible API
+# [providers.custom]
+# api_base = "https://example.llm.api/v1"
+# default_model = "gpt-oss"
+# models = ["gpt-oss"]
+# env_var = "CUSTOM_API_KEY"
+
+# Local Ollama (no API key needed)
+# [providers.ollama]
+# api_base = "http://localhost:11434/v1"
+# default_model = "llama2"
+# models = ["llama2", "mistral", "codellama", "mixtral"]

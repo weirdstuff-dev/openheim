@@ -16,17 +16,26 @@ Openheim is an open-source, lightweight LLM agent written in Rust that is built 
 ### Prerequisites
 
 - Rust 1.85+ (uses 2024 edition)
-- OpenAI API key (or compatible service)
+- An API key for at least one LLM provider (OpenAI, Anthropic, or any OpenAI-compatible service)
 
 ### Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/openheim.git
+git clone https://github.com/weirdstuff-dev/openheim.git
 cd openheim
 
 # Build the project
 cargo build --release
+```
+
+### Configuration
+
+```bash
+# Initialize the config file
+cargo run -- --init
+
+# Edit ~/.openheim/config.toml to add your provider(s) and API keys
 ```
 
 ### Basic Usage
@@ -40,6 +49,12 @@ cargo run -- --agent-mode
 
 # Start API server
 cargo run -- --api-mode --port 8080
+
+# Use a specific model
+cargo run -- --query "Hello" --model gpt-4-turbo
+
+# List configured providers and models
+cargo run -- --list
 ```
 
 ## Operation Modes
@@ -118,28 +133,75 @@ Receives real-time events for each iteration.
 
 ## Configuration
 
+Openheim uses a TOML configuration file at `~/.openheim/config.toml` to manage LLM providers and settings.
+
+### Setup
+
+```bash
+# Initialize the default config file
+openheim --init
+
+# Edit the config to add your providers
+vim ~/.openheim/config.toml
+```
+
+### Config File Format
+
+```toml
+# Default provider to use
+default_provider = "openai"
+
+# Maximum agent iterations (can be overridden with --max-iterations)
+max_iterations = 10
+
+# Provider configurations
+[providers.openai]
+api_base = "https://api.openai.com/v1"
+default_model = "gpt-4"
+models = ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
+env_var = "OPENAI_API_KEY"   # reads API key from this env var
+
+[providers.anthropic]
+api_base = "https://api.anthropic.com/v1"
+default_model = "claude-3-5-sonnet"
+models = ["claude-3-5-sonnet", "claude-3-opus", "claude-3-haiku"]
+env_var = "ANTHROPIC_API_KEY"
+
+# Local Ollama (no API key needed)
+[providers.ollama]
+api_base = "http://localhost:11434/v1"
+default_model = "llama2"
+models = ["llama2", "mistral", "codellama", "mixtral"]
+```
+
+Each provider supports:
+- `api_base` - The API endpoint URL
+- `default_model` - Model used when no `--model` flag is given
+- `models` - List of available models for this provider
+- `env_var` - Environment variable name for the API key (recommended)
+- `api_key` - Inline API key (not recommended; prefer `env_var`)
+
 ### Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `OPENAI_API_KEY` | API authentication token | *required* |
-| `OPENAI_API_BASE` | LLM API endpoint URL | OpenAI default |
-| `OPENAI_MODEL` | Model identifier | glm-4.7 |
-| `RUST_LOG` | Logging level | info |
+| Variable | Description |
+|----------|-------------|
+| `OPENAI_API_KEY` | OpenAI API key (referenced via `env_var` in config) |
+| `ANTHROPIC_API_KEY` | Anthropic API key (referenced via `env_var` in config) |
+| `RUST_LOG` | Logging level (default: `info`) |
 
 ### CLI Arguments
 
 ```
 OPTIONS:
     --query <PROMPT>          Execute a single prompt
-    --agent-mode           Start interactive conversation mode
+    --agent-mode              Start interactive conversation mode
     --api-mode                Start HTTP/WebSocket server
     --host <HOST>             Server bind address [default: 0.0.0.0]
     --port <PORT>             Server port [default: 8080]
-    --max-iterations <N>      Agent iteration limit [default: 10]
-    --api-base <URL>          LLM API endpoint
-    --api-key <KEY>           LLM authentication token
-    --model <NAME>            LLM model name
+    --max-iterations <N>      Override max agent iterations from config
+    --model <NAME>            Use a specific model (must be configured in a provider)
+    --list                    List all configured providers and models
+    --init                    Initialize config file at ~/.openheim/config.toml
 ```
 
 ## Available Tools
@@ -180,6 +242,8 @@ docker run -p 8080:8080 \
 The Docker setup includes:
 - Multi-stage build for minimal image size
 - Non-root user for security
+- Entrypoint script that auto-initializes config on first run
+- Persistent volume for config (`~/.openheim/config.toml`)
 - Volume mount for persistent workspace
 - Auto-restart policy
 
@@ -189,8 +253,12 @@ The Docker setup includes:
 openheim/
 ├── src/
 │   ├── main.rs           # Entry point
-│   ├── config.rs         # Configuration management
 │   ├── error.rs          # Error types
+│   ├── config/
+│   │   ├── mod.rs        # Config loading & initialization
+│   │   ├── types.rs      # AppConfig, ProviderConfig, AgentConfig types
+│   │   ├── resolve.rs    # Provider/model resolution logic
+│   │   └── config.toml.default  # Default config template
 │   ├── core/
 │   │   ├── agent.rs      # Agent orchestration
 │   │   ├── llm.rs        # LLM client abstraction
@@ -208,7 +276,8 @@ openheim/
 ├── workspace/            # Default working directory
 ├── Cargo.toml
 ├── Dockerfile
-└── docker-compose.yml
+├── docker-compose.yml
+└── docker-entrypoint.sh  # Docker config initialization
 ```
 
 ## Architecture

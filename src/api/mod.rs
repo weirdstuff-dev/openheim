@@ -5,7 +5,7 @@ use reqwest::Client;
 use std::sync::Arc;
 
 use crate::{
-    AgentConfig,
+    AgentConfig, AppConfig,
     llm::{LlmClient, OpenAiCompatibleClient},
     tools::{SystemToolExecutor, ToolExecutor},
 };
@@ -14,7 +14,7 @@ pub mod rest;
 pub mod ws;
 pub mod ws_fs;
 
-pub use rest::{execute_agent};
+pub use rest::execute_agent;
 pub use ws::ws_handler;
 pub use ws_fs::ws_fs_handler;
 
@@ -23,8 +23,9 @@ pub async fn start_api_server(
     port: u16,
     client: Client,
     config: AgentConfig,
+    app_config: AppConfig,
 ) -> Result<()> {
-    tracing::info!("🚀 Starting API server on {}:{}", host, port);
+    tracing::info!("Starting API server on {}:{}", host, port);
     tracing::info!("  POST /query           - Execute agent with prompt");
     tracing::info!("  WS   /ws              - WebSocket for streaming agent execution");
     tracing::info!("  WS   /ws/fs           - WebSocket for filesystem access (read/write/watch)");
@@ -52,6 +53,8 @@ pub async fn start_api_server(
             .app_data(web::Data::new(llm_client.clone()))
             .app_data(web::Data::new(tool_executor.clone()))
             .app_data(web::Data::new(config.clone()))
+            .app_data(web::Data::new(app_config.clone()))
+            .app_data(web::Data::new(client.clone()))
             .route("/query", web::post().to(execute_agent))
             .route("/ws", web::get().to(ws_handler))
             .route("/ws/fs", web::get().to(ws_fs_handler))

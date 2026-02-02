@@ -5,7 +5,7 @@ pub mod core;
 pub mod error;
 pub mod tools;
 
-pub use config::AgentConfig;
+pub use config::{AgentConfig, AppConfig};
 pub use core::{agent, llm, models};
 pub use error::{Error, Result};
 pub use models::*;
