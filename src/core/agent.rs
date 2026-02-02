@@ -89,7 +89,7 @@ pub async fn run_agent(
             println!("--- Iteration {} ---", iteration + 1);
         }
 
-        let choice = call_llm(&llm, &messages, tools).await?;
+        let choice = call_llm(&llm, &messages, &tools).await?;
         messages.push(choice.message.clone());
 
         if let Some(tool_calls) = &choice.message.tool_calls {
@@ -151,7 +151,7 @@ where
             iteration: iteration + 1,
         });
 
-        let choice = call_llm(&llm, &messages, tools).await?;
+        let choice = call_llm(&llm, &messages, &tools).await?;
         messages.push(choice.message.clone());
 
         if let Some(tool_calls) = &choice.message.tool_calls {
@@ -252,7 +252,7 @@ pub async fn run_agent_with_history(
             println!("--- Iteration {} ---", iteration + 1);
         }
 
-        let choice = call_llm(&llm, messages, tools).await?;
+        let choice = call_llm(&llm, messages, &tools).await?;
         messages.push(choice.message.clone());
 
         if let Some(tool_calls) = &choice.message.tool_calls {
