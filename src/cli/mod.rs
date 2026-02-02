@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use crate::{
     agent::{run_agent, run_agent_with_history},
-    AgentConfig, Message,
-    llm::{LlmClient, OpenAiCompatibleClient},
+    AgentConfig, AppConfig, Message,
+    config::resolve_client_and_config,
     tools::{SystemToolExecutor, ToolExecutor},
 };
 
@@ -44,16 +44,32 @@ pub struct Args {
     pub init: bool,
 }
 
-pub async fn run_agent_mode(client: &Client, config: &AgentConfig) -> Result<()> {
+pub async fn run_agent_mode(
+    client: &Client,
+    config: &AgentConfig,
+    app_config: &AppConfig,
+    model_name: Option<&str>,
+    max_iterations: Option<usize>,
+) -> Result<()> {
     tracing::info!("🔄 Starting continue mode - persistent conversation");
     tracing::info!("Type your messages and press Enter. Type 'exit', 'quit' or :q to end the conversation.\n");
 
-    let llm_client: Arc<dyn LlmClient> = Arc::new(OpenAiCompatibleClient::new(
-        client.clone(),
-        config.api_base.clone(),
-        config.api_key.clone(),
-        config.model.clone(),
-    ));
+    let (llm_client, resolved_config) = resolve_client_and_config(
+        model_name,
+        max_iterations,
+        app_config,
+        client,
+        Arc::new(crate::llm::OpenAiCompatibleClient::new(
+            client.clone(),
+            config.api_base.clone(),
+            config.api_key.clone(),
+            config.model.clone(),
+        )),
+        config,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+
+    let config = resolved_config;
     let tool_executor: Arc<dyn ToolExecutor> = Arc::new(SystemToolExecutor::new());
 
     let mut messages: Vec<Message> = Vec::new();
@@ -80,7 +96,7 @@ pub async fn run_agent_mode(client: &Client, config: &AgentConfig) -> Result<()>
                 match run_agent_with_history(
                     llm_client.clone(),
                     tool_executor.clone(),
-                    config,
+                    &config,
                     &mut messages,
                     true,
                 )
@@ -114,23 +130,40 @@ pub async fn run_agent_mode(client: &Client, config: &AgentConfig) -> Result<()>
     Ok(())
 }
 
-pub async fn run_single_prompt(client: &Client, config: &AgentConfig, args: &Args) -> Result<()> {
+pub async fn run_single_prompt(
+    client: &Client,
+    config: &AgentConfig,
+    app_config: &AppConfig,
+    model_name: Option<&str>,
+    max_iterations: Option<usize>,
+    args: &Args,
+) -> Result<()> {
     let prompt = args.query.as_ref().context(
         "Prompt is required in CLI mode. Use --prompt, --agent-mode, or switch to API mode with --api-mode"
     )?;
 
-    let llm_client: Arc<dyn LlmClient> = Arc::new(OpenAiCompatibleClient::new(
-        client.clone(),
-        config.api_base.clone(),
-        config.api_key.clone(),
-        config.model.clone(),
-    ));
+    let (llm_client, resolved_config) = resolve_client_and_config(
+        model_name,
+        max_iterations,
+        app_config,
+        client,
+        Arc::new(crate::llm::OpenAiCompatibleClient::new(
+            client.clone(),
+            config.api_base.clone(),
+            config.api_key.clone(),
+            config.model.clone(),
+        )),
+        config,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+
+    let config = resolved_config;
     let tool_executor: Arc<dyn ToolExecutor> = Arc::new(SystemToolExecutor::new());
 
     let result = run_agent(
         llm_client,
         tool_executor,
-        config,
+        &config,
         prompt,
         true,
     )

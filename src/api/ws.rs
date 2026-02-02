@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::core::agent::run_agent_streaming;
-use crate::config::{AgentConfig, AppConfig};
-use crate::core::llm::{LlmClient, OpenAiCompatibleClient};
+use crate::config::{AgentConfig, AppConfig, resolve_client_and_config};
+use crate::core::llm::LlmClient;
 use crate::core::models::StreamEvent;
 use crate::tools::ToolExecutor;
 
@@ -69,29 +69,14 @@ impl AgentWebSocket {
     }
 
     fn resolve_request(&self, req: &WsRequest) -> Result<(Arc<dyn LlmClient>, AgentConfig), String> {
-        if let Some(model_name) = &req.model {
-            match self.app_config.resolve(Some(model_name)) {
-                Ok(mut resolved) => {
-                    if let Some(max_iter) = req.max_iterations {
-                        resolved.max_iterations = max_iter;
-                    }
-                    let client: Arc<dyn LlmClient> = Arc::new(OpenAiCompatibleClient::new(
-                        self.http_client.clone(),
-                        resolved.api_base.clone(),
-                        resolved.api_key.clone(),
-                        resolved.model.clone(),
-                    ));
-                    Ok((client, resolved))
-                }
-                Err(e) => Err(e.to_string()),
-            }
-        } else {
-            let mut cfg = self.config.clone();
-            if let Some(max_iter) = req.max_iterations {
-                cfg.max_iterations = max_iter;
-            }
-            Ok((self.llm.clone(), cfg))
-        }
+        resolve_client_and_config(
+            req.model.as_deref(),
+            req.max_iterations,
+            &self.app_config,
+            &self.http_client,
+            self.llm.clone(),
+            &self.config,
+        )
     }
 }
 

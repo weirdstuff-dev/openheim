@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut agent_config = match app_config.resolve(args.model.as_deref()) {
+    let agent_config = match app_config.resolve(None) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -52,18 +52,29 @@ async fn main() -> Result<()> {
         }
     };
 
-    if let Some(max_iter) = args.max_iterations {
-        agent_config.max_iterations = max_iter;
-    }
-
     let client = Client::new();
 
     if args.api_mode {
         api::start_api_server(args.host, args.port, client, agent_config, app_config).await?;
     } else if args.agent_mode {
-        cli::run_agent_mode(&client, &agent_config).await?;
+        cli::run_agent_mode(
+            &client,
+            &agent_config,
+            &app_config,
+            args.model.as_deref(),
+            args.max_iterations,
+        )
+        .await?;
     } else {
-        cli::run_single_prompt(&client, &agent_config, &args).await?;
+        cli::run_single_prompt(
+            &client,
+            &agent_config,
+            &app_config,
+            args.model.as_deref(),
+            args.max_iterations,
+            &args,
+        )
+        .await?;
     }
 
     Ok(())

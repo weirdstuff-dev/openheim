@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::core::agent::run_agent;
-use crate::config::{AgentConfig, AppConfig};
+use crate::config::{AgentConfig, AppConfig, resolve_client_and_config};
 use crate::core::models::AgentResult;
-use crate::core::llm::{LlmClient, OpenAiCompatibleClient};
+use crate::core::llm::LlmClient;
 use crate::tools::ToolExecutor;
 
 #[derive(Debug, Deserialize)]
@@ -37,34 +37,22 @@ pub async fn execute_agent(
     http_client: web::Data<ReqwestClient>,
 ) -> impl Responder {
     // Resolve the LLM client: use per-request model if specified, otherwise use the default
-    let (llm_client, agent_config) = if let Some(model_name) = &req.model {
-        match app_config.resolve(Some(model_name)) {
-            Ok(mut resolved) => {
-                if let Some(max_iter) = req.max_iterations {
-                    resolved.max_iterations = max_iter;
-                }
-                let client: Arc<dyn LlmClient> = Arc::new(OpenAiCompatibleClient::new(
-                    http_client.get_ref().clone(),
-                    resolved.api_base.clone(),
-                    resolved.api_key.clone(),
-                    resolved.model.clone(),
-                ));
-                (client, resolved)
-            }
-            Err(e) => {
-                return HttpResponse::BadRequest().json(AgentResponse {
-                    success: false,
-                    result: None,
-                    error: Some(e.to_string()),
-                });
-            }
+    let (llm_client, agent_config) = match resolve_client_and_config(
+        req.model.as_deref(),
+        req.max_iterations,
+        app_config.get_ref(),
+        http_client.get_ref(),
+        default_llm.get_ref().clone(),
+        config.get_ref(),
+    ) {
+        Ok((client, config)) => (client, config),
+        Err(e) => {
+            return HttpResponse::BadRequest().json(AgentResponse {
+                success: false,
+                result: None,
+                error: Some(e),
+            });
         }
-    } else {
-        let mut cfg = config.get_ref().clone();
-        if let Some(max_iter) = req.max_iterations {
-            cfg.max_iterations = max_iter;
-        }
-        (default_llm.get_ref().clone(), cfg)
     };
 
     let tool_executor = executor.get_ref().clone();
