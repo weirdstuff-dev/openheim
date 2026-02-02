@@ -41,7 +41,13 @@ impl AppConfig {
         );
     }
 
-    pub fn list_models(&self) -> String {
+    pub fn list_models(&self) -> anyhow::Result<String> {
+        if self.providers.is_empty() {
+            anyhow::bail!(
+                "No providers configured. Edit your config file to add at least one provider.\n\
+            );
+        }
+
         let mut out = String::from("Configured providers:\n");
         for (name, provider) in &self.providers {
             let is_default = name == &self.default_provider;
@@ -62,7 +68,7 @@ impl AppConfig {
                 .collect();
             out.push_str(&format!("    models:   {}\n", models.join(", ")));
         }
-        out
+        Ok(out)
     }
 
     fn provider_names(&self) -> String {

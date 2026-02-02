@@ -40,7 +40,13 @@ async fn main() -> Result<()> {
     };
 
     if args.list {
-        print!("{}", app_config.list_models());
+        match app_config.list_models() {
+            Ok(output) => print!("{}", output),
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
         return Ok(());
     }
 
