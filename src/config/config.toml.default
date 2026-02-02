@@ -1,26 +1,41 @@
-# Openheim Configuration Example
+# Openheim Configuration
 # Copy this file to ~/.openheim/config.toml and customize
 
-# Default LLM provider to use
+# Default LLM provider to use (must match a [providers.X] section below)
 default_provider = "openai"
 
 # Maximum number of agent iterations (can be overridden with --max-iterations)
 max_iterations = 10
 
-# OpenAI Configuration
+# --- Provider Configuration ---
+#
+# The provider name determines which API client is used:
+#   "openai"    -> OpenAI API (api.openai.com)
+#   "anthropic" -> Anthropic Messages API (api.anthropic.com)
+#   "gemini"    -> Google Gemini API (generativelanguage.googleapis.com)
+#   Any other   -> OpenAI-compatible API (works with Ollama, Together, etc.)
+
+# OpenAI
 [providers.openai]
-api_base = "https://api.openai.com/v1/chat/completions"
+api_base = "https://api.openai.com/v1"
 default_model = "gpt-4"
 models = ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
 env_var = "OPENAI_API_KEY"
 # api_key = "sk-..."  # Not recommended - use environment variable instead
 
-# Anthropic Claude Configuration
+# Anthropic Claude
 [providers.anthropic]
-api_base = "https://api.anthropic.com/v1/messages"
-default_model = "claude-3-5-sonnet"
-models = ["claude-3-5-sonnet", "claude-3-opus", "claude-3-haiku"]
+api_base = "https://api.anthropic.com/v1"
+default_model = "claude-sonnet-4-5-20250929"
+models = ["claude-sonnet-4-5-20250929", "claude-3-5-sonnet-20241022", "claude-3-opus-20240229", "claude-3-haiku-20240307"]
 env_var = "ANTHROPIC_API_KEY"
+
+# Google Gemini
+# [providers.gemini]
+# api_base = "https://generativelanguage.googleapis.com/v1beta"
+# default_model = "gemini-2.5-flash"
+# models = ["gemini-2.5-flash", "gemini-2.5-pro"]
+# env_var = "GEMINI_API_KEY"
 
 # Custom/Generic OpenAI-compatible API
 # [providers.custom]

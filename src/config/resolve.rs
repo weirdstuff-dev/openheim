@@ -17,6 +17,7 @@ impl AppConfig {
             )
         })?;
         Ok(AgentConfig {
+            provider_name: self.default_provider.clone(),
             api_base: provider.api_base.clone(),
             api_key: provider.resolve_api_key(),
             model: provider.default_model.clone(),
@@ -25,9 +26,10 @@ impl AppConfig {
     }
 
     fn resolve_model(&self, model_name: &str) -> anyhow::Result<AgentConfig> {
-        for (_name, provider) in &self.providers {
+        for (name, provider) in &self.providers {
             if provider.models.contains(&model_name.to_string()) {
                 return Ok(AgentConfig {
+                    provider_name: name.clone(),
                     api_base: provider.api_base.clone(),
                     api_key: provider.resolve_api_key(),
                     model: model_name.to_string(),

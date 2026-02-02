@@ -1,23 +1,20 @@
 use async_trait::async_trait;
 use reqwest::Client as ReqwestClient;
 
-use crate::error::{Error, Result};
 use crate::core::models::{ChatRequest, ChatResponse, Choice, Message, Tool};
+use crate::error::{Error, Result};
 
-#[async_trait]
-pub trait LlmClient: Send + Sync {
-    async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice>;
-}
+use super::LlmClient;
 
 #[derive(Clone)]
-pub struct OpenAiCompatibleClient {
+pub struct OpenAiClient {
     client: ReqwestClient,
     api_base: String,
     api_key: String,
     model: String,
 }
 
-impl OpenAiCompatibleClient {
+impl OpenAiClient {
     pub fn new(client: ReqwestClient, api_base: String, api_key: String, model: String) -> Self {
         Self {
             client,
@@ -29,7 +26,7 @@ impl OpenAiCompatibleClient {
 }
 
 #[async_trait]
-impl LlmClient for OpenAiCompatibleClient {
+impl LlmClient for OpenAiClient {
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
         let request = ChatRequest {
             model: self.model.clone(),
@@ -51,7 +48,6 @@ impl LlmClient for OpenAiCompatibleClient {
 
         if !response.status().is_success() {
             let status = response.status();
-
             let error_text = match response.text().await {
                 Ok(t) => t,
                 Err(_) => "<failed to read error body>".to_string(),
