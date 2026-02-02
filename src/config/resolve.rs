@@ -44,7 +44,7 @@ impl AppConfig {
     pub fn list_models(&self) -> anyhow::Result<String> {
         if self.providers.is_empty() {
             anyhow::bail!(
-                "No providers configured. Edit your config file to add at least one provider.\n\
+                "No providers configured. Edit your config file to add at least one provider.\n "
             );
         }
 
