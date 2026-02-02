@@ -45,6 +45,7 @@ impl ProviderConfig {
 /// Runtime configuration passed to agent/LLM code
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
+    pub provider_name: String,
     pub api_base: String,
     pub api_key: String,
     pub model: String,
@@ -52,8 +53,9 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
-    pub fn new(api_base: String, api_key: String, model: String, max_iterations: usize) -> Self {
+    pub fn new(provider_name: String, api_base: String, api_key: String, model: String, max_iterations: usize) -> Self {
         Self {
+            provider_name,
             api_base,
             api_key,
             model,
@@ -63,6 +65,7 @@ impl AgentConfig {
 
     pub fn with_max_iterations(&self, max_iterations: usize) -> Self {
         Self {
+            provider_name: self.provider_name.clone(),
             api_base: self.api_base.clone(),
             api_key: self.api_key.clone(),
             model: self.model.clone(),
@@ -75,6 +78,7 @@ impl AgentConfig {
             Arc::clone(self)
         } else {
             Arc::new(Self {
+                provider_name: self.provider_name.clone(),
                 api_base: self.api_base.clone(),
                 api_key: self.api_key.clone(),
                 model: self.model.clone(),
@@ -87,6 +91,7 @@ impl AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
+            provider_name: String::new(),
             api_base: String::new(),
             api_key: String::new(),
             model: String::new(),

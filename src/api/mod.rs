@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use crate::{
     AgentConfig, AppConfig,
-    llm::{LlmClient, OpenAiCompatibleClient},
+    config::create_client,
+    llm::LlmClient,
     tools::{SystemToolExecutor, ToolExecutor},
 };
 
@@ -31,12 +32,7 @@ pub async fn start_api_server(
     tracing::info!("  WS   /ws/fs           - WebSocket for filesystem access (read/write/watch)");
     tracing::info!("");
 
-    let llm_client: Arc<dyn LlmClient> = Arc::new(OpenAiCompatibleClient::new(
-        client.clone(),
-        config.api_base.clone(),
-        config.api_key.clone(),
-        config.model.clone(),
-    ));
+    let llm_client: Arc<dyn LlmClient> = create_client(&config, &client);
 
     let tool_executor: Arc<dyn ToolExecutor> = Arc::new(SystemToolExecutor::new());
 

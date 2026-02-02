@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::{
     agent::{run_agent, run_agent_with_history},
     AgentConfig, AppConfig, Message,
-    config::resolve_client_and_config,
+    config::{resolve_client_and_config, create_client},
     tools::{SystemToolExecutor, ToolExecutor},
 };
 
@@ -59,12 +59,7 @@ pub async fn run_agent_mode(
         max_iterations,
         app_config,
         client,
-        Arc::new(crate::llm::OpenAiCompatibleClient::new(
-            client.clone(),
-            config.api_base.clone(),
-            config.api_key.clone(),
-            config.model.clone(),
-        )),
+        create_client(config, client),
         config,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
@@ -147,12 +142,7 @@ pub async fn run_single_prompt(
         max_iterations,
         app_config,
         client,
-        Arc::new(crate::llm::OpenAiCompatibleClient::new(
-            client.clone(),
-            config.api_base.clone(),
-            config.api_key.clone(),
-            config.model.clone(),
-        )),
+        create_client(config, client),
         config,
     )
     .map_err(|e| anyhow::anyhow!(e))?;

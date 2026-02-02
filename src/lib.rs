@@ -11,4 +11,4 @@ pub use error::{Error, Result};
 pub use models::*;
 
 pub use tools::{execute_tool, execute_tool_blocking, get_available_tools};
-pub use llm::{LlmClient, OpenAiCompatibleClient};
+pub use llm::{LlmClient, OpenAiClient, OpenAiCompatibleClient, AnthropicClient, GeminiClient};
