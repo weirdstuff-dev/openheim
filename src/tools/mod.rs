@@ -1,87 +1,91 @@
-pub mod executor;
+mod execute_command;
+mod read_file;
+mod write_file;
 
-pub use executor::{SystemToolExecutor, ToolExecutor};
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
+use async_trait::async_trait;
+
+use crate::core::models::Tool;
 use crate::error::{Error, Result};
-use crate::core::models::{FunctionDefinition, Tool};
-use once_cell::sync::Lazy;
-use serde_json::json;
 use tokio::runtime::Runtime;
 
-static AVAILABLE_TOOLS: Lazy<Vec<Tool>> = Lazy::new(|| {
-    vec![
-        Tool {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "execute_command".to_string(),
-                description: "Execute a shell command (e.g., ls, pwd, echo). Use this for listing directories and running system commands.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "The shell command to execute"
-                        }
-                    },
-                    "required": ["command"]
-                }),
-            },
-        },
-        Tool {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "read_file".to_string(),
-                description: "Read the contents of a file at the specified path.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The path to the file to read"
-                        }
-                    },
-                    "required": ["path"]
-                }),
-            },
-        },
-        Tool {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "write_file".to_string(),
-                description: "Write content to a file at the specified path. Creates the file if it doesn't exist.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The path to the file to write"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "The content to write to the file"
-                        }
-                    },
-                    "required": ["path", "content"]
-                }),
-            },
-        },
-    ]
-});
+#[async_trait]
+pub trait ToolHandler: Send + Sync {
+    /// Returns the tool definition (name, description, JSON-schema parameters).
+    fn definition(&self) -> Tool;
 
-pub fn get_available_tools() -> &'static [Tool] {
-    &AVAILABLE_TOOLS
+    /// Executes the tool with the given JSON-encoded arguments.
+    async fn execute(&self, args: &str) -> Result<String>;
+}
+
+#[async_trait]
+pub trait ToolExecutor: Send + Sync {
+    async fn execute(&self, name: &str, args_json: &str) -> Result<String>;
+}
+
+pub struct SystemToolExecutor {
+    handlers: HashMap<String, Box<dyn ToolHandler>>,
+}
+
+impl SystemToolExecutor {
+    pub fn new() -> Self {
+        let mut executor = Self {
+            handlers: HashMap::new(),
+        };
+        executor.register(Box::new(execute_command::ExecuteCommandTool));
+        executor.register(Box::new(read_file::ReadFileTool));
+        executor.register(Box::new(write_file::WriteFileTool));
+        executor
+    }
+
+    fn register(&mut self, handler: Box<dyn ToolHandler>) {
+        let name = handler.definition().function.name.clone();
+        self.handlers.insert(name, handler);
+    }
+}
+
+impl Default for SystemToolExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for SystemToolExecutor {
+    async fn execute(&self, name: &str, args_json: &str) -> Result<String> {
+        let handler = self
+            .handlers
+            .get(name)
+            .ok_or_else(|| Error::ToolExecutionError(format!("Unknown tool: {}", name)))?;
+        handler.execute(args_json).await
+    }
+}
+
+/// Global executor used by the free-standing helper functions.
+static GLOBAL_EXECUTOR: OnceLock<SystemToolExecutor> = OnceLock::new();
+
+fn global_executor() -> &'static SystemToolExecutor {
+    GLOBAL_EXECUTOR.get_or_init(SystemToolExecutor::new)
+}
+
+pub fn get_available_tools() -> Vec<Tool> {
+    global_executor()
+        .handlers
+        .values()
+        .map(|h| h.definition())
+        .collect()
 }
 
 pub async fn execute_tool(name: &str, arguments: &str) -> Result<String> {
-    let exec = SystemToolExecutor::new();
-    exec.execute(name, arguments).await
+    global_executor().execute(name, arguments).await
 }
 
 pub fn execute_tool_blocking(name: &str, arguments: &str) -> Result<String> {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => handle.block_on(execute_tool(name, arguments)),
         Err(_) => {
-            // No current runtime — create a temporary one.
             let rt = Runtime::new()
                 .map_err(|e| Error::Other(format!("Failed to create runtime: {}", e)))?;
             rt.block_on(execute_tool(name, arguments))
