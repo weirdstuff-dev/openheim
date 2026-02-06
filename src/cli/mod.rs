@@ -4,11 +4,13 @@ use reqwest::Client;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::{
-    agent::{run_agent, run_agent_with_history},
+    agent::run_agent_with_history,
     AgentConfig, AppConfig, Message,
     config::{resolve_client_and_config, create_client},
+    rag::RagContext,
     tools::{SystemToolExecutor, ToolExecutor},
 };
 
@@ -42,6 +44,18 @@ pub struct Args {
 
     #[arg(long, help = "Initialize config file at ~/.openheim/config.toml")]
     pub init: bool,
+
+    #[arg(long, help = "Continue a specific conversation by its UUID")]
+    pub chat_id: Option<String>,
+
+    #[arg(long, help = "Continue the most recent conversation")]
+    pub continue_last: bool,
+
+    #[arg(long, value_delimiter = ',', help = "Skills to activate (comma-separated)")]
+    pub skills: Option<Vec<String>>,
+
+    #[arg(long, help = "List all available skills")]
+    pub list_skills: bool,
 }
 
 pub async fn run_agent_mode(
@@ -50,8 +64,11 @@ pub async fn run_agent_mode(
     app_config: &AppConfig,
     model_name: Option<&str>,
     max_iterations: Option<usize>,
+    chat_id: Option<&str>,
+    continue_last: bool,
+    skill_names: Vec<String>,
 ) -> Result<()> {
-    tracing::info!("🔄 Starting continue mode - persistent conversation");
+    tracing::info!("Starting agent mode - persistent conversation");
     tracing::info!("Type your messages and press Enter. Type 'exit', 'quit' or :q to end the conversation.\n");
 
     let (llm_client, resolved_config) = resolve_client_and_config(
@@ -67,7 +84,40 @@ pub async fn run_agent_mode(
     let config = resolved_config;
     let tool_executor: Arc<dyn ToolExecutor> = Arc::new(SystemToolExecutor::new());
 
-    let mut messages: Vec<Message> = Vec::new();
+    let rag = RagContext::new()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize rag context: {}", e))?;
+
+    let resolved_chat_id = if let Some(id_str) = chat_id {
+        Some(
+            Uuid::parse_str(id_str)
+                .map_err(|e| anyhow::anyhow!("Invalid chat ID '{}': {}", id_str, e))?,
+        )
+    } else if continue_last {
+        rag.history
+            .get_last_conversation()
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .map(|c| c.meta.id)
+    } else {
+        None
+    };
+
+    let (mut conversation, prompt_builder) = rag
+        .prepare(
+            resolved_chat_id,
+            &skill_names,
+            Some(config.model.clone()),
+            Some(config.provider_name.clone()),
+        )
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    println!("Chat ID: {}", conversation.meta.id);
+    if !conversation.messages.is_empty() {
+        println!(
+            "Loaded {} messages from previous conversation.",
+            conversation.messages.len()
+        );
+    }
+
     let mut rl = DefaultEditor::new()?;
 
     loop {
@@ -80,30 +130,33 @@ pub async fn run_agent_mode(
                 }
 
                 if input == "exit" || input == "quit" || input == ":q" {
-                    println!("👋 Goodbye!");
+                    println!("Goodbye!");
                     break;
                 }
 
                 rl.add_history_entry(input)?;
 
-                messages.push(Message::user(input.to_string()));
+                conversation.messages.push(Message::user(input.to_string()));
 
                 match run_agent_with_history(
                     llm_client.clone(),
                     tool_executor.clone(),
                     &config,
-                    &mut messages,
+                    &mut conversation.messages,
                     true,
+                    Some(&prompt_builder),
                 )
                 .await
                 {
                     Ok(result) => {
+                        let _ = rag.history.save_conversation(&conversation);
                         println!("\n=== Agent Response ===");
                         println!("{}", result.final_response);
                         println!("Iterations: {}\n", result.iterations_used);
                     }
                     Err(e) => {
-                        eprintln!("❌ Error: {}", e);
+                        let _ = rag.history.save_conversation(&conversation);
+                        eprintln!("Error: {}", e);
                     }
                 }
             }
@@ -150,18 +203,47 @@ pub async fn run_single_prompt(
     let config = resolved_config;
     let tool_executor: Arc<dyn ToolExecutor> = Arc::new(SystemToolExecutor::new());
 
-    let result = run_agent(
+    let skill_names = args.skills.clone().unwrap_or_default();
+
+    let rag = RagContext::new()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize rag context: {}", e))?;
+
+    let resolved_chat_id = if let Some(id_str) = &args.chat_id {
+        Some(
+            Uuid::parse_str(id_str)
+                .map_err(|e| anyhow::anyhow!("Invalid chat ID '{}': {}", id_str, e))?,
+        )
+    } else {
+        None
+    };
+
+    let (mut conversation, prompt_builder) = rag
+        .prepare(
+            resolved_chat_id,
+            &skill_names,
+            Some(config.model.clone()),
+            Some(config.provider_name.clone()),
+        )
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    conversation.messages.push(Message::user(prompt.clone()));
+
+    let result = run_agent_with_history(
         llm_client,
         tool_executor,
         &config,
-        prompt,
+        &mut conversation.messages,
         true,
+        Some(&prompt_builder),
     )
     .await?;
 
+    let _ = rag.history.save_conversation(&conversation);
+
     println!("\n=== Final Result ===");
     println!("{}", result.final_response);
-    println!("\nCompleted in {} iterations", result.iterations_used);
+    println!("\nChat ID: {}", conversation.meta.id);
+    println!("Completed in {} iterations", result.iterations_used);
 
     Ok(())
 }

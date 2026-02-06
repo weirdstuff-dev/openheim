@@ -3,6 +3,7 @@ pub mod cli;
 pub mod config;
 pub mod core;
 pub mod error;
+pub mod rag;
 pub mod tools;
 
 pub use config::{AgentConfig, AppConfig};
@@ -12,3 +13,4 @@ pub use models::*;
 
 pub use tools::{execute_tool, execute_tool_blocking, get_available_tools};
 pub use llm::{LlmClient, OpenAiClient, OpenAiCompatibleClient, AnthropicClient, GeminiClient};
+pub use rag::{RagContext, PromptBuilder};

@@ -4,11 +4,13 @@ use actix_web_actors::ws;
 use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use uuid::Uuid;
 
-use crate::core::agent::run_agent_streaming;
+use crate::core::agent::run_agent_streaming_with_history;
 use crate::config::{AgentConfig, AppConfig, resolve_client_and_config};
 use crate::core::llm::LlmClient;
-use crate::core::models::StreamEvent;
+use crate::core::models::{Message, StreamEvent};
+use crate::rag::RagContext;
 use crate::tools::ToolExecutor;
 
 #[derive(Debug, Deserialize)]
@@ -19,6 +21,10 @@ pub struct WsRequest {
     /// Optional model name to override the default.
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub chat_id: Option<Uuid>,
+    #[serde(default)]
+    pub skills: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -34,7 +40,10 @@ pub enum WsResponse {
     Error { message: String },
 
     #[serde(rename = "done")]
-    Done,
+    Done {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        chat_id: Option<String>,
+    },
 }
 
 pub struct AgentWebSocket {
@@ -97,6 +106,8 @@ struct ExecuteAgent {
     llm: Arc<dyn LlmClient>,
     config: AgentConfig,
     prompt: String,
+    chat_id: Option<Uuid>,
+    skills: Vec<String>,
 }
 
 impl Handler<ExecuteAgent> for AgentWebSocket {
@@ -107,33 +118,70 @@ impl Handler<ExecuteAgent> for AgentWebSocket {
         let executor = self.executor.clone();
         let config = msg.config;
         let prompt = msg.prompt;
+        let chat_id = msg.chat_id;
+        let skills = msg.skills;
 
-        // Actor address to send back text messages
         let addr = ctx.address();
         let addr_for_closure = addr.clone();
 
         ctx.spawn(
             async move {
-                // run_agent_streaming expects a synchronous callback FnMut(StreamEvent).
-                // We forward events to the actor by serializing them and sending SendText messages.
-                let result = run_agent_streaming(
+                let rag = match RagContext::new() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let error_msg = WsResponse::Error {
+                            message: e.to_string(),
+                        };
+                        if let Ok(json) = serde_json::to_string(&error_msg) {
+                            addr.do_send(SendText { text: json });
+                        }
+                        return;
+                    }
+                };
+
+                let (mut conversation, prompt_builder) = match rag.prepare(
+                    chat_id,
+                    &skills,
+                    Some(config.model.clone()),
+                    Some(config.provider_name.clone()),
+                ) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let error_msg = WsResponse::Error {
+                            message: e.to_string(),
+                        };
+                        if let Ok(json) = serde_json::to_string(&error_msg) {
+                            addr.do_send(SendText { text: json });
+                        }
+                        return;
+                    }
+                };
+
+                conversation.messages.push(Message::user(prompt));
+                let conv_id = conversation.meta.id;
+
+                let result = run_agent_streaming_with_history(
                     llm,
                     executor,
                     &config,
-                    &prompt,
+                    &mut conversation.messages,
+                    Some(&prompt_builder),
                     move |event: StreamEvent| {
                         let ws_msg = WsResponse::Event { data: event };
                         if let Ok(json) = serde_json::to_string(&ws_msg) {
-                            // Ignore send failures (actor may be stopping)
                             addr_for_closure.do_send(SendText { text: json });
                         }
                     },
                 )
                 .await;
 
+                let _ = rag.history.save_conversation(&conversation);
+
                 match result {
                     Ok(_) => {
-                        let done_msg = WsResponse::Done;
+                        let done_msg = WsResponse::Done {
+                            chat_id: Some(conv_id.to_string()),
+                        };
                         if let Ok(json) = serde_json::to_string(&done_msg) {
                             addr.do_send(SendText { text: json });
                         }
@@ -179,6 +227,8 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for AgentWebSocket {
                                 llm,
                                 config,
                                 prompt: req.prompt,
+                                chat_id: req.chat_id,
+                                skills: req.skills.unwrap_or_default(),
                             });
                         }
                         Err(e) => {
