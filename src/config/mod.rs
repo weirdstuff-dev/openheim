@@ -2,7 +2,7 @@ mod client;
 mod resolve;
 mod types;
 
-pub use client::{create_client, resolve_client_and_config};
+pub use client::{build_http_client, create_client, resolve_client_and_config};
 pub use types::{AgentConfig, AppConfig, ProviderConfig};
 
 use std::path::PathBuf;

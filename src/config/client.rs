@@ -1,11 +1,20 @@
 use reqwest::Client as ReqwestClient;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::types::{AgentConfig, AppConfig};
 use crate::core::llm::{
     AnthropicClient, GeminiClient, LlmClient, OpenAiClient, OpenAiCompatibleClient,
 };
 use crate::error::Result;
+
+/// Build a reqwest client with the configured timeout.
+pub fn build_http_client(timeout_secs: u64) -> ReqwestClient {
+    ReqwestClient::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+        .expect("failed to build HTTP client")
+}
 
 /// Create the appropriate LLM client based on the provider name.
 pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<dyn LlmClient> {
@@ -45,7 +54,6 @@ pub fn resolve_client_and_config(
     model_name: Option<&str>,
     max_iterations: Option<usize>,
     app_config: &AppConfig,
-    http_client: &ReqwestClient,
     default_llm: Arc<dyn LlmClient>,
     default_config: &AgentConfig,
 ) -> Result<(Arc<dyn LlmClient>, AgentConfig)> {
@@ -54,7 +62,8 @@ pub fn resolve_client_and_config(
         if let Some(max_iter) = max_iterations {
             resolved.max_iterations = max_iter;
         }
-        let client = create_client(&resolved, http_client);
+        let resolved_http = build_http_client(resolved.timeout_secs);
+        let client = create_client(&resolved, &resolved_http);
         Ok((client, resolved))
     } else {
         let mut cfg = default_config.clone();

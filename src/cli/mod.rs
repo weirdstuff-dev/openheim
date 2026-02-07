@@ -75,7 +75,6 @@ pub async fn run_agent_mode(
         model_name,
         max_iterations,
         app_config,
-        client,
         create_client(config, client),
         config,
     )?;
@@ -196,7 +195,6 @@ pub async fn run_single_prompt(
         model_name,
         max_iterations,
         app_config,
-        client,
         create_client(config, client),
         config,
     )?;

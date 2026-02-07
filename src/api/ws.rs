@@ -1,7 +1,6 @@
 use actix::{Actor, ActorContext, AsyncContext, Handler, Message as ActixMessage, StreamHandler, WrapFuture};
 use actix_web::{web, Error, HttpRequest, HttpResponse};
 use actix_web_actors::ws;
-use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -51,7 +50,6 @@ pub struct AgentWebSocket {
     executor: Arc<dyn ToolExecutor>,
     config: AgentConfig,
     app_config: AppConfig,
-    http_client: ReqwestClient,
     rag: RagContext,
 }
 
@@ -61,7 +59,6 @@ impl AgentWebSocket {
         executor: Arc<dyn ToolExecutor>,
         config: AgentConfig,
         app_config: AppConfig,
-        http_client: ReqwestClient,
         rag: RagContext,
     ) -> Self {
         Self {
@@ -69,7 +66,6 @@ impl AgentWebSocket {
             executor,
             config,
             app_config,
-            http_client,
             rag,
         }
     }
@@ -85,7 +81,6 @@ impl AgentWebSocket {
             req.model.as_deref(),
             req.max_iterations,
             &self.app_config,
-            &self.http_client,
             self.llm.clone(),
             &self.config,
         )
@@ -255,7 +250,6 @@ pub async fn ws_handler(
     executor: web::Data<Arc<dyn ToolExecutor>>,
     config: web::Data<AgentConfig>,
     app_config: web::Data<AppConfig>,
-    http_client: web::Data<ReqwestClient>,
     rag: web::Data<RagContext>,
 ) -> Result<HttpResponse, Error> {
     let ws = AgentWebSocket::new(
@@ -263,7 +257,6 @@ pub async fn ws_handler(
         executor.get_ref().clone(),
         config.get_ref().clone(),
         app_config.get_ref().clone(),
-        http_client.get_ref().clone(),
         rag.get_ref().clone(),
     );
     ws::start(ws, &req, stream)

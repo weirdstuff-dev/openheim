@@ -1,11 +1,10 @@
 use clap::Parser;
-use reqwest::Client;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use openheim::{
     api,
     cli::{self, Args},
-    config::{init_config, load_config},
+    config::{build_http_client, init_config, load_config},
     rag::SkillsManager,
 };
 
@@ -84,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let client = Client::new();
+    let client = build_http_client(agent_config.timeout_secs);
 
     if args.api_mode {
         api::start_api_server(args.host, args.port, client, agent_config, app_config).await?;

@@ -23,6 +23,7 @@ impl AppConfig {
             api_key: provider.resolve_api_key(),
             model: provider.default_model.clone(),
             max_iterations: self.max_iterations,
+            timeout_secs: provider.timeout_secs.unwrap_or(120),
         })
     }
 
@@ -35,6 +36,7 @@ impl AppConfig {
                     api_key: provider.resolve_api_key(),
                     model: model_name.to_string(),
                     max_iterations: self.max_iterations,
+                    timeout_secs: provider.timeout_secs.unwrap_or(120),
                 });
             }
         }

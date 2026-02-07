@@ -1,5 +1,4 @@
 use actix_web::{web, HttpResponse, Responder};
-use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -42,14 +41,12 @@ pub async fn execute_agent(
     executor: web::Data<Arc<dyn ToolExecutor>>,
     config: web::Data<AgentConfig>,
     app_config: web::Data<AppConfig>,
-    http_client: web::Data<ReqwestClient>,
     rag: web::Data<RagContext>,
 ) -> impl Responder {
     let (llm_client, agent_config) = match resolve_client_and_config(
         req.model.as_deref(),
         req.max_iterations,
         app_config.get_ref(),
-        http_client.get_ref(),
         default_llm.get_ref().clone(),
         config.get_ref(),
     ) {

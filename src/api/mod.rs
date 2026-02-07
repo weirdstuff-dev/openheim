@@ -50,7 +50,6 @@ pub async fn start_api_server(
             .app_data(web::Data::new(tool_executor.clone()))
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(app_config.clone()))
-            .app_data(web::Data::new(client.clone()))
             .app_data(web::Data::new(rag_context.clone()))
             .route("/query", web::post().to(execute_agent))
             .route("/ws", web::get().to(ws_handler))
