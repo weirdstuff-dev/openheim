@@ -7,6 +7,7 @@ use openheim::{
     api,
     cli::{self, Args},
     config::{init_config, load_config},
+    rag::SkillsManager,
 };
 
 #[actix_web::main]
@@ -50,6 +51,32 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if args.list_skills {
+        match SkillsManager::new() {
+            Ok(mgr) => match mgr.list_skills() {
+                Ok(skills) => {
+                    if skills.is_empty() {
+                        println!("No skills found. Add .md files to ~/.openheim/skills/");
+                    } else {
+                        println!("Available skills:");
+                        for name in &skills {
+                            println!("  - {}", name);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            },
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
     let agent_config = match app_config.resolve(None) {
         Ok(c) => c,
         Err(e) => {
@@ -69,6 +96,9 @@ async fn main() -> Result<()> {
             &app_config,
             args.model.as_deref(),
             args.max_iterations,
+            args.chat_id.as_deref(),
+            args.continue_last,
+            args.skills.clone().unwrap_or_default(),
         )
         .await?;
     } else {
