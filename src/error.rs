@@ -34,6 +34,21 @@ impl Error {
     pub fn config(msg: impl fmt::Display) -> Self {
         Error::ConfigError(msg.to_string())
     }
+
+    /// Returns true for transient errors that may succeed on retry (429, 5xx, network errors).
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Error::ApiError(msg) => {
+                msg.contains("status 429")
+                    || msg.contains("status 500")
+                    || msg.contains("status 502")
+                    || msg.contains("status 503")
+                    || msg.contains("status 504")
+            }
+            Error::ReqwestError(_) => true,
+            _ => false,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

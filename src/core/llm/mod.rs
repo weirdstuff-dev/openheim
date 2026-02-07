@@ -2,6 +2,7 @@ mod anthropic;
 mod gemini;
 mod openai;
 mod openai_compatible;
+mod retry;
 
 use async_trait::async_trait;
 
@@ -17,3 +18,4 @@ pub use anthropic::AnthropicClient;
 pub use gemini::GeminiClient;
 pub use openai::OpenAiClient;
 pub use openai_compatible::OpenAiCompatibleClient;
+pub use retry::RetryClient;

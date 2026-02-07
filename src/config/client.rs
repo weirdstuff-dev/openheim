@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use super::types::{AgentConfig, AppConfig};
 use crate::core::llm::{
-    AnthropicClient, GeminiClient, LlmClient, OpenAiClient, OpenAiCompatibleClient,
+    AnthropicClient, GeminiClient, LlmClient, OpenAiClient, OpenAiCompatibleClient, RetryClient,
 };
 use crate::error::Result;
 
@@ -16,9 +16,9 @@ pub fn build_http_client(timeout_secs: u64) -> ReqwestClient {
         .expect("failed to build HTTP client")
 }
 
-/// Create the appropriate LLM client based on the provider name.
+/// Create the appropriate LLM client based on the provider name, wrapped with retry logic.
 pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<dyn LlmClient> {
-    match config.provider_name.as_str() {
+    let inner: Arc<dyn LlmClient> = match config.provider_name.as_str() {
         "openai" => Arc::new(OpenAiClient::new(
             http_client.clone(),
             config.api_base.clone(),
@@ -43,7 +43,8 @@ pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<d
             config.api_key.clone(),
             config.model.clone(),
         )),
-    }
+    };
+    Arc::new(RetryClient::new(inner))
 }
 
 /// Resolves the LLM client and agent configuration based on an optional model name and max iterations.
