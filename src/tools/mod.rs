@@ -9,7 +9,6 @@ use async_trait::async_trait;
 
 use crate::core::models::Tool;
 use crate::error::{Error, Result};
-use tokio::runtime::Runtime;
 
 #[async_trait]
 pub trait ToolHandler: Send + Sync {
@@ -80,15 +79,4 @@ pub fn get_available_tools() -> Vec<Tool> {
 
 pub async fn execute_tool(name: &str, arguments: &str) -> Result<String> {
     global_executor().execute(name, arguments).await
-}
-
-pub fn execute_tool_blocking(name: &str, arguments: &str) -> Result<String> {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => handle.block_on(execute_tool(name, arguments)),
-        Err(_) => {
-            let rt = Runtime::new()
-                .map_err(|e| Error::Other(format!("Failed to create runtime: {}", e)))?;
-            rt.block_on(execute_tool(name, arguments))
-        }
-    }
 }
