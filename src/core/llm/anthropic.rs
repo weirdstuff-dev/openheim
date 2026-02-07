@@ -220,6 +220,7 @@ fn convert_response(resp: AnthropicResponse) -> Choice {
                 Some(tool_calls)
             },
             tool_call_id: None,
+            tool_name: None,
         },
         finish_reason,
     }

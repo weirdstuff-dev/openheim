@@ -88,7 +88,7 @@ async fn run_agent_loop(
                     result: result.clone(),
                 });
 
-                messages.push(Message::tool_result(tool_call.id.clone(), result));
+                messages.push(Message::tool_result(tool_call.id.clone(), tool_name.clone(), result));
             }
 
             steps.push(AgentStep {

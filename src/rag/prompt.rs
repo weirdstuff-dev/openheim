@@ -26,6 +26,7 @@ impl PromptBuilder {
                 content: Some(system_content),
                 tool_calls: None,
                 tool_call_id: None,
+                tool_name: None,
             });
         }
 

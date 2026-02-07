@@ -133,14 +133,15 @@ fn convert_messages(messages: &[Message]) -> Vec<GeminiContent> {
             }
             Role::Tool => {
                 // Tool results become functionResponse parts in a user turn.
-                // We need the tool name — but our Message only has tool_call_id, not name.
-                // We use the tool_call_id as a fallback for the name field; the agent
-                // loop should ideally provide the name. Gemini matches by name, not id.
+                // Gemini matches by function name, not by call id.
+                let name = msg.tool_name.clone()
+                    .or_else(|| msg.tool_call_id.clone())
+                    .unwrap_or_default();
                 let part = GeminiPart {
                     text: None,
                     function_call: None,
                     function_response: Some(GeminiFunctionResponse {
-                        name: msg.tool_call_id.clone().unwrap_or_default(),
+                        name,
                         response: serde_json::json!({
                             "result": msg.content.clone().unwrap_or_default()
                         }),
@@ -244,6 +245,7 @@ fn convert_response(resp: GeminiResponse) -> Result<Choice> {
                 Some(tool_calls)
             },
             tool_call_id: None,
+            tool_name: None,
         },
         finish_reason,
     })
