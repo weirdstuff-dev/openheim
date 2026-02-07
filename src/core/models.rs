@@ -18,6 +18,8 @@ pub struct ChatRequest {
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<Tool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

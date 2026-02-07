@@ -28,6 +28,8 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
     /// Request timeout in seconds (default: 120)
     pub timeout_secs: Option<u64>,
+    /// Maximum output tokens for LLM responses
+    pub max_tokens: Option<u32>,
 }
 
 impl ProviderConfig {
@@ -54,6 +56,8 @@ pub struct AgentConfig {
     pub max_iterations: usize,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// Maximum output tokens for LLM responses (provider-specific defaults if not set)
+    pub max_tokens: Option<u32>,
 }
 
 fn default_timeout_secs() -> u64 {
@@ -69,6 +73,7 @@ impl AgentConfig {
             model,
             max_iterations,
             timeout_secs: default_timeout_secs(),
+            max_tokens: None,
         }
     }
 
@@ -97,6 +102,7 @@ impl Default for AgentConfig {
             model: String::new(),
             max_iterations: 10,
             timeout_secs: default_timeout_secs(),
+            max_tokens: None,
         }
     }
 }

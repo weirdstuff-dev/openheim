@@ -24,24 +24,28 @@ pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<d
             config.api_base.clone(),
             config.api_key.clone(),
             config.model.clone(),
+            config.max_tokens,
         )),
         "anthropic" => Arc::new(AnthropicClient::new(
             http_client.clone(),
             config.api_base.clone(),
             config.api_key.clone(),
             config.model.clone(),
+            config.max_tokens,
         )),
         "gemini" => Arc::new(GeminiClient::new(
             http_client.clone(),
             config.api_base.clone(),
             config.api_key.clone(),
             config.model.clone(),
+            config.max_tokens,
         )),
         _ => Arc::new(OpenAiCompatibleClient::new(
             http_client.clone(),
             config.api_base.clone(),
             config.api_key.clone(),
             config.model.clone(),
+            config.max_tokens,
         )),
     };
     Arc::new(RetryClient::new(inner))

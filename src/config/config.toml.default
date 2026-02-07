@@ -23,6 +23,7 @@ models = ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
 env_var = "OPENAI_API_KEY"
 # api_key = "sk-..."  # Not recommended - use environment variable instead
 # timeout_secs = 120  # Request timeout in seconds (default: 120)
+# max_tokens = 4096   # Maximum output tokens for LLM responses
 
 # Anthropic Claude
 [providers.anthropic]

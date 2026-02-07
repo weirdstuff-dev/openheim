@@ -17,15 +17,17 @@ pub struct AnthropicClient {
     api_base: String,
     api_key: String,
     model: String,
+    max_tokens: u32,
 }
 
 impl AnthropicClient {
-    pub fn new(client: ReqwestClient, api_base: String, api_key: String, model: String) -> Self {
+    pub fn new(client: ReqwestClient, api_base: String, api_key: String, model: String, max_tokens: Option<u32>) -> Self {
         Self {
             client,
             api_base,
             api_key,
             model,
+            max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         }
     }
 }
@@ -231,7 +233,7 @@ impl LlmClient for AnthropicClient {
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
         let request = AnthropicRequest {
             model: self.model.clone(),
-            max_tokens: DEFAULT_MAX_TOKENS,
+            max_tokens: self.max_tokens,
             messages: convert_messages(messages),
             tools: convert_tools(tools),
         };

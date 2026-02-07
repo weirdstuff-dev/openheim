@@ -14,15 +14,17 @@ pub struct GeminiClient {
     api_base: String,
     api_key: String,
     model: String,
+    max_tokens: Option<u32>,
 }
 
 impl GeminiClient {
-    pub fn new(client: ReqwestClient, api_base: String, api_key: String, model: String) -> Self {
+    pub fn new(client: ReqwestClient, api_base: String, api_key: String, model: String, max_tokens: Option<u32>) -> Self {
         Self {
             client,
             api_base,
             api_key,
             model,
+            max_tokens,
         }
     }
 }
@@ -30,10 +32,19 @@ impl GeminiClient {
 // --- Gemini request types ---
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GeminiRequest {
     contents: Vec<GeminiContent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<GeminiToolDeclaration>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation_config: Option<GeminiGenerationConfig>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiGenerationConfig {
+    max_output_tokens: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -257,6 +268,9 @@ impl LlmClient for GeminiClient {
         let request = GeminiRequest {
             contents: convert_messages(messages),
             tools: convert_tools(tools),
+            generation_config: self.max_tokens.map(|t| GeminiGenerationConfig {
+                max_output_tokens: t,
+            }),
         };
 
         let endpoint = format!(

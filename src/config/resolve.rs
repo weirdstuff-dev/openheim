@@ -24,6 +24,7 @@ impl AppConfig {
             model: provider.default_model.clone(),
             max_iterations: self.max_iterations,
             timeout_secs: provider.timeout_secs.unwrap_or(120),
+            max_tokens: provider.max_tokens,
         })
     }
 
@@ -37,6 +38,7 @@ impl AppConfig {
                     model: model_name.to_string(),
                     max_iterations: self.max_iterations,
                     timeout_secs: provider.timeout_secs.unwrap_or(120),
+                    max_tokens: provider.max_tokens,
                 });
             }
         }
