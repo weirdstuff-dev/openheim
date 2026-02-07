@@ -132,9 +132,10 @@ async fn run_agent_loop(
                 });
             }
         } else {
-            if verbose {
-                println!("⚠️  Unexpected response format");
-            }
+            tracing::warn!(
+                "Unexpected LLM response at iteration {}: no content or tool_calls",
+                iter_num
+            );
             break;
         }
     }
