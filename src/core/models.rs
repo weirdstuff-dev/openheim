@@ -16,6 +16,7 @@ pub enum Role {
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<Tool>,
 }
 
