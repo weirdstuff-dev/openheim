@@ -36,7 +36,7 @@ pub async fn start_api_server(
     let tool_executor: Arc<dyn ToolExecutor> = Arc::new(SystemToolExecutor::new());
     let rag_context = RagContext::new()?;
 
-    HttpServer::new(move || {
+    let server = HttpServer::new(move || {
         let cors = Cors::default()
             .allow_any_origin()
             .allow_any_method()
@@ -57,9 +57,20 @@ pub async fn start_api_server(
     })
     .bind((host.as_str(), port))
     .map_err(|e| crate::error::Error::Other(format!("Failed to bind server: {}", e)))?
-    .run()
-    .await
-    .map_err(|e| crate::error::Error::Other(format!("Server error: {}", e)))?;
+    .run();
 
+    let handle = server.handle();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!("Received shutdown signal, gracefully stopping server...");
+            handle.stop(true).await;
+        }
+    });
+
+    server
+        .await
+        .map_err(|e| crate::error::Error::Other(format!("Server error: {}", e)))?;
+
+    tracing::info!("Server stopped");
     Ok(())
 }
