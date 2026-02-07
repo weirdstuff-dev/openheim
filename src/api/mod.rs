@@ -1,12 +1,12 @@
 use actix_cors::Cors;
 use actix_web::{middleware::Logger, web, App, HttpServer};
-use anyhow::Result;
 use reqwest::Client;
 use std::sync::Arc;
 
 use crate::{
     AgentConfig, AppConfig,
     config::create_client,
+    error::Result,
     llm::LlmClient,
     tools::{SystemToolExecutor, ToolExecutor},
 };
@@ -26,7 +26,6 @@ pub async fn start_api_server(
     config: AgentConfig,
     app_config: AppConfig,
 ) -> Result<()> {
-    // TODO: improve this
     tracing::info!("Starting API server on {}:{}", host, port);
     tracing::info!("  POST /query");
     tracing::info!("  WS   /ws");
@@ -55,9 +54,11 @@ pub async fn start_api_server(
             .route("/ws", web::get().to(ws_handler))
             .route("/ws/fs", web::get().to(ws_fs_handler))
     })
-    .bind((host.as_str(), port))?
+    .bind((host.as_str(), port))
+    .map_err(|e| crate::error::Error::Other(format!("Failed to bind server: {}", e)))?
     .run()
-    .await?;
+    .await
+    .map_err(|e| crate::error::Error::Other(format!("Server error: {}", e)))?;
 
     Ok(())
 }

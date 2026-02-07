@@ -8,9 +8,7 @@ pub struct SkillsManager {
 
 impl SkillsManager {
     pub fn new() -> Result<Self> {
-        let dir = config_dir()
-            .map_err(|e| Error::Other(e.to_string()))?
-            .join("skills");
+        let dir = config_dir()?.join("skills");
         std::fs::create_dir_all(&dir)?;
         Ok(Self { skills_dir: dir })
     }

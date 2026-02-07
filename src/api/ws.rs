@@ -77,7 +77,7 @@ impl AgentWebSocket {
         }
     }
 
-    fn resolve_request(&self, req: &WsRequest) -> Result<(Arc<dyn LlmClient>, AgentConfig), String> {
+    fn resolve_request(&self, req: &WsRequest) -> crate::error::Result<(Arc<dyn LlmClient>, AgentConfig)> {
         resolve_client_and_config(
             req.model.as_deref(),
             req.max_iterations,
@@ -232,7 +232,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for AgentWebSocket {
                             });
                         }
                         Err(e) => {
-                            let error = WsResponse::Error { message: e };
+                            let error = WsResponse::Error { message: e.to_string() };
                             self.send_json(&error, ctx);
                         }
                     }

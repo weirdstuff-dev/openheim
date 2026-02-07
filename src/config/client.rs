@@ -5,6 +5,7 @@ use super::types::{AgentConfig, AppConfig};
 use crate::core::llm::{
     AnthropicClient, GeminiClient, LlmClient, OpenAiClient, OpenAiCompatibleClient,
 };
+use crate::error::Result;
 
 /// Create the appropriate LLM client based on the provider name.
 pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<dyn LlmClient> {
@@ -47,18 +48,14 @@ pub fn resolve_client_and_config(
     http_client: &ReqwestClient,
     default_llm: Arc<dyn LlmClient>,
     default_config: &AgentConfig,
-) -> Result<(Arc<dyn LlmClient>, AgentConfig), String> {
+) -> Result<(Arc<dyn LlmClient>, AgentConfig)> {
     if let Some(model) = model_name {
-        match app_config.resolve(Some(model)) {
-            Ok(mut resolved) => {
-                if let Some(max_iter) = max_iterations {
-                    resolved.max_iterations = max_iter;
-                }
-                let client = create_client(&resolved, http_client);
-                Ok((client, resolved))
-            }
-            Err(e) => Err(e.to_string()),
+        let mut resolved = app_config.resolve(Some(model))?;
+        if let Some(max_iter) = max_iterations {
+            resolved.max_iterations = max_iter;
         }
+        let client = create_client(&resolved, http_client);
+        Ok((client, resolved))
     } else {
         let mut cfg = default_config.clone();
         if let Some(max_iter) = max_iterations {

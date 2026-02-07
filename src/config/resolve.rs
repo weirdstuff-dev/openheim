@@ -1,20 +1,21 @@
 use super::types::{AgentConfig, AppConfig};
+use crate::error::{Error, Result};
 
 impl AppConfig {
-    pub fn resolve(&self, model_name: Option<&str>) -> anyhow::Result<AgentConfig> {
+    pub fn resolve(&self, model_name: Option<&str>) -> Result<AgentConfig> {
         match model_name {
             Some(name) => self.resolve_model(name),
             None => self.resolve_default(),
         }
     }
     
-    fn resolve_default(&self) -> anyhow::Result<AgentConfig> {
+    fn resolve_default(&self) -> Result<AgentConfig> {
         let provider = self.providers.get(&self.default_provider).ok_or_else(|| {
-            anyhow::anyhow!(
+            Error::config(format!(
                 "Default provider '{}' not found in config. Available providers: {}",
                 self.default_provider,
                 self.provider_names()
-            )
+            ))
         })?;
         Ok(AgentConfig {
             provider_name: self.default_provider.clone(),
@@ -25,7 +26,7 @@ impl AppConfig {
         })
     }
 
-    fn resolve_model(&self, model_name: &str) -> anyhow::Result<AgentConfig> {
+    fn resolve_model(&self, model_name: &str) -> Result<AgentConfig> {
         for (name, provider) in &self.providers {
             if provider.models.contains(&model_name.to_string()) {
                 return Ok(AgentConfig {
@@ -37,17 +38,17 @@ impl AppConfig {
                 });
             }
         }
-        anyhow::bail!(
+        Err(Error::config(format!(
             "Model '{}' not found in any provider. Run `openheim --list` to see available models.",
             model_name
-        );
+        )))
     }
 
-    pub fn list_models(&self) -> anyhow::Result<String> {
+    pub fn list_models(&self) -> Result<String> {
         if self.providers.is_empty() {
-            anyhow::bail!(
-                "No providers configured. Edit your config file to add at least one provider.\n "
-            );
+            return Err(Error::config(
+                "No providers configured. Edit your config file to add at least one provider.",
+            ));
         }
 
         let mut out = String::from("Configured providers:\n");

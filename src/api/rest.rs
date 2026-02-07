@@ -57,7 +57,7 @@ pub async fn execute_agent(
             return HttpResponse::BadRequest().json(AgentResponse {
                 success: false,
                 result: None,
-                error: Some(e),
+                error: Some(e.to_string()),
                 chat_id: None,
             });
         }

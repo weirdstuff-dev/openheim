@@ -1,4 +1,3 @@
-use anyhow::{Context, Result};
 use clap::Parser;
 use reqwest::Client;
 use rustyline::error::ReadlineError;
@@ -10,6 +9,7 @@ use crate::{
     agent::run_agent_with_history,
     AgentConfig, AppConfig, Message,
     config::{resolve_client_and_config, create_client},
+    error::{Error, Result},
     rag::RagContext,
     tools::{SystemToolExecutor, ToolExecutor},
 };
@@ -78,37 +78,32 @@ pub async fn run_agent_mode(
         client,
         create_client(config, client),
         config,
-    )
-    .map_err(|e| anyhow::anyhow!(e))?;
+    )?;
 
     let config = resolved_config;
     let tool_executor: Arc<dyn ToolExecutor> = Arc::new(SystemToolExecutor::new());
 
-    let rag = RagContext::new()
-        .map_err(|e| anyhow::anyhow!("Failed to initialize rag context: {}", e))?;
+    let rag = RagContext::new()?;
 
     let resolved_chat_id = if let Some(id_str) = chat_id {
         Some(
             Uuid::parse_str(id_str)
-                .map_err(|e| anyhow::anyhow!("Invalid chat ID '{}': {}", id_str, e))?,
+                .map_err(|e| Error::ConfigError(format!("Invalid chat ID '{}': {}", id_str, e)))?,
         )
     } else if continue_last {
         rag.history
-            .get_last_conversation()
-            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .get_last_conversation()?
             .map(|c| c.meta.id)
     } else {
         None
     };
 
-    let (mut conversation, prompt_builder) = rag
-        .prepare(
-            resolved_chat_id,
-            &skill_names,
-            Some(config.model.clone()),
-            Some(config.provider_name.clone()),
-        )
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let (mut conversation, prompt_builder) = rag.prepare(
+        resolved_chat_id,
+        &skill_names,
+        Some(config.model.clone()),
+        Some(config.provider_name.clone()),
+    )?;
 
     println!("Chat ID: {}", conversation.meta.id);
     if !conversation.messages.is_empty() {
@@ -118,7 +113,8 @@ pub async fn run_agent_mode(
         );
     }
 
-    let mut rl = DefaultEditor::new()?;
+    let mut rl = DefaultEditor::new()
+        .map_err(|e| Error::Other(format!("Failed to initialize readline: {}", e)))?;
 
     loop {
         let readline = rl.readline("You: ");
@@ -134,7 +130,7 @@ pub async fn run_agent_mode(
                     break;
                 }
 
-                rl.add_history_entry(input)?;
+                let _ = rl.add_history_entry(input);
 
                 conversation.messages.push(Message::user(input.to_string()));
 
@@ -186,9 +182,11 @@ pub async fn run_single_prompt(
     max_iterations: Option<usize>,
     args: &Args,
 ) -> Result<()> {
-    let prompt = args.query.as_ref().context(
-        "Prompt is required in CLI mode. Use --prompt, --agent-mode, or switch to API mode with --api-mode"
-    )?;
+    let prompt = args.query.as_ref().ok_or_else(|| {
+        Error::ConfigError(
+            "Prompt is required in CLI mode. Use --query, --agent-mode, or switch to API mode with --api-mode".to_string()
+        )
+    })?;
 
     let (llm_client, resolved_config) = resolve_client_and_config(
         model_name,
@@ -197,34 +195,30 @@ pub async fn run_single_prompt(
         client,
         create_client(config, client),
         config,
-    )
-    .map_err(|e| anyhow::anyhow!(e))?;
+    )?;
 
     let config = resolved_config;
     let tool_executor: Arc<dyn ToolExecutor> = Arc::new(SystemToolExecutor::new());
 
     let skill_names = args.skills.clone().unwrap_or_default();
 
-    let rag = RagContext::new()
-        .map_err(|e| anyhow::anyhow!("Failed to initialize rag context: {}", e))?;
+    let rag = RagContext::new()?;
 
     let resolved_chat_id = if let Some(id_str) = &args.chat_id {
         Some(
             Uuid::parse_str(id_str)
-                .map_err(|e| anyhow::anyhow!("Invalid chat ID '{}': {}", id_str, e))?,
+                .map_err(|e| Error::ConfigError(format!("Invalid chat ID '{}': {}", id_str, e)))?,
         )
     } else {
         None
     };
 
-    let (mut conversation, prompt_builder) = rag
-        .prepare(
-            resolved_chat_id,
-            &skill_names,
-            Some(config.model.clone()),
-            Some(config.provider_name.clone()),
-        )
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let (mut conversation, prompt_builder) = rag.prepare(
+        resolved_chat_id,
+        &skill_names,
+        Some(config.model.clone()),
+        Some(config.provider_name.clone()),
+    )?;
 
     conversation.messages.push(Message::user(prompt.clone()));
 

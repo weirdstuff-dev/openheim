@@ -1,4 +1,3 @@
-use anyhow::Result;
 use clap::Parser;
 use reqwest::Client;
 use tracing_subscriber::{fmt, EnvFilter};
@@ -11,7 +10,7 @@ use openheim::{
 };
 
 #[actix_web::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     fmt::Subscriber::builder().with_env_filter(env_filter).init();

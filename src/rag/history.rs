@@ -34,9 +34,7 @@ pub struct HistoryManager {
 
 impl HistoryManager {
     pub fn new() -> Result<Self> {
-        let dir = config_dir()
-            .map_err(|e| Error::Other(e.to_string()))?
-            .join("history");
+        let dir = config_dir()?.join("history");
         std::fs::create_dir_all(&dir)?;
         Ok(Self { history_dir: dir })
     }
