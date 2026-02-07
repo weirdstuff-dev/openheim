@@ -109,7 +109,9 @@ pub async fn execute_agent(
     .await
     {
         Ok(result) => {
-            let _ = rag.history.save_conversation(&conversation);
+            if let Err(e) = rag.history.save_conversation(&conversation) {
+                tracing::warn!("Failed to save conversation: {e}");
+            }
             HttpResponse::Ok().json(AgentResponse {
                 success: true,
                 result: Some(result),
@@ -118,7 +120,9 @@ pub async fn execute_agent(
             })
         }
         Err(e) => {
-            let _ = rag.history.save_conversation(&conversation);
+            if let Err(e) = rag.history.save_conversation(&conversation) {
+                tracing::warn!("Failed to save conversation: {e}");
+            }
             HttpResponse::InternalServerError().json(AgentResponse {
                 success: false,
                 result: None,

@@ -175,7 +175,9 @@ impl Handler<ExecuteAgent> for AgentWebSocket {
                 )
                 .await;
 
-                let _ = rag.history.save_conversation(&conversation);
+                if let Err(e) = rag.history.save_conversation(&conversation) {
+                    tracing::warn!("Failed to save conversation: {e}");
+                }
 
                 match result {
                     Ok(_) => {

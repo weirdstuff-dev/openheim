@@ -145,13 +145,17 @@ pub async fn run_agent_mode(
                 .await
                 {
                     Ok(result) => {
-                        let _ = rag.history.save_conversation(&conversation);
+                        if let Err(e) = rag.history.save_conversation(&conversation) {
+                            tracing::warn!("Failed to save conversation: {e}");
+                        }
                         println!("\n=== Agent Response ===");
                         println!("{}", result.final_response);
                         println!("Iterations: {}\n", result.iterations_used);
                     }
                     Err(e) => {
-                        let _ = rag.history.save_conversation(&conversation);
+                        if let Err(e) = rag.history.save_conversation(&conversation) {
+                            tracing::warn!("Failed to save conversation: {e}");
+                        }
                         eprintln!("Error: {}", e);
                     }
                 }
@@ -232,7 +236,9 @@ pub async fn run_single_prompt(
     )
     .await?;
 
-    let _ = rag.history.save_conversation(&conversation);
+    if let Err(e) = rag.history.save_conversation(&conversation) {
+        tracing::warn!("Failed to save conversation: {e}");
+    }
 
     println!("\n=== Final Result ===");
     println!("{}", result.final_response);
