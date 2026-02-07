@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::config::config_dir;
-use crate::core::models::Message;
+use crate::core::models::{Message, Role};
 use crate::error::{Error, Result};
 use std::path::PathBuf;
 
@@ -88,7 +88,7 @@ impl HistoryManager {
         conv_to_save.meta.updated_at = Utc::now();
 
         if conv_to_save.meta.title.is_none() {
-            if let Some(msg) = conv_to_save.messages.iter().find(|m| m.role == "user") {
+            if let Some(msg) = conv_to_save.messages.iter().find(|m| m.role == Role::User) {
                 if let Some(content) = &msg.content {
                     let title: String = content.chars().take(80).collect();
                     conv_to_save.meta.title = Some(title);

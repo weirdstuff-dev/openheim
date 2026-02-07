@@ -1,4 +1,4 @@
-use crate::core::models::Message;
+use crate::core::models::{Message, Role};
 
 pub struct PromptBuilder {
     system_parts: Vec<String>,
@@ -22,7 +22,7 @@ impl PromptBuilder {
         if !self.system_parts.is_empty() {
             let system_content = self.system_parts.join("\n\n---\n\n");
             messages.push(Message {
-                role: "system".to_string(),
+                role: Role::System,
                 content: Some(system_content),
                 tool_calls: None,
                 tool_call_id: None,

@@ -3,7 +3,7 @@ use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::models::{Choice, FunctionCall, Message, Tool, ToolCall};
+use crate::core::models::{Choice, FunctionCall, Message, Role, Tool, ToolCall};
 use crate::error::{Error, Result};
 
 use super::LlmClient;
@@ -98,8 +98,8 @@ fn convert_messages(messages: &[Message]) -> Vec<GeminiContent> {
     let mut result = Vec::new();
 
     for msg in messages {
-        match msg.role.as_str() {
-            "assistant" => {
+        match msg.role {
+            Role::Assistant => {
                 let mut parts = Vec::new();
                 if let Some(text) = &msg.content {
                     if !text.is_empty() {
@@ -131,7 +131,7 @@ fn convert_messages(messages: &[Message]) -> Vec<GeminiContent> {
                     });
                 }
             }
-            "tool" => {
+            Role::Tool => {
                 // Tool results become functionResponse parts in a user turn.
                 // We need the tool name — but our Message only has tool_call_id, not name.
                 // We use the tool_call_id as a fallback for the name field; the agent
@@ -160,7 +160,7 @@ fn convert_messages(messages: &[Message]) -> Vec<GeminiContent> {
                 });
             }
             _ => {
-                // user and any other role
+                // user and system roles
                 let text = msg.content.clone().unwrap_or_default();
                 result.push(GeminiContent {
                     role: "user".to_string(),
@@ -236,7 +236,7 @@ fn convert_response(resp: GeminiResponse) -> Result<Choice> {
 
     Ok(Choice {
         message: Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content,
             tool_calls: if tool_calls.is_empty() {
                 None
