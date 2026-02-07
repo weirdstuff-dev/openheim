@@ -43,6 +43,7 @@ pub async fn execute_agent(
     config: web::Data<AgentConfig>,
     app_config: web::Data<AppConfig>,
     http_client: web::Data<ReqwestClient>,
+    rag: web::Data<RagContext>,
 ) -> impl Responder {
     let (llm_client, agent_config) = match resolve_client_and_config(
         req.model.as_deref(),
@@ -55,18 +56,6 @@ pub async fn execute_agent(
         Ok((client, config)) => (client, config),
         Err(e) => {
             return HttpResponse::BadRequest().json(AgentResponse {
-                success: false,
-                result: None,
-                error: Some(e.to_string()),
-                chat_id: None,
-            });
-        }
-    };
-
-    let rag = match RagContext::new() {
-        Ok(r) => r,
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(AgentResponse {
                 success: false,
                 result: None,
                 error: Some(e.to_string()),

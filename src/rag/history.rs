@@ -34,6 +34,7 @@ struct ConversationEnvelope {
     meta: ConversationMeta,
 }
 
+#[derive(Clone)]
 pub struct HistoryManager {
     history_dir: PathBuf,
 }

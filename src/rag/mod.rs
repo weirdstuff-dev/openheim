@@ -9,6 +9,7 @@ pub use skills::SkillsManager;
 use crate::error::Result;
 use uuid::Uuid;
 
+#[derive(Clone)]
 pub struct RagContext {
     pub history: HistoryManager,
     pub skills: SkillsManager,

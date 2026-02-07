@@ -8,6 +8,7 @@ use crate::{
     config::create_client,
     error::Result,
     llm::LlmClient,
+    rag::RagContext,
     tools::{SystemToolExecutor, ToolExecutor},
 };
 
@@ -32,8 +33,8 @@ pub async fn start_api_server(
     tracing::info!("  WS   /ws/fs");
 
     let llm_client: Arc<dyn LlmClient> = create_client(&config, &client);
-
     let tool_executor: Arc<dyn ToolExecutor> = Arc::new(SystemToolExecutor::new());
+    let rag_context = RagContext::new()?;
 
     HttpServer::new(move || {
         let cors = Cors::default()
@@ -50,6 +51,7 @@ pub async fn start_api_server(
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(app_config.clone()))
             .app_data(web::Data::new(client.clone()))
+            .app_data(web::Data::new(rag_context.clone()))
             .route("/query", web::post().to(execute_agent))
             .route("/ws", web::get().to(ws_handler))
             .route("/ws/fs", web::get().to(ws_fs_handler))

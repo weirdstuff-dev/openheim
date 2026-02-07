@@ -2,6 +2,7 @@ use crate::config::config_dir;
 use crate::error::{Error, Result};
 use std::path::PathBuf;
 
+#[derive(Clone)]
 pub struct SkillsManager {
     skills_dir: PathBuf,
 }

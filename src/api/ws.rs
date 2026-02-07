@@ -52,6 +52,7 @@ pub struct AgentWebSocket {
     config: AgentConfig,
     app_config: AppConfig,
     http_client: ReqwestClient,
+    rag: RagContext,
 }
 
 impl AgentWebSocket {
@@ -61,6 +62,7 @@ impl AgentWebSocket {
         config: AgentConfig,
         app_config: AppConfig,
         http_client: ReqwestClient,
+        rag: RagContext,
     ) -> Self {
         Self {
             llm,
@@ -68,6 +70,7 @@ impl AgentWebSocket {
             config,
             app_config,
             http_client,
+            rag,
         }
     }
 
@@ -108,6 +111,7 @@ struct ExecuteAgent {
     prompt: String,
     chat_id: Option<Uuid>,
     skills: Vec<String>,
+    rag: RagContext,
 }
 
 impl Handler<ExecuteAgent> for AgentWebSocket {
@@ -120,25 +124,13 @@ impl Handler<ExecuteAgent> for AgentWebSocket {
         let prompt = msg.prompt;
         let chat_id = msg.chat_id;
         let skills = msg.skills;
+        let rag = msg.rag;
 
         let addr = ctx.address();
         let addr_for_closure = addr.clone();
 
         ctx.spawn(
             async move {
-                let rag = match RagContext::new() {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let error_msg = WsResponse::Error {
-                            message: e.to_string(),
-                        };
-                        if let Ok(json) = serde_json::to_string(&error_msg) {
-                            addr.do_send(SendText { text: json });
-                        }
-                        return;
-                    }
-                };
-
                 let (mut conversation, prompt_builder) = match rag.prepare(
                     chat_id,
                     &skills,
@@ -231,6 +223,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for AgentWebSocket {
                                 prompt: req.prompt,
                                 chat_id: req.chat_id,
                                 skills: req.skills.unwrap_or_default(),
+                                rag: self.rag.clone(),
                             });
                         }
                         Err(e) => {
@@ -263,6 +256,7 @@ pub async fn ws_handler(
     config: web::Data<AgentConfig>,
     app_config: web::Data<AppConfig>,
     http_client: web::Data<ReqwestClient>,
+    rag: web::Data<RagContext>,
 ) -> Result<HttpResponse, Error> {
     let ws = AgentWebSocket::new(
         llm.get_ref().clone(),
@@ -270,6 +264,7 @@ pub async fn ws_handler(
         config.get_ref().clone(),
         app_config.get_ref().clone(),
         http_client.get_ref().clone(),
+        rag.get_ref().clone(),
     );
     ws::start(ws, &req, stream)
 }
