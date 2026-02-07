@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Top-level configuration loaded from ~/.openheim/config.toml
@@ -9,7 +9,7 @@ pub struct AppConfig {
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
     #[serde(default)]
-    pub providers: HashMap<String, ProviderConfig>,
+    pub providers: BTreeMap<String, ProviderConfig>,
 }
 
 fn default_max_iterations() -> usize {
