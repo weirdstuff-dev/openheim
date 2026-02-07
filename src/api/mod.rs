@@ -26,11 +26,11 @@ pub async fn start_api_server(
     config: AgentConfig,
     app_config: AppConfig,
 ) -> Result<()> {
+    // TODO: improve this
     tracing::info!("Starting API server on {}:{}", host, port);
-    tracing::info!("  POST /query           - Execute agent with prompt");
-    tracing::info!("  WS   /ws              - WebSocket for streaming agent execution");
-    tracing::info!("  WS   /ws/fs           - WebSocket for filesystem access (read/write/watch)");
-    tracing::info!("");
+    tracing::info!("  POST /query");
+    tracing::info!("  WS   /ws");
+    tracing::info!("  WS   /ws/fs");
 
     let llm_client: Arc<dyn LlmClient> = create_client(&config, &client);
 

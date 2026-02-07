@@ -24,10 +24,10 @@ pub struct Args {
     #[arg(long, help = "Maximum number of agent iterations (overrides config)")]
     pub max_iterations: Option<usize>,
 
-    #[arg(long, help = "Run in API server mode instead of CLI mode")]
+    #[arg(long, help = "Run in API server mode")]
     pub api_mode: bool,
 
-    #[arg(long, help = "Run in continue mode for persistent conversations (CLI only)")]
+    #[arg(long, help = "Run in agent mode on the CLI")]
     pub agent_mode: bool,
 
     #[arg(long, default_value = "0.0.0.0", help = "API server bind address")]
@@ -45,7 +45,7 @@ pub struct Args {
     #[arg(long, help = "Initialize config file at ~/.openheim/config.toml")]
     pub init: bool,
 
-    #[arg(long, help = "Continue a specific conversation by its UUID")]
+    #[arg(long, help = "Continue a specific conversation by its ID")]
     pub chat_id: Option<String>,
 
     #[arg(long, help = "Continue the most recent conversation")]

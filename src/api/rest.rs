@@ -14,11 +14,11 @@ use crate::tools::ToolExecutor;
 #[derive(Debug, Deserialize)]
 pub struct AgentRequest {
     pub prompt: String,
-    #[serde(default)]
-    pub max_iterations: Option<usize>,
     /// Optional model name. If provided, resolves against AppConfig to pick the right provider.
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub max_iterations: Option<usize>,
     #[serde(default)]
     pub chat_id: Option<Uuid>,
     #[serde(default)]
