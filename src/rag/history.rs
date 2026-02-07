@@ -28,6 +28,12 @@ pub struct Conversation {
     pub messages: Vec<Message>,
 }
 
+/// Lightweight struct for deserializing only the metadata portion of a conversation file.
+#[derive(Debug, Deserialize)]
+struct ConversationEnvelope {
+    meta: ConversationMeta,
+}
+
 pub struct HistoryManager {
     history_dir: PathBuf,
 }
@@ -106,8 +112,8 @@ impl HistoryManager {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("json") {
                 let data = std::fs::read_to_string(&path)?;
-                if let Ok(conv) = serde_json::from_str::<Conversation>(&data) {
-                    metas.push(conv.meta);
+                if let Ok(envelope) = serde_json::from_str::<ConversationEnvelope>(&data) {
+                    metas.push(envelope.meta);
                 }
             }
         }
