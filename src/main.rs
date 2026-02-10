@@ -1,17 +1,15 @@
-use anyhow::Result;
 use clap::Parser;
-use reqwest::Client;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use openheim::{
     api,
     cli::{self, Args},
-    config::{init_config, load_config},
+    config::{build_http_client, init_config, load_config},
     rag::SkillsManager,
 };
 
 #[actix_web::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     fmt::Subscriber::builder().with_env_filter(env_filter).init();
@@ -85,7 +83,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    let client = Client::new();
+    let client = build_http_client(agent_config.timeout_secs);
 
     if args.api_mode {
         api::start_api_server(args.host, args.port, client, agent_config, app_config).await?;

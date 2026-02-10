@@ -3,7 +3,7 @@ use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::models::{Choice, FunctionCall, Message, Tool, ToolCall};
+use crate::core::models::{Choice, FunctionCall, Message, Role, Tool, ToolCall};
 use crate::error::{Error, Result};
 
 use super::LlmClient;
@@ -14,15 +14,17 @@ pub struct GeminiClient {
     api_base: String,
     api_key: String,
     model: String,
+    max_tokens: Option<u32>,
 }
 
 impl GeminiClient {
-    pub fn new(client: ReqwestClient, api_base: String, api_key: String, model: String) -> Self {
+    pub fn new(client: ReqwestClient, api_base: String, api_key: String, model: String, max_tokens: Option<u32>) -> Self {
         Self {
             client,
             api_base,
             api_key,
             model,
+            max_tokens,
         }
     }
 }
@@ -30,10 +32,19 @@ impl GeminiClient {
 // --- Gemini request types ---
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GeminiRequest {
     contents: Vec<GeminiContent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<GeminiToolDeclaration>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation_config: Option<GeminiGenerationConfig>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiGenerationConfig {
+    max_output_tokens: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -98,8 +109,8 @@ fn convert_messages(messages: &[Message]) -> Vec<GeminiContent> {
     let mut result = Vec::new();
 
     for msg in messages {
-        match msg.role.as_str() {
-            "assistant" => {
+        match msg.role {
+            Role::Assistant => {
                 let mut parts = Vec::new();
                 if let Some(text) = &msg.content {
                     if !text.is_empty() {
@@ -131,16 +142,17 @@ fn convert_messages(messages: &[Message]) -> Vec<GeminiContent> {
                     });
                 }
             }
-            "tool" => {
+            Role::Tool => {
                 // Tool results become functionResponse parts in a user turn.
-                // We need the tool name — but our Message only has tool_call_id, not name.
-                // We use the tool_call_id as a fallback for the name field; the agent
-                // loop should ideally provide the name. Gemini matches by name, not id.
+                // Gemini matches by function name, not by call id.
+                let name = msg.tool_name.clone()
+                    .or_else(|| msg.tool_call_id.clone())
+                    .unwrap_or_default();
                 let part = GeminiPart {
                     text: None,
                     function_call: None,
                     function_response: Some(GeminiFunctionResponse {
-                        name: msg.tool_call_id.clone().unwrap_or_default(),
+                        name,
                         response: serde_json::json!({
                             "result": msg.content.clone().unwrap_or_default()
                         }),
@@ -160,7 +172,7 @@ fn convert_messages(messages: &[Message]) -> Vec<GeminiContent> {
                 });
             }
             _ => {
-                // user and any other role
+                // user and system roles
                 let text = msg.content.clone().unwrap_or_default();
                 result.push(GeminiContent {
                     role: "user".to_string(),
@@ -236,7 +248,7 @@ fn convert_response(resp: GeminiResponse) -> Result<Choice> {
 
     Ok(Choice {
         message: Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content,
             tool_calls: if tool_calls.is_empty() {
                 None
@@ -244,6 +256,7 @@ fn convert_response(resp: GeminiResponse) -> Result<Choice> {
                 Some(tool_calls)
             },
             tool_call_id: None,
+            tool_name: None,
         },
         finish_reason,
     })
@@ -255,6 +268,9 @@ impl LlmClient for GeminiClient {
         let request = GeminiRequest {
             contents: convert_messages(messages),
             tools: convert_tools(tools),
+            generation_config: self.max_tokens.map(|t| GeminiGenerationConfig {
+                max_output_tokens: t,
+            }),
         };
 
         let endpoint = format!(

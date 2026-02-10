@@ -12,15 +12,17 @@ pub struct OpenAiCompatibleClient {
     api_base: String,
     api_key: String,
     model: String,
+    max_tokens: Option<u32>,
 }
 
 impl OpenAiCompatibleClient {
-    pub fn new(client: ReqwestClient, api_base: String, api_key: String, model: String) -> Self {
+    pub fn new(client: ReqwestClient, api_base: String, api_key: String, model: String, max_tokens: Option<u32>) -> Self {
         Self {
             client,
             api_base,
             api_key,
             model,
+            max_tokens,
         }
     }
 }
@@ -32,6 +34,7 @@ impl LlmClient for OpenAiCompatibleClient {
             model: self.model.clone(),
             messages: messages.to_vec(),
             tools: tools.to_vec(),
+            max_tokens: self.max_tokens,
         };
 
         let endpoint = format!("{}/chat/completions", self.api_base.trim_end_matches('/'));

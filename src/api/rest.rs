@@ -1,5 +1,4 @@
 use actix_web::{web, HttpResponse, Responder};
-use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -14,11 +13,11 @@ use crate::tools::ToolExecutor;
 #[derive(Debug, Deserialize)]
 pub struct AgentRequest {
     pub prompt: String,
-    #[serde(default)]
-    pub max_iterations: Option<usize>,
     /// Optional model name. If provided, resolves against AppConfig to pick the right provider.
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub max_iterations: Option<usize>,
     #[serde(default)]
     pub chat_id: Option<Uuid>,
     #[serde(default)]
@@ -42,31 +41,18 @@ pub async fn execute_agent(
     executor: web::Data<Arc<dyn ToolExecutor>>,
     config: web::Data<AgentConfig>,
     app_config: web::Data<AppConfig>,
-    http_client: web::Data<ReqwestClient>,
+    rag: web::Data<RagContext>,
 ) -> impl Responder {
     let (llm_client, agent_config) = match resolve_client_and_config(
         req.model.as_deref(),
         req.max_iterations,
         app_config.get_ref(),
-        http_client.get_ref(),
         default_llm.get_ref().clone(),
         config.get_ref(),
     ) {
         Ok((client, config)) => (client, config),
         Err(e) => {
             return HttpResponse::BadRequest().json(AgentResponse {
-                success: false,
-                result: None,
-                error: Some(e),
-                chat_id: None,
-            });
-        }
-    };
-
-    let rag = match RagContext::new() {
-        Ok(r) => r,
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(AgentResponse {
                 success: false,
                 result: None,
                 error: Some(e.to_string()),
@@ -109,7 +95,9 @@ pub async fn execute_agent(
     .await
     {
         Ok(result) => {
-            let _ = rag.history.save_conversation(&conversation);
+            if let Err(e) = rag.history.save_conversation(&conversation) {
+                tracing::warn!("Failed to save conversation: {e}");
+            }
             HttpResponse::Ok().json(AgentResponse {
                 success: true,
                 result: Some(result),
@@ -118,7 +106,9 @@ pub async fn execute_agent(
             })
         }
         Err(e) => {
-            let _ = rag.history.save_conversation(&conversation);
+            if let Err(e) = rag.history.save_conversation(&conversation) {
+                tracing::warn!("Failed to save conversation: {e}");
+            }
             HttpResponse::InternalServerError().json(AgentResponse {
                 success: false,
                 result: None,

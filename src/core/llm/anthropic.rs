@@ -3,7 +3,7 @@ use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::models::{Choice, FunctionCall, Message, Tool, ToolCall};
+use crate::core::models::{Choice, FunctionCall, Message, Role, Tool, ToolCall};
 use crate::error::{Error, Result};
 
 use super::LlmClient;
@@ -17,15 +17,17 @@ pub struct AnthropicClient {
     api_base: String,
     api_key: String,
     model: String,
+    max_tokens: u32,
 }
 
 impl AnthropicClient {
-    pub fn new(client: ReqwestClient, api_base: String, api_key: String, model: String) -> Self {
+    pub fn new(client: ReqwestClient, api_base: String, api_key: String, model: String, max_tokens: Option<u32>) -> Self {
         Self {
             client,
             api_base,
             api_key,
             model,
+            max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         }
     }
 }
@@ -99,8 +101,8 @@ fn convert_messages(messages: &[Message]) -> Vec<AnthropicMessage> {
     let mut result = Vec::new();
 
     for msg in messages {
-        match msg.role.as_str() {
-            "tool" => {
+        match msg.role {
+            Role::Tool => {
                 // Tool results must be sent as user messages with tool_result content blocks
                 let block = AnthropicContentBlock::ToolResult {
                     tool_use_id: msg.tool_call_id.clone().unwrap_or_default(),
@@ -119,7 +121,7 @@ fn convert_messages(messages: &[Message]) -> Vec<AnthropicMessage> {
                     content: vec![block],
                 });
             }
-            "assistant" => {
+            Role::Assistant => {
                 let mut blocks = Vec::new();
                 if let Some(text) = &msg.content {
                     if !text.is_empty() {
@@ -146,11 +148,16 @@ fn convert_messages(messages: &[Message]) -> Vec<AnthropicMessage> {
                     });
                 }
             }
-            role => {
-                // user and any other role
+            _ => {
+                // user and system roles
+                let role_str = match msg.role {
+                    Role::User => "user",
+                    Role::System => "user",
+                    _ => "user",
+                };
                 let text = msg.content.clone().unwrap_or_default();
                 result.push(AnthropicMessage {
-                    role: role.to_string(),
+                    role: role_str.to_string(),
                     content: vec![AnthropicContentBlock::Text { text }],
                 });
             }
@@ -207,7 +214,7 @@ fn convert_response(resp: AnthropicResponse) -> Choice {
 
     Choice {
         message: Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content,
             tool_calls: if tool_calls.is_empty() {
                 None
@@ -215,6 +222,7 @@ fn convert_response(resp: AnthropicResponse) -> Choice {
                 Some(tool_calls)
             },
             tool_call_id: None,
+            tool_name: None,
         },
         finish_reason,
     }
@@ -225,7 +233,7 @@ impl LlmClient for AnthropicClient {
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
         let request = AnthropicRequest {
             model: self.model.clone(),
-            max_tokens: DEFAULT_MAX_TOKENS,
+            max_tokens: self.max_tokens,
             messages: convert_messages(messages),
             tools: convert_tools(tools),
         };

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Top-level configuration loaded from ~/.openheim/config.toml
@@ -9,7 +9,7 @@ pub struct AppConfig {
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
     #[serde(default)]
-    pub providers: HashMap<String, ProviderConfig>,
+    pub providers: BTreeMap<String, ProviderConfig>,
 }
 
 fn default_max_iterations() -> usize {
@@ -26,6 +26,10 @@ pub struct ProviderConfig {
     pub env_var: Option<String>,
     /// Inline API key (not recommended - prefer env_var)
     pub api_key: Option<String>,
+    /// Request timeout in seconds (default: 120)
+    pub timeout_secs: Option<u64>,
+    /// Maximum output tokens for LLM responses
+    pub max_tokens: Option<u32>,
 }
 
 impl ProviderConfig {
@@ -50,6 +54,14 @@ pub struct AgentConfig {
     pub api_key: String,
     pub model: String,
     pub max_iterations: usize,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Maximum output tokens for LLM responses (provider-specific defaults if not set)
+    pub max_tokens: Option<u32>,
+}
+
+fn default_timeout_secs() -> u64 {
+    120
 }
 
 impl AgentConfig {
@@ -60,16 +72,15 @@ impl AgentConfig {
             api_key,
             model,
             max_iterations,
+            timeout_secs: default_timeout_secs(),
+            max_tokens: None,
         }
     }
 
     pub fn with_max_iterations(&self, max_iterations: usize) -> Self {
         Self {
-            provider_name: self.provider_name.clone(),
-            api_base: self.api_base.clone(),
-            api_key: self.api_key.clone(),
-            model: self.model.clone(),
             max_iterations,
+            ..self.clone()
         }
     }
 
@@ -77,13 +88,7 @@ impl AgentConfig {
         if self.max_iterations == max_iterations {
             Arc::clone(self)
         } else {
-            Arc::new(Self {
-                provider_name: self.provider_name.clone(),
-                api_base: self.api_base.clone(),
-                api_key: self.api_key.clone(),
-                model: self.model.clone(),
-                max_iterations,
-            })
+            Arc::new(self.with_max_iterations(max_iterations))
         }
     }
 }
@@ -96,6 +101,8 @@ impl Default for AgentConfig {
             api_key: String::new(),
             model: String::new(),
             max_iterations: 10,
+            timeout_secs: default_timeout_secs(),
+            max_tokens: None,
         }
     }
 }

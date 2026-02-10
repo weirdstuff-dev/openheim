@@ -2,48 +2,66 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // Chat API Models
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<Tool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Message {
-    pub role: String,
+    pub role: Role,
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
 }
 
 impl Message {
     pub fn user(content: String) -> Self {
         Self {
-            role: "user".to_string(),
+            role: Role::User,
             content: Some(content),
             tool_calls: None,
             tool_call_id: None,
+            tool_name: None,
         }
     }
 
     pub fn assistant(content: String) -> Self {
         Self {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: Some(content),
             tool_calls: None,
             tool_call_id: None,
+            tool_name: None,
         }
     }
 
-    pub fn tool_result(tool_call_id: String, content: String) -> Self {
+    pub fn tool_result(tool_call_id: String, tool_name: String, content: String) -> Self {
         Self {
-            role: "tool".to_string(),
+            role: Role::Tool,
             content: Some(content),
             tool_calls: None,
             tool_call_id: Some(tool_call_id),
+            tool_name: Some(tool_name),
         }
     }
 }
