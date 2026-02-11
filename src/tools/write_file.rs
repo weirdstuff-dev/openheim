@@ -59,3 +59,46 @@ impl ToolHandler for WriteFileTool {
         Ok(format!("Successfully wrote to {}", path))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn definition_has_correct_name() {
+        let tool = WriteFileTool;
+        let def = tool.definition();
+        assert_eq!(def.function.name, "write_file");
+        assert_eq!(def.tool_type, "function");
+    }
+
+    #[tokio::test]
+    async fn execute_writes_file_and_creates_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub").join("test.txt");
+        let path_str = path.to_str().unwrap();
+
+        let tool = WriteFileTool;
+        let args = serde_json::json!({"path": path_str, "content": "written"}).to_string();
+        let result = tool.execute(&args).await.unwrap();
+        assert!(result.contains("Successfully wrote"));
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "written");
+    }
+
+    #[tokio::test]
+    async fn execute_errors_for_missing_content() {
+        let tool = WriteFileTool;
+        let result = tool.execute(r#"{"path": "/tmp/test.txt"}"#).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("content"));
+    }
+
+    #[tokio::test]
+    async fn execute_errors_for_malformed_json() {
+        let tool = WriteFileTool;
+        let result = tool.execute("bad json").await;
+        assert!(result.is_err());
+    }
+}
