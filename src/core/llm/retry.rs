@@ -52,3 +52,113 @@ impl LlmClient for RetryClient {
         Err(last_err.unwrap())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Error;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::core::models::Role;
+
+    fn ok_choice(content: &str) -> Choice {
+        Choice {
+            message: Message {
+                role: Role::Assistant,
+                content: Some(content.into()),
+                tool_calls: None,
+                tool_call_id: None,
+                tool_name: None,
+            },
+            finish_reason: Some("stop".into()),
+        }
+    }
+
+    /// Mock that always succeeds
+    struct AlwaysOk;
+
+    #[async_trait]
+    impl LlmClient for AlwaysOk {
+        async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> crate::error::Result<Choice> {
+            Ok(ok_choice("success"))
+        }
+    }
+
+    /// Mock that always fails with a non-retryable error
+    struct AlwaysFailNonRetryable;
+
+    #[async_trait]
+    impl LlmClient for AlwaysFailNonRetryable {
+        async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> crate::error::Result<Choice> {
+            Err(Error::ApiError("status 400: bad request".into()))
+        }
+    }
+
+    /// Mock that fails N times with a retryable error, then succeeds
+    struct FailThenSucceed {
+        remaining_failures: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmClient for FailThenSucceed {
+        async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> crate::error::Result<Choice> {
+            let remaining = self.remaining_failures.fetch_sub(1, Ordering::SeqCst);
+            if remaining > 0 {
+                Err(Error::ApiError("status 429: rate limited".into()))
+            } else {
+                Ok(ok_choice("recovered"))
+            }
+        }
+    }
+
+    /// Mock that always fails with a retryable error (to test max retries)
+    struct AlwaysFailRetryable {
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmClient for AlwaysFailRetryable {
+        async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> crate::error::Result<Choice> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Err(Error::ApiError("status 503: service unavailable".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn success_on_first_attempt() {
+        let client = RetryClient::new(Arc::new(AlwaysOk));
+        let result = client.send(&[], &[]).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().message.content.as_deref(), Some("success"));
+    }
+
+    #[tokio::test]
+    async fn non_retryable_error_returned_immediately() {
+        let client = RetryClient::new(Arc::new(AlwaysFailNonRetryable));
+        let result = client.send(&[], &[]).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("400"));
+    }
+
+    #[tokio::test]
+    async fn success_after_transient_failure() {
+        let inner = Arc::new(FailThenSucceed {
+            remaining_failures: AtomicUsize::new(2),
+        });
+        let client = RetryClient::new(inner);
+        let result = client.send(&[], &[]).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().message.content.as_deref(), Some("recovered"));
+    }
+
+    #[tokio::test]
+    async fn retryable_error_exhausts_retries() {
+        let inner = Arc::new(AlwaysFailRetryable {
+            call_count: AtomicUsize::new(0),
+        });
+        let client = RetryClient::new(inner.clone());
+        let result = client.send(&[], &[]).await;
+        assert!(result.is_err());
+        // Should have been called 1 (initial) + 3 (retries) = 4 times
+        assert_eq!(inner.call_count.load(Ordering::SeqCst), 4);
+    }
+}
