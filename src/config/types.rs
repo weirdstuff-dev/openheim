@@ -106,3 +106,116 @@ impl Default for AgentConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_provider(env_var: Option<&str>, api_key: Option<&str>) -> ProviderConfig {
+        ProviderConfig {
+            api_base: "https://api.example.com".into(),
+            default_model: "model-1".into(),
+            models: vec!["model-1".into()],
+            env_var: env_var.map(String::from),
+            api_key: api_key.map(String::from),
+            timeout_secs: None,
+            max_tokens: None,
+        }
+    }
+
+    #[test]
+    fn resolve_api_key_from_env_var() {
+        let var_name = "OPENHEIM_TEST_KEY_ENV";
+        unsafe { std::env::set_var(var_name, "secret-from-env"); }
+        let provider = sample_provider(Some(var_name), Some("inline-key"));
+        assert_eq!(provider.resolve_api_key(), "secret-from-env");
+        unsafe { std::env::remove_var(var_name); }
+    }
+
+    #[test]
+    fn resolve_api_key_falls_back_to_inline() {
+        let var_name = "OPENHEIM_TEST_KEY_MISSING";
+        unsafe { std::env::remove_var(var_name); }
+        let provider = sample_provider(Some(var_name), Some("inline-key"));
+        assert_eq!(provider.resolve_api_key(), "inline-key");
+    }
+
+    #[test]
+    fn resolve_api_key_returns_empty_when_none() {
+        let var_name = "OPENHEIM_TEST_KEY_NONE";
+        unsafe { std::env::remove_var(var_name); }
+        let provider = sample_provider(Some(var_name), None);
+        assert_eq!(provider.resolve_api_key(), "");
+    }
+
+    #[test]
+    fn resolve_api_key_no_env_var_configured() {
+        let provider = sample_provider(None, Some("inline-only"));
+        assert_eq!(provider.resolve_api_key(), "inline-only");
+    }
+
+    #[test]
+    fn resolve_api_key_empty_env_var_falls_back() {
+        let var_name = "OPENHEIM_TEST_KEY_EMPTY";
+        unsafe { std::env::set_var(var_name, "  "); }
+        let provider = sample_provider(Some(var_name), Some("fallback"));
+        assert_eq!(provider.resolve_api_key(), "fallback");
+        unsafe { std::env::remove_var(var_name); }
+    }
+
+    #[test]
+    fn agent_config_new_sets_defaults() {
+        let cfg = AgentConfig::new(
+            "openai".into(),
+            "https://api.openai.com".into(),
+            "key".into(),
+            "gpt-4".into(),
+            5,
+        );
+        assert_eq!(cfg.provider_name, "openai");
+        assert_eq!(cfg.max_iterations, 5);
+        assert_eq!(cfg.timeout_secs, 120);
+        assert!(cfg.max_tokens.is_none());
+    }
+
+    #[test]
+    fn with_max_iterations_clones_with_new_value() {
+        let cfg = AgentConfig::new("p".into(), "b".into(), "k".into(), "m".into(), 5);
+        let updated = cfg.with_max_iterations(20);
+        assert_eq!(updated.max_iterations, 20);
+        assert_eq!(updated.provider_name, "p");
+    }
+
+    #[test]
+    fn arc_with_max_iterations_reuses_arc_when_same() {
+        let cfg = Arc::new(AgentConfig::new("p".into(), "b".into(), "k".into(), "m".into(), 10));
+        let same = cfg.arc_with_max_iterations(10);
+        assert!(Arc::ptr_eq(&cfg, &same));
+    }
+
+    #[test]
+    fn arc_with_max_iterations_creates_new_when_different() {
+        let cfg = Arc::new(AgentConfig::new("p".into(), "b".into(), "k".into(), "m".into(), 10));
+        let different = cfg.arc_with_max_iterations(20);
+        assert!(!Arc::ptr_eq(&cfg, &different));
+        assert_eq!(different.max_iterations, 20);
+    }
+
+    #[test]
+    fn agent_config_default_has_correct_values() {
+        let cfg = AgentConfig::default();
+        assert_eq!(cfg.max_iterations, 10);
+        assert_eq!(cfg.timeout_secs, 120);
+        assert!(cfg.provider_name.is_empty());
+    }
+
+    #[test]
+    fn app_config_deserializes_with_default_max_iterations() {
+        let toml_str = r#"
+            default_provider = "openai"
+            [providers]
+        "#;
+        let cfg: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.max_iterations, 10);
+    }
+}
