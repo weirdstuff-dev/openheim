@@ -52,3 +52,55 @@ impl Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_helper_creates_config_error() {
+        let err = Error::config("missing field");
+        assert!(matches!(err, Error::ConfigError(_)));
+        assert_eq!(err.to_string(), "Config error: missing field");
+    }
+
+    #[test]
+    fn is_retryable_for_429() {
+        let err = Error::ApiError("API request failed with status 429: rate limited".into());
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_for_5xx() {
+        for code in &["500", "502", "503", "504"] {
+            let err = Error::ApiError(format!("API request failed with status {}: error", code));
+            assert!(err.is_retryable(), "expected retryable for status {}", code);
+        }
+    }
+
+    #[test]
+    fn is_not_retryable_for_400() {
+        let err = Error::ApiError("API request failed with status 400: bad request".into());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn is_not_retryable_for_non_api_errors() {
+        assert!(!Error::ParseError("bad json".into()).is_retryable());
+        assert!(!Error::ConfigError("missing".into()).is_retryable());
+        assert!(!Error::ToolExecutionError("failed".into()).is_retryable());
+        assert!(!Error::Other("something".into()).is_retryable());
+    }
+
+    #[tokio::test]
+    async fn reqwest_error_is_retryable() {
+        // reqwest errors (network failures) should always be retryable
+        let err = reqwest::Client::new()
+            .get("http://127.0.0.1:1")
+            .send()
+            .await
+            .unwrap_err();
+        let error = Error::ReqwestError(err);
+        assert!(error.is_retryable());
+    }
+}
