@@ -1,320 +1,163 @@
-# Openheim
+# openheim
 
-Openheim is an open-source, lightweight LLM agent written in Rust that is built for the home, cloud, and enterprise.
+Openheim is an open-source LLM agent written in Rust. It connects to multiple LLM providers, executes tools on their behalf, persists conversations, and can be extended with user-defined skills. It runs as a CLI, an interactive REPL, or an HTTP/WebSocket server.
 
 ## Features
 
-- **Multiple Operation Modes**: CLI single-prompt, interactive conversation, and HTTP API server
-- **Tool Execution**: Built-in tools for command execution, file reading, and file writing
-- **Streaming Support**: Real-time WebSocket streaming for agent execution and filesystem operations
-- **OpenAI Compatible**: Works with any OpenAI-compatible LLM API endpoint
-- **Docker Ready**: Multi-stage Docker build with docker-compose for easy deployment
-- **Cross-Platform**: Supports both Unix and Windows environments
+- **Multi-provider** -- OpenAI, Anthropic, Google Gemini, and any OpenAI-compatible endpoint (Ollama, vLLM, etc.)
+- **Tool execution** -- Built-in tools for running shell commands, reading files, and writing files. The tool system is trait-based and extensible.
+- **Conversation memory** -- Conversations are persisted to disk and can be resumed across sessions.
+- **Skills** -- Drop markdown files into `~/.openheim/skills/` to give the agent custom instructions or domain knowledge.
+- **Streaming** -- Real-time WebSocket streaming of agent iterations and a separate filesystem-operations WebSocket with file watching.
+- **Retry with backoff** -- Transient LLM failures (429, 5xx, network errors) are retried automatically with exponential backoff.
+- **Docker ready** -- Multi-stage Docker build with docker-compose for quick deployment.
 
-## Quick Start
+## Getting Started
 
 ### Prerequisites
 
-- Rust 1.85+ (uses 2024 edition)
-- An API key for at least one LLM provider (OpenAI, Anthropic, or any OpenAI-compatible service)
+- Rust 1.85+
+- An API key for at least one supported LLM provider
 
-### Installation
+### Build
 
 ```bash
-# Clone the repository
 git clone https://github.com/weirdstuff-dev/openheim.git
 cd openheim
-
-# Build the project
 cargo build --release
 ```
 
-### Configuration
+### Configure
 
 ```bash
-# Initialize the config file
+# Create the default config file
 cargo run -- --init
 
-# Edit ~/.openheim/config.toml to add your provider(s) and API keys
+# Edit it to add your providers and API keys
+vim ~/.openheim/config.toml
 ```
 
-### Basic Usage
+The config file uses TOML. Each provider entry specifies an API base URL, a default model, and either an `env_var` (recommended) or an inline `api_key`:
+
+```toml
+default_provider = "openai"
+max_iterations = 10
+
+[providers.openai]
+api_base = "https://api.openai.com/v1"
+default_model = "gpt-4"
+models = ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
+env_var = "OPENAI_API_KEY"
+
+[providers.anthropic]
+api_base = "https://api.anthropic.com/v1"
+default_model = "claude-3-5-sonnet-20241022"
+models = ["claude-3-5-sonnet-20241022", "claude-3-opus-20240229"]
+env_var = "ANTHROPIC_API_KEY"
+
+[providers.ollama]
+api_base = "http://localhost:11434/v1"
+default_model = "llama2"
+models = ["llama2", "mistral", "codellama"]
+```
+
+### Run
 
 ```bash
-# Run a single query
+# Single prompt
 cargo run -- --query "List the files in the current directory"
 
-# Start interactive mode
+# Interactive REPL
 cargo run -- --agent-mode
 
-# Start API server
+# HTTP/WebSocket server
 cargo run -- --api-mode --port 8080
 
-# Use a specific model
+# Override model
 cargo run -- --query "Hello" --model gpt-4-turbo
+
+# Resume your last conversation
+cargo run -- --agent-mode --continue-last
+
+# Load skills
+cargo run -- --agent-mode --skills coding,debug
 
 # List configured providers and models
 cargo run -- --list
 ```
 
-## Operation Modes
+## How It Works
 
-### 1. Single Prompt Mode (Default)
+Openheim runs an iterative agent loop:
 
-Execute a one-off task and exit:
+1. Send the conversation and available tools to the LLM.
+2. If the LLM requests a tool call, execute it and feed the result back.
+3. Repeat until the LLM returns a final response or the iteration limit is reached.
 
-```bash
-openheim --query "Create a hello world script" --max-iterations 5
-```
+Conversations, including tool call history, are saved to `~/.openheim/history/` as JSON so they can be continued later.
 
-### 2. Interactive Mode
+## Skills
 
-REPL-style conversation with persistent history:
-
-```bash
-openheim --agent-mode
-```
-
-Commands: `exit`, `quit`, or `:q` to exit.
-
-### 3. API Server Mode
-
-Start an HTTP server with REST and WebSocket endpoints:
+Skills are markdown files stored in `~/.openheim/skills/`. When loaded, their content is prepended to the system prompt. Use them to define personas, coding guidelines, or any recurring context you want the agent to have.
 
 ```bash
-openheim --api-mode --host 0.0.0.0 --port 8080
+# List available skills
+cargo run -- --list-skills
 ```
 
-## API Reference
+## API Server
 
-### REST Endpoint
+Start the server with `--api-mode`. It exposes:
 
-**POST /query**
+- **POST /query** -- Submit a prompt and receive the agent's result.
+- **WS /ws** -- Stream agent events (iteration starts, tool calls, responses) in real time.
+- **WS /ws/fs** -- Filesystem operations (list, read, write, watch, delete, rename) over a WebSocket.
 
-Execute an agent task.
-
-```json
-// Request
-{
-  "prompt": "What files are in the workspace?",
-  "max_iterations": 10
-}
-
-// Response
-{
-  "success": true,
-  "result": "...",
-  "iterations": 3
-}
-```
-
-### WebSocket Endpoints
-
-**WS /ws** - Agent Streaming
-
-Connect and send:
-```json
-{"prompt": "Build a web server", "max_iterations": 10}
-```
-
-Receives real-time events for each iteration.
-
-**WS /ws/fs** - Filesystem Operations
-
-| Operation | Payload |
-|-----------|---------|
-| watch | `{"type": "watch", "path": "/workspace"}` |
-| list | `{"type": "list", "path": "/workspace", "recursive": true}` |
-| read | `{"type": "read", "path": "/workspace/file.txt"}` |
-| write | `{"type": "write", "path": "/workspace/file.txt", "content": "..."}` |
-| mkdir | `{"type": "mkdir", "path": "/workspace/newdir"}` |
-| delete | `{"type": "delete", "path": "/workspace/file.txt"}` |
-| rename | `{"type": "rename", "from": "/old.txt", "to": "/new.txt"}` |
-
-## Configuration
-
-Openheim uses a TOML configuration file at `~/.openheim/config.toml` to manage LLM providers and settings.
-
-### Setup
-
-```bash
-# Initialize the default config file
-openheim --init
-
-# Edit the config to add your providers
-vim ~/.openheim/config.toml
-```
-
-### Config File Format
-
-```toml
-# Default provider to use
-default_provider = "openai"
-
-# Maximum agent iterations (can be overridden with --max-iterations)
-max_iterations = 10
-
-# Provider configurations
-[providers.openai]
-api_base = "https://api.openai.com/v1"
-default_model = "gpt-4"
-models = ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
-env_var = "OPENAI_API_KEY"   # reads API key from this env var
-
-[providers.anthropic]
-api_base = "https://api.anthropic.com/v1"
-default_model = "claude-3-5-sonnet"
-models = ["claude-3-5-sonnet", "claude-3-opus", "claude-3-haiku"]
-env_var = "ANTHROPIC_API_KEY"
-
-# Local Ollama (no API key needed)
-[providers.ollama]
-api_base = "http://localhost:11434/v1"
-default_model = "llama2"
-models = ["llama2", "mistral", "codellama", "mixtral"]
-```
-
-Each provider supports:
-- `api_base` - The API endpoint URL
-- `default_model` - Model used when no `--model` flag is given
-- `models` - List of available models for this provider
-- `env_var` - Environment variable name for the API key (recommended)
-- `api_key` - Inline API key (not recommended; prefer `env_var`)
-
-### Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `OPENAI_API_KEY` | OpenAI API key (referenced via `env_var` in config) |
-| `ANTHROPIC_API_KEY` | Anthropic API key (referenced via `env_var` in config) |
-| `RUST_LOG` | Logging level (default: `info`) |
-
-### CLI Arguments
-
-```
-OPTIONS:
-    --query <PROMPT>          Execute a single prompt
-    --agent-mode              Start interactive conversation mode
-    --api-mode                Start HTTP/WebSocket server
-    --host <HOST>             Server bind address [default: 0.0.0.0]
-    --port <PORT>             Server port [default: 8080]
-    --max-iterations <N>      Override max agent iterations from config
-    --model <NAME>            Use a specific model (must be configured in a provider)
-    --list                    List all configured providers and models
-    --init                    Initialize config file at ~/.openheim/config.toml
-```
-
-## Available Tools
-
-The agent has access to three built-in tools:
-
-| Tool | Description |
-|------|-------------|
-| `execute_command` | Run shell commands (platform-aware) |
-| `read_file` | Read file contents |
-| `write_file` | Create or overwrite files |
-
-## Docker Deployment
-
-### Using Docker Compose
+## Docker
 
 ```bash
 # Build and start
 docker-compose up --build
 
-# Run in background
-docker-compose up -d
-```
-
-### Manual Docker Build
-
-```bash
-# Build image
+# Or run manually
 docker build -t openheim .
-
-# Run container
 docker run -p 8080:8080 \
   -e OPENAI_API_KEY=sk-your-key \
   -v $(pwd)/workspace:/workspace \
   openheim --api-mode
 ```
 
-The Docker setup includes:
-- Multi-stage build for minimal image size
-- Non-root user for security
-- Entrypoint script that auto-initializes config on first run
-- Persistent volume for config (`~/.openheim/config.toml`)
-- Volume mount for persistent workspace
-- Auto-restart policy
-
-## Project Structure
+## Project Layout
 
 ```
-openheim/
-├── src/
-│   ├── main.rs           # Entry point
-│   ├── error.rs          # Error types
-│   ├── config/
-│   │   ├── mod.rs        # Config loading & initialization
-│   │   ├── types.rs      # AppConfig, ProviderConfig, AgentConfig types
-│   │   ├── resolve.rs    # Provider/model resolution logic
-│   │   └── config.toml.default  # Default config template
-│   ├── core/
-│   │   ├── agent.rs      # Agent orchestration
-│   │   ├── llm.rs        # LLM client abstraction
-│   │   └── models.rs     # Data structures
-│   ├── tools/
-│   │   ├── mod.rs        # Tool definitions
-│   │   └── executor/     # Tool execution engine
-│   ├── api/
-│   │   ├── mod.rs        # Server setup
-│   │   ├── rest.rs       # REST endpoints
-│   │   ├── ws.rs         # Agent WebSocket
-│   │   └── ws_fs.rs      # Filesystem WebSocket
-│   └── cli/
-│       └── mod.rs        # CLI interface
-├── workspace/            # Default working directory
-├── Cargo.toml
-├── Dockerfile
-├── docker-compose.yml
-└── docker-entrypoint.sh  # Docker config initialization
+src/
+  main.rs           Entry point and CLI argument parsing
+  lib.rs            Public API surface
+  error.rs          Error types
+  config/           Config loading, provider/model resolution, LLM client factory
+  core/
+    agent.rs        Agent loop (sync and streaming variants)
+    models.rs       Message, Tool, Choice, and related types
+    llm/            LLM client trait and provider implementations
+  tools/            Tool trait, registry, and built-in tools
+  rag/              Conversation history, prompt builder, and skills manager
+  api/              Actix-web server, REST endpoint, WebSocket handlers
+  cli/              Interactive and single-prompt CLI modes
 ```
-
-## Architecture
-
-Openheim uses a modular architecture:
-
-- **Core**: Agent loop, LLM client trait, and data models
-- **Tools**: Extensible tool system with async/blocking execution
-- **API**: Actix-web server with REST and WebSocket handlers
-- **CLI**: Clap-based command-line interface
-
-The agent runs an iterative loop:
-1. Send prompt to LLM with available tools
-2. If LLM requests tool execution, run tools
-3. Feed tool results back to LLM
-4. Repeat until LLM returns final response or max iterations reached
 
 ## Development
 
 ```bash
-# Run with logging
 RUST_LOG=debug cargo run -- --query "test"
-
-# Run tests
 cargo test
-
-# Check formatting
 cargo fmt --check
-
-# Run clippy
 cargo clippy
 ```
 
 ## License
 
-This project is open source. See [LICENSE](LICENSE) for details.
+See [LICENSE](LICENSE) for details.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome. Feel free to open an issue or submit a pull request.
