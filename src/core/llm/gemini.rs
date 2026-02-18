@@ -307,3 +307,174 @@ impl LlmClient for GeminiClient {
         convert_response(gemini_response)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn convert_messages_user() {
+        let messages = vec![Message::user("hello".into())];
+        let result = convert_messages(&messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "user");
+        assert_eq!(result[0].parts[0].text.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn convert_messages_assistant_becomes_model() {
+        let messages = vec![Message::assistant("response".into())];
+        let result = convert_messages(&messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "model");
+        assert_eq!(result[0].parts[0].text.as_deref(), Some("response"));
+    }
+
+    #[test]
+    fn convert_messages_assistant_with_tool_calls() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"a.txt"}"#.into(),
+                },
+            }]),
+            tool_call_id: None,
+            tool_name: None,
+        }];
+        let result = convert_messages(&messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "model");
+        assert!(result[0].parts[0].function_call.is_some());
+        assert_eq!(result[0].parts[0].function_call.as_ref().unwrap().name, "read_file");
+    }
+
+    #[test]
+    fn convert_messages_tool_result_as_function_response() {
+        let messages = vec![Message::tool_result(
+            "call_1".into(),
+            "read_file".into(),
+            "file content".into(),
+        )];
+        let result = convert_messages(&messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "user");
+        let fr = result[0].parts[0].function_response.as_ref().unwrap();
+        assert_eq!(fr.name, "read_file");
+    }
+
+    #[test]
+    fn convert_messages_merges_tool_results_into_user() {
+        let messages = vec![
+            Message::tool_result("call_1".into(), "read_file".into(), "a".into()),
+            Message::tool_result("call_2".into(), "write_file".into(), "b".into()),
+        ];
+        let result = convert_messages(&messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "user");
+        assert_eq!(result[0].parts.len(), 2);
+    }
+
+    #[test]
+    fn convert_tools_wraps_in_declaration() {
+        let tools = vec![Tool {
+            tool_type: "function".into(),
+            function: crate::core::models::FunctionDefinition {
+                name: "test_tool".into(),
+                description: "A test tool".into(),
+                parameters: json!({"type": "object"}),
+            },
+        }];
+        let result = convert_tools(&tools);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].function_declarations.len(), 1);
+        assert_eq!(result[0].function_declarations[0].name, "test_tool");
+    }
+
+    #[test]
+    fn convert_tools_empty_returns_empty() {
+        let result = convert_tools(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn convert_response_text_only() {
+        let resp = GeminiResponse {
+            candidates: vec![GeminiCandidate {
+                content: GeminiContent {
+                    role: "model".into(),
+                    parts: vec![GeminiPart {
+                        text: Some("Hello!".into()),
+                        function_call: None,
+                        function_response: None,
+                    }],
+                },
+                finish_reason: Some("STOP".into()),
+            }],
+        };
+        let choice = convert_response(resp).unwrap();
+        assert_eq!(choice.message.content.as_deref(), Some("Hello!"));
+        assert!(choice.message.tool_calls.is_none());
+        assert_eq!(choice.finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn convert_response_function_call() {
+        let resp = GeminiResponse {
+            candidates: vec![GeminiCandidate {
+                content: GeminiContent {
+                    role: "model".into(),
+                    parts: vec![GeminiPart {
+                        text: None,
+                        function_call: Some(GeminiFunctionCall {
+                            name: "read_file".into(),
+                            args: json!({"path": "test.txt"}),
+                        }),
+                        function_response: None,
+                    }],
+                },
+                finish_reason: Some("STOP".into()),
+            }],
+        };
+        let choice = convert_response(resp).unwrap();
+        assert!(choice.message.content.is_none());
+        let tool_calls = choice.message.tool_calls.unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "read_file");
+        assert_eq!(tool_calls[0].id, "call_0");
+    }
+
+    #[test]
+    fn convert_response_finish_reason_mapping() {
+        // STOP -> stop
+        let resp = GeminiResponse {
+            candidates: vec![GeminiCandidate {
+                content: GeminiContent { role: "model".into(), parts: vec![GeminiPart { text: Some("x".into()), function_call: None, function_response: None }] },
+                finish_reason: Some("STOP".into()),
+            }],
+        };
+        assert_eq!(convert_response(resp).unwrap().finish_reason.as_deref(), Some("stop"));
+
+        // MAX_TOKENS -> length
+        let resp = GeminiResponse {
+            candidates: vec![GeminiCandidate {
+                content: GeminiContent { role: "model".into(), parts: vec![GeminiPart { text: Some("x".into()), function_call: None, function_response: None }] },
+                finish_reason: Some("MAX_TOKENS".into()),
+            }],
+        };
+        assert_eq!(convert_response(resp).unwrap().finish_reason.as_deref(), Some("length"));
+    }
+
+    #[test]
+    fn convert_response_errors_on_empty_candidates() {
+        let resp = GeminiResponse { candidates: vec![] };
+        let result = convert_response(resp);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No candidates"));
+    }
+}

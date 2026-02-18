@@ -269,3 +269,171 @@ impl LlmClient for AnthropicClient {
         Ok(convert_response(anthropic_response))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn convert_messages_user_message() {
+        let messages = vec![Message::user("hello".into())];
+        let result = convert_messages(&messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "user");
+        assert!(matches!(&result[0].content[0], AnthropicContentBlock::Text { text } if text == "hello"));
+    }
+
+    #[test]
+    fn convert_messages_system_becomes_user() {
+        let messages = vec![Message {
+            role: Role::System,
+            content: Some("system prompt".into()),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
+        }];
+        let result = convert_messages(&messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "user");
+    }
+
+    #[test]
+    fn convert_messages_assistant_with_tool_calls() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: Some("thinking".into()),
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"a.txt"}"#.into(),
+                },
+            }]),
+            tool_call_id: None,
+            tool_name: None,
+        }];
+        let result = convert_messages(&messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "assistant");
+        assert_eq!(result[0].content.len(), 2); // text + tool_use
+    }
+
+    #[test]
+    fn convert_messages_merges_consecutive_tool_results() {
+        let messages = vec![
+            Message::tool_result("call_1".into(), "read_file".into(), "content1".into()),
+            Message::tool_result("call_2".into(), "write_file".into(), "content2".into()),
+        ];
+        let result = convert_messages(&messages);
+        // Both tool results should merge into a single user message
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "user");
+        assert_eq!(result[0].content.len(), 2);
+    }
+
+    #[test]
+    fn convert_tools_maps_definitions() {
+        let tools = vec![Tool {
+            tool_type: "function".into(),
+            function: crate::core::models::FunctionDefinition {
+                name: "read_file".into(),
+                description: "Read a file".into(),
+                parameters: json!({"type": "object"}),
+            },
+        }];
+        let result = convert_tools(&tools);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "read_file");
+        assert_eq!(result[0].description, "Read a file");
+    }
+
+    #[test]
+    fn convert_tools_empty_input() {
+        let result = convert_tools(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn convert_response_text_only() {
+        let resp = AnthropicResponse {
+            content: vec![AnthropicResponseBlock::Text {
+                text: "Hello!".into(),
+            }],
+            stop_reason: Some("end_turn".into()),
+        };
+        let choice = convert_response(resp);
+        assert_eq!(choice.message.content.as_deref(), Some("Hello!"));
+        assert!(choice.message.tool_calls.is_none());
+        assert_eq!(choice.finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn convert_response_tool_use() {
+        let resp = AnthropicResponse {
+            content: vec![AnthropicResponseBlock::ToolUse {
+                id: "call_1".into(),
+                name: "read_file".into(),
+                input: json!({"path": "a.txt"}),
+            }],
+            stop_reason: Some("tool_use".into()),
+        };
+        let choice = convert_response(resp);
+        assert!(choice.message.content.is_none());
+        let tool_calls = choice.message.tool_calls.unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "call_1");
+        assert_eq!(tool_calls[0].function.name, "read_file");
+        assert_eq!(choice.finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    #[test]
+    fn convert_response_mixed_text_and_tool() {
+        let resp = AnthropicResponse {
+            content: vec![
+                AnthropicResponseBlock::Text { text: "Let me read that.".into() },
+                AnthropicResponseBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    input: json!({"path": "test.txt"}),
+                },
+            ],
+            stop_reason: Some("tool_use".into()),
+        };
+        let choice = convert_response(resp);
+        assert_eq!(choice.message.content.as_deref(), Some("Let me read that."));
+        assert_eq!(choice.message.tool_calls.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn convert_response_stop_reason_mapping() {
+        // end_turn -> stop
+        let resp = AnthropicResponse {
+            content: vec![AnthropicResponseBlock::Text { text: "done".into() }],
+            stop_reason: Some("end_turn".into()),
+        };
+        assert_eq!(convert_response(resp).finish_reason.as_deref(), Some("stop"));
+
+        // tool_use -> tool_calls
+        let resp = AnthropicResponse {
+            content: vec![AnthropicResponseBlock::Text { text: "x".into() }],
+            stop_reason: Some("tool_use".into()),
+        };
+        assert_eq!(convert_response(resp).finish_reason.as_deref(), Some("tool_calls"));
+
+        // max_tokens passes through
+        let resp = AnthropicResponse {
+            content: vec![AnthropicResponseBlock::Text { text: "x".into() }],
+            stop_reason: Some("max_tokens".into()),
+        };
+        assert_eq!(convert_response(resp).finish_reason.as_deref(), Some("max_tokens"));
+
+        // None stays None
+        let resp = AnthropicResponse {
+            content: vec![AnthropicResponseBlock::Text { text: "x".into() }],
+            stop_reason: None,
+        };
+        assert!(convert_response(resp).finish_reason.is_none());
+    }
+}

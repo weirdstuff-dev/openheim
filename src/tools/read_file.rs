@@ -45,3 +45,53 @@ impl ToolHandler for ReadFileTool {
         Ok(content)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn definition_has_correct_name() {
+        let tool = ReadFileTool;
+        let def = tool.definition();
+        assert_eq!(def.function.name, "read_file");
+        assert_eq!(def.tool_type, "function");
+    }
+
+    #[tokio::test]
+    async fn execute_reads_existing_file() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "hello world").unwrap();
+        let path = tmp.path().to_str().unwrap();
+
+        let tool = ReadFileTool;
+        let args = serde_json::json!({"path": path}).to_string();
+        let result = tool.execute(&args).await.unwrap();
+        assert_eq!(result, "hello world");
+    }
+
+    #[tokio::test]
+    async fn execute_errors_for_nonexistent_file() {
+        let tool = ReadFileTool;
+        let args = r#"{"path": "/tmp/openheim_nonexistent_file_test_12345.txt"}"#;
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_errors_for_malformed_json() {
+        let tool = ReadFileTool;
+        let result = tool.execute("not json").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("parse"));
+    }
+
+    #[tokio::test]
+    async fn execute_errors_for_missing_path() {
+        let tool = ReadFileTool;
+        let result = tool.execute(r#"{"other": "value"}"#).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("path"));
+    }
+}

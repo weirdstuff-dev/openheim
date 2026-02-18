@@ -80,3 +80,35 @@ pub fn get_available_tools() -> Vec<Tool> {
 pub async fn execute_tool(name: &str, arguments: &str) -> Result<String> {
     global_executor().execute(name, arguments).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn executor_registers_all_tools() {
+        let executor = SystemToolExecutor::new();
+        assert!(executor.handlers.contains_key("execute_command"));
+        assert!(executor.handlers.contains_key("read_file"));
+        assert!(executor.handlers.contains_key("write_file"));
+        assert_eq!(executor.handlers.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn executor_returns_error_for_unknown_tool() {
+        let executor = SystemToolExecutor::new();
+        let result = executor.execute("nonexistent_tool", "{}").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown tool"));
+    }
+
+    #[test]
+    fn get_available_tools_returns_three_definitions() {
+        let tools = get_available_tools();
+        assert_eq!(tools.len(), 3);
+        let names: Vec<&str> = tools.iter().map(|t| t.function.name.as_str()).collect();
+        assert!(names.contains(&"execute_command"));
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"write_file"));
+    }
+}

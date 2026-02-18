@@ -68,3 +68,47 @@ impl ToolHandler for ExecuteCommandTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn definition_has_correct_name() {
+        let tool = ExecuteCommandTool;
+        let def = tool.definition();
+        assert_eq!(def.function.name, "execute_command");
+        assert_eq!(def.tool_type, "function");
+    }
+
+    #[tokio::test]
+    async fn execute_runs_simple_command() {
+        let tool = ExecuteCommandTool;
+        let args = r#"{"command": "echo hello"}"#;
+        let result = tool.execute(args).await.unwrap();
+        assert_eq!(result.trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn execute_returns_output_for_failing_command() {
+        let tool = ExecuteCommandTool;
+        let args = r#"{"command": "ls /nonexistent_dir_12345"}"#;
+        let result = tool.execute(args).await.unwrap();
+        assert!(result.contains("Command failed:"));
+    }
+
+    #[tokio::test]
+    async fn execute_errors_for_malformed_json() {
+        let tool = ExecuteCommandTool;
+        let result = tool.execute("bad json").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_errors_for_missing_command() {
+        let tool = ExecuteCommandTool;
+        let result = tool.execute(r#"{"other": "value"}"#).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("command"));
+    }
+}
