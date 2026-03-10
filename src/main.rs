@@ -8,81 +8,36 @@ use openheim::{
     rag::SkillsManager,
 };
 
-#[actix_web::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    fmt::Subscriber::builder().with_env_filter(env_filter).init();
-
-    let args = Args::parse();
-
+async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if args.init {
-        match init_config() {
-            Ok(path) => {
-                println!("Config file created at {}", path.display());
-                println!("Edit it to configure your LLM providers.");
-            }
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
-        }
+        let path = init_config()?;
+        println!("Config file created at {}", path.display());
+        println!("Edit it to configure your LLM providers.");
         return Ok(());
     }
 
-    let app_config = match load_config() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let app_config = load_config()?;
 
     if args.list {
-        match app_config.list_models() {
-            Ok(output) => print!("{}", output),
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
-        }
+        print!("{}", app_config.list_models()?);
         return Ok(());
     }
 
     if args.list_skills {
-        match SkillsManager::new() {
-            Ok(mgr) => match mgr.list_skills() {
-                Ok(skills) => {
-                    if skills.is_empty() {
-                        println!("No skills found. Add .md files to ~/.openheim/skills/");
-                    } else {
-                        println!("Available skills:");
-                        for name in &skills {
-                            println!("  - {}", name);
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    std::process::exit(1);
-                }
-            },
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
+        let mgr = SkillsManager::new()?;
+        let skills = mgr.list_skills()?;
+        if skills.is_empty() {
+            println!("No skills found. Add .md files to ~/.openheim/skills/");
+        } else {
+            println!("Available skills:");
+            for name in &skills {
+                println!("  - {}", name);
             }
         }
         return Ok(());
     }
 
-    let agent_config = match app_config.resolve(None) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    };
-
+    let agent_config = app_config.resolve(None)?;
     let client = build_http_client(agent_config.timeout_secs);
 
     if args.api_mode {
@@ -109,6 +64,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &args,
         )
         .await?;
+    }
+
+    Ok(())
+}
+
+#[actix_web::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    fmt::Subscriber::builder().with_env_filter(env_filter).init();
+
+    let args = Args::parse();
+
+    if let Err(e) = run(args).await {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
     }
 
     Ok(())
