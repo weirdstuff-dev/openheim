@@ -187,9 +187,8 @@ pub async fn run_agent_mode(
     };
     println!();
     println!(
-        "  {} {}",
-        "◆".truecolor(255, 140, 0),
-        "openheim".bold()
+        "  {}",
+        "openheim".truecolor(255, 140, 0).bold()
     );
     println!(
         "  {}",
