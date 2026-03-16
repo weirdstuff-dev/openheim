@@ -1,16 +1,19 @@
 use clap::Parser;
+use colored::Colorize;
+use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{
-    agent::run_agent_with_history,
-    AgentConfig, AppConfig, Message,
+    agent::run_agent_streaming_with_history,
+    AgentConfig, AppConfig, LlmClient, Message, StreamEvent,
     config::{resolve_client_and_config, create_client},
     error::{Error, Result},
-    rag::RagContext,
+    rag::{Conversation, PromptBuilder, RagContext},
     tools::{SystemToolExecutor, ToolExecutor},
 };
 
@@ -58,6 +61,109 @@ pub struct Args {
     pub list_skills: bool,
 }
 
+// Holds all resolved state needed to run an agent interaction.
+struct SessionContext {
+    llm_client: Arc<dyn LlmClient>,
+    config: AgentConfig,
+    tool_executor: Arc<dyn ToolExecutor>,
+    rag: RagContext,
+    conversation: Conversation,
+    prompt_builder: PromptBuilder,
+}
+
+impl SessionContext {
+    fn new(
+        client: &Client,
+        agent_config: &AgentConfig,
+        app_config: &AppConfig,
+        model_name: Option<&str>,
+        max_iterations: Option<usize>,
+        chat_id: Option<Uuid>,
+        skill_names: Vec<String>,
+    ) -> Result<Self> {
+        let (llm_client, config) = resolve_client_and_config(
+            model_name,
+            max_iterations,
+            app_config,
+            create_client(agent_config, client),
+            agent_config,
+        )?;
+        let tool_executor: Arc<dyn ToolExecutor> = Arc::new(SystemToolExecutor::new());
+        let rag = RagContext::new()?;
+        let (conversation, prompt_builder) = rag.prepare(
+            chat_id,
+            &skill_names,
+            Some(config.model.clone()),
+            Some(config.provider_name.clone()),
+        )?;
+        Ok(Self { llm_client, config, tool_executor, rag, conversation, prompt_builder })
+    }
+}
+
+fn parse_chat_id(id_str: &str) -> Result<Uuid> {
+    Uuid::parse_str(id_str)
+        .map_err(|e| Error::ConfigError(format!("Invalid chat ID '{}': {}", id_str, e)))
+}
+
+fn resolve_chat_id(chat_id: Option<&str>, continue_last: bool) -> Result<Option<Uuid>> {
+    if let Some(id_str) = chat_id {
+        Ok(Some(parse_chat_id(id_str)?))
+    } else if continue_last {
+        let rag = RagContext::new()?;
+        Ok(rag.history.get_last_conversation()?.map(|c| c.meta.id))
+    } else {
+        Ok(None)
+    }
+}
+
+fn make_spinner() -> ProgressBar {
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::with_template("{spinner:.cyan} {msg:.dim}")
+            .unwrap(),
+    );
+    pb.enable_steady_tick(Duration::from_millis(100));
+    pb
+}
+
+fn make_event_handler(pb: ProgressBar) -> impl FnMut(StreamEvent) {
+    move |event| match event {
+        StreamEvent::IterationStart { .. } => {
+            pb.set_message("thinking...");
+        }
+        StreamEvent::ToolCall { tool_name, arguments } => {
+            let args_preview: String = arguments.chars().take(48).collect();
+            let args_preview = if arguments.chars().count() > 48 {
+                format!("{}…", args_preview)
+            } else {
+                arguments.clone()
+            };
+            pb.println(format!(
+                "  {} {}  {}",
+                "┌".dimmed(),
+                tool_name.cyan().bold(),
+                args_preview.dimmed()
+            ));
+            pb.set_message(format!("running {}...", tool_name));
+        }
+        StreamEvent::ToolResult { result, .. } => {
+            let flat: String = result.chars().take(80).collect();
+            let flat = flat.replace('\n', " ");
+            let flat = flat.trim();
+            let preview = if result.chars().count() > 80 {
+                format!("{}…", flat)
+            } else {
+                flat.to_string()
+            };
+            pb.println(format!("  {} {}", "└".dimmed(), preview.dimmed()));
+            pb.set_message("thinking...");
+        }
+        StreamEvent::LlmResponse { .. } | StreamEvent::Finished { .. } => {
+            pb.finish_and_clear();
+        }
+    }
+}
+
 pub async fn run_agent_mode(
     client: &Client,
     config: &AgentConfig,
@@ -68,55 +174,38 @@ pub async fn run_agent_mode(
     continue_last: bool,
     skill_names: Vec<String>,
 ) -> Result<()> {
-    tracing::info!("Starting agent mode - persistent conversation");
-    tracing::info!("Type your messages and press Enter. Type 'exit', 'quit' or :q to end the conversation.\n");
-
-    let (llm_client, resolved_config) = resolve_client_and_config(
-        model_name,
-        max_iterations,
-        app_config,
-        create_client(config, client),
-        config,
+    let chat_id = resolve_chat_id(chat_id, continue_last)?;
+    let mut session = SessionContext::new(
+        client, config, app_config, model_name, max_iterations, chat_id, skill_names,
     )?;
 
-    let config = resolved_config;
-    let tool_executor: Arc<dyn ToolExecutor> = Arc::new(SystemToolExecutor::new());
-
-    let rag = RagContext::new()?;
-
-    let resolved_chat_id = if let Some(id_str) = chat_id {
-        Some(
-            Uuid::parse_str(id_str)
-                .map_err(|e| Error::ConfigError(format!("Invalid chat ID '{}': {}", id_str, e)))?,
-        )
-    } else if continue_last {
-        rag.history
-            .get_last_conversation()?
-            .map(|c| c.meta.id)
+    let chat_id_short = &session.conversation.meta.id.to_string()[..8];
+    let chat_status = if session.conversation.messages.is_empty() {
+        "new".to_string()
     } else {
-        None
+        format!("{} msgs", session.conversation.messages.len())
     };
-
-    let (mut conversation, prompt_builder) = rag.prepare(
-        resolved_chat_id,
-        &skill_names,
-        Some(config.model.clone()),
-        Some(config.provider_name.clone()),
-    )?;
-
-    println!("Chat ID: {}", conversation.meta.id);
-    if !conversation.messages.is_empty() {
-        println!(
-            "Loaded {} messages from previous conversation.",
-            conversation.messages.len()
-        );
-    }
+    println!();
+    println!(
+        "  {}",
+        "openheim".truecolor(255, 140, 0).bold()
+    );
+    println!(
+        "  {}",
+        format!(
+            "{}  ·  {}  ·  chat {}  ·  {}",
+            session.config.model, session.config.provider_name, chat_id_short, chat_status
+        )
+        .dimmed()
+    );
+    println!("  {}", "─".repeat(48).dimmed());
+    println!();
 
     let mut rl = DefaultEditor::new()
         .map_err(|e| Error::Other(format!("Failed to initialize readline: {}", e)))?;
 
     loop {
-        let readline = rl.readline("You: ");
+        let readline = rl.readline(&format!("{} ", "you >".bold().green()));
         match readline {
             Ok(line) => {
                 let input = line.trim();
@@ -125,50 +214,55 @@ pub async fn run_agent_mode(
                 }
 
                 if input == "exit" || input == "quit" || input == ":q" {
-                    println!("Goodbye!");
+                    println!("  {}", "goodbye".dimmed());
                     break;
                 }
 
                 let _ = rl.add_history_entry(input);
+                session.conversation.messages.push(Message::user(input.to_string()));
 
-                conversation.messages.push(Message::user(input.to_string()));
+                let pb = make_spinner();
+                pb.set_message("thinking...");
+                let pb_cb = pb.clone();
 
-                match run_agent_with_history(
-                    llm_client.clone(),
-                    tool_executor.clone(),
-                    &config,
-                    &mut conversation.messages,
-                    true,
-                    Some(&prompt_builder),
+                let result = run_agent_streaming_with_history(
+                    session.llm_client.clone(),
+                    session.tool_executor.clone(),
+                    &session.config,
+                    &mut session.conversation.messages,
+                    Some(&session.prompt_builder),
+                    make_event_handler(pb_cb),
                 )
-                .await
-                {
+                .await;
+
+                match result {
                     Ok(result) => {
-                        if let Err(e) = rag.history.save_conversation(&conversation) {
+                        if let Err(e) = session.rag.history.save_conversation(&session.conversation) {
                             tracing::warn!("Failed to save conversation: {e}");
                         }
-                        println!("\n=== Agent Response ===");
-                        println!("{}", result.final_response);
-                        println!("Iterations: {}\n", result.iterations_used);
+                        println!("{} {}", "agent >".bold().truecolor(255, 140, 0), result.final_response);
+                        println!(
+                            "  {}",
+                            format!("{} iterations  ·  saved", result.iterations_used).dimmed()
+                        );
+                        println!();
                     }
                     Err(e) => {
-                        if let Err(e) = rag.history.save_conversation(&conversation) {
+                        pb.finish_and_clear();
+                        if let Err(e) = session.rag.history.save_conversation(&session.conversation) {
                             tracing::warn!("Failed to save conversation: {e}");
                         }
-                        eprintln!("Error: {}", e);
+                        eprintln!("  {} {}", "error:".red().bold(), e);
+                        println!();
                     }
                 }
             }
-            Err(ReadlineError::Interrupted) => {
-                println!("^C");
-                break;
-            }
-            Err(ReadlineError::Eof) => {
-                println!("^D");
+            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
+                println!();
                 break;
             }
             Err(err) => {
-                eprintln!("Error: {:?}", err);
+                eprintln!("  {} {:?}", "error:".red().bold(), err);
                 break;
             }
         }
@@ -191,57 +285,52 @@ pub async fn run_single_prompt(
         )
     })?;
 
-    let (llm_client, resolved_config) = resolve_client_and_config(
-        model_name,
-        max_iterations,
-        app_config,
-        create_client(config, client),
-        config,
-    )?;
-
-    let config = resolved_config;
-    let tool_executor: Arc<dyn ToolExecutor> = Arc::new(SystemToolExecutor::new());
-
+    let chat_id = args.chat_id.as_deref().map(parse_chat_id).transpose()?;
     let skill_names = args.skills.clone().unwrap_or_default();
 
-    let rag = RagContext::new()?;
-
-    let resolved_chat_id = if let Some(id_str) = &args.chat_id {
-        Some(
-            Uuid::parse_str(id_str)
-                .map_err(|e| Error::ConfigError(format!("Invalid chat ID '{}': {}", id_str, e)))?,
-        )
-    } else {
-        None
-    };
-
-    let (mut conversation, prompt_builder) = rag.prepare(
-        resolved_chat_id,
-        &skill_names,
-        Some(config.model.clone()),
-        Some(config.provider_name.clone()),
+    let mut session = SessionContext::new(
+        client, config, app_config, model_name, max_iterations, chat_id, skill_names,
     )?;
 
-    conversation.messages.push(Message::user(prompt.clone()));
+    session.conversation.messages.push(Message::user(prompt.clone()));
 
-    let result = run_agent_with_history(
-        llm_client,
-        tool_executor,
-        &config,
-        &mut conversation.messages,
-        true,
-        Some(&prompt_builder),
+    let pb = make_spinner();
+    pb.set_message("thinking...");
+    let pb_cb = pb.clone();
+
+    let result = run_agent_streaming_with_history(
+        session.llm_client,
+        session.tool_executor,
+        &session.config,
+        &mut session.conversation.messages,
+        Some(&session.prompt_builder),
+        make_event_handler(pb_cb),
     )
-    .await?;
+    .await;
 
-    if let Err(e) = rag.history.save_conversation(&conversation) {
-        tracing::warn!("Failed to save conversation: {e}");
+    pb.finish_and_clear();
+
+    match result {
+        Ok(result) => {
+            if let Err(e) = session.rag.history.save_conversation(&session.conversation) {
+                tracing::warn!("Failed to save conversation: {e}");
+            }
+            println!("{} {}", "agent >".bold().truecolor(255, 140, 0), result.final_response);
+            println!(
+                "  {}",
+                format!(
+                    "chat: {}  ·  {} iterations",
+                    &session.conversation.meta.id.to_string()[..8],
+                    result.iterations_used
+                )
+                .dimmed()
+            );
+        }
+        Err(e) => {
+            eprintln!("  {} {}", "error:".red().bold(), e);
+            return Err(e);
+        }
     }
-
-    println!("\n=== Final Result ===");
-    println!("{}", result.final_response);
-    println!("\nChat ID: {}", conversation.meta.id);
-    println!("Completed in {} iterations", result.iterations_used);
 
     Ok(())
 }
