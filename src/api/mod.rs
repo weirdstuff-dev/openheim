@@ -14,11 +14,9 @@ use crate::{
 
 pub mod rest;
 pub mod ws;
-pub mod ws_fs;
 
 pub use rest::execute_agent;
 pub use ws::ws_handler;
-pub use ws_fs::ws_fs_handler;
 
 pub async fn start_api_server(
     host: String,
@@ -30,7 +28,6 @@ pub async fn start_api_server(
     tracing::info!("Starting API server on {}:{}", host, port);
     tracing::info!("  POST /query");
     tracing::info!("  WS   /ws");
-    tracing::info!("  WS   /ws/fs");
 
     let llm_client: Arc<dyn LlmClient> = create_client(&config, &client);
     let tool_executor: Arc<dyn ToolExecutor> = Arc::new(SystemToolExecutor::new());
@@ -53,7 +50,6 @@ pub async fn start_api_server(
             .app_data(web::Data::new(rag_context.clone()))
             .route("/query", web::post().to(execute_agent))
             .route("/ws", web::get().to(ws_handler))
-            .route("/ws/fs", web::get().to(ws_fs_handler))
     })
     .bind((host.as_str(), port))
     .map_err(|e| crate::error::Error::Other(format!("Failed to bind server: {}", e)))?

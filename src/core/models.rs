@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 // Chat API Models
 
@@ -237,6 +238,76 @@ pub enum FsResponse {
 
     #[serde(rename = "error")]
     Error { message: String },
+}
+
+// Agent WebSocket types
+
+#[derive(Debug, Deserialize)]
+pub struct WsRequest {
+    pub prompt: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub max_iterations: Option<usize>,
+    #[serde(default)]
+    pub chat_id: Option<Uuid>,
+    #[serde(default)]
+    pub skills: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+pub enum WsResponse {
+    #[serde(rename = "event")]
+    Event { data: StreamEvent },
+
+    #[serde(rename = "error")]
+    Error { message: String },
+
+    #[serde(rename = "done")]
+    Done {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        chat_id: Option<String>,
+    },
+}
+
+// Unified WebSocket envelope types
+
+/// System-level events not tied to a specific channel.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+pub enum SystemEvent {
+    #[serde(rename = "connected")]
+    Connected { message: String },
+
+    #[serde(rename = "error")]
+    Error { message: String },
+}
+
+/// Inbound envelope: every message from the client wraps its payload with a channel tag.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "channel", content = "data")]
+pub enum ClientEnvelope {
+    #[serde(rename = "agent")]
+    Agent(WsRequest),
+
+    #[serde(rename = "fs")]
+    Fs(FsRequest),
+}
+
+/// Outbound envelope: every message to the client carries a channel tag so the
+/// client can route responses without maintaining two separate connections.
+#[derive(Debug, Serialize)]
+#[serde(tag = "channel", content = "data")]
+pub enum ServerEnvelope {
+    #[serde(rename = "system")]
+    System(SystemEvent),
+
+    #[serde(rename = "agent")]
+    Agent(WsResponse),
+
+    #[serde(rename = "fs")]
+    Fs(FsResponse),
 }
 
 #[cfg(test)]

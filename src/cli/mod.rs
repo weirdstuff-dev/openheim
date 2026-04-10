@@ -36,7 +36,7 @@ pub struct Args {
     #[arg(long, default_value = "0.0.0.0", help = "API server bind address")]
     pub host: String,
 
-    #[arg(long, default_value = "8080", help = "API server port")]
+    #[arg(long, default_value = "1217", help = "API server port")]
     pub port: u16,
 
     #[arg(long, help = "Model name to use (must be configured in a provider)")]
