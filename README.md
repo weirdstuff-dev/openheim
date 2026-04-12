@@ -1,25 +1,50 @@
-# openheim
+<div align="center">
+    <img src="hexagon-multiple.svg" width="48" height="48" alt="openheim icon" style="color: #00D452"/>
 
-Openheim is an open-source LLM agent written in Rust. It connects to multiple LLM providers, executes tools on their behalf, persists conversations, and can be extended with user-defined skills. It runs as a CLI, an interactive REPL, or an HTTP/WebSocket server.
+  # openheim
+  
+  
+  [![openheim.io](https://openheim.io)]
+</div>
+
+**A fast, multi-provider LLM agent runtime built in Rust.**
+
+Openheim runs an iterative agent loop — it calls your LLM, executes tools on its behalf, feeds results back, and repeats until the task is done. It works as a CLI, an interactive REPL, or a self-hosted HTTP/WebSocket server.
+
+---
+
+## Why Rust?
+
+Openheim is built in Rust from the ground up:
+
+- **Low memory** — runs in a fraction of the RAM a Python agent would need
+- **Fast startup** — no interpreter warmup
+- **True concurrency** — async Tokio runtime, multiple agents without threading headaches
+- **Safe by default** — Rust's ownership model means fewer footguns in long-running agent processes
+
+---
 
 ## Features
 
-- **Multi-provider** -- OpenAI, Anthropic, Google Gemini, and any OpenAI-compatible endpoint (Ollama, vLLM, etc.)
-- **Tool execution** -- Built-in tools for running shell commands, reading files, and writing files. The tool system is trait-based and extensible.
-- **Conversation memory** -- Conversations are persisted to disk and can be resumed across sessions.
-- **Skills** -- Drop markdown files into `~/.openheim/skills/` to give the agent custom instructions or domain knowledge.
-- **Streaming** -- Real-time WebSocket streaming of agent iterations and a separate filesystem-operations WebSocket with file watching.
-- **Retry with backoff** -- Transient LLM failures (429, 5xx, network errors) are retried automatically with exponential backoff.
-- **Docker ready** -- Multi-stage Docker build with docker-compose for quick deployment.
+- **Multi-provider** — OpenAI, Anthropic Claude, Google Gemini, and any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.)
+- **Tool execution** — built-in shell, file read, and file write tools. Trait-based, so you can add your own.
+- **Conversation memory** — conversations (including full tool call history) persist to disk and resume across sessions
+- **Skills** — drop a markdown file into `~/.openheim/skills/` and it's prepended to the system prompt. Define personas, coding guidelines, or any recurring context.
+- **Streaming** — real-time WebSocket streaming of agent iterations, tool calls, and responses
+- **Filesystem WebSocket** — WS channel for file operations with live file watching
+- **Retry with backoff** — transient failures (429s, 5xx, network errors) are retried automatically with exponential backoff
+- **Docker ready** — multi-stage Dockerfile and docker-compose included
 
-## Getting Started
+---
+
+## Quickstart
 
 ### Prerequisites
 
 - Rust 1.85+
-- An API key for at least one supported LLM provider
+- An API key for at least one supported provider
 
-### Build
+### Install
 
 ```bash
 git clone https://github.com/weirdstuff-dev/openheim.git
@@ -30,14 +55,14 @@ cargo build --release
 ### Configure
 
 ```bash
-# Create the default config file
+# Generate the default config
 cargo run -- --init
 
-# Edit it to add your providers and API keys
+# Edit it
 vim ~/.openheim/config.toml
 ```
 
-The config file uses TOML. Each provider entry specifies an API base URL, a default model, and either an `env_var` (recommended) or an inline `api_key`:
+Example config:
 
 ```toml
 default_provider = "openai"
@@ -71,10 +96,7 @@ cargo run -- --query "List the files in the current directory"
 cargo run -- --agent-mode
 
 # HTTP/WebSocket server
-cargo run -- --api-mode --port 8080
-
-# Override model
-cargo run -- --query "Hello" --model gpt-4-turbo
+cargo run -- --api-mode --port 1217
 
 # Resume your last conversation
 cargo run -- --agent-mode --continue-last
@@ -82,41 +104,64 @@ cargo run -- --agent-mode --continue-last
 # Load skills
 cargo run -- --agent-mode --skills coding,debug
 
+# Override model for a single run
+cargo run -- --query "Hello" --model gpt-4-turbo
+
 # List configured providers and models
 cargo run -- --list
 ```
 
-## How It Works
+---
 
-Openheim runs an iterative agent loop:
+## How the agent loop works
 
-1. Send the conversation and available tools to the LLM.
-2. If the LLM requests a tool call, execute it and feed the result back.
-3. Repeat until the LLM returns a final response or the iteration limit is reached.
+```
+User prompt
+    │
+    ▼
+Send conversation + tools → LLM
+    │
+    ├─ Tool call requested? → Execute tool → feed result back → repeat
+    │
+    └─ Final response → done
+```
 
-Conversations, including tool call history, are saved to `~/.openheim/history/` as JSON so they can be continued later.
+Conversations are saved to `~/.openheim/history/` as JSON after every run and can be continued with `--continue-last`.
+
+---
 
 ## Skills
 
-Skills are markdown files stored in `~/.openheim/skills/`. When loaded, their content is prepended to the system prompt. Use them to define personas, coding guidelines, or any recurring context you want the agent to have.
+Skills are markdown files in `~/.openheim/skills/`. When loaded, their content is injected into the system prompt before the conversation starts.
+
+Use them to give the agent a persona, a set of coding standards, domain knowledge, or anything you'd otherwise paste into the system prompt every time.
 
 ```bash
 # List available skills
 cargo run -- --list-skills
+
+# Run with specific skills loaded
+cargo run -- --agent-mode --skills rust,debugging
 ```
+
+---
 
 ## API Server
 
-Start the server with `--api-mode`. It exposes:
+Start with `--api-mode`:
 
-- **POST /query** -- Submit a prompt and receive the agent's result.
-- **WS /ws** -- Stream agent events (iteration starts, tool calls, responses) in real time.
-- **WS /ws/fs** -- Filesystem operations (list, read, write, watch, delete, rename) over a WebSocket.
+| Endpoint | Description |
+|---|---|
+| `POST /query` | Submit a prompt, get the agent's full result |
+| `WS /ws` | Stream agent events in real time (iterations, tool calls, responses) |
+| `WS /ws/fs` | Filesystem operations over WebSocket with file watching |
+
+---
 
 ## Docker
 
 ```bash
-# Build and start
+# Build and start with docker-compose
 docker-compose up --build
 
 # Or run manually
@@ -127,7 +172,9 @@ docker run -p 8080:8080 \
   openheim --api-mode
 ```
 
-## Project Layout
+---
+
+## Project structure
 
 ```
 src/
@@ -145,6 +192,8 @@ src/
   cli/              Interactive and single-prompt CLI modes
 ```
 
+---
+
 ## Development
 
 ```bash
@@ -154,10 +203,14 @@ cargo fmt --check
 cargo clippy
 ```
 
-## License
-
-See [LICENSE](LICENSE) for details.
+---
 
 ## Contributing
 
-Contributions are welcome. Feel free to open an issue or submit a pull request.
+Contributions are welcome.
+
+---
+
+## License
+
+See [LICENSE](./LICENSE) for details.
