@@ -1,6 +1,6 @@
 <div align="center">
 
-# <img src="hexagon-multiple.svg" width="36" height="36" alt="" valign="middle" /> openheim
+# <img src="hexagon-multiple-green.svg" width="36" height="36" alt="" valign="middle" /> openheim
 
 [![openheim.io](https://openheim.io)]
 </div>
