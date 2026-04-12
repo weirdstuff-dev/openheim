@@ -1,10 +1,8 @@
 <div align="center">
-    <img src="hexagon-multiple.svg" width="48" height="48" alt="openheim icon" style="color: #00D452"/>
 
-  # openheim
-  
-  
-  [![openheim.io](https://openheim.io)]
+# <img src="hexagon-multiple.svg" width="36" height="36" alt="" valign="middle" /> openheim
+
+[![openheim.io](https://openheim.io)]
 </div>
 
 **A fast, multi-provider LLM agent runtime built in Rust.**
