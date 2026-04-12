@@ -2,7 +2,7 @@
 
 # <img src="hexagon-multiple-green.svg" width="36" height="36" alt="" valign="middle" /> openheim
 
-[![openheim.io](https://openheim.io)]
+[openheim.io](https://openheim.io)
 </div>
 
 **A fast, multi-provider LLM agent runtime built in Rust.**
