@@ -146,13 +146,12 @@ cargo run -- --agent-mode --skills rust,debugging
 
 ## API Server
 
-Start with `--api-mode`:
+Start with `--api-mode`: [WS_SPEC.md](src/api/WS_SPEC.md)
 
 | Endpoint | Description |
 |---|---|
 | `POST /query` | Submit a prompt, get the agent's full result |
-| `WS /ws` | Stream agent events in real time (iterations, tool calls, responses) |
-| `WS /ws/fs` | Filesystem operations over WebSocket with file watching |
+| `WS /ws` | Stream agent events in real time (iterations, tool calls, responses, fs) |
 
 ---
 
