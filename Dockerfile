@@ -47,7 +47,7 @@ USER openheim
 RUN mkdir -p /home/openheim/.openheim
 
 # Expose the API port
-EXPOSE 8080
+EXPOSE 1217
 
 # Set environment variables
 ENV RUST_LOG=info
