@@ -1,10 +1,12 @@
 use actix_web::{web, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::api::{WsRegistry, do_restart};
 use crate::core::agent::run_agent_with_history;
-use crate::config::{AgentConfig, AppConfig, resolve_client_and_config};
+use crate::config::{AgentConfig, AppConfig, save_config, resolve_client_and_config};
 use crate::core::models::{AgentResult, Message};
 use crate::core::llm::LlmClient;
 use crate::rag::RagContext;
@@ -33,6 +35,25 @@ pub struct AgentResponse {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_id: Option<Uuid>,
+}
+
+pub async fn update_config_handler(
+    body: web::Json<AppConfig>,
+) -> impl Responder {
+    match save_config(&body.into_inner()) {
+        Ok(()) => HttpResponse::Ok().json(json!({ "status": "saved" })),
+        Err(e) => HttpResponse::BadRequest().json(json!({ "error": e.to_string() })),
+    }
+}
+
+pub async fn restart_handler(
+    registry: web::Data<WsRegistry>,
+) -> impl Responder {
+    let registry = registry.get_ref().clone();
+    tokio::spawn(async move {
+        do_restart(&registry).await;
+    });
+    HttpResponse::Ok().json(json!({ "status": "restarting" }))
 }
 
 pub async fn execute_agent(

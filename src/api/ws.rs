@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::fs;
 use walkdir::WalkDir;
 
+use crate::api::WsRegistry;
 use crate::config::{AgentConfig, AppConfig, resolve_client_and_config};
 use crate::core::agent::run_agent_streaming_with_history;
 use crate::core::llm::LlmClient;
@@ -29,6 +30,9 @@ pub struct OpenheimWebSocket {
     workspace_root: Option<PathBuf>,
     watcher: Option<RecommendedWatcher>,
     watcher_rx: Option<mpsc::Receiver<Result<Event, notify::Error>>>,
+    // Registry
+    registry: WsRegistry,
+    my_addr: Option<actix::Addr<Self>>,
 }
 
 impl OpenheimWebSocket {
@@ -38,6 +42,7 @@ impl OpenheimWebSocket {
         config: AgentConfig,
         app_config: AppConfig,
         rag: RagContext,
+        registry: WsRegistry,
     ) -> Self {
         Self {
             llm,
@@ -48,6 +53,8 @@ impl OpenheimWebSocket {
             workspace_root: None,
             watcher: None,
             watcher_rx: None,
+            registry,
+            my_addr: None,
         }
     }
 
@@ -236,12 +243,21 @@ impl Actor for OpenheimWebSocket {
     type Context = ws::WebsocketContext<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
+        let addr = ctx.address();
+        self.my_addr = Some(addr.clone());
+        self.registry.lock().unwrap().push(addr);
         self.send_envelope(
             &ServerEnvelope::System(SystemEvent::Connected {
                 message: "Connected to Openheim".to_string(),
             }),
             ctx,
         );
+    }
+
+    fn stopped(&mut self, _ctx: &mut Self::Context) {
+        if let Some(addr) = &self.my_addr {
+            self.registry.lock().unwrap().retain(|a| a != addr);
+        }
     }
 }
 
@@ -520,6 +536,24 @@ impl Handler<FsOp> for OpenheimWebSocket {
     }
 }
 
+// --- Shutdown message ---
+
+#[derive(ActixMessage)]
+#[rtype(result = "()")]
+pub struct Shutdown;
+
+impl Handler<Shutdown> for OpenheimWebSocket {
+    type Result = ();
+
+    fn handle(&mut self, _: Shutdown, ctx: &mut Self::Context) {
+        ctx.close(Some(ws::CloseReason {
+            code: ws::CloseCode::Restart,
+            description: None,
+        }));
+        ctx.stop();
+    }
+}
+
 // --- Shared message for sending pre-serialized text from spawned futures ---
 
 #[derive(ActixMessage)]
@@ -588,6 +622,7 @@ pub async fn ws_handler(
     config: web::Data<AgentConfig>,
     app_config: web::Data<AppConfig>,
     rag: web::Data<RagContext>,
+    registry: web::Data<WsRegistry>,
 ) -> Result<HttpResponse, Error> {
     let ws = OpenheimWebSocket::new(
         llm.get_ref().clone(),
@@ -595,6 +630,7 @@ pub async fn ws_handler(
         config.get_ref().clone(),
         app_config.get_ref().clone(),
         rag.get_ref().clone(),
+        registry.get_ref().clone(),
     );
     ws::start(ws, &req, stream)
 }
