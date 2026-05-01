@@ -57,6 +57,20 @@ Run the agent with a prompt. Blocking — returns when the agent finishes.
 
 ---
 
+### GET /config
+
+Return the current configuration from `~/.openheim/config.toml`.
+
+**Response `200 OK`** — `AppConfig` object (see `PUT /config` for the schema)
+
+**Response `500 Internal Server Error`**
+
+```json
+{ "error": "Config file not found at ..." }
+```
+
+---
+
 ### PUT /config
 
 Validate and persist a new configuration to `~/.openheim/config.toml`. Does not restart the server — call `POST /restart` after to apply changes.

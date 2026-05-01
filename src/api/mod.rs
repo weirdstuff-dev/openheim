@@ -16,7 +16,7 @@ use crate::{
 pub mod rest;
 pub mod ws;
 
-pub use rest::{execute_agent, restart_handler, update_config_handler};
+pub use rest::{execute_agent, get_config_handler, restart_handler, update_config_handler};
 pub use ws::{ws_handler, Shutdown};
 
 /// Shared registry of active WebSocket connections.
@@ -41,6 +41,7 @@ pub async fn start_api_server(
 ) -> Result<()> {
     tracing::info!("Starting API server on {}:{}", host, port);
     tracing::info!("  POST /query");
+    tracing::info!("  GET  /config");
     tracing::info!("  PUT  /config");
     tracing::info!("  POST /restart");
     tracing::info!("  WS   /ws");
@@ -67,6 +68,7 @@ pub async fn start_api_server(
             .app_data(web::Data::new(rag_context.clone()))
             .app_data(web::Data::new(registry.clone()))
             .route("/query", web::post().to(execute_agent))
+            .route("/config", web::get().to(get_config_handler))
             .route("/config", web::put().to(update_config_handler))
             .route("/restart", web::post().to(restart_handler))
             .route("/ws", web::get().to(ws_handler))

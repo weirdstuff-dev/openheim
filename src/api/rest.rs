@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::api::{WsRegistry, do_restart};
 use crate::core::agent::run_agent_with_history;
-use crate::config::{AgentConfig, AppConfig, save_config, resolve_client_and_config};
+use crate::config::{AgentConfig, AppConfig, load_config, save_config, resolve_client_and_config};
 use crate::core::models::{AgentResult, Message};
 use crate::core::llm::LlmClient;
 use crate::rag::RagContext;
@@ -35,6 +35,13 @@ pub struct AgentResponse {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_id: Option<Uuid>,
+}
+
+pub async fn get_config_handler() -> impl Responder {
+    match load_config() {
+        Ok(config) => HttpResponse::Ok().json(config),
+        Err(e) => HttpResponse::InternalServerError().json(json!({ "error": e.to_string() })),
+    }
 }
 
 pub async fn update_config_handler(
