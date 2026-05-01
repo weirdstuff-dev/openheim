@@ -50,3 +50,29 @@ pub fn load_config() -> Result<AppConfig> {
     let config: AppConfig = toml::from_str(&contents)?;
     Ok(config)
 }
+
+/// Validate an AppConfig before saving.
+pub fn validate_config(config: &AppConfig) -> Result<()> {
+    if config.providers.is_empty() {
+        return Err(Error::config("config must have at least one provider"));
+    }
+    if !config.providers.contains_key(&config.default_provider) {
+        return Err(Error::config(format!(
+            "default_provider '{}' not found in providers",
+            config.default_provider
+        )));
+    }
+    Ok(())
+}
+
+/// Validate and atomically write AppConfig to ~/.openheim/config.toml.
+pub fn save_config(config: &AppConfig) -> Result<()> {
+    validate_config(config)?;
+    let toml = toml::to_string_pretty(config)
+        .map_err(|e| Error::config(format!("failed to serialize config: {e}")))?;
+    let path = config_path()?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, toml)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
