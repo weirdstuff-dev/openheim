@@ -1,6 +1,137 @@
-# Openheim WebSocket API
+# Openheim API
 
-## Connection
+---
+
+## REST API
+
+Base URL: `http://<host>:<port>` (default port `1217`)
+
+---
+
+### POST /query
+
+Run the agent with a prompt. Blocking — returns when the agent finishes.
+
+**Request**
+
+```json
+{
+  "prompt": "Write a hello world in Python",
+  "model": "gpt-4o",           // optional — overrides server default
+  "max_iterations": 10,        // optional — overrides server default
+  "chat_id": "uuid-string",    // optional — continue an existing conversation
+  "skills": ["web_search"]     // optional — list of skill names to enable
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `prompt` | string | yes | User message |
+| `model` | string | no | Model override |
+| `max_iterations` | number | no | Max agent loop iterations |
+| `chat_id` | string (UUID) | no | Resume a prior conversation |
+| `skills` | string[] | no | Skills to enable |
+
+**Response `200 OK`**
+
+```json
+{
+  "success": true,
+  "result": {
+    "final_response": "Here is your Python file...",
+    "iterations": 3
+  },
+  "chat_id": "uuid-string"
+}
+```
+
+**Response `500 Internal Server Error`**
+
+```json
+{
+  "success": false,
+  "error": "LLM request timed out",
+  "chat_id": "uuid-string"
+}
+```
+
+---
+
+### PUT /config
+
+Validate and persist a new configuration to `~/.openheim/config.toml`. Does not restart the server — call `POST /restart` after to apply changes.
+
+**Request** — full `AppConfig` object
+
+```json
+{
+  "default_provider": "anthropic",
+  "max_iterations": 10,
+  "providers": {
+    "anthropic": {
+      "api_base": "https://api.anthropic.com/v1",
+      "default_model": "claude-3-5-sonnet-20241022",
+      "models": ["claude-3-5-sonnet-20241022", "claude-3-haiku-20240307"],
+      "env_var": "ANTHROPIC_API_KEY",
+      "timeout_secs": 120,
+      "max_tokens": 8096
+    },
+    "ollama": {
+      "api_base": "http://localhost:11434/v1",
+      "default_model": "llama3.2",
+      "models": ["llama3.2", "mistral"]
+    }
+  }
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `default_provider` | string | yes | Must match a key in `providers` |
+| `max_iterations` | number | no | Global default (default: `10`) |
+| `providers` | object | yes | At least one provider required |
+
+**Provider fields**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `api_base` | string | yes | Base URL for the provider API |
+| `default_model` | string | yes | Default model for this provider |
+| `models` | string[] | yes | Available models |
+| `env_var` | string | no | Env var name holding the API key (recommended) |
+| `api_key` | string | no | Inline API key (not recommended) |
+| `timeout_secs` | number | no | Request timeout in seconds (default: `120`) |
+| `max_tokens` | number | no | Max output tokens |
+
+**Response `200 OK`**
+
+```json
+{ "status": "saved" }
+```
+
+**Response `400 Bad Request`**
+
+```json
+{ "error": "default_provider 'openai' not found in providers" }
+```
+
+---
+
+### POST /restart
+
+Notify all active WebSocket clients with a `restarting` system event (close code `1012`), then exit the process. The container is expected to restart automatically (Docker `restart: unless-stopped`), loading the updated config from disk.
+
+**Request** — no body
+
+**Response `200 OK`** — returned immediately before shutdown begins
+
+```json
+{ "status": "restarting" }
+```
+
+---
+
+## WebSocket API
 
 ```
 GET /ws
@@ -85,19 +216,10 @@ The server streams a sequence of events for each run, followed by a terminal `do
 **StreamEvent types** (discriminated by `event_type`):
 
 ```json
-// Agent loop iteration started
 { "event_type": "iteration_start", "iteration": 1 }
-
-// Agent called a tool
 { "event_type": "tool_call", "tool_name": "read_file", "arguments": "{\"path\":\"main.py\"}" }
-
-// Tool returned a result
 { "event_type": "tool_result", "tool_name": "read_file", "result": "print('hello')" }
-
-// LLM produced a response
 { "event_type": "llm_response", "content": "Here is your Python file..." }
-
-// Agent loop finished
 { "event_type": "finished", "final_response": "Done! Here is your file.", "iterations": 3 }
 ```
 
@@ -108,7 +230,7 @@ The server streams a sequence of events for each run, followed by a terminal `do
   "channel": "agent",
   "data": {
     "type": "done",
-    "chat_id": "uuid-string"   // present if conversation was persisted
+    "chat_id": "uuid-string"
   }
 }
 ```
@@ -125,7 +247,7 @@ The server streams a sequence of events for each run, followed by a terminal `do
 }
 ```
 
-**Typical agent event sequence:**
+**Typical event sequence:**
 
 ```
 event(iteration_start) → event(tool_call) → event(tool_result) → event(llm_response) → event(finished) → done
@@ -204,19 +326,19 @@ Both `from` and `to` must be within the workspace.
 
 ### Server → Client: Filesystem responses
 
-#### `watching` — watch started
+#### `watching`
 
 ```json
 { "channel": "fs", "data": { "type": "watching", "path": "/home/user/myproject" } }
 ```
 
-#### `unwatched` — watch stopped
+#### `unwatched`
 
 ```json
 { "channel": "fs", "data": { "type": "unwatched" } }
 ```
 
-#### `file_list` — directory listing
+#### `file_list`
 
 ```json
 {
@@ -229,15 +351,17 @@ Both `from` and `to` must be within the workspace.
         "path": "/home/user/myproject/src/main.py",
         "name": "main.py",
         "is_dir": false,
-        "size": 1024,        // bytes; absent for directories
-        "modified": 1712345678  // unix timestamp (seconds); may be absent
+        "size": 1024,
+        "modified": 1712345678
       }
     ]
   }
 }
 ```
 
-#### `file_content` — file read result
+`size` is bytes, absent for directories. `modified` is a Unix timestamp in seconds, may be absent.
+
+#### `file_content`
 
 ```json
 { "channel": "fs", "data": { "type": "file_content", "path": "src/main.py", "content": "print('hello')" } }
@@ -280,9 +404,9 @@ Both `from` and `to` must be within the workspace.
 }
 ```
 
-`event_kind` is a debug string from the [`notify`](https://docs.rs/notify) crate. Common values: `Create(Any)`, `Modify(Data(Any))`, `Remove(Any)`. The frontend should treat unknown values gracefully.
+`event_kind` is a debug string from the [`notify`](https://docs.rs/notify) crate. Common values: `Create(Any)`, `Modify(Data(Any))`, `Remove(Any)`. Treat unknown values gracefully.
 
-#### `error` — operation failed
+#### `error`
 
 ```json
 { "channel": "fs", "data": { "type": "error", "message": "Path not within workspace or does not exist" } }
@@ -292,13 +416,25 @@ Both `from` and `to` must be within the workspace.
 
 ## Channel: `system`
 
-Server-only. Not sent by the client.
+Server-only. Clients cannot send on this channel.
 
 #### `connected`
 
 ```json
 { "channel": "system", "data": { "type": "connected", "message": "Connected to Openheim" } }
 ```
+
+Sent immediately on connection.
+
+#### `restarting`
+
+```json
+{ "channel": "system", "data": { "type": "restarting", "reason": "config_update" } }
+```
+
+Sent to all connected clients before the server exits. The WebSocket connection is then closed with code `1012` (Service Restart). Clients should reconnect automatically.
+
+`reason` values: `"config_update"` (triggered via `PUT /config` + `POST /restart`), `"manual"` (triggered via `POST /restart` directly).
 
 #### `error` — malformed message
 
@@ -326,15 +462,55 @@ Sent when the server cannot parse a client message.
 
 The server does not persist WebSocket state across connections. On reconnect:
 
-- Re-send `watch` to restore filesystem watching and enable fs operations.
+- Re-send `watch` to restore filesystem watching.
 - Use the `chat_id` returned in `done` to resume a conversation.
+- A `1012` close code means the server restarted intentionally — reconnect after a short delay.
 
 ---
 
 ## TypeScript Types (reference)
 
 ```ts
-// Envelopes
+// REST
+
+interface AppConfig {
+  default_provider: string;
+  max_iterations?: number;
+  providers: Record<string, ProviderConfig>;
+}
+
+interface ProviderConfig {
+  api_base: string;
+  default_model: string;
+  models: string[];
+  env_var?: string;
+  api_key?: string;
+  timeout_secs?: number;
+  max_tokens?: number;
+}
+
+interface AgentResult {
+  final_response: string;
+  iterations: number;
+}
+
+// POST /query
+interface QueryRequest {
+  prompt: string;
+  model?: string;
+  max_iterations?: number;
+  chat_id?: string;
+  skills?: string[];
+}
+
+interface QueryResponse {
+  success: boolean;
+  result?: AgentResult;
+  error?: string;
+  chat_id?: string;
+}
+
+// WebSocket envelopes
 type ClientEnvelope =
   | { channel: "agent"; data: AgentRequest }
   | { channel: "fs"; data: FsRequest };
@@ -343,6 +519,12 @@ type ServerEnvelope =
   | { channel: "system"; data: SystemEvent }
   | { channel: "agent"; data: AgentResponse }
   | { channel: "fs"; data: FsResponse };
+
+// System
+type SystemEvent =
+  | { type: "connected"; message: string }
+  | { type: "restarting"; reason: string }
+  | { type: "error"; message: string };
 
 // Agent
 interface AgentRequest {
@@ -363,11 +545,6 @@ type StreamEvent =
 type AgentResponse =
   | { type: "event"; data: StreamEvent }
   | { type: "done"; chat_id?: string }
-  | { type: "error"; message: string };
-
-// System
-type SystemEvent =
-  | { type: "connected"; message: string }
   | { type: "error"; message: string };
 
 // Filesystem
