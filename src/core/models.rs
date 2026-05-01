@@ -282,6 +282,9 @@ pub enum SystemEvent {
 
     #[serde(rename = "error")]
     Error { message: String },
+
+    #[serde(rename = "restarting")]
+    Restarting { reason: String },
 }
 
 /// Inbound envelope: every message from the client wraps its payload with a channel tag.
