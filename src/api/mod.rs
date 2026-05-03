@@ -30,7 +30,8 @@ pub async fn start_api_server(
     tracing::info!("  WS   /ws");
 
     let llm_client: Arc<dyn LlmClient> = create_client(&config, &client);
-    let tool_executor: Arc<dyn ToolExecutor> = Arc::new(SystemToolExecutor::new());
+    let tool_executor: Arc<dyn ToolExecutor> =
+        Arc::new(SystemToolExecutor::build(&app_config.mcp_servers).await);
     let rag_context = RagContext::new()?;
 
     let server = HttpServer::new(move || {

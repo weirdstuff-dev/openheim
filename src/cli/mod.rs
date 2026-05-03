@@ -72,7 +72,7 @@ struct SessionContext {
 }
 
 impl SessionContext {
-    fn new(
+    async fn new(
         client: &Client,
         agent_config: &AgentConfig,
         app_config: &AppConfig,
@@ -88,7 +88,8 @@ impl SessionContext {
             create_client(agent_config, client),
             agent_config,
         )?;
-        let tool_executor: Arc<dyn ToolExecutor> = Arc::new(SystemToolExecutor::new());
+        let tool_executor: Arc<dyn ToolExecutor> =
+            Arc::new(SystemToolExecutor::build(&app_config.mcp_servers).await);
         let rag = RagContext::new()?;
         let (conversation, prompt_builder) = rag.prepare(
             chat_id,
@@ -177,7 +178,7 @@ pub async fn run_agent_mode(
     let chat_id = resolve_chat_id(chat_id, continue_last)?;
     let mut session = SessionContext::new(
         client, config, app_config, model_name, max_iterations, chat_id, skill_names,
-    )?;
+    ).await?;
 
     let chat_id_short = &session.conversation.meta.id.to_string()[..8];
     let chat_status = if session.conversation.messages.is_empty() {
@@ -290,7 +291,7 @@ pub async fn run_single_prompt(
 
     let mut session = SessionContext::new(
         client, config, app_config, model_name, max_iterations, chat_id, skill_names,
-    )?;
+    ).await?;
 
     session.conversation.messages.push(Message::user(prompt.clone()));
 
