@@ -3,7 +3,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use openheim::{
     config::init_config,
-    transport::{run, stdio},
+    transport::{run, stdio, ws},
 };
 
 #[derive(Parser, Debug)]
@@ -61,9 +61,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
-        Some(Command::Serve { .. }) => {
-            eprintln!("WebSocket server not yet implemented (Phase 3)");
-            std::process::exit(1);
+        Some(Command::Serve { host, port }) => {
+            if let Err(e) = ws::serve(host, port).await {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
         }
         Some(Command::Init) => {
             match init_config() {
