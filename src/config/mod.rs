@@ -3,7 +3,7 @@ mod resolve;
 mod types;
 
 pub use client::{build_http_client, create_client, resolve_client_and_config};
-pub use types::{AgentConfig, AppConfig, ProviderConfig};
+pub use types::{AgentConfig, AppConfig, McpServerConfig, ProviderConfig};
 
 use std::path::PathBuf;
 

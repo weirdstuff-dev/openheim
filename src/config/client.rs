@@ -115,6 +115,7 @@ mod tests {
             default_provider: "openai".into(),
             max_iterations: 10,
             providers,
+            mcp_servers: BTreeMap::new(),
         }
     }
 

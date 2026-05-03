@@ -51,3 +51,16 @@ env_var = "ANTHROPIC_API_KEY"
 # api_base = "http://localhost:11434/v1"
 # default_model = "llama2"
 # models = ["llama2", "mistral", "codellama", "mixtral"]
+
+# --- MCP Server Configuration (Model Context Protocol) ---
+# Tools are exposed to the LLM as "{server_name}__{tool_name}".
+#
+# Stdio transport — spawn a local process:
+# [mcp_servers.filesystem]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+# env = { }
+#
+# Streamable HTTP transport — connect to a running server:
+# [mcp_servers.remote-tools]
+# url = "http://localhost:8080/mcp"

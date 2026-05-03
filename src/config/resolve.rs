@@ -123,6 +123,7 @@ mod tests {
             default_provider: "openai".into(),
             max_iterations: 5,
             providers,
+            mcp_servers: BTreeMap::new(),
         }
     }
 
@@ -161,6 +162,7 @@ mod tests {
             default_provider: "nonexistent".into(),
             max_iterations: 10,
             providers: BTreeMap::new(),
+            mcp_servers: BTreeMap::new(),
         };
         let err = config.resolve(None).unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
@@ -183,6 +185,7 @@ mod tests {
             default_provider: "openai".into(),
             max_iterations: 10,
             providers: BTreeMap::new(),
+            mcp_servers: BTreeMap::new(),
         };
         let err = config.list_models().unwrap_err();
         assert!(err.to_string().contains("No providers configured"));
