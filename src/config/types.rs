@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// Top-level configuration loaded from ~/.openheim/config.toml
@@ -10,6 +10,24 @@ pub struct AppConfig {
     pub max_iterations: usize,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
+    #[serde(default)]
+    pub mcp_servers: BTreeMap<String, McpServerConfig>,
+}
+
+/// Configuration for a single MCP server connection.
+/// The map key in `[mcp_servers.<name>]` is used as the server name and tool-name prefix.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    /// Binary to spawn for stdio transport (e.g. `"npx"`, `"uvx"`).
+    pub command: Option<String>,
+    /// Arguments passed to `command`.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment variables for the spawned process.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// Base URL for Streamable HTTP transport (e.g. `"http://localhost:8080/mcp"`).
+    pub url: Option<String>,
 }
 
 fn default_max_iterations() -> usize {

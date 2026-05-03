@@ -5,7 +5,7 @@ use crate::core::llm::LlmClient;
 use crate::core::models::*;
 use crate::error::Result;
 use crate::rag::PromptBuilder;
-use crate::tools::{get_available_tools, ToolExecutor};
+use crate::tools::ToolExecutor;
 
 async fn call_llm(
     llm: &Arc<dyn LlmClient>,
@@ -31,7 +31,7 @@ async fn run_agent_loop(
     verbose: bool,
     mut callback: Option<&mut dyn FnMut(StreamEvent)>,
 ) -> Result<AgentResult> {
-    let tools = get_available_tools();
+    let tools = tool_executor.list_tools();
     let mut steps = Vec::new();
     let mut final_response = String::new();
 
@@ -284,6 +284,10 @@ mod tests {
 
     #[async_trait]
     impl ToolExecutor for MockToolExecutor {
+        fn list_tools(&self) -> Vec<Tool> {
+            vec![]
+        }
+
         async fn execute(&self, name: &str, args_json: &str) -> Result<String> {
             self.calls.lock().unwrap().push((name.into(), args_json.into()));
             Ok(self.result.clone())

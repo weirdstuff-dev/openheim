@@ -2,11 +2,11 @@ mod execute_command;
 mod read_file;
 mod write_file;
 
-use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
 
+use crate::config::McpServerConfig;
 use crate::core::models::Tool;
 use crate::error::{Error, Result};
 
@@ -21,6 +21,7 @@ pub trait ToolHandler: Send + Sync {
 
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {
+    fn list_tools(&self) -> Vec<Tool>;
     async fn execute(&self, name: &str, args_json: &str) -> Result<String>;
 }
 
@@ -30,17 +31,29 @@ pub struct SystemToolExecutor {
 
 impl SystemToolExecutor {
     pub fn new() -> Self {
-        let mut executor = Self {
-            handlers: HashMap::new(),
-        };
-        executor.register(Box::new(execute_command::ExecuteCommandTool));
-        executor.register(Box::new(read_file::ReadFileTool));
-        executor.register(Box::new(write_file::WriteFileTool));
+        Self { handlers: HashMap::new() }
+    }
+
+    pub async fn build(mcp_configs: &BTreeMap<String, McpServerConfig>) -> Self {
+        let mut executor = Self::new();
+        executor.register_builtins();
+        for handler in crate::mcp::load_mcp_tools(mcp_configs).await {
+            executor.register(handler);
+        }
         executor
     }
 
-    fn register(&mut self, handler: Box<dyn ToolHandler>) {
+    pub fn register_builtins(&mut self) {
+        self.register(Box::new(execute_command::ExecuteCommandTool));
+        self.register(Box::new(read_file::ReadFileTool));
+        self.register(Box::new(write_file::WriteFileTool));
+    }
+
+    pub fn register(&mut self, handler: Box<dyn ToolHandler>) {
         let name = handler.definition().function.name.clone();
+        if self.handlers.contains_key(&name) {
+            tracing::warn!(name = %name, "Tool name collision: overwriting existing handler");
+        }
         self.handlers.insert(name, handler);
     }
 }
@@ -53,6 +66,10 @@ impl Default for SystemToolExecutor {
 
 #[async_trait]
 impl ToolExecutor for SystemToolExecutor {
+    fn list_tools(&self) -> Vec<Tool> {
+        self.handlers.values().map(|h| h.definition()).collect()
+    }
+
     async fn execute(&self, name: &str, args_json: &str) -> Result<String> {
         let handler = self
             .handlers
@@ -62,32 +79,20 @@ impl ToolExecutor for SystemToolExecutor {
     }
 }
 
-/// Global executor used by the free-standing helper functions.
-static GLOBAL_EXECUTOR: OnceLock<SystemToolExecutor> = OnceLock::new();
-
-fn global_executor() -> &'static SystemToolExecutor {
-    GLOBAL_EXECUTOR.get_or_init(SystemToolExecutor::new)
-}
-
-pub fn get_available_tools() -> Vec<Tool> {
-    global_executor()
-        .handlers
-        .values()
-        .map(|h| h.definition())
-        .collect()
-}
-
-pub async fn execute_tool(name: &str, arguments: &str) -> Result<String> {
-    global_executor().execute(name, arguments).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn executor_registers_all_tools() {
+    fn new_executor_is_empty() {
         let executor = SystemToolExecutor::new();
+        assert_eq!(executor.handlers.len(), 0);
+    }
+
+    #[test]
+    fn register_builtins_adds_three_tools() {
+        let mut executor = SystemToolExecutor::new();
+        executor.register_builtins();
         assert!(executor.handlers.contains_key("execute_command"));
         assert!(executor.handlers.contains_key("read_file"));
         assert!(executor.handlers.contains_key("write_file"));
@@ -100,15 +105,5 @@ mod tests {
         let result = executor.execute("nonexistent_tool", "{}").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unknown tool"));
-    }
-
-    #[test]
-    fn get_available_tools_returns_three_definitions() {
-        let tools = get_available_tools();
-        assert_eq!(tools.len(), 3);
-        let names: Vec<&str> = tools.iter().map(|t| t.function.name.as_str()).collect();
-        assert!(names.contains(&"execute_command"));
-        assert!(names.contains(&"read_file"));
-        assert!(names.contains(&"write_file"));
     }
 }
