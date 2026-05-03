@@ -312,6 +312,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-client-protocol-tokio"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e1572b219f22c4b3be0f20f934c8b6f1d1457126ce72923c4f6608f96153b65"
+dependencies = [
+ "agent-client-protocol",
+ "futures",
+ "serde",
+ "serde_json",
+ "shell-words",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1822,6 +1837,7 @@ dependencies = [
  "actix-web",
  "actix-web-actors",
  "agent-client-protocol",
+ "agent-client-protocol-tokio",
  "async-trait",
  "chrono",
  "clap",
@@ -1838,6 +1854,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
  "tracing-subscriber",
@@ -2604,6 +2621,12 @@ checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
 ]
+
+[[package]]
+name = "shell-words"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shlex"
