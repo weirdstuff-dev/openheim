@@ -4,6 +4,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 use openheim::{
     config::init_config,
     transport::{run, stdio, ws},
+    tui,
 };
 
 #[derive(Parser, Debug)]
@@ -46,8 +47,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         None => {
-            eprintln!("TUI not yet implemented (Phase 4)");
-            std::process::exit(1);
+            if let Err(e) = tui::run().await {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
         }
         Some(Command::Acp) => {
             if let Err(e) = stdio::run().await {

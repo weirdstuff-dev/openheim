@@ -138,7 +138,28 @@ impl HistoryManager {
         skills: Vec<String>,
     ) -> Result<Conversation> {
         match chat_id {
-            Some(id) => self.load_conversation(&id),
+            Some(id) => {
+                let path = self.conversation_path(&id);
+                if path.exists() {
+                    self.load_conversation(&id)
+                } else {
+                    let now = Utc::now();
+                    let conv = Conversation {
+                        meta: ConversationMeta {
+                            id,
+                            created_at: now,
+                            updated_at: now,
+                            model,
+                            provider,
+                            title: None,
+                            skills,
+                        },
+                        messages: Vec::new(),
+                    };
+                    self.save_conversation(&conv)?;
+                    Ok(conv)
+                }
+            }
             None => self.create_conversation(model, provider, skills),
         }
     }
