@@ -37,7 +37,10 @@ async fn connect_server(name: &str, config: &McpServerConfig) -> Result<Vec<Box<
 
     // Sanitise the prefix: hyphens and spaces become underscores so the
     // combined name is a valid identifier for tool-call APIs.
-    let prefix = name.replace(['-', ' '], "_");
+    let prefix: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
 
     let handlers = tools
         .iter()
