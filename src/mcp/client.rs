@@ -1,6 +1,6 @@
 use rmcp::{
     ServiceExt,
-    model::{CallToolRequestParams, Tool},
+    model::{CallToolRequestParams, Content, RawContent, ResourceContents, Tool},
     service::{RoleClient, RunningService},
     transport::{TokioChildProcess, streamable_http_client::StreamableHttpClientTransport},
 };
@@ -79,13 +79,20 @@ fn build_call_params(name: &str, args_json: &str) -> Result<CallToolRequestParam
     Ok(CallToolRequestParams::new(name.to_string()).with_arguments(map))
 }
 
-fn extract_text_content(content: &[impl serde::Serialize]) -> String {
+fn extract_text_content(content: &[Content]) -> String {
     content
         .iter()
-        .filter_map(|c| {
-            serde_json::to_value(c)
-                .ok()
-                .and_then(|v| v.get("text")?.as_str().map(String::from))
+        .map(|item| match &**item {
+            RawContent::Text(t) => t.text.clone(),
+            RawContent::Image(i) => format!("[image: {}]", i.mime_type),
+            RawContent::Audio(a) => format!("[audio: {}]", a.mime_type),
+            RawContent::Resource(r) => match &r.resource {
+                ResourceContents::TextResourceContents { text, .. } => text.clone(),
+                ResourceContents::BlobResourceContents { uri, mime_type, .. } => {
+                    format!("[blob: {} ({})]", uri, mime_type.as_deref().unwrap_or("unknown"))
+                }
+            },
+            RawContent::ResourceLink(l) => format!("[resource: {}]", l.uri),
         })
         .collect::<Vec<_>>()
         .join("\n")
