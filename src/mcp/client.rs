@@ -46,13 +46,10 @@ impl McpClient {
     }
 
     pub async fn list_tools(&self) -> Result<Vec<Tool>> {
-        let result = self
-            .service
-            .peer()
-            .list_tools(Default::default())
+        self.service
+            .list_all_tools()
             .await
-            .map_err(|e| Error::Other(format!("MCP list_tools failed for '{}': {}", self.server_name, e)))?;
-        Ok(result.tools.into_iter().collect())
+            .map_err(|e| Error::Other(format!("MCP list_tools failed for '{}': {}", self.server_name, e)))
     }
 
     pub async fn call_tool(&self, name: &str, args_json: &str) -> Result<String> {
