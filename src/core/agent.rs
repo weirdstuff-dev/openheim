@@ -22,15 +22,18 @@ async fn call_llm(
     }
 }
 
-async fn run_agent_loop(
+async fn run_agent_loop<F>(
     llm: &Arc<dyn LlmClient>,
     tool_executor: &Arc<dyn ToolExecutor>,
     config: &AgentConfig,
     messages: &mut Vec<Message>,
     prompt_builder: Option<&PromptBuilder>,
     verbose: bool,
-    mut callback: Option<&mut dyn FnMut(StreamEvent)>,
-) -> Result<AgentResult> {
+    mut callback: Option<F>,
+) -> Result<AgentResult>
+where
+    F: FnMut(StreamEvent) + Send,
+{
     let tools = tool_executor.list_tools();
     let mut steps = Vec::new();
     let mut final_response = String::new();
@@ -45,7 +48,7 @@ async fn run_agent_loop(
         if verbose {
             println!("--- Iteration {} ---", iter_num);
         }
-        if let Some(cb) = callback.as_deref_mut() {
+        if let Some(cb) = callback.as_mut() {
             cb(StreamEvent::IterationStart { iteration: iter_num });
         }
 
@@ -63,7 +66,7 @@ async fn run_agent_loop(
                 let tool_name = &tool_call.function.name;
                 let arguments = &tool_call.function.arguments;
 
-                if let Some(cb) = callback.as_deref_mut() {
+                if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::ToolCall {
                         tool_name: tool_name.clone(),
                         arguments: arguments.clone(),
@@ -75,7 +78,7 @@ async fn run_agent_loop(
                 if verbose {
                     println!("✅ Tool {}: {}\n", tool_name, result);
                 }
-                if let Some(cb) = callback.as_deref_mut() {
+                if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::ToolResult {
                         tool_name: tool_name.clone(),
                         result: result.clone(),
@@ -100,7 +103,7 @@ async fn run_agent_loop(
             if verbose {
                 println!("💬 LLM Response:\n{}\n", content);
             }
-            if let Some(cb) = callback.as_deref_mut() {
+            if let Some(cb) = callback.as_mut() {
                 cb(StreamEvent::LlmResponse {
                     content: content.clone(),
                 });
@@ -118,7 +121,7 @@ async fn run_agent_loop(
                 if verbose {
                     println!("✨ Agent finished successfully!");
                 }
-                if let Some(cb) = callback.as_deref_mut() {
+                if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::Finished {
                         final_response: final_response.clone(),
                         iterations: iter_num,
@@ -140,7 +143,7 @@ async fn run_agent_loop(
         }
     }
 
-    if let Some(cb) = callback.as_deref_mut() {
+    if let Some(cb) = callback.as_mut() {
         cb(StreamEvent::Finished {
             final_response: final_response.clone(),
             iterations: config.max_iterations,
@@ -162,7 +165,7 @@ pub async fn run_agent_with_history(
     verbose: bool,
     prompt_builder: Option<&PromptBuilder>,
 ) -> Result<AgentResult> {
-    run_agent_loop(
+    run_agent_loop::<fn(StreamEvent)>(
         &llm,
         &tool_executor,
         config,
@@ -180,10 +183,10 @@ pub async fn run_agent_streaming_with_history<F>(
     config: &AgentConfig,
     messages: &mut Vec<Message>,
     prompt_builder: Option<&PromptBuilder>,
-    mut callback: F,
+    callback: F,
 ) -> Result<AgentResult>
 where
-    F: FnMut(StreamEvent),
+    F: FnMut(StreamEvent) + Send,
 {
     run_agent_loop(
         &llm,
@@ -192,7 +195,7 @@ where
         messages,
         prompt_builder,
         false,
-        Some(&mut callback),
+        Some(callback),
     )
     .await
 }
