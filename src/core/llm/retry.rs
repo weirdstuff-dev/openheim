@@ -25,31 +25,24 @@ impl RetryClient {
 #[async_trait]
 impl LlmClient for RetryClient {
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
-        let mut last_err = None;
-
         for attempt in 0..=MAX_RETRIES {
             match self.inner.send(messages, tools).await {
                 Ok(choice) => return Ok(choice),
-                Err(e) => {
-                    if attempt < MAX_RETRIES && e.is_retryable() {
-                        let backoff = Duration::from_millis(INITIAL_BACKOFF_MS * 2u64.pow(attempt));
-                        tracing::warn!(
-                            "LLM request failed (attempt {}/{}): {}. Retrying in {:?}...",
-                            attempt + 1,
-                            MAX_RETRIES + 1,
-                            e,
-                            backoff
-                        );
-                        sleep(backoff).await;
-                        last_err = Some(e);
-                    } else {
-                        return Err(e);
-                    }
+                Err(e) if attempt < MAX_RETRIES && e.is_retryable() => {
+                    let backoff = Duration::from_millis(INITIAL_BACKOFF_MS * 2u64.pow(attempt));
+                    tracing::warn!(
+                        "LLM request failed (attempt {}/{}): {}. Retrying in {:?}...",
+                        attempt + 1,
+                        MAX_RETRIES + 1,
+                        e,
+                        backoff
+                    );
+                    sleep(backoff).await;
                 }
+                Err(e) => return Err(e),
             }
         }
-
-        Err(last_err.unwrap())
+        unreachable!("loop always returns via Ok or Err arm")
     }
 }
 
@@ -89,7 +82,7 @@ mod tests {
     #[async_trait]
     impl LlmClient for AlwaysFailNonRetryable {
         async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> crate::error::Result<Choice> {
-            Err(Error::ApiError("status 400: bad request".into()))
+            Err(Error::HttpError { status: 400, body: "bad request".into() })
         }
     }
 
@@ -103,7 +96,7 @@ mod tests {
         async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> crate::error::Result<Choice> {
             let remaining = self.remaining_failures.fetch_sub(1, Ordering::SeqCst);
             if remaining > 0 {
-                Err(Error::ApiError("status 429: rate limited".into()))
+                Err(Error::HttpError { status: 429, body: "rate limited".into() })
             } else {
                 Ok(ok_choice("recovered"))
             }
@@ -119,7 +112,7 @@ mod tests {
     impl LlmClient for AlwaysFailRetryable {
         async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> crate::error::Result<Choice> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
-            Err(Error::ApiError("status 503: service unavailable".into()))
+            Err(Error::HttpError { status: 503, body: "service unavailable".into() })
         }
     }
 
@@ -136,7 +129,7 @@ mod tests {
         let client = RetryClient::new(Arc::new(AlwaysFailNonRetryable));
         let result = client.send(&[], &[]).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("400"));
+        assert!(matches!(result.unwrap_err(), Error::HttpError { status: 400, .. }));
     }
 
     #[tokio::test]

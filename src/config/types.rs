@@ -53,12 +53,11 @@ pub struct ProviderConfig {
 impl ProviderConfig {
     /// Resolve the API key: try env_var first, then inline api_key, then empty string (for keyless providers like Ollama)
     pub fn resolve_api_key(&self) -> String {
-        if let Some(env_var) = &self.env_var {
-            if let Ok(key) = std::env::var(env_var) {
-                if !key.trim().is_empty() {
-                    return key;
-                }
-            }
+        if let Some(env_var) = &self.env_var
+            && let Ok(key) = std::env::var(env_var)
+            && !key.trim().is_empty()
+        {
+            return key;
         }
         self.api_key.clone().unwrap_or_default()
     }

@@ -105,7 +105,7 @@ struct GeminiCandidate {
 
 // --- Conversions ---
 
-fn convert_messages(messages: &[Message]) -> Vec<GeminiContent> {
+fn convert_messages(messages: &[Message]) -> Result<Vec<GeminiContent>> {
     let mut result = Vec::new();
 
     for msg in messages {
@@ -124,7 +124,10 @@ fn convert_messages(messages: &[Message]) -> Vec<GeminiContent> {
                 if let Some(tool_calls) = &msg.tool_calls {
                     for tc in tool_calls {
                         let args: Value = serde_json::from_str(&tc.function.arguments)
-                            .unwrap_or(Value::Object(serde_json::Map::new()));
+                            .map_err(|e| Error::ParseError(format!(
+                                "invalid JSON in tool call arguments for '{}': {}",
+                                tc.function.name, e
+                            )))?;
                         parts.push(GeminiPart {
                             text: None,
                             function_call: Some(GeminiFunctionCall {
@@ -172,7 +175,7 @@ fn convert_messages(messages: &[Message]) -> Vec<GeminiContent> {
                 });
             }
             _ => {
-                // user and system roles
+                // user and system roles (Gemini has no dedicated system role in the messages array)
                 let text = msg.content.clone().unwrap_or_default();
                 result.push(GeminiContent {
                     role: "user".to_string(),
@@ -186,7 +189,7 @@ fn convert_messages(messages: &[Message]) -> Vec<GeminiContent> {
         }
     }
 
-    result
+    Ok(result)
 }
 
 fn convert_tools(tools: &[Tool]) -> Vec<GeminiToolDeclaration> {
@@ -266,7 +269,7 @@ fn convert_response(resp: GeminiResponse) -> Result<Choice> {
 impl LlmClient for GeminiClient {
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
         let request = GeminiRequest {
-            contents: convert_messages(messages),
+            contents: convert_messages(messages)?,
             tools: convert_tools(tools),
             generation_config: self.max_tokens.map(|t| GeminiGenerationConfig {
                 max_output_tokens: t,
@@ -290,15 +293,9 @@ impl LlmClient for GeminiClient {
             .map_err(Error::ReqwestError)?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let error_text = match response.text().await {
-                Ok(t) => t,
-                Err(_) => "<failed to read error body>".to_string(),
-            };
-            return Err(Error::ApiError(format!(
-                "API request failed with status {}: {}",
-                status, error_text
-            )));
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_else(|_| "<failed to read error body>".into());
+            return Err(Error::HttpError { status, body });
         }
 
         let gemini_response: GeminiResponse =
@@ -316,7 +313,7 @@ mod tests {
     #[test]
     fn convert_messages_user() {
         let messages = vec![Message::user("hello".into())];
-        let result = convert_messages(&messages);
+        let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
         assert_eq!(result[0].parts[0].text.as_deref(), Some("hello"));
@@ -325,7 +322,7 @@ mod tests {
     #[test]
     fn convert_messages_assistant_becomes_model() {
         let messages = vec![Message::assistant("response".into())];
-        let result = convert_messages(&messages);
+        let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "model");
         assert_eq!(result[0].parts[0].text.as_deref(), Some("response"));
@@ -347,11 +344,30 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
         }];
-        let result = convert_messages(&messages);
+        let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "model");
         assert!(result[0].parts[0].function_call.is_some());
         assert_eq!(result[0].parts[0].function_call.as_ref().unwrap().name, "read_file");
+    }
+
+    #[test]
+    fn convert_messages_invalid_tool_arguments_returns_error() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: "not valid json".into(),
+                },
+            }]),
+            tool_call_id: None,
+            tool_name: None,
+        }];
+        assert!(convert_messages(&messages).is_err());
     }
 
     #[test]
@@ -361,7 +377,7 @@ mod tests {
             "read_file".into(),
             "file content".into(),
         )];
-        let result = convert_messages(&messages);
+        let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
         let fr = result[0].parts[0].function_response.as_ref().unwrap();
@@ -374,7 +390,7 @@ mod tests {
             Message::tool_result("call_1".into(), "read_file".into(), "a".into()),
             Message::tool_result("call_2".into(), "write_file".into(), "b".into()),
         ];
-        let result = convert_messages(&messages);
+        let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
         assert_eq!(result[0].parts.len(), 2);

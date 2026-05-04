@@ -5,6 +5,10 @@ pub enum Error {
     #[error("API error: {0}")]
     ApiError(String),
 
+    /// HTTP error response from a provider (status code is preserved for retry logic).
+    #[error("HTTP {status}: {body}")]
+    HttpError { status: u16, body: String },
+
     #[error("Tool execution error: {0}")]
     ToolExecutionError(String),
 
@@ -38,14 +42,8 @@ impl Error {
     /// Returns true for transient errors that may succeed on retry (429, 5xx, network errors).
     pub fn is_retryable(&self) -> bool {
         match self {
-            Error::ApiError(msg) => {
-                msg.contains("status 429")
-                    || msg.contains("status 500")
-                    || msg.contains("status 502")
-                    || msg.contains("status 503")
-                    || msg.contains("status 504")
-            }
-            Error::ReqwestError(_) => true,
+            Error::HttpError { status, .. } => matches!(status, 429 | 500 | 502 | 503 | 504),
+            Error::ReqwestError(e) => e.is_timeout() || e.is_connect(),
             _ => false,
         }
     }
@@ -64,28 +62,32 @@ mod tests {
         assert_eq!(err.to_string(), "Config error: missing field");
     }
 
+    fn http_err(status: u16) -> Error {
+        Error::HttpError { status, body: "error".into() }
+    }
+
     #[test]
     fn is_retryable_for_429() {
-        let err = Error::ApiError("API request failed with status 429: rate limited".into());
-        assert!(err.is_retryable());
+        assert!(http_err(429).is_retryable());
     }
 
     #[test]
     fn is_retryable_for_5xx() {
-        for code in &["500", "502", "503", "504"] {
-            let err = Error::ApiError(format!("API request failed with status {}: error", code));
-            assert!(err.is_retryable(), "expected retryable for status {}", code);
+        for code in [500u16, 502, 503, 504] {
+            assert!(http_err(code).is_retryable(), "expected retryable for status {}", code);
         }
     }
 
     #[test]
     fn is_not_retryable_for_400() {
-        let err = Error::ApiError("API request failed with status 400: bad request".into());
-        assert!(!err.is_retryable());
+        assert!(!http_err(400).is_retryable());
+        assert!(!http_err(401).is_retryable());
+        assert!(!http_err(404).is_retryable());
     }
 
     #[test]
-    fn is_not_retryable_for_non_api_errors() {
+    fn is_not_retryable_for_non_http_errors() {
+        assert!(!Error::ApiError("something".into()).is_retryable());
         assert!(!Error::ParseError("bad json".into()).is_retryable());
         assert!(!Error::ConfigError("missing".into()).is_retryable());
         assert!(!Error::ToolExecutionError("failed".into()).is_retryable());
@@ -93,14 +95,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reqwest_error_is_retryable() {
-        // reqwest errors (network failures) should always be retryable
+    async fn reqwest_connection_error_is_retryable() {
         let err = reqwest::Client::new()
             .get("http://127.0.0.1:1")
             .send()
             .await
             .unwrap_err();
-        let error = Error::ReqwestError(err);
-        assert!(error.is_retryable());
+        assert!(Error::ReqwestError(err).is_retryable());
     }
 }

@@ -9,11 +9,11 @@ use crate::core::llm::{
 use crate::error::Result;
 
 /// Build a reqwest client with the configured timeout.
-pub fn build_http_client(timeout_secs: u64) -> ReqwestClient {
+pub fn build_http_client(timeout_secs: u64) -> Result<ReqwestClient> {
     ReqwestClient::builder()
         .timeout(Duration::from_secs(timeout_secs))
         .build()
-        .expect("failed to build HTTP client")
+        .map_err(|e| crate::error::Error::Other(format!("failed to build HTTP client: {}", e)))
 }
 
 /// Create the appropriate LLM client based on the provider name, wrapped with retry logic.
@@ -67,7 +67,7 @@ pub fn resolve_client_and_config(
         if let Some(max_iter) = max_iterations {
             resolved.max_iterations = max_iter;
         }
-        let resolved_http = build_http_client(resolved.timeout_secs);
+        let resolved_http = build_http_client(resolved.timeout_secs)?;
         let client = create_client(&resolved, &resolved_http);
         Ok((client, resolved))
     } else {

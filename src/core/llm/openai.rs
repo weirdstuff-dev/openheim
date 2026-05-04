@@ -50,15 +50,9 @@ impl LlmClient for OpenAiClient {
             .map_err(Error::ReqwestError)?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let error_text = match response.text().await {
-                Ok(t) => t,
-                Err(_) => "<failed to read error body>".to_string(),
-            };
-            return Err(Error::ApiError(format!(
-                "API request failed with status {}: {}",
-                status, error_text
-            )));
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_else(|_| "<failed to read error body>".into());
+            return Err(Error::HttpError { status, body });
         }
 
         let chat_response: ChatResponse = response.json().await.map_err(Error::ReqwestError)?;

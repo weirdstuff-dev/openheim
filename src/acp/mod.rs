@@ -43,7 +43,7 @@ impl AgentState {
         app_config: AppConfig,
         rag: RagContext,
     ) -> crate::error::Result<Self> {
-        let http_client = build_http_client(config.timeout_secs);
+        let http_client = build_http_client(config.timeout_secs)?;
         let llm = create_client(&config, &http_client);
         let executor =
             Arc::new(SystemToolExecutor::build(&app_config.mcp_servers).await) as Arc<dyn ToolExecutor>;

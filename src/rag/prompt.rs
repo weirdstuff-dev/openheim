@@ -4,11 +4,15 @@ pub struct PromptBuilder {
     system_parts: Vec<String>,
 }
 
+impl Default for PromptBuilder {
+    fn default() -> Self {
+        Self { system_parts: Vec::new() }
+    }
+}
+
 impl PromptBuilder {
     pub fn new() -> Self {
-        Self {
-            system_parts: Vec::new(),
-        }
+        Self::default()
     }
 
     pub fn add_skill(&mut self, name: &str, content: &str) {
