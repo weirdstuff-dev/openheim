@@ -405,6 +405,7 @@ async fn run_acp_client(
     mut prompt_rx: mpsc::Receiver<String>,
     update_tx: mpsc::Sender<AgentUpdate>,
 ) {
+    let error_tx = update_tx.clone();
     let result = Client
         .builder()
         .connect_with(transport, async move |cx| {
@@ -493,5 +494,6 @@ async fn run_acp_client(
 
     if let Err(e) = result {
         tracing::error!("TUI ACP client error: {e}");
+        let _ = error_tx.send(AgentUpdate::Error(e.to_string())).await;
     }
 }

@@ -72,8 +72,10 @@ impl McpClient {
 
 fn build_call_params(name: &str, args_json: &str) -> Result<CallToolRequestParams> {
     let trimmed = args_json.trim();
-    let effective = if trimmed.is_empty() { "{}" } else { trimmed };
-    let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(effective)?;
+    if trimmed.is_empty() || trimmed == "{}" {
+        return Ok(CallToolRequestParams::new(name.to_string()));
+    }
+    let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(trimmed)?;
     Ok(CallToolRequestParams::new(name.to_string()).with_arguments(map))
 }
 

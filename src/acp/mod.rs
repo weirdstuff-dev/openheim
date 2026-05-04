@@ -113,7 +113,7 @@ pub async fn serve(
                 let session_key = req.session_id.to_string();
                 let text = extract_prompt_text(&req.prompt);
 
-                let (llm, executor, config, rag, chat_id) = {
+                let (llm, executor, config, rag, chat_id, skills) = {
                     let sessions = state_prompt.sessions.read().await;
                     match sessions.get(&session_key) {
                         Some(s) => (
@@ -122,6 +122,7 @@ pub async fn serve(
                             s.config.clone(),
                             state_prompt.rag.clone(),
                             s.chat_id,
+                            s.skills.clone(),
                         ),
                         None => {
                             return responder.respond_with_internal_error(
@@ -133,7 +134,7 @@ pub async fn serve(
 
                 let (mut conversation, prompt_builder) = match rag.prepare(
                     Some(chat_id),
-                    &[],
+                    &skills,
                     Some(config.model.clone()),
                     Some(config.provider_name.clone()),
                 ) {

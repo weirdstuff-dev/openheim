@@ -147,7 +147,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AgentState>) {
                 Ok(WsInbound::Fs(req)) => {
                     fs_state.handle(req, fs_tx.clone());
                 }
-                Err(_) => {}
+                Err(e) => {
+                    tracing::warn!("invalid WS payload: {e}");
+                    let _ = fs_tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
+                        message: format!("Invalid payload: {e}"),
+                    }));
+                }
             },
             Message::Close(_) => break,
             _ => {}

@@ -30,7 +30,7 @@ pub async fn run_headless(prompt: String, model: Option<String>) -> crate::error
     let server_transport = ByteStreams::new(server_write.compat_write(), server_read.compat());
     let client_transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
 
-    tokio::spawn(acp::serve(server_transport, state));
+    let server_handle = tokio::spawn(acp::serve(server_transport, state));
 
     Client
         .builder()
@@ -73,5 +73,10 @@ pub async fn run_headless(prompt: String, model: Option<String>) -> crate::error
                 .await
         })
         .await
+        .map_err(|e| crate::error::Error::Other(e.to_string()))?;
+
+    server_handle
+        .await
         .map_err(|e| crate::error::Error::Other(e.to_string()))
+        .and_then(|r| r.map_err(|e| crate::error::Error::Other(e.to_string())))
 }
