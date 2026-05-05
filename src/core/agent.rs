@@ -22,15 +22,18 @@ async fn call_llm(
     }
 }
 
-async fn run_agent_loop(
+async fn run_agent_loop<F>(
     llm: &Arc<dyn LlmClient>,
     tool_executor: &Arc<dyn ToolExecutor>,
     config: &AgentConfig,
     messages: &mut Vec<Message>,
     prompt_builder: Option<&PromptBuilder>,
     verbose: bool,
-    mut callback: Option<&mut dyn FnMut(StreamEvent)>,
-) -> Result<AgentResult> {
+    mut callback: Option<F>,
+) -> Result<AgentResult>
+where
+    F: FnMut(StreamEvent) + Send,
+{
     let tools = tool_executor.list_tools();
     let mut steps = Vec::new();
     let mut final_response = String::new();
@@ -45,7 +48,7 @@ async fn run_agent_loop(
         if verbose {
             println!("--- Iteration {} ---", iter_num);
         }
-        if let Some(cb) = callback.as_deref_mut() {
+        if let Some(cb) = callback.as_mut() {
             cb(StreamEvent::IterationStart { iteration: iter_num });
         }
 
@@ -63,19 +66,22 @@ async fn run_agent_loop(
                 let tool_name = &tool_call.function.name;
                 let arguments = &tool_call.function.arguments;
 
-                if let Some(cb) = callback.as_deref_mut() {
+                if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::ToolCall {
                         tool_name: tool_name.clone(),
                         arguments: arguments.clone(),
                     });
                 }
 
-                let result = tool_executor.execute(tool_name, arguments).await?;
+                let result = match tool_executor.execute(tool_name, arguments).await {
+                    Ok(r) => r,
+                    Err(e) => format!("Error: {e}"),
+                };
 
                 if verbose {
                     println!("✅ Tool {}: {}\n", tool_name, result);
                 }
-                if let Some(cb) = callback.as_deref_mut() {
+                if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::ToolResult {
                         tool_name: tool_name.clone(),
                         result: result.clone(),
@@ -100,7 +106,7 @@ async fn run_agent_loop(
             if verbose {
                 println!("💬 LLM Response:\n{}\n", content);
             }
-            if let Some(cb) = callback.as_deref_mut() {
+            if let Some(cb) = callback.as_mut() {
                 cb(StreamEvent::LlmResponse {
                     content: content.clone(),
                 });
@@ -118,7 +124,7 @@ async fn run_agent_loop(
                 if verbose {
                     println!("✨ Agent finished successfully!");
                 }
-                if let Some(cb) = callback.as_deref_mut() {
+                if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::Finished {
                         final_response: final_response.clone(),
                         iterations: iter_num,
@@ -140,7 +146,7 @@ async fn run_agent_loop(
         }
     }
 
-    if let Some(cb) = callback.as_deref_mut() {
+    if let Some(cb) = callback.as_mut() {
         cb(StreamEvent::Finished {
             final_response: final_response.clone(),
             iterations: config.max_iterations,
@@ -162,7 +168,7 @@ pub async fn run_agent_with_history(
     verbose: bool,
     prompt_builder: Option<&PromptBuilder>,
 ) -> Result<AgentResult> {
-    run_agent_loop(
+    run_agent_loop::<fn(StreamEvent)>(
         &llm,
         &tool_executor,
         config,
@@ -180,10 +186,10 @@ pub async fn run_agent_streaming_with_history<F>(
     config: &AgentConfig,
     messages: &mut Vec<Message>,
     prompt_builder: Option<&PromptBuilder>,
-    mut callback: F,
+    callback: F,
 ) -> Result<AgentResult>
 where
-    F: FnMut(StreamEvent),
+    F: FnMut(StreamEvent) + Send,
 {
     run_agent_loop(
         &llm,
@@ -192,7 +198,7 @@ where
         messages,
         prompt_builder,
         false,
-        Some(&mut callback),
+        Some(callback),
     )
     .await
 }
@@ -294,6 +300,16 @@ mod tests {
         }
     }
 
+    struct FailingToolExecutor;
+
+    #[async_trait]
+    impl ToolExecutor for FailingToolExecutor {
+        fn list_tools(&self) -> Vec<Tool> { vec![] }
+        async fn execute(&self, _name: &str, _args: &str) -> Result<String> {
+            Err(Error::ApiError("tool failed".into()))
+        }
+    }
+
     #[tokio::test]
     async fn agent_stops_on_finish_reason_stop() {
         let llm = Arc::new(MockLlm::new(vec![
@@ -378,5 +394,26 @@ mod tests {
         assert!(matches!(events[3], StreamEvent::IterationStart { iteration: 2 }));
         assert!(matches!(&events[4], StreamEvent::LlmResponse { content } if content == "all done"));
         assert!(matches!(&events[5], StreamEvent::Finished { .. }));
+    }
+
+    #[tokio::test]
+    async fn agent_feeds_tool_error_back_to_llm() {
+        let llm = Arc::new(MockLlm::new(vec![
+            tool_call_choice("bad_tool", "{}"),
+            text_choice("I got an error", "stop"),
+        ]));
+        let executor: Arc<dyn ToolExecutor> = Arc::new(FailingToolExecutor);
+        let config = make_config(10);
+        let mut messages = vec![Message::user("do something".into())];
+
+        // Should not propagate the error; LLM should receive it as a tool result
+        let result = run_agent_with_history(
+            llm, executor, &config, &mut messages, false, None,
+        ).await.unwrap();
+
+        assert_eq!(result.final_response, "I got an error");
+        // The tool result message should contain the error text
+        let tool_result_msg = messages.iter().find(|m| m.tool_call_id.is_some()).unwrap();
+        assert!(tool_result_msg.content.as_deref().unwrap_or("").contains("Error:"));
     }
 }

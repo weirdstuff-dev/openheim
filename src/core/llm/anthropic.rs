@@ -38,6 +38,8 @@ impl AnthropicClient {
 struct AnthropicRequest {
     model: String,
     max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicTool>,
@@ -97,7 +99,7 @@ enum AnthropicResponseBlock {
 
 // --- Conversions ---
 
-fn convert_messages(messages: &[Message]) -> Vec<AnthropicMessage> {
+fn convert_messages(messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
     let mut result = Vec::new();
 
     for msg in messages {
@@ -130,10 +132,11 @@ fn convert_messages(messages: &[Message]) -> Vec<AnthropicMessage> {
                 }
                 if let Some(tool_calls) = &msg.tool_calls {
                     for tc in tool_calls {
-                        let input: Value =
-                            serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Object(
-                                serde_json::Map::new(),
-                            ));
+                        let input: Value = serde_json::from_str(&tc.function.arguments)
+                            .map_err(|e| Error::ParseError(format!(
+                                "invalid JSON in tool call arguments for '{}': {}",
+                                tc.function.name, e
+                            )))?;
                         blocks.push(AnthropicContentBlock::ToolUse {
                             id: tc.id.clone(),
                             name: tc.function.name.clone(),
@@ -148,23 +151,20 @@ fn convert_messages(messages: &[Message]) -> Vec<AnthropicMessage> {
                     });
                 }
             }
-            _ => {
-                // user and system roles
-                let role_str = match msg.role {
-                    Role::User => "user",
-                    Role::System => "user",
-                    _ => "user",
-                };
+            Role::User => {
                 let text = msg.content.clone().unwrap_or_default();
                 result.push(AnthropicMessage {
-                    role: role_str.to_string(),
+                    role: "user".to_string(),
                     content: vec![AnthropicContentBlock::Text { text }],
                 });
+            }
+            Role::System => {
+                // extracted into the top-level system field of AnthropicRequest
             }
         }
     }
 
-    result
+    Ok(result)
 }
 
 fn convert_tools(tools: &[Tool]) -> Vec<AnthropicTool> {
@@ -231,10 +231,20 @@ fn convert_response(resp: AnthropicResponse) -> Choice {
 #[async_trait]
 impl LlmClient for AnthropicClient {
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
+        let system: Option<String> = {
+            let parts: Vec<&str> = messages
+                .iter()
+                .filter(|m| m.role == Role::System)
+                .filter_map(|m| m.content.as_deref())
+                .collect();
+            if parts.is_empty() { None } else { Some(parts.join("\n\n")) }
+        };
+
         let request = AnthropicRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
-            messages: convert_messages(messages),
+            system,
+            messages: convert_messages(messages)?,
             tools: convert_tools(tools),
         };
 
@@ -252,15 +262,9 @@ impl LlmClient for AnthropicClient {
             .map_err(Error::ReqwestError)?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let error_text = match response.text().await {
-                Ok(t) => t,
-                Err(_) => "<failed to read error body>".to_string(),
-            };
-            return Err(Error::ApiError(format!(
-                "API request failed with status {}: {}",
-                status, error_text
-            )));
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_else(|_| "<failed to read error body>".into());
+            return Err(Error::HttpError { status, body });
         }
 
         let anthropic_response: AnthropicResponse =
@@ -278,14 +282,14 @@ mod tests {
     #[test]
     fn convert_messages_user_message() {
         let messages = vec![Message::user("hello".into())];
-        let result = convert_messages(&messages);
+        let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
         assert!(matches!(&result[0].content[0], AnthropicContentBlock::Text { text } if text == "hello"));
     }
 
     #[test]
-    fn convert_messages_system_becomes_user() {
+    fn convert_messages_system_is_excluded() {
         let messages = vec![Message {
             role: Role::System,
             content: Some("system prompt".into()),
@@ -293,9 +297,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
         }];
-        let result = convert_messages(&messages);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].role, "user");
+        let result = convert_messages(&messages).unwrap();
+        assert_eq!(result.len(), 0);
     }
 
     #[test]
@@ -314,10 +317,29 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
         }];
-        let result = convert_messages(&messages);
+        let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "assistant");
         assert_eq!(result[0].content.len(), 2); // text + tool_use
+    }
+
+    #[test]
+    fn convert_messages_invalid_tool_arguments_returns_error() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: "not valid json".into(),
+                },
+            }]),
+            tool_call_id: None,
+            tool_name: None,
+        }];
+        assert!(convert_messages(&messages).is_err());
     }
 
     #[test]
@@ -326,7 +348,7 @@ mod tests {
             Message::tool_result("call_1".into(), "read_file".into(), "content1".into()),
             Message::tool_result("call_2".into(), "write_file".into(), "content2".into()),
         ];
-        let result = convert_messages(&messages);
+        let result = convert_messages(&messages).unwrap();
         // Both tool results should merge into a single user message
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");

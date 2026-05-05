@@ -1,85 +1,90 @@
-use clap::Parser;
-use tracing_subscriber::{fmt, EnvFilter};
+use clap::{Parser, Subcommand};
+use tracing_subscriber::{EnvFilter, fmt};
 
 use openheim::{
-    api,
-    cli::{self, Args},
-    config::{build_http_client, init_config, load_config},
-    rag::SkillsManager,
+    config::init_config,
+    transport::{run, stdio, ws},
+    tui,
 };
 
-async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
-    if args.init {
-        let path = init_config()?;
-        println!("Config file created at {}", path.display());
-        println!("Edit it to configure your LLM providers.");
-        return Ok(());
-    }
-
-    let app_config = load_config()?;
-
-    if args.list {
-        print!("{}", app_config.list_models()?);
-        return Ok(());
-    }
-
-    if args.list_skills {
-        let mgr = SkillsManager::new()?;
-        let skills = mgr.list_skills()?;
-        if skills.is_empty() {
-            println!("No skills found. Add .md files to ~/.openheim/skills/");
-        } else {
-            println!("Available skills:");
-            for name in &skills {
-                println!("  - {}", name);
-            }
-        }
-        return Ok(());
-    }
-
-    let agent_config = app_config.resolve(None)?;
-    let client = build_http_client(agent_config.timeout_secs);
-
-    if args.api_mode {
-        api::start_api_server(args.host, args.port, client, agent_config, app_config).await?;
-    } else if args.agent_mode {
-        cli::run_agent_mode(
-            &client,
-            &agent_config,
-            &app_config,
-            args.model.as_deref(),
-            args.max_iterations,
-            args.chat_id.as_deref(),
-            args.continue_last,
-            args.skills.clone().unwrap_or_default(),
-        )
-        .await?;
-    } else {
-        cli::run_single_prompt(
-            &client,
-            &agent_config,
-            &app_config,
-            args.model.as_deref(),
-            args.max_iterations,
-            &args,
-        )
-        .await?;
-    }
-
-    Ok(())
+#[derive(Parser, Debug)]
+#[command(name = "openheim", about = "AI agent")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+    /// Comma-separated skills to activate for this session (e.g. --skills rust,nodejs)
+    #[arg(long = "skills", value_name = "NAMES", value_delimiter = ',', global = false)]
+    skills: Vec<String>,
 }
 
-#[actix_web::main]
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Serve as an ACP agent over stdio (for Zed, Claude Code, etc.)
+    Acp,
+    /// Run a single prompt headlessly and stream output to stdout
+    Run {
+        /// Prompt to send to the agent
+        prompt: String,
+        /// Model name override (must be configured in a provider)
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Start WebSocket/ACP server
+    Serve {
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+        #[arg(long, default_value = "1217")]
+        port: u16,
+    },
+    /// Initialize config file at ~/.openheim/config.toml
+    Init,
+}
+
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
     fmt::Subscriber::builder().with_env_filter(env_filter).init();
 
-    let args = Args::parse();
+    let cli = Cli::parse();
 
-    if let Err(e) = run(args).await {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
+    match cli.command {
+        None => {
+            if let Err(e) = tui::run(cli.skills).await {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Command::Acp) => {
+            if let Err(e) = stdio::run().await {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Command::Run { prompt, model }) => {
+            if let Err(e) = run::run_headless(prompt, model).await {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Command::Serve { host, port }) => {
+            if let Err(e) = ws::serve(host, port).await {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Command::Init) => {
+            match init_config() {
+                Ok(path) => {
+                    println!("Config file created at {}", path.display());
+                    println!("Edit it to configure your LLM providers.");
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 
     Ok(())

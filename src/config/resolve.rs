@@ -1,5 +1,26 @@
-use super::types::{AgentConfig, AppConfig};
+use super::types::{AgentConfig, AppConfig, ProviderConfig};
 use crate::error::{Error, Result};
+
+fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<()> {
+    if provider.api_base.is_empty() {
+        return Err(Error::config(format!("Provider '{}' has an empty api_base", name)));
+    }
+    if !provider.api_base.starts_with("http://") && !provider.api_base.starts_with("https://") {
+        return Err(Error::config(format!(
+            "Provider '{}' api_base '{}' must start with http:// or https://",
+            name, provider.api_base
+        )));
+    }
+    if !provider.models.is_empty() && !provider.models.contains(&provider.default_model) {
+        return Err(Error::config(format!(
+            "Provider '{}' default_model '{}' is not listed in models: [{}]",
+            name,
+            provider.default_model,
+            provider.models.join(", ")
+        )));
+    }
+    Ok(())
+}
 
 impl AppConfig {
     pub fn resolve(&self, model_name: Option<&str>) -> Result<AgentConfig> {
@@ -17,6 +38,7 @@ impl AppConfig {
                 self.provider_names()
             ))
         })?;
+        validate_provider(&self.default_provider, provider)?;
         Ok(AgentConfig {
             provider_name: self.default_provider.clone(),
             api_base: provider.api_base.clone(),
@@ -31,6 +53,7 @@ impl AppConfig {
     fn resolve_model(&self, model_name: &str) -> Result<AgentConfig> {
         for (name, provider) in &self.providers {
             if provider.models.contains(&model_name.to_string()) {
+                validate_provider(name, provider)?;
                 return Ok(AgentConfig {
                     provider_name: name.clone(),
                     api_base: provider.api_base.clone(),
@@ -189,5 +212,45 @@ mod tests {
         };
         let err = config.list_models().unwrap_err();
         assert!(err.to_string().contains("No providers configured"));
+    }
+
+    fn provider_with_base(api_base: &str) -> ProviderConfig {
+        ProviderConfig {
+            api_base: api_base.into(),
+            default_model: "gpt-4".into(),
+            models: vec!["gpt-4".into()],
+            env_var: None,
+            api_key: Some("key".into()),
+            timeout_secs: None,
+            max_tokens: None,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_empty_api_base() {
+        let p = provider_with_base("");
+        let err = validate_provider("test", &p).unwrap_err();
+        assert!(err.to_string().contains("empty api_base"));
+    }
+
+    #[test]
+    fn validate_rejects_non_http_api_base() {
+        let p = provider_with_base("ftp://example.com");
+        let err = validate_provider("test", &p).unwrap_err();
+        assert!(err.to_string().contains("http://") || err.to_string().contains("https://"));
+    }
+
+    #[test]
+    fn validate_rejects_default_model_not_in_models() {
+        let mut p = provider_with_base("https://api.example.com");
+        p.default_model = "gpt-5".into();
+        let err = validate_provider("test", &p).unwrap_err();
+        assert!(err.to_string().contains("gpt-5"));
+    }
+
+    #[test]
+    fn validate_accepts_valid_provider() {
+        let p = provider_with_base("https://api.example.com");
+        assert!(validate_provider("test", &p).is_ok());
     }
 }
