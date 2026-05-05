@@ -55,4 +55,4 @@ ENV RUST_LOG=info
 ENTRYPOINT ["docker-entrypoint.sh"]
 
 # Default to API mode
-CMD ["openheim", "--api-mode"]
+CMD ["openheim", "serve"]
