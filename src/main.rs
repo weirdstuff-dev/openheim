@@ -12,6 +12,9 @@ use openheim::{
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+    /// Comma-separated skills to activate for this session (e.g. --skills rust,nodejs)
+    #[arg(long = "skills", value_name = "NAMES", value_delimiter = ',', global = false)]
+    skills: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -47,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         None => {
-            if let Err(e) = tui::run().await {
+            if let Err(e) = tui::run(cli.skills).await {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
             }

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use agent_client_protocol::{
     ByteStreams, Client,
     schema::{
-        ContentBlock, InitializeRequest, ProtocolVersion, SessionNotification, SessionUpdate,
-        ToolCallStatus,
+        ContentBlock, InitializeRequest, NewSessionRequest, ProtocolVersion, SessionNotification,
+        SessionUpdate, ToolCallStatus,
     },
     util::MatchDispatch,
     SessionMessage,
@@ -19,7 +19,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use crate::{
     acp::{self, AgentState},
     config::{AgentConfig, AppConfig, load_config},
-    rag::{ConversationMeta, RagContext},
+    rag::{ConversationMeta, RagContext, SkillsManager},
 };
 
 #[derive(Debug, Clone)]
@@ -31,7 +31,7 @@ enum AgentUpdate {
     Error(String),
 }
 
-pub async fn run() -> crate::error::Result<()> {
+pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
     let app_config = load_config()?;
     let agent_config = app_config.resolve(None)?;
     let rag = RagContext::new()?;
@@ -48,13 +48,18 @@ pub async fn run() -> crate::error::Result<()> {
     let client_transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
 
     tokio::spawn(acp::serve(server_transport, state));
-    tokio::spawn(run_acp_client(client_transport, prompt_rx, update_tx));
+    tokio::spawn(run_acp_client(client_transport, prompt_rx, update_tx, skills.clone()));
 
     let mut editor = DefaultEditor::new()
         .map_err(|e| crate::error::Error::Other(e.to_string()))?;
 
     println!("{}", "openheim".yellow().bold());
-    println!("{}", "type a message or :help for commands".dimmed());
+    if skills.is_empty() {
+        println!("{}", "type a message or :help for commands".dimmed());
+    } else {
+        println!("{}", "type a message or :help for commands".dimmed());
+        println!("  {} {}", "skills:".dimmed(), skills.join(", ").yellow());
+    }
     println!();
 
     let mut sessions: Vec<ConversationMeta> = Vec::new();
@@ -207,6 +212,33 @@ fn handle_command(
             }
             println!();
         }
+        "skills" => {
+            match SkillsManager::new() {
+                Ok(mgr) => match mgr.list_skills() {
+                    Ok(names) if names.is_empty() => {
+                        println!("{}", "  no skills available".dimmed());
+                        println!(
+                            "{}",
+                            "  add <name>.md files to ~/.openheim/skills/".dimmed()
+                        );
+                    }
+                    Ok(names) => {
+                        println!();
+                        for name in &names {
+                            println!("  {}", name);
+                        }
+                        println!();
+                        println!(
+                            "{}",
+                            "  activate with: openheim --skills <name>,<name>,...".dimmed()
+                        );
+                    }
+                    Err(e) => println!("{}", format!("  error listing skills: {e}").red()),
+                },
+                Err(e) => println!("{}", format!("  error: {e}").red()),
+            }
+            println!();
+        }
         "help" => {
             println!();
             let c = |s: &str| format!("{:<16}", s).bold().to_string();
@@ -216,6 +248,7 @@ fn handle_command(
             println!("  {}  load session n", c(":open <n>"));
             println!("  {}  show current config", c(":config"));
             println!("  {}  show MCP servers", c(":mcp"));
+            println!("  {}  list available skills", c(":skills"));
             println!();
         }
         unknown => {
@@ -404,6 +437,7 @@ async fn run_acp_client(
     >,
     mut prompt_rx: mpsc::Receiver<String>,
     update_tx: mpsc::Sender<AgentUpdate>,
+    skills: Vec<String>,
 ) {
     let error_tx = update_tx.clone();
     let result = Client
@@ -413,7 +447,17 @@ async fn run_acp_client(
                 .block_task()
                 .await?;
 
-            cx.build_session_cwd()?
+            let cwd = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let request = if skills.is_empty() {
+                NewSessionRequest::new(cwd)
+            } else {
+                let mut meta = serde_json::Map::new();
+                meta.insert("skills".to_string(), serde_json::json!(skills));
+                NewSessionRequest::new(cwd).meta(meta)
+            };
+
+            cx.build_session_from(request)
                 .block_task()
                 .run_until(async move |mut session| {
                     while let Some(prompt) = prompt_rx.recv().await {

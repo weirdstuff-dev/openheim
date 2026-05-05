@@ -94,13 +94,19 @@ pub async fn serve(
                 let chat_id = Uuid::new_v4();
                 let session_key = chat_id.to_string();
 
+                let skills: Vec<String> = req.meta
+                    .as_ref()
+                    .and_then(|m| m.get("skills"))
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+
                 state_session.sessions.write().await.insert(
                     session_key.clone(),
                     SessionState {
                         chat_id,
                         config: state_session.config.clone(),
                         cwd: req.cwd,
-                        skills: vec![],
+                        skills,
                     },
                 );
 
