@@ -39,6 +39,8 @@ struct GeminiRequest {
     tools: Vec<GeminiToolDeclaration>,
     #[serde(skip_serializing_if = "Option::is_none")]
     generation_config: Option<GeminiGenerationConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_instruction: Option<GeminiContent>,
 }
 
 #[derive(Debug, Serialize)]
@@ -174,8 +176,7 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<GeminiContent>> {
                     parts: vec![part],
                 });
             }
-            _ => {
-                // user and system roles (Gemini has no dedicated system role in the messages array)
+            Role::User => {
                 let text = msg.content.clone().unwrap_or_default();
                 result.push(GeminiContent {
                     role: "user".to_string(),
@@ -185,6 +186,9 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<GeminiContent>> {
                         function_response: None,
                     }],
                 });
+            }
+            Role::System => {
+                // extracted into system_instruction field of GeminiRequest
             }
         }
     }
@@ -268,12 +272,33 @@ fn convert_response(resp: GeminiResponse) -> Result<Choice> {
 #[async_trait]
 impl LlmClient for GeminiClient {
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
+        let system_instruction: Option<GeminiContent> = {
+            let parts: Vec<&str> = messages
+                .iter()
+                .filter(|m| m.role == Role::System)
+                .filter_map(|m| m.content.as_deref())
+                .collect();
+            if parts.is_empty() {
+                None
+            } else {
+                Some(GeminiContent {
+                    role: "user".to_string(),
+                    parts: vec![GeminiPart {
+                        text: Some(parts.join("\n\n")),
+                        function_call: None,
+                        function_response: None,
+                    }],
+                })
+            }
+        };
+
         let request = GeminiRequest {
             contents: convert_messages(messages)?,
             tools: convert_tools(tools),
             generation_config: self.max_tokens.map(|t| GeminiGenerationConfig {
                 max_output_tokens: t,
             }),
+            system_instruction,
         };
 
         let endpoint = format!(

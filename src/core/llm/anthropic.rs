@@ -38,6 +38,8 @@ impl AnthropicClient {
 struct AnthropicRequest {
     model: String,
     max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicTool>,
@@ -149,13 +151,15 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
                     });
                 }
             }
-            _ => {
-                // Anthropic has no "system" role in messages; system prompts become user turns.
+            Role::User => {
                 let text = msg.content.clone().unwrap_or_default();
                 result.push(AnthropicMessage {
                     role: "user".to_string(),
                     content: vec![AnthropicContentBlock::Text { text }],
                 });
+            }
+            Role::System => {
+                // extracted into the top-level system field of AnthropicRequest
             }
         }
     }
@@ -227,9 +231,19 @@ fn convert_response(resp: AnthropicResponse) -> Choice {
 #[async_trait]
 impl LlmClient for AnthropicClient {
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
+        let system: Option<String> = {
+            let parts: Vec<&str> = messages
+                .iter()
+                .filter(|m| m.role == Role::System)
+                .filter_map(|m| m.content.as_deref())
+                .collect();
+            if parts.is_empty() { None } else { Some(parts.join("\n\n")) }
+        };
+
         let request = AnthropicRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
+            system,
             messages: convert_messages(messages)?,
             tools: convert_tools(tools),
         };
@@ -275,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn convert_messages_system_becomes_user() {
+    fn convert_messages_system_is_excluded() {
         let messages = vec![Message {
             role: Role::System,
             content: Some("system prompt".into()),
@@ -284,8 +298,7 @@ mod tests {
             tool_name: None,
         }];
         let result = convert_messages(&messages).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].role, "user");
+        assert_eq!(result.len(), 0);
     }
 
     #[test]

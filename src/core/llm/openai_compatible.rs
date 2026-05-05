@@ -1,10 +1,11 @@
 use async_trait::async_trait;
 use reqwest::Client as ReqwestClient;
 
-use crate::core::models::{ChatRequest, ChatResponse, Choice, Message, Tool};
-use crate::error::{Error, Result};
+use crate::core::models::{Choice, Message, Tool};
+use crate::error::Result;
 
 use super::LlmClient;
+use super::openai::send_openai_style;
 
 #[derive(Clone)]
 pub struct OpenAiCompatibleClient {
@@ -30,37 +31,6 @@ impl OpenAiCompatibleClient {
 #[async_trait]
 impl LlmClient for OpenAiCompatibleClient {
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
-        let request = ChatRequest {
-            model: self.model.clone(),
-            messages: messages.to_vec(),
-            tools: tools.to_vec(),
-            max_tokens: self.max_tokens,
-        };
-
-        let endpoint = format!("{}/chat/completions", self.api_base.trim_end_matches('/'));
-
-        let response = self
-            .client
-            .post(&endpoint)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .map_err(Error::ReqwestError)?;
-
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_else(|_| "<failed to read error body>".into());
-            return Err(Error::HttpError { status, body });
-        }
-
-        let chat_response: ChatResponse = response.json().await.map_err(Error::ReqwestError)?;
-
-        chat_response
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::ApiError("No response from LLM".to_string()))
+        send_openai_style(&self.client, &self.api_base, &self.api_key, &self.model, self.max_tokens, messages, tools).await
     }
 }

@@ -204,11 +204,13 @@ pub async fn serve(
                     tracing::warn!("failed to save conversation: {e}");
                 }
 
-                if let Err(e) = run_result {
-                    tracing::error!("agent loop error: {e}");
+                match run_result {
+                    Ok(_) => responder.respond(PromptResponse::new(StopReason::EndTurn)),
+                    Err(e) => {
+                        tracing::error!("agent loop error: {e}");
+                        responder.respond_with_internal_error(e.to_string())
+                    }
                 }
-
-                responder.respond(PromptResponse::new(StopReason::EndTurn))
             },
             on_receive_request!(),
         )

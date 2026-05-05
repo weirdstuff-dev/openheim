@@ -1,13 +1,8 @@
 use crate::core::models::{Message, Role};
 
+#[derive(Default)]
 pub struct PromptBuilder {
     system_parts: Vec<String>,
-}
-
-impl Default for PromptBuilder {
-    fn default() -> Self {
-        Self { system_parts: Vec::new() }
-    }
 }
 
 impl PromptBuilder {

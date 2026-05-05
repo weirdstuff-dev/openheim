@@ -406,14 +406,22 @@ fn validate_path_opt(workspace: &Option<PathBuf>, path: &str) -> Option<PathBuf>
 }
 
 async fn list_directory(path: &Path, recursive: bool) -> Vec<FileEntry> {
-    let mut entries = Vec::new();
     if recursive {
-        for e in WalkDir::new(path).min_depth(1).into_iter().filter_map(|e| e.ok()) {
-            if let Some(entry) = path_to_file_entry(e.path()) {
-                entries.push(entry);
-            }
-        }
-    } else if let Ok(mut dir) = fs::read_dir(path).await {
+        let path = path.to_path_buf();
+        return tokio::task::spawn_blocking(move || {
+            WalkDir::new(&path)
+                .min_depth(1)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter_map(|e| path_to_file_entry(e.path()))
+                .collect()
+        })
+        .await
+        .unwrap_or_default();
+    }
+
+    let mut entries = Vec::new();
+    if let Ok(mut dir) = fs::read_dir(path).await {
         while let Ok(Some(e)) = dir.next_entry().await {
             if let Some(entry) = path_to_file_entry(&e.path()) {
                 entries.push(entry);
