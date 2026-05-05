@@ -145,7 +145,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AgentState>) {
                     let _ = acp_in_tx.unbounded_send(Ok(line));
                 }
                 Ok(WsInbound::Fs(req)) => {
-                    fs_state.handle(req, fs_tx.clone());
+                    fs_state.handle(req, fs_tx.clone()).await;
                 }
                 Err(e) => {
                     tracing::warn!("invalid WS payload: {e}");
@@ -174,7 +174,7 @@ impl FsState {
         Self { workspace_root: None, _watcher: None }
     }
 
-    fn handle(&mut self, req: FsRequest, tx: UnboundedSender<WsOutbound>) {
+    async fn handle(&mut self, req: FsRequest, tx: UnboundedSender<WsOutbound>) {
         match req {
             FsRequest::Watch { path } => self.start_watching(path, tx),
             FsRequest::Unwatch => {
@@ -182,127 +182,109 @@ impl FsState {
                 let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Unwatched));
             }
             FsRequest::List { path, recursive } => {
-                let workspace = self.workspace_root.clone();
-                tokio::spawn(async move {
-                    match validate_path_opt(&workspace, &path) {
-                        Some(validated) => {
-                            let entries =
-                                list_directory(&validated, recursive.unwrap_or(false)).await;
-                            let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::FileList {
-                                path,
-                                entries,
-                            }));
-                        }
-                        None => send_path_error(&tx),
+                match validate_path_opt(&self.workspace_root, &path) {
+                    Some(validated) => {
+                        let entries =
+                            list_directory(&validated, recursive.unwrap_or(false)).await;
+                        let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::FileList {
+                            path,
+                            entries,
+                        }));
                     }
-                });
+                    None => send_path_error(&tx),
+                }
             }
             FsRequest::Read { path } => {
-                let workspace = self.workspace_root.clone();
-                tokio::spawn(async move {
-                    match validate_path_opt(&workspace, &path) {
-                        Some(validated) => {
-                            let resp = match fs::read_to_string(&validated).await {
-                                Ok(content) => FsResponse::FileContent { path, content },
-                                Err(e) => FsResponse::Error {
-                                    message: format!("Failed to read: {e}"),
-                                },
-                            };
-                            let _ = tx.unbounded_send(WsOutbound::Fs(resp));
-                        }
-                        None => send_path_error(&tx),
+                match validate_path_opt(&self.workspace_root, &path) {
+                    Some(validated) => {
+                        let resp = match fs::read_to_string(&validated).await {
+                            Ok(content) => FsResponse::FileContent { path, content },
+                            Err(e) => FsResponse::Error {
+                                message: format!("Failed to read: {e}"),
+                            },
+                        };
+                        let _ = tx.unbounded_send(WsOutbound::Fs(resp));
                     }
-                });
+                    None => send_path_error(&tx),
+                }
             }
             FsRequest::Write { path, content } => {
-                let workspace = self.workspace_root.clone();
-                tokio::spawn(async move {
-                    match validate_path_opt(&workspace, &path) {
-                        Some(validated) => {
-                            if let Some(parent) = validated.parent() {
-                                if !parent.exists() {
-                                    if let Err(e) = fs::create_dir_all(parent).await {
-                                        let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
-                                            message: format!("Failed to create dirs: {e}"),
-                                        }));
-                                        return;
-                                    }
+                match validate_path_opt(&self.workspace_root, &path) {
+                    Some(validated) => {
+                        if let Some(parent) = validated.parent() {
+                            if !parent.exists() {
+                                if let Err(e) = fs::create_dir_all(parent).await {
+                                    let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
+                                        message: format!("Failed to create dirs: {e}"),
+                                    }));
+                                    return;
                                 }
                             }
-                            let resp = match fs::write(&validated, content).await {
-                                Ok(()) => FsResponse::WriteSuccess { path },
-                                Err(e) => FsResponse::Error {
-                                    message: format!("Failed to write: {e}"),
-                                },
-                            };
-                            let _ = tx.unbounded_send(WsOutbound::Fs(resp));
                         }
-                        None => send_path_error(&tx),
+                        let resp = match fs::write(&validated, content).await {
+                            Ok(()) => FsResponse::WriteSuccess { path },
+                            Err(e) => FsResponse::Error {
+                                message: format!("Failed to write: {e}"),
+                            },
+                        };
+                        let _ = tx.unbounded_send(WsOutbound::Fs(resp));
                     }
-                });
+                    None => send_path_error(&tx),
+                }
             }
             FsRequest::Mkdir { path } => {
-                let workspace = self.workspace_root.clone();
-                tokio::spawn(async move {
-                    match validate_path_opt(&workspace, &path) {
-                        Some(validated) => {
-                            let resp = match fs::create_dir_all(&validated).await {
-                                Ok(()) => FsResponse::MkdirSuccess { path },
-                                Err(e) => FsResponse::Error {
-                                    message: format!("Failed to mkdir: {e}"),
-                                },
-                            };
-                            let _ = tx.unbounded_send(WsOutbound::Fs(resp));
-                        }
-                        None => send_path_error(&tx),
+                match validate_path_opt(&self.workspace_root, &path) {
+                    Some(validated) => {
+                        let resp = match fs::create_dir_all(&validated).await {
+                            Ok(()) => FsResponse::MkdirSuccess { path },
+                            Err(e) => FsResponse::Error {
+                                message: format!("Failed to mkdir: {e}"),
+                            },
+                        };
+                        let _ = tx.unbounded_send(WsOutbound::Fs(resp));
                     }
-                });
+                    None => send_path_error(&tx),
+                }
             }
             FsRequest::Delete { path } => {
-                let workspace = self.workspace_root.clone();
-                tokio::spawn(async move {
-                    match validate_path_opt(&workspace, &path) {
-                        Some(validated) => {
-                            let resp = if validated.is_dir() {
-                                match fs::remove_dir_all(&validated).await {
-                                    Ok(()) => FsResponse::DeleteSuccess { path },
-                                    Err(e) => FsResponse::Error {
-                                        message: format!("Failed to delete dir: {e}"),
-                                    },
-                                }
-                            } else {
-                                match fs::remove_file(&validated).await {
-                                    Ok(()) => FsResponse::DeleteSuccess { path },
-                                    Err(e) => FsResponse::Error {
-                                        message: format!("Failed to delete file: {e}"),
-                                    },
-                                }
-                            };
-                            let _ = tx.unbounded_send(WsOutbound::Fs(resp));
-                        }
-                        None => send_path_error(&tx),
+                match validate_path_opt(&self.workspace_root, &path) {
+                    Some(validated) => {
+                        let resp = if validated.is_dir() {
+                            match fs::remove_dir_all(&validated).await {
+                                Ok(()) => FsResponse::DeleteSuccess { path },
+                                Err(e) => FsResponse::Error {
+                                    message: format!("Failed to delete dir: {e}"),
+                                },
+                            }
+                        } else {
+                            match fs::remove_file(&validated).await {
+                                Ok(()) => FsResponse::DeleteSuccess { path },
+                                Err(e) => FsResponse::Error {
+                                    message: format!("Failed to delete file: {e}"),
+                                },
+                            }
+                        };
+                        let _ = tx.unbounded_send(WsOutbound::Fs(resp));
                     }
-                });
+                    None => send_path_error(&tx),
+                }
             }
             FsRequest::Rename { from, to } => {
-                let workspace = self.workspace_root.clone();
-                tokio::spawn(async move {
-                    match (
-                        validate_path_opt(&workspace, &from),
-                        validate_path_opt(&workspace, &to),
-                    ) {
-                        (Some(vf), Some(vt)) => {
-                            let resp = match fs::rename(&vf, &vt).await {
-                                Ok(()) => FsResponse::RenameSuccess { from, to },
-                                Err(e) => FsResponse::Error {
-                                    message: format!("Failed to rename: {e}"),
-                                },
-                            };
-                            let _ = tx.unbounded_send(WsOutbound::Fs(resp));
-                        }
-                        _ => send_path_error(&tx),
+                match (
+                    validate_path_opt(&self.workspace_root, &from),
+                    validate_path_opt(&self.workspace_root, &to),
+                ) {
+                    (Some(vf), Some(vt)) => {
+                        let resp = match fs::rename(&vf, &vt).await {
+                            Ok(()) => FsResponse::RenameSuccess { from, to },
+                            Err(e) => FsResponse::Error {
+                                message: format!("Failed to rename: {e}"),
+                            },
+                        };
+                        let _ = tx.unbounded_send(WsOutbound::Fs(resp));
                     }
-                });
+                    _ => send_path_error(&tx),
+                }
             }
         }
     }
@@ -389,16 +371,18 @@ fn validate_path_opt(workspace: &Option<PathBuf>, path: &str) -> Option<PathBuf>
     let check_path = if canonical.exists() {
         canonical.canonicalize().ok()?
     } else {
-        let parent = canonical.parent()?;
-        if !parent.exists() {
-            return None;
-        }
-        let canonical_parent = parent.canonicalize().ok()?;
         let workspace_canonical = workspace.canonicalize().ok()?;
-        if !canonical_parent.starts_with(&workspace_canonical) {
-            return None;
+        let mut parent = canonical.parent()?;
+        loop {
+            if parent.exists() {
+                let canonical_ancestor = parent.canonicalize().ok()?;
+                if !canonical_ancestor.starts_with(&workspace_canonical) {
+                    return None;
+                }
+                return Some(canonical);
+            }
+            parent = parent.parent()?;
         }
-        return Some(canonical);
     };
 
     let workspace_canonical = workspace.canonicalize().ok()?;
