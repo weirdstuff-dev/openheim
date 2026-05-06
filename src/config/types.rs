@@ -2,6 +2,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+/// Public model info for a single provider (no credentials).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderModels {
+    pub default_model: String,
+    pub models: Vec<String>,
+}
+
+/// JSON-safe summary of all configured providers and their models.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelsInfo {
+    pub default_provider: String,
+    pub providers: BTreeMap<String, ProviderModels>,
+}
+
 /// Top-level configuration loaded from ~/.openheim/config.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -32,6 +46,27 @@ pub struct McpServerConfig {
 
 fn default_max_iterations() -> usize {
     10
+}
+
+impl AppConfig {
+    pub fn models_info(&self) -> ModelsInfo {
+        ModelsInfo {
+            default_provider: self.default_provider.clone(),
+            providers: self
+                .providers
+                .iter()
+                .map(|(name, p)| {
+                    (
+                        name.clone(),
+                        ProviderModels {
+                            default_model: p.default_model.clone(),
+                            models: p.models.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Per-provider configuration

@@ -73,6 +73,7 @@ pub async fn serve(
     transport: impl ConnectTo<Agent>,
     state: Arc<AgentState>,
 ) -> agent_client_protocol::Result<()> {
+    let state_init = state.clone();
     let state_session = state.clone();
     let state_prompt = state.clone();
 
@@ -81,10 +82,15 @@ pub async fn serve(
         .name("openheim")
         .on_receive_request(
             async move |req: InitializeRequest, responder, _cx: ConnectionTo<Client>| {
+                let mut meta = serde_json::Map::new();
+                if let Ok(val) = serde_json::to_value(state_init.app_config.models_info()) {
+                    meta.insert("models".to_string(), val);
+                }
                 responder.respond(
                     InitializeResponse::new(req.protocol_version)
                         .agent_capabilities(AgentCapabilities::new())
-                        .agent_info(Implementation::new("openheim", env!("CARGO_PKG_VERSION"))),
+                        .agent_info(Implementation::new("openheim", env!("CARGO_PKG_VERSION")))
+                        .meta(meta),
                 )
             },
             on_receive_request!(),

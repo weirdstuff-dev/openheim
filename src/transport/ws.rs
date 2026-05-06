@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    Router,
+    Json, Router,
     extract::{
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -56,6 +56,7 @@ pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        .route("/models", get(models_handler))
         .with_state(state);
 
     let addr = format!("{host}:{port}");
@@ -74,6 +75,10 @@ pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
         .map_err(|e| crate::error::Error::Other(format!("Server error: {e}")))?;
 
     Ok(())
+}
+
+async fn models_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
+    Json(state.app_config.models_info())
 }
 
 async fn ws_handler(
