@@ -106,11 +106,18 @@ pub async fn serve(
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
                     .unwrap_or_default();
 
+                let config = req.meta
+                    .as_ref()
+                    .and_then(|m| m.get("model"))
+                    .and_then(|v| v.as_str())
+                    .and_then(|model| state_session.app_config.resolve(Some(model)).ok())
+                    .unwrap_or_else(|| state_session.config.clone());
+
                 state_session.sessions.write().await.insert(
                     session_key.clone(),
                     SessionState {
                         chat_id,
-                        config: state_session.config.clone(),
+                        config,
                         cwd: req.cwd,
                         skills,
                     },
