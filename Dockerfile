@@ -46,8 +46,6 @@ USER openheim
 # Create config directory (will be used if no volume mounted)
 RUN mkdir -p /home/openheim/.openheim
 
-COPY config.toml /home/openheim/.openheim/config.toml
-
 # Expose the API port
 EXPOSE 1217
 
