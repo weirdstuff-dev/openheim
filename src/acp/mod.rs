@@ -88,7 +88,7 @@ pub async fn serve(
                 if let Ok(val) = serde_json::to_value(state_init.app_config.models_info()) {
                     meta.insert("models".to_string(), val);
                 }
-                if let Ok(val) = serde_json::to_value(state_init.app_config.mcp_servers_info()) {
+                if let Ok(val) = serde_json::to_value(&state_init.mcp_statuses) {
                     meta.insert("mcp_servers".to_string(), val);
                 }
                 if let Ok(skills) = state_init.rag.skills.list_skills() {
