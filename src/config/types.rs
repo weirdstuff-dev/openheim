@@ -16,6 +16,16 @@ pub struct ModelsInfo {
     pub providers: BTreeMap<String, ProviderModels>,
 }
 
+/// Public info for a single MCP server (no credentials or env vars).
+#[derive(Debug, Clone, Serialize)]
+pub struct McpServerInfo {
+    pub transport: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
 /// Top-level configuration loaded from ~/.openheim/config.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -66,6 +76,41 @@ impl AppConfig {
                 })
                 .collect(),
         }
+    }
+
+    pub fn to_public_json(&self) -> serde_json::Value {
+        let mut val = serde_json::to_value(self).unwrap_or_default();
+        if let Some(providers) = val.get_mut("providers").and_then(|v| v.as_object_mut()) {
+            for p in providers.values_mut() {
+                if let Some(obj) = p.as_object_mut() {
+                    obj.remove("api_key");
+                }
+            }
+        }
+        if let Some(servers) = val.get_mut("mcp_servers").and_then(|v| v.as_object_mut()) {
+            for s in servers.values_mut() {
+                if let Some(env) = s.get_mut("env").and_then(|v| v.as_object_mut()) {
+                    for v in env.values_mut() {
+                        *v = serde_json::Value::String("<redacted>".to_string());
+                    }
+                }
+            }
+        }
+        val
+    }
+
+    pub fn mcp_servers_info(&self) -> BTreeMap<String, McpServerInfo> {
+        self.mcp_servers
+            .iter()
+            .map(|(name, cfg)| {
+                let info = if cfg.command.is_some() {
+                    McpServerInfo { transport: "stdio", command: cfg.command.clone(), url: None }
+                } else {
+                    McpServerInfo { transport: "http", command: None, url: cfg.url.clone() }
+                };
+                (name.clone(), info)
+            })
+            .collect()
     }
 }
 

@@ -34,6 +34,7 @@ pub struct AgentState {
     pub config: AgentConfig,
     pub app_config: AppConfig,
     pub rag: RagContext,
+    pub mcp_statuses: Vec<crate::mcp::McpServerStatus>,
     sessions: Sessions,
 }
 
@@ -45,14 +46,15 @@ impl AgentState {
     ) -> crate::error::Result<Self> {
         let http_client = build_http_client(config.timeout_secs)?;
         let llm = create_client(&config, &http_client);
-        let executor =
-            Arc::new(SystemToolExecutor::build(&app_config.mcp_servers).await) as Arc<dyn ToolExecutor>;
+        let (sys_executor, mcp_statuses) = SystemToolExecutor::build(&app_config.mcp_servers).await;
+        let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
         Ok(Self {
             llm,
             executor,
             config,
             app_config,
             rag,
+            mcp_statuses,
             sessions: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -85,6 +87,17 @@ pub async fn serve(
                 let mut meta = serde_json::Map::new();
                 if let Ok(val) = serde_json::to_value(state_init.app_config.models_info()) {
                     meta.insert("models".to_string(), val);
+                }
+                if let Ok(val) = serde_json::to_value(state_init.app_config.mcp_servers_info()) {
+                    meta.insert("mcp_servers".to_string(), val);
+                }
+                if let Ok(skills) = state_init.rag.skills.list_skills() {
+                    if let Ok(val) = serde_json::to_value(skills) {
+                        meta.insert("skills".to_string(), val);
+                    }
+                }
+                if let Ok(val) = serde_json::to_value(state_init.executor.list_tools()) {
+                    meta.insert("tools".to_string(), val);
                 }
                 responder.respond(
                     InitializeResponse::new(req.protocol_version)

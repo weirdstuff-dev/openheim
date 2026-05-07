@@ -56,7 +56,11 @@ pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
-        .route("/models", get(models_handler))
+        .route("/api/config", get(config_handler))
+        .route("/api/models", get(models_handler))
+        .route("/api/skills", get(skills_handler))
+        .route("/api/tools", get(tools_handler))
+        .route("/api/mcp-servers", get(mcp_servers_handler))
         .with_state(state);
 
     let addr = format!("{host}:{port}");
@@ -65,6 +69,7 @@ pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
         .map_err(|e| crate::error::Error::Other(format!("Failed to bind {addr}: {e}")))?;
 
     tracing::info!("WS server listening on ws://{addr}/ws");
+    tracing::info!("API available at http://{addr}/api/{{config,models,skills,tools,mcp-servers}}");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
@@ -77,8 +82,24 @@ pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
     Ok(())
 }
 
+async fn config_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
+    Json(state.app_config.to_public_json())
+}
+
 async fn models_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
     Json(state.app_config.models_info())
+}
+
+async fn skills_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
+    Json(state.rag.skills.list_skills().unwrap_or_default())
+}
+
+async fn tools_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
+    Json(state.executor.list_tools())
+}
+
+async fn mcp_servers_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
+    Json(state.mcp_statuses.clone())
 }
 
 async fn ws_handler(
