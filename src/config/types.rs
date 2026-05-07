@@ -105,8 +105,10 @@ impl AppConfig {
             .map(|(name, cfg)| {
                 let info = if cfg.command.is_some() {
                     McpServerInfo { transport: "stdio", command: cfg.command.clone(), url: None }
-                } else {
+                } else if cfg.url.is_some() {
                     McpServerInfo { transport: "http", command: None, url: cfg.url.clone() }
+                } else {
+                    McpServerInfo { transport: "unknown", command: None, url: None }
                 };
                 (name.clone(), info)
             })

@@ -33,8 +33,10 @@ pub(crate) async fn load_mcp_tools(
     for (name, config) in configs {
         let (transport, command, url) = if config.command.is_some() {
             ("stdio", config.command.clone(), None)
-        } else {
+        } else if config.url.is_some() {
             ("http", None, config.url.clone())
+        } else {
+            ("unknown", None, None)
         };
 
         match connect_server(name, config).await {
