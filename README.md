@@ -26,10 +26,11 @@ Openheim is built in Rust from the ground up:
 
 - **Multi-provider** — OpenAI, Anthropic Claude, Google Gemini, and any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.)
 - **Tool execution** — built-in shell, file read, and file write tools. Trait-based, so you can add your own.
+- **MCP (Model Context Protocol)** — connect external MCP servers (stdio or Streamable HTTP) and their tools are automatically exposed to the LLM as `{server_name}__{tool_name}`.
 - **Conversation memory** — conversations (including full tool call history) persist to disk and resume across sessions
 - **Skills** — drop a markdown file into `~/.openheim/skills/` and it's prepended to the system prompt. ACP clients can also pass skills per-session via `_meta`.
 - **ACP transport** — implements the [Agent Client Protocol](https://github.com/block/agent-client-protocol) over stdio (for editor integrations) and WebSocket (for remote clients), with real-time streaming of message chunks and tool calls
-- **Filesystem WebSocket** — WS channel for file operations with live file watching
+- **Unified WebSocket** — single multiplexed `WS /ws` connection carries both ACP agent traffic (sessions, streaming, tool calls) and filesystem operations (file CRUD, live watching) via channel envelopes
 - **Retry with backoff** — transient failures (429s, 5xx, network errors) are retried automatically with exponential backoff
 - **Docker ready** — multi-stage Dockerfile and docker-compose included
 
@@ -71,17 +72,34 @@ api_base = "https://api.openai.com/v1"
 default_model = "gpt-4"
 models = ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
 env_var = "OPENAI_API_KEY"
+# timeout_secs = 120  # Request timeout in seconds (default: 120)
+# max_tokens = 4096   # Maximum output tokens for LLM responses
 
 [providers.anthropic]
 api_base = "https://api.anthropic.com/v1"
-default_model = "claude-3-5-sonnet-20241022"
-models = ["claude-3-5-sonnet-20241022", "claude-3-opus-20240229"]
+default_model = "claude-sonnet-4-5-20250929"
+models = ["claude-sonnet-4-5-20250929", "claude-3-5-sonnet-20241022", "claude-3-opus-20240229"]
 env_var = "ANTHROPIC_API_KEY"
 
+[providers.gemini]
+api_base = "https://generativelanguage.googleapis.com/v1beta"
+default_model = "gemini-2.5-flash"
+models = ["gemini-2.5-flash", "gemini-2.5-pro"]
+env_var = "GEMINI_API_KEY"
+
+# Local Ollama (no API key needed)
 [providers.ollama]
 api_base = "http://localhost:11434/v1"
 default_model = "llama2"
 models = ["llama2", "mistral", "codellama"]
+
+# MCP servers — tools are exposed as "{server_name}__{tool_name}"
+# [mcp_servers.filesystem]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+#
+# [mcp_servers.remote-tools]
+# url = "http://localhost:8080/mcp"
 ```
 
 ### Run
@@ -148,12 +166,25 @@ ACP clients (Zed, Claude Code, etc.) can pass skills per-session by including a 
 
 Start with `cargo run -- serve` (defaults to `0.0.0.0:1217`).
 
-The server speaks the [Agent Client Protocol](https://github.com/block/agent-client-protocol) over WebSocket and exposes two endpoints:
+The server speaks the [Agent Client Protocol](https://github.com/block/agent-client-protocol) over WebSocket and exposes a multiplexed WS endpoint plus REST API routes:
+
+### WebSocket
 
 | Endpoint | Description |
 |---|---|
-| `WS /ws` | ACP agent — handle sessions, stream message chunks and tool calls |
-| `WS /fs` | Filesystem channel — file operations with live file watching |
+| `WS /ws` | Single multiplexed connection carrying two channels via JSON envelopes: **agent** (ACP sessions, streaming, tool calls) and **fs** (file CRUD, live watching) |
+
+Every message is wrapped in `{ "channel": "<agent|fs>", "data": <payload> }`.
+
+### REST API
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/config` | Public config (providers, models — API keys stripped) |
+| `GET /api/models` | Available models per provider |
+| `GET /api/skills` | List of installed skills |
+| `GET /api/tools` | All registered tool definitions (built-in + MCP) |
+| `GET /api/mcp-servers` | MCP server connection statuses |
 
 ---
 
@@ -179,19 +210,29 @@ docker run -p 1217:1217 \
 src/
   main.rs           Entry point and subcommand dispatch
   lib.rs            Public API surface
-  error.rs          Error types
-  config/           Config loading, provider/model resolution, LLM client factory
+  error.rs          Error types (with retryable classification for backoff)
+  config/           Config loading, provider/model resolution, defaults
   core/
     agent.rs        Agent loop (streaming variant)
-    models.rs       Message, Tool, Choice, and related types
+    models.rs       Message, Tool, Choice, and WebSocket envelope types
     llm/            LLM client trait and provider implementations
+      anthropic.rs    Anthropic Messages API client
+      gemini.rs       Google Gemini API client
+      openai.rs       OpenAI API client
+      openai_compatible.rs  Generic OpenAI-compatible client (Ollama, etc.)
+      retry.rs        Automatic retry with exponential backoff
   tools/            Tool trait, registry, and built-in tools
+    execute_command.rs / read_file.rs / write_file.rs
+  mcp/              MCP (Model Context Protocol) client integration
+    client.rs       MCP server connection (stdio + Streamable HTTP)
+    tool_handler.rs  Adapts MCP tools to the ToolHandler trait
   rag/              Conversation history, prompt builder, and skills manager
   acp/              ACP agent core — session state and protocol handling
   transport/
     stdio.rs        ACP-over-stdio transport (for editor integrations)
-    ws.rs           ACP-over-WebSocket server (axum) + filesystem channel
+    ws.rs           Multiplexed WebSocket server (axum) + REST API + filesystem channel
     run.rs          Headless single-prompt transport
+    WS_SPEC.md      Full WebSocket protocol reference for frontend implementors
   tui/              Interactive rustyline REPL
 ```
 
