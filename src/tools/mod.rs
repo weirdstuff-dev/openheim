@@ -34,13 +34,16 @@ impl SystemToolExecutor {
         Self { handlers: HashMap::new() }
     }
 
-    pub async fn build(mcp_configs: &BTreeMap<String, McpServerConfig>) -> Self {
+    pub async fn build(
+        mcp_configs: &BTreeMap<String, McpServerConfig>,
+    ) -> (Self, Vec<crate::mcp::McpServerStatus>) {
         let mut executor = Self::new();
         executor.register_builtins();
-        for handler in crate::mcp::load_mcp_tools(mcp_configs).await {
+        let (handlers, statuses) = crate::mcp::load_mcp_tools(mcp_configs).await;
+        for handler in handlers {
             executor.register(handler);
         }
-        executor
+        (executor, statuses)
     }
 
     pub fn register_builtins(&mut self) {

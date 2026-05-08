@@ -2,6 +2,30 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+/// Public model info for a single provider (no credentials).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderModels {
+    pub default_model: String,
+    pub models: Vec<String>,
+}
+
+/// JSON-safe summary of all configured providers and their models.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelsInfo {
+    pub default_provider: String,
+    pub providers: BTreeMap<String, ProviderModels>,
+}
+
+/// Public info for a single MCP server (no credentials or env vars).
+#[derive(Debug, Clone, Serialize)]
+pub struct McpServerInfo {
+    pub transport: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
 /// Top-level configuration loaded from ~/.openheim/config.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -32,6 +56,64 @@ pub struct McpServerConfig {
 
 fn default_max_iterations() -> usize {
     10
+}
+
+impl AppConfig {
+    pub fn models_info(&self) -> ModelsInfo {
+        ModelsInfo {
+            default_provider: self.default_provider.clone(),
+            providers: self
+                .providers
+                .iter()
+                .map(|(name, p)| {
+                    (
+                        name.clone(),
+                        ProviderModels {
+                            default_model: p.default_model.clone(),
+                            models: p.models.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    pub fn to_public_json(&self) -> serde_json::Value {
+        let mut val = serde_json::to_value(self).unwrap_or_default();
+        if let Some(providers) = val.get_mut("providers").and_then(|v| v.as_object_mut()) {
+            for p in providers.values_mut() {
+                if let Some(obj) = p.as_object_mut() {
+                    obj.remove("api_key");
+                }
+            }
+        }
+        if let Some(servers) = val.get_mut("mcp_servers").and_then(|v| v.as_object_mut()) {
+            for s in servers.values_mut() {
+                if let Some(env) = s.get_mut("env").and_then(|v| v.as_object_mut()) {
+                    for v in env.values_mut() {
+                        *v = serde_json::Value::String("<redacted>".to_string());
+                    }
+                }
+            }
+        }
+        val
+    }
+
+    pub fn mcp_servers_info(&self) -> BTreeMap<String, McpServerInfo> {
+        self.mcp_servers
+            .iter()
+            .map(|(name, cfg)| {
+                let info = if cfg.command.is_some() {
+                    McpServerInfo { transport: "stdio", command: cfg.command.clone(), url: None }
+                } else if cfg.url.is_some() {
+                    McpServerInfo { transport: "http", command: None, url: cfg.url.clone() }
+                } else {
+                    McpServerInfo { transport: "unknown", command: None, url: None }
+                };
+                (name.clone(), info)
+            })
+            .collect()
+    }
 }
 
 /// Per-provider configuration

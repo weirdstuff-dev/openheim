@@ -34,6 +34,7 @@ pub struct AgentState {
     pub config: AgentConfig,
     pub app_config: AppConfig,
     pub rag: RagContext,
+    pub mcp_statuses: Vec<crate::mcp::McpServerStatus>,
     sessions: Sessions,
 }
 
@@ -45,14 +46,15 @@ impl AgentState {
     ) -> crate::error::Result<Self> {
         let http_client = build_http_client(config.timeout_secs)?;
         let llm = create_client(&config, &http_client);
-        let executor =
-            Arc::new(SystemToolExecutor::build(&app_config.mcp_servers).await) as Arc<dyn ToolExecutor>;
+        let (sys_executor, mcp_statuses) = SystemToolExecutor::build(&app_config.mcp_servers).await;
+        let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
         Ok(Self {
             llm,
             executor,
             config,
             app_config,
             rag,
+            mcp_statuses,
             sessions: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -73,6 +75,7 @@ pub async fn serve(
     transport: impl ConnectTo<Agent>,
     state: Arc<AgentState>,
 ) -> agent_client_protocol::Result<()> {
+    let state_init = state.clone();
     let state_session = state.clone();
     let state_prompt = state.clone();
 
@@ -81,10 +84,26 @@ pub async fn serve(
         .name("openheim")
         .on_receive_request(
             async move |req: InitializeRequest, responder, _cx: ConnectionTo<Client>| {
+                let mut meta = serde_json::Map::new();
+                if let Ok(val) = serde_json::to_value(state_init.app_config.models_info()) {
+                    meta.insert("models".to_string(), val);
+                }
+                if let Ok(val) = serde_json::to_value(&state_init.mcp_statuses) {
+                    meta.insert("mcp_servers".to_string(), val);
+                }
+                if let Ok(skills) = state_init.rag.skills.list_skills() {
+                    if let Ok(val) = serde_json::to_value(skills) {
+                        meta.insert("skills".to_string(), val);
+                    }
+                }
+                if let Ok(val) = serde_json::to_value(state_init.executor.list_tools()) {
+                    meta.insert("tools".to_string(), val);
+                }
                 responder.respond(
                     InitializeResponse::new(req.protocol_version)
                         .agent_capabilities(AgentCapabilities::new())
-                        .agent_info(Implementation::new("openheim", env!("CARGO_PKG_VERSION"))),
+                        .agent_info(Implementation::new("openheim", env!("CARGO_PKG_VERSION")))
+                        .meta(meta),
                 )
             },
             on_receive_request!(),
@@ -100,11 +119,18 @@ pub async fn serve(
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
                     .unwrap_or_default();
 
+                let config = req.meta
+                    .as_ref()
+                    .and_then(|m| m.get("model"))
+                    .and_then(|v| v.as_str())
+                    .and_then(|model| state_session.app_config.resolve(Some(model)).ok())
+                    .unwrap_or_else(|| state_session.config.clone());
+
                 state_session.sessions.write().await.insert(
                     session_key.clone(),
                     SessionState {
                         chat_id,
-                        config: state_session.config.clone(),
+                        config,
                         cwd: req.cwd,
                         skills,
                     },
