@@ -11,6 +11,7 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use tower_http::cors::{Any, CorsLayer};
 use futures::{
     SinkExt, StreamExt,
     channel::mpsc::{self, UnboundedSender},
@@ -54,6 +55,11 @@ pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
     let rag = RagContext::new()?;
     let state = Arc::new(AgentState::new(agent_config, app_config, rag).await?);
 
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/api/config", get(config_handler))
@@ -61,6 +67,7 @@ pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
         .route("/api/skills", get(skills_handler))
         .route("/api/tools", get(tools_handler))
         .route("/api/mcp-servers", get(mcp_servers_handler))
+        .layer(cors)
         .with_state(state);
 
     let addr = format!("{host}:{port}");
