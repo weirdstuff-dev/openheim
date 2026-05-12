@@ -185,6 +185,25 @@ Every message is wrapped in `{ "channel": "<agent|fs>", "data": <payload> }`.
 | `GET /api/skills` | List of installed skills |
 | `GET /api/tools` | All registered tool definitions (built-in + MCP) |
 | `GET /api/mcp-servers` | MCP server connection statuses |
+| `GET /api/sessions` | All persisted sessions (metadata only, newest first) |
+| `GET /api/sessions/{id}` | Full conversation — messages, tool calls, and metadata |
+
+> **Frontend / WebSocket implementors:** see [OPENHEIM_SPEC.md](./OPENHEIM_SPEC.md) for the complete protocol reference, TypeScript interfaces, and sequence diagrams.
+
+---
+
+## Use as a library
+
+Openheim can be embedded directly in your Rust application via the `openheim` crate. The library exposes the full agent runtime — sessions, streaming, conversation history, skills, and MCP servers — through a single `OpenheimClient` facade.
+
+```toml
+# Cargo.toml
+[dependencies]
+openheim = { path = "../openheim-core" }
+tokio = { version = "1", features = ["full"] }
+```
+
+See **[docs/library.md](./docs/library.md)** for the full API reference, session management, multi-turn conversations, and MCP integration.
 
 ---
 
