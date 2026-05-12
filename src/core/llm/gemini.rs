@@ -114,15 +114,14 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<GeminiContent>> {
         match msg.role {
             Role::Assistant => {
                 let mut parts = Vec::new();
-                if let Some(text) = &msg.content {
-                    if !text.is_empty() {
+                if let Some(text) = &msg.content
+                    && !text.is_empty() {
                         parts.push(GeminiPart {
                             text: Some(text.clone()),
                             function_call: None,
                             function_response: None,
                         });
                     }
-                }
                 if let Some(tool_calls) = &msg.tool_calls {
                     for tc in tool_calls {
                         let args: Value = serde_json::from_str(&tc.function.arguments)

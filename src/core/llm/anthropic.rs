@@ -125,11 +125,10 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
             }
             Role::Assistant => {
                 let mut blocks = Vec::new();
-                if let Some(text) = &msg.content {
-                    if !text.is_empty() {
+                if let Some(text) = &msg.content
+                    && !text.is_empty() {
                         blocks.push(AnthropicContentBlock::Text { text: text.clone() });
                     }
-                }
                 if let Some(tool_calls) = &msg.tool_calls {
                     for tc in tool_calls {
                         let input: Value = serde_json::from_str(&tc.function.arguments)

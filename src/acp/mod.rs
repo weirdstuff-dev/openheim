@@ -180,8 +180,8 @@ impl AgentState {
         Ok(metas
             .iter()
             .filter(|m| {
-                cwd.map_or(true, |filter| {
-                    m.cwd.as_deref().map_or(false, |c| c == filter)
+                cwd.is_none_or(|filter| {
+                    m.cwd.as_deref() == Some(filter)
                 })
             })
             .map(|m| {
@@ -284,11 +284,10 @@ pub async fn serve(
                 if let Ok(val) = serde_json::to_value(&state_init.mcp_statuses) {
                     meta.insert("mcp_servers".to_string(), val);
                 }
-                if let Ok(skills) = state_init.rag.skills.list_skills() {
-                    if let Ok(val) = serde_json::to_value(skills) {
+                if let Ok(skills) = state_init.rag.skills.list_skills()
+                    && let Ok(val) = serde_json::to_value(skills) {
                         meta.insert("skills".to_string(), val);
                     }
-                }
                 if let Ok(val) = serde_json::to_value(state_init.executor.list_tools()) {
                     meta.insert("tools".to_string(), val);
                 }

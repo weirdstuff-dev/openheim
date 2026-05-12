@@ -219,14 +219,12 @@ impl HistoryManager {
         let mut conv_to_save = conv.clone();
         conv_to_save.meta.updated_at = Utc::now();
 
-        if conv_to_save.meta.title.is_none() {
-            if let Some(msg) = conv_to_save.messages.iter().find(|m| m.role == Role::User) {
-                if let Some(content) = &msg.content {
+        if conv_to_save.meta.title.is_none()
+            && let Some(msg) = conv_to_save.messages.iter().find(|m| m.role == Role::User)
+                && let Some(content) = &msg.content {
                     let title: String = content.chars().take(80).collect();
                     conv_to_save.meta.title = Some(title);
                 }
-            }
-        }
 
         let json = serde_json::to_string_pretty(&conv_to_save)?;
         std::fs::write(&path, json)?;

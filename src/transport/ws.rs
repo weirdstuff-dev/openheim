@@ -185,13 +185,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AgentState>) {
                 msg = acp_out_rx.next() => {
                     match msg {
                         Some(line) => {
-                            if let Ok(val) = serde_json::from_str::<Value>(&line) {
-                                if let Ok(text) = serde_json::to_string(&WsOutbound::Agent(val)) {
-                                    if ws_tx.send(Message::Text(text.into())).await.is_err() {
+                            if let Ok(val) = serde_json::from_str::<Value>(&line)
+                                && let Ok(text) = serde_json::to_string(&WsOutbound::Agent(val))
+                                    && ws_tx.send(Message::Text(text.into())).await.is_err() {
                                         break;
                                     }
-                                }
-                            }
                         }
                         None => break,
                     }
@@ -199,11 +197,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AgentState>) {
                 msg = fs_rx.next() => {
                     match msg {
                         Some(env) => {
-                            if let Ok(text) = serde_json::to_string(&env) {
-                                if ws_tx.send(Message::Text(text.into())).await.is_err() {
+                            if let Ok(text) = serde_json::to_string(&env)
+                                && ws_tx.send(Message::Text(text.into())).await.is_err() {
                                     break;
                                 }
-                            }
                         }
                         None => break,
                     }
@@ -288,16 +285,14 @@ impl FsState {
             FsRequest::Write { path, content } => {
                 match validate_path_opt(&self.workspace_root, &path) {
                     Some(validated) => {
-                        if let Some(parent) = validated.parent() {
-                            if !parent.exists() {
-                                if let Err(e) = fs::create_dir_all(parent).await {
+                        if let Some(parent) = validated.parent()
+                            && !parent.exists()
+                                && let Err(e) = fs::create_dir_all(parent).await {
                                     let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
                                         message: format!("Failed to create dirs: {e}"),
                                     }));
                                     return;
                                 }
-                            }
-                        }
                         let resp = match fs::write(&validated, content).await {
                             Ok(()) => FsResponse::WriteSuccess { path },
                             Err(e) => FsResponse::Error {

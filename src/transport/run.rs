@@ -52,12 +52,10 @@ pub async fn run_headless(prompt: String, model: Option<String>) -> crate::error
                                         async |notif: SessionNotification| {
                                             if let SessionUpdate::AgentMessageChunk(chunk) =
                                                 notif.update
-                                            {
-                                                if let ContentBlock::Text(t) = chunk.content {
+                                                && let ContentBlock::Text(t) = chunk.content {
                                                     print!("{}", t.text);
                                                     let _ = std::io::stdout().flush();
                                                 }
-                                            }
                                             Ok(())
                                         },
                                     )
