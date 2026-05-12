@@ -5,9 +5,10 @@ use std::time::Duration;
 use axum::{
     Json, Router,
     extract::{
-        State,
+        Path as AxumPath, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
+    http::StatusCode,
     response::IntoResponse,
     routing::get,
 };
@@ -28,6 +29,7 @@ use crate::{
     acp::{self, AgentState},
     config::load_config,
     core::models::{FileEntry, FsRequest, FsResponse},
+    error::Error as AppError,
     rag::RagContext,
 };
 
@@ -67,6 +69,8 @@ pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
         .route("/api/skills", get(skills_handler))
         .route("/api/tools", get(tools_handler))
         .route("/api/mcp-servers", get(mcp_servers_handler))
+        .route("/api/sessions", get(sessions_handler))
+        .route("/api/sessions/{id}", get(session_handler))
         .layer(cors)
         .with_state(state);
 
@@ -107,6 +111,46 @@ async fn tools_handler(State(state): State<Arc<AgentState>>) -> impl IntoRespons
 
 async fn mcp_servers_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
     Json(state.mcp_statuses.clone())
+}
+
+async fn sessions_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
+    match state.rag.history.list_conversations() {
+        Ok(metas) => Json(metas).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "failed to load conversations" })),
+        )
+            .into_response(),
+    }
+}
+
+async fn session_handler(
+    State(state): State<Arc<AgentState>>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let uuid = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid session id" })),
+            )
+                .into_response();
+        }
+    };
+    match state.rag.history.load_conversation(&uuid) {
+        Ok(conv) => Json(conv).into_response(),
+        Err(AppError::Other(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "session not found" })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "failed to load session" })),
+        )
+            .into_response(),
+    }
 }
 
 async fn ws_handler(

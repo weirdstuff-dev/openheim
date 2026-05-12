@@ -144,6 +144,8 @@ pub struct ConversationMeta {
     pub title: Option<String>,
     #[serde(default)]
     pub skills: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +192,7 @@ impl HistoryManager {
                 provider,
                 title: None,
                 skills,
+                cwd: None,
             },
             messages: Vec::new(),
         };
@@ -282,6 +285,7 @@ impl HistoryManager {
                             provider,
                             title: None,
                             skills,
+                            cwd: None,
                         },
                         messages: Vec::new(),
                     };

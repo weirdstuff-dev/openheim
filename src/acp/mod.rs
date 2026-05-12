@@ -7,9 +7,11 @@ use agent_client_protocol::{
     on_receive_dispatch, on_receive_request,
     schema::{
         AgentCapabilities, ContentBlock, ContentChunk, Implementation, InitializeRequest,
-        InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
-        SessionNotification, SessionUpdate, StopReason, ToolCall as AcpToolCall, ToolCallStatus,
-        ToolCallUpdate, ToolCallUpdateFields,
+        InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+        LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
+        SessionCapabilities, SessionInfo, SessionListCapabilities, SessionNotification,
+        SessionUpdate, StopReason, ToolCall as AcpToolCall, ToolCallStatus, ToolCallUpdate,
+        ToolCallUpdateFields,
     },
     util::internal_error,
 };
@@ -18,7 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     config::{AgentConfig, AppConfig, build_http_client, create_client},
-    core::{agent::run_agent_streaming_with_history, models::StreamEvent},
+    core::{agent::run_agent_streaming_with_history, models::{Role, StreamEvent}},
     llm::LlmClient,
     rag::RagContext,
     tools::{SystemToolExecutor, ToolExecutor},
@@ -78,6 +80,8 @@ pub async fn serve(
     let state_init = state.clone();
     let state_session = state.clone();
     let state_prompt = state.clone();
+    let state_list = state.clone();
+    let state_load = state.clone();
 
     Agent
         .builder()
@@ -101,7 +105,14 @@ pub async fn serve(
                 }
                 responder.respond(
                     InitializeResponse::new(req.protocol_version)
-                        .agent_capabilities(AgentCapabilities::new())
+                        .agent_capabilities(
+                            AgentCapabilities::new()
+                                .load_session(true)
+                                .session_capabilities(
+                                    SessionCapabilities::new()
+                                        .list(SessionListCapabilities::new()),
+                                ),
+                        )
                         .agent_info(Implementation::new("openheim", env!("CARGO_PKG_VERSION")))
                         .meta(meta),
                 )
@@ -145,7 +156,7 @@ pub async fn serve(
                 let session_key = req.session_id.to_string();
                 let text = extract_prompt_text(&req.prompt);
 
-                let (llm, executor, config, rag, chat_id, skills) = {
+                let (llm, executor, config, rag, chat_id, skills, cwd) = {
                     let sessions = state_prompt.sessions.read().await;
                     match sessions.get(&session_key) {
                         Some(s) => (
@@ -155,6 +166,7 @@ pub async fn serve(
                             state_prompt.rag.clone(),
                             s.chat_id,
                             s.skills.clone(),
+                            s.cwd.clone(),
                         ),
                         None => {
                             return responder.respond_with_internal_error(
@@ -178,6 +190,7 @@ pub async fn serve(
                     }
                 };
 
+                conversation.meta.cwd = Some(cwd);
                 conversation
                     .messages
                     .push(crate::core::models::Message::user(text));
@@ -243,6 +256,91 @@ pub async fn serve(
                         responder.respond_with_internal_error(e.to_string())
                     }
                 }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: ListSessionsRequest, responder, _cx: ConnectionTo<Client>| {
+                let metas = match state_list.rag.history.list_conversations() {
+                    Ok(m) => m,
+                    Err(e) => return responder.respond_with_internal_error(e.to_string()),
+                };
+
+                let sessions: Vec<SessionInfo> = metas
+                    .iter()
+                    .filter(|m| {
+                        req.cwd.as_ref().map_or(true, |filter| {
+                            m.cwd.as_deref().map_or(false, |c| c == filter.as_path())
+                        })
+                    })
+                    .map(|m| {
+                        let cwd = m.cwd.clone().unwrap_or_else(|| std::path::PathBuf::from("/"));
+                        let mut info = SessionInfo::new(m.id.to_string(), cwd);
+                        if let Some(t) = &m.title {
+                            info = info.title(t.clone());
+                        }
+                        info.updated_at(m.updated_at.to_rfc3339())
+                    })
+                    .collect();
+
+                responder.respond(ListSessionsResponse::new(sessions))
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: LoadSessionRequest, responder, cx: ConnectionTo<Client>| {
+                let session_id_str = req.session_id.0.as_ref();
+                let uuid = match uuid::Uuid::parse_str(session_id_str) {
+                    Ok(u) => u,
+                    Err(_) => {
+                        return responder
+                            .respond_with_internal_error("invalid session id format");
+                    }
+                };
+
+                let conversation = match state_load.rag.history.load_conversation(&uuid) {
+                    Ok(c) => c,
+                    Err(e) => return responder.respond_with_internal_error(e.to_string()),
+                };
+
+                let mut session_config = state_load.config.clone();
+                if let Some(model) = &conversation.meta.model {
+                    session_config.model = model.clone();
+                }
+                if let Some(provider) = &conversation.meta.provider {
+                    session_config.provider_name = provider.clone();
+                }
+                state_load.sessions.write().await.insert(
+                    req.session_id.0.to_string(),
+                    SessionState {
+                        chat_id: uuid,
+                        config: session_config,
+                        cwd: req.cwd.clone(),
+                        skills: conversation.meta.skills.clone(),
+                    },
+                );
+
+                for msg in &conversation.messages {
+                    let text = msg.content.clone().unwrap_or_default();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let update = match msg.role {
+                        Role::User => SessionUpdate::UserMessageChunk(ContentChunk::new(
+                            ContentBlock::from(text),
+                        )),
+                        Role::Assistant => SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                            ContentBlock::from(text),
+                        )),
+                        _ => continue,
+                    };
+                    let _ = cx.send_notification(SessionNotification::new(
+                        req.session_id.clone(),
+                        update,
+                    ));
+                }
+
+                responder.respond(LoadSessionResponse::new())
             },
             on_receive_request!(),
         )
