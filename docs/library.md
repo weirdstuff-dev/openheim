@@ -1,0 +1,408 @@
+# openheim as a Rust library
+
+Openheim can be embedded directly in your Rust application. The library exposes the full agent runtime — sessions, streaming, conversation history, RAG, skills, MCP servers, and tools — through a single `OpenheimClient` facade built on top of the [Agent Client Protocol (ACP)](https://github.com/block/agent-client-protocol).
+
+---
+
+## Add to your project
+
+```toml
+# Cargo.toml
+[dependencies]
+openheim = { path = "../openheim-core" }   # or version once published
+tokio = { version = "1", features = ["full"] }
+```
+
+---
+
+## Quick start
+
+```rust
+use openheim::{OpenheimClient, SessionUpdate};
+
+#[tokio::main]
+async fn main() -> openheim::Result<()> {
+    // Loads ~/.openheim/config.toml
+    let client = OpenheimClient::builder().build().await?;
+
+    let session = client
+        .new_session()
+        .cwd("/my/project")
+        .start()
+        .await?;
+
+    session
+        .prompt("What files are in the current directory?", |update| {
+            if let SessionUpdate::AgentMessageChunk(chunk) = update {
+                for block in &chunk.content {
+                    if let openheim::ContentBlock::Text(t) = block {
+                        print!("{}", t.text);
+                    }
+                }
+            }
+        })
+        .await?;
+
+    Ok(())
+}
+```
+
+---
+
+## Client initialisation
+
+### From `~/.openheim/config.toml` (default)
+
+```rust
+let client = OpenheimClient::builder().build().await?;
+```
+
+### From a custom config file
+
+```rust
+let client = OpenheimClient::from_config("/etc/myapp/openheim.toml")
+    .build()
+    .await?;
+```
+
+### Programmatic config (no file needed)
+
+```rust
+let client = OpenheimClient::builder()
+    .provider("anthropic")
+    .api_key("sk-ant-...")
+    .model("claude-opus-4-7")
+    .max_iterations(15)
+    .build()
+    .await?;
+```
+
+Supported `provider` values: `"openai"`, `"anthropic"`, `"gemini"`, or any string for OpenAI-compatible endpoints (Ollama, vLLM, LM Studio, etc.).
+
+Default models when `.model()` is omitted:
+- `"anthropic"` → `claude-sonnet-4-6`
+- `"gemini"` → `gemini-2.0-flash`
+- everything else → `gpt-4o`
+
+### With MCP servers
+
+MCP servers can be added in either mode. Their tools become available to the agent automatically as `{server_name}__{tool_name}`.
+
+```rust
+use openheim::{McpServerConfig, OpenheimClient};
+use std::collections::HashMap;
+
+let client = OpenheimClient::builder()
+    .provider("openai")
+    .api_key(std::env::var("OPENAI_API_KEY").unwrap())
+    // stdio MCP server
+    .mcp_server("filesystem", McpServerConfig {
+        command: Some("npx".into()),
+        args: vec![
+            "-y".into(),
+            "@modelcontextprotocol/server-filesystem".into(),
+            "/workspace".into(),
+        ],
+        env: HashMap::new(),
+        url: None,
+    })
+    // Streamable HTTP MCP server
+    .mcp_server("my-tools", McpServerConfig {
+        command: None,
+        args: vec![],
+        env: HashMap::new(),
+        url: Some("http://localhost:8080/mcp".into()),
+    })
+    .build()
+    .await?;
+```
+
+MCP servers defined in a config file are always loaded; builder `.mcp_server()` calls are merged in on top.
+
+---
+
+## Sessions
+
+Sessions are the unit of conversation. Each session has its own message history, model, skills, and working directory.
+
+### Create a session
+
+```rust
+let session = client
+    .new_session()
+    .model("gpt-4o")                          // optional — overrides the config default
+    .skills(vec!["rust".into(), "tdd".into()]) // optional — names of ~/.openheim/skills/*.md
+    .cwd("/my/workspace")                      // optional — used for history filtering
+    .start()
+    .await?;
+
+println!("session id: {}", session.id);
+```
+
+### Send a prompt (streaming)
+
+`prompt` calls your callback once per ACP `SessionUpdate` event as the agent runs.
+
+```rust
+use openheim::{AcpToolCall, ContentBlock, SessionUpdate};
+
+session
+    .prompt("Refactor the auth module to use JWTs", |update| {
+        match update {
+            SessionUpdate::AgentMessageChunk(chunk) => {
+                for block in &chunk.content {
+                    if let ContentBlock::Text(t) = block {
+                        print!("{}", t.text);
+                    }
+                }
+            }
+            SessionUpdate::ToolCall(tc) => {
+                println!("\n[tool] {} — running…", tc.name);
+            }
+            SessionUpdate::ToolCallUpdate(tcu) => {
+                println!("[tool] {} — done", tcu.id);
+            }
+            _ => {}
+        }
+    })
+    .await?;
+```
+
+### Multi-turn conversation
+
+Call `prompt` multiple times on the same handle. The agent accumulates history on disk automatically.
+
+```rust
+session.prompt("My name is Alice", |_| {}).await?;
+session.prompt("What's my name?", |update| { /* prints "Alice" */ }).await?;
+```
+
+---
+
+## History & session management
+
+### List sessions
+
+```rust
+use std::path::Path;
+
+// All sessions, newest first
+let all = client.list_sessions(None)?;
+
+// Only sessions from a specific working directory
+let workspace = client.list_sessions(Some(Path::new("/my/workspace")))?;
+
+for info in &workspace {
+    println!("{} — {}", info.id, info.title.as_deref().unwrap_or("untitled"));
+}
+```
+
+### Get full conversation (messages + metadata)
+
+```rust
+let conv = client.get_session("550e8400-e29b-41d4-a716-446655440000")?;
+
+println!("model: {:?}", conv.meta.model);
+println!("messages: {}", conv.messages.len());
+
+for msg in &conv.messages {
+    println!("[{:?}] {}", msg.role, msg.content.as_deref().unwrap_or(""));
+}
+```
+
+### Resume a session (load + continue prompting)
+
+`load_session` registers the conversation in the live sessions map and replays the message history through your callback so you can populate a UI.
+
+```rust
+let session = client
+    .load_session(
+        "550e8400-e29b-41d4-a716-446655440000",
+        "/my/workspace".into(),
+        |update| {
+            // replay previous messages into your UI
+            match update {
+                SessionUpdate::UserMessageChunk(chunk) => { /* render user bubble */ }
+                SessionUpdate::AgentMessageChunk(chunk) => { /* render agent bubble */ }
+                _ => {}
+            }
+        },
+    )
+    .await?;
+
+// Continue where the conversation left off
+session.prompt("Continue from where you left off", |update| { /* … */ }).await?;
+```
+
+### Delete a session
+
+```rust
+client.delete_session("550e8400-e29b-41d4-a716-446655440000")?;
+```
+
+---
+
+## RAG — direct history and skills access
+
+`client.rag()` returns a `&RagContext` with direct access to the underlying `HistoryManager` and `SkillsManager`. This is useful for advanced use cases like building custom UIs, searching conversations, or managing skills programmatically.
+
+```rust
+let rag = client.rag();
+
+// List all conversation metadata
+let metas = rag.history.list_conversations()?;
+
+// Load a full conversation
+let conv = rag.history.load_conversation(&uuid)?;
+
+// Save a conversation (e.g. after external edits)
+rag.history.save_conversation(&conv)?;
+
+// List available skills
+let skills = rag.skills.list_skills()?;
+// → ["debugging", "rust", "tdd"]
+
+// Load skill content
+let content = rag.skills.load_skill("rust")?;
+println!("{content}");
+```
+
+---
+
+## Introspection
+
+### Available tools
+
+```rust
+for tool in client.tools() {
+    println!("{}: {}", tool.function.name, tool.function.description.as_deref().unwrap_or(""));
+}
+```
+
+### MCP server statuses
+
+```rust
+for status in client.mcp_servers() {
+    println!(
+        "{} [{}] connected={} tools={}{}",
+        status.name,
+        status.transport,
+        status.connected,
+        status.tool_count,
+        status.error.as_deref().map(|e| format!(" error={e}")).unwrap_or_default(),
+    );
+}
+```
+
+### Available models
+
+```rust
+let models = client.models();
+println!("default provider: {}", models.default_provider);
+for (provider, info) in &models.providers {
+    println!("  {provider}: {} (default)", info.default_model);
+    for model in &info.models {
+        println!("    - {model}");
+    }
+}
+```
+
+---
+
+## Full example — multi-provider app with MCP and history
+
+```rust
+use openheim::{ContentBlock, McpServerConfig, OpenheimClient, SessionUpdate};
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() -> openheim::Result<()> {
+    let client = OpenheimClient::builder()
+        .provider("anthropic")
+        .api_key(std::env::var("ANTHROPIC_API_KEY").unwrap())
+        .model("claude-opus-4-7")
+        .max_iterations(20)
+        .mcp_server("fs", McpServerConfig {
+            command: Some("npx".into()),
+            args: vec![
+                "-y".into(),
+                "@modelcontextprotocol/server-filesystem".into(),
+                "/workspace".into(),
+            ],
+            env: HashMap::new(),
+            url: None,
+        })
+        .build()
+        .await?;
+
+    // Print MCP connection status
+    for s in client.mcp_servers() {
+        println!("[mcp] {} — connected={} tools={}", s.name, s.connected, s.tool_count);
+    }
+
+    // Check for an existing session or start fresh
+    let all_sessions = client.list_sessions(Some(std::path::Path::new("/workspace")))?;
+    let session = if let Some(last) = all_sessions.first() {
+        println!("Resuming session: {}", last.id);
+        client
+            .load_session(&last.id.to_string(), "/workspace".into(), |_| {})
+            .await?
+    } else {
+        client
+            .new_session()
+            .skills(vec!["rust".into()])
+            .cwd("/workspace")
+            .start()
+            .await?
+    };
+
+    session
+        .prompt("Summarise the project structure", |update| {
+            if let SessionUpdate::AgentMessageChunk(chunk) = update {
+                for block in &chunk.content {
+                    if let ContentBlock::Text(t) = block {
+                        print!("{}", t.text);
+                    }
+                }
+            }
+        })
+        .await?;
+
+    println!("\nDone. Session id: {}", session.id);
+    Ok(())
+}
+```
+
+---
+
+## ACP event reference
+
+All events received by the `prompt` callback are `agent_client_protocol::schema::SessionUpdate` variants, re-exported from `openheim`:
+
+| Variant | When |
+|---|---|
+| `AgentMessageChunk(ContentChunk)` | Streaming text from the LLM |
+| `UserMessageChunk(ContentChunk)` | Echoed user message (during `load_session` history replay) |
+| `ToolCall(AcpToolCall)` | Agent is about to invoke a tool |
+| `ToolCallUpdate(ToolCallUpdate)` | Tool finished; contains status and raw output |
+
+`ContentChunk.content` is a `Vec<ContentBlock>`. Match on `ContentBlock::Text(t)` to get the text string.
+
+---
+
+## Error handling
+
+All fallible operations return `openheim::Result<T>` (`std::result::Result<T, openheim::Error>`).
+
+```rust
+use openheim::{Error, OpenheimClient};
+
+match client.get_session("bad-id") {
+    Ok(conv) => { /* … */ }
+    Err(Error::ConfigError(msg)) => eprintln!("config: {msg}"),
+    Err(Error::Other(msg)) => eprintln!("error: {msg}"),
+    Err(e) => eprintln!("unexpected: {e}"),
+}
+```
+
+Transient LLM errors (rate limits, 5xx, network timeouts) are retried automatically with exponential backoff before surfacing as `Error::HttpError` or `Error::ApiError`.
