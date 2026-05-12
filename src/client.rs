@@ -52,8 +52,8 @@ impl OpenheimClient {
     }
 
     /// List persisted sessions (all or filtered by cwd).
-    pub fn list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<SessionInfo>> {
-        self.state.acp_list_sessions(cwd)
+    pub async fn list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<SessionInfo>> {
+        self.state.acp_list_sessions(cwd).await
     }
 
     /// Load a persisted session into a live `SessionHandle`.

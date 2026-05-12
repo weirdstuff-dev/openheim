@@ -66,39 +66,9 @@ impl AppConfig {
             }
         }
         Err(Error::config(format!(
-            "Model '{}' not found in any provider. Run `openheim --list` to see available models.",
+            "Model '{}' not found in any provider. Check the [providers] section in your config file.",
             model_name
         )))
-    }
-
-    pub fn list_models(&self) -> Result<String> {
-        if self.providers.is_empty() {
-            return Err(Error::config(
-                "No providers configured. Edit your config file to add at least one provider.",
-            ));
-        }
-
-        let mut out = String::from("Configured providers:\n");
-        for (name, provider) in &self.providers {
-            let is_default = name == &self.default_provider;
-            let suffix = if is_default { " (default)" } else { "" };
-            out.push_str(&format!("\n  {}{}\n", name, suffix));
-            out.push_str(&format!("    api_base: {}\n", provider.api_base));
-
-            let models: Vec<String> = provider
-                .models
-                .iter()
-                .map(|m| {
-                    if m == &provider.default_model {
-                        format!("{} (default)", m)
-                    } else {
-                        m.clone()
-                    }
-                })
-                .collect();
-            out.push_str(&format!("    models:   {}\n", models.join(", ")));
-        }
-        Ok(out)
     }
 
     fn provider_names(&self) -> String {
@@ -189,29 +159,6 @@ mod tests {
         };
         let err = config.resolve(None).unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
-    }
-
-    #[test]
-    fn list_models_shows_providers_and_models() {
-        let config = sample_config();
-        let output = config.list_models().unwrap();
-        assert!(output.contains("openai"));
-        assert!(output.contains("gpt-4 (default)"));
-        assert!(output.contains("gpt-3.5-turbo"));
-        assert!(output.contains("anthropic"));
-        assert!(output.contains("(default)")); // default provider marker
-    }
-
-    #[test]
-    fn list_models_errors_when_empty() {
-        let config = AppConfig {
-            default_provider: "openai".into(),
-            max_iterations: 10,
-            providers: BTreeMap::new(),
-            mcp_servers: BTreeMap::new(),
-        };
-        let err = config.list_models().unwrap_err();
-        assert!(err.to_string().contains("No providers configured"));
     }
 
     fn provider_with_base(api_base: &str) -> ProviderConfig {

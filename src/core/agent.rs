@@ -28,7 +28,6 @@ async fn run_agent_loop<F>(
     config: &AgentConfig,
     messages: &mut Vec<Message>,
     prompt_builder: Option<&PromptBuilder>,
-    verbose: bool,
     mut callback: Option<F>,
 ) -> Result<AgentResult>
 where
@@ -38,16 +37,9 @@ where
     let mut steps = Vec::new();
     let mut final_response = String::new();
 
-    if verbose {
-        println!("🤖 Continuing conversation...\n");
-    }
-
     for iteration in 0..config.max_iterations {
         let iter_num = iteration + 1;
 
-        if verbose {
-            println!("--- Iteration {} ---", iter_num);
-        }
         if let Some(cb) = callback.as_mut() {
             cb(StreamEvent::IterationStart { iteration: iter_num });
         }
@@ -56,10 +48,6 @@ where
         messages.push(choice.message.clone());
 
         if let Some(tool_calls) = &choice.message.tool_calls {
-            if verbose {
-                println!("🛠️  LLM wants to call {} tool(s)", tool_calls.len());
-            }
-
             let mut tool_results = Vec::new();
 
             for tool_call in tool_calls {
@@ -78,9 +66,6 @@ where
                     Err(e) => format!("Error: {e}"),
                 };
 
-                if verbose {
-                    println!("✅ Tool {}: {}\n", tool_name, result);
-                }
                 if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::ToolResult {
                         tool_name: tool_name.clone(),
@@ -103,9 +88,6 @@ where
                 tool_calls: Some(tool_results),
             });
         } else if let Some(content) = &choice.message.content {
-            if verbose {
-                println!("💬 LLM Response:\n{}\n", content);
-            }
             if let Some(cb) = callback.as_mut() {
                 cb(StreamEvent::LlmResponse {
                     content: content.clone(),
@@ -121,9 +103,6 @@ where
             });
 
             if choice.finish_reason.as_deref() == Some("stop") {
-                if verbose {
-                    println!("✨ Agent finished successfully!");
-                }
                 if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::Finished {
                         final_response: final_response.clone(),
@@ -165,7 +144,6 @@ pub async fn run_agent_with_history(
     tool_executor: Arc<dyn ToolExecutor>,
     config: &AgentConfig,
     messages: &mut Vec<Message>,
-    verbose: bool,
     prompt_builder: Option<&PromptBuilder>,
 ) -> Result<AgentResult> {
     run_agent_loop::<fn(StreamEvent)>(
@@ -174,7 +152,6 @@ pub async fn run_agent_with_history(
         config,
         messages,
         prompt_builder,
-        verbose,
         None,
     )
     .await
@@ -197,7 +174,6 @@ where
         config,
         messages,
         prompt_builder,
-        false,
         Some(callback),
     )
     .await
@@ -320,7 +296,7 @@ mod tests {
         let mut messages = vec![Message::user("hi".into())];
 
         let result = run_agent_with_history(
-            llm.clone(), executor, &config, &mut messages, false, None,
+            llm.clone(), executor, &config, &mut messages, None,
         ).await.unwrap();
 
         assert_eq!(result.final_response, "done");
@@ -339,7 +315,7 @@ mod tests {
         let mut messages = vec![Message::user("read a.txt".into())];
 
         let result = run_agent_with_history(
-            llm.clone(), executor.clone(), &config, &mut messages, false, None,
+            llm.clone(), executor.clone(), &config, &mut messages, None,
         ).await.unwrap();
 
         assert_eq!(result.final_response, "here is the file content");
@@ -363,7 +339,7 @@ mod tests {
         let mut messages = vec![Message::user("loop".into())];
 
         let result = run_agent_with_history(
-            llm, executor, &config, &mut messages, false, None,
+            llm, executor, &config, &mut messages, None,
         ).await.unwrap();
 
         assert_eq!(result.iterations_used, 3);
@@ -408,7 +384,7 @@ mod tests {
 
         // Should not propagate the error; LLM should receive it as a tool result
         let result = run_agent_with_history(
-            llm, executor, &config, &mut messages, false, None,
+            llm, executor, &config, &mut messages, None,
         ).await.unwrap();
 
         assert_eq!(result.final_response, "I got an error");

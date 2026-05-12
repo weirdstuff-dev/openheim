@@ -160,20 +160,28 @@ impl AgentState {
         )
         .await;
 
-        if let Err(e) = self.rag.history.save_conversation(&conversation) {
+        let history = self.rag.history.clone();
+        let conv_to_save = conversation.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || history.save_conversation(&conv_to_save))
+            .await
+            .unwrap_or_else(|e| Err(Error::Other(e.to_string())))
+        {
             tracing::warn!("failed to save conversation: {e}");
         }
 
         run_result.map(|_| ())
     }
 
-    pub fn acp_list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<SessionInfo>> {
-        let metas = self.rag.history.list_conversations()?;
+    pub async fn acp_list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<SessionInfo>> {
+        let history = self.rag.history.clone();
+        let metas = tokio::task::spawn_blocking(move || history.list_conversations())
+            .await
+            .map_err(|e| Error::Other(e.to_string()))??;
         Ok(metas
             .iter()
             .filter(|m| {
-                cwd.map_or(true, |filter| {
-                    m.cwd.as_deref().map_or(false, |c| c == filter)
+                cwd.is_none_or(|filter| {
+                    m.cwd.as_deref() == Some(filter)
                 })
             })
             .map(|m| {
@@ -199,7 +207,10 @@ impl AgentState {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| Error::Other("invalid session id format".to_string()))?;
 
-        let conversation = self.rag.history.load_conversation(&uuid)?;
+        let history = self.rag.history.clone();
+        let conversation = tokio::task::spawn_blocking(move || history.load_conversation(&uuid))
+            .await
+            .map_err(|e| Error::Other(e.to_string()))??;
 
         let mut session_config = self.config.clone();
         if let Some(model) = &conversation.meta.model {
@@ -273,11 +284,10 @@ pub async fn serve(
                 if let Ok(val) = serde_json::to_value(&state_init.mcp_statuses) {
                     meta.insert("mcp_servers".to_string(), val);
                 }
-                if let Ok(skills) = state_init.rag.skills.list_skills() {
-                    if let Ok(val) = serde_json::to_value(skills) {
+                if let Ok(skills) = state_init.rag.skills.list_skills()
+                    && let Ok(val) = serde_json::to_value(skills) {
                         meta.insert("skills".to_string(), val);
                     }
-                }
                 if let Ok(val) = serde_json::to_value(state_init.executor.list_tools()) {
                     meta.insert("tools".to_string(), val);
                 }
@@ -347,7 +357,7 @@ pub async fn serve(
         )
         .on_receive_request(
             async move |req: ListSessionsRequest, responder, _cx: ConnectionTo<Client>| {
-                match state_list.acp_list_sessions(req.cwd.as_deref()) {
+                match state_list.acp_list_sessions(req.cwd.as_deref()).await {
                     Ok(sessions) => responder.respond(ListSessionsResponse::new(sessions)),
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
                 }

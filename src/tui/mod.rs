@@ -103,8 +103,8 @@ fn handle_command(
     match cmd {
         "q" | "quit" => return true,
         "sessions" => {
-            if let Ok(rag) = RagContext::new() {
-                if let Ok(metas) = rag.history.list_conversations() {
+            if let Ok(rag) = RagContext::new()
+                && let Ok(metas) = rag.history.list_conversations() {
                     if metas.is_empty() {
                         println!("{}", "  no sessions yet".dimmed());
                     } else {
@@ -127,7 +127,6 @@ fn handle_command(
                     }
                     println!();
                 }
-            }
         }
         "open" => {
             if let Ok(n) = arg.parse::<usize>() {
@@ -176,9 +175,8 @@ fn handle_command(
             }
             println!();
             println!(
-                "  {}  {}",
-                "edit config:".dimmed(),
-                "~/.openheim/config.toml"
+                "  {}  ~/.openheim/config.toml",
+                "edit config:".dimmed()
             );
             println!();
         }
@@ -205,7 +203,7 @@ fn handle_command(
                     if let Some(url) = &server.url {
                         println!("    {}  {}", "http ".dimmed(), url.dimmed());
                     }
-                    for (k, _) in &server.env {
+                    for k in server.env.keys() {
                         println!("    {}  {}", "env  ".dimmed(), k.dimmed());
                     }
                 }
@@ -267,33 +265,31 @@ fn open_session(meta: &ConversationMeta) {
     println!("  {}  {}", divider.dimmed(), title.bold());
     println!();
 
-    if let Ok(rag) = RagContext::new() {
-        if let Ok(conv) = rag.history.load_conversation(&meta.id) {
+    if let Ok(rag) = RagContext::new()
+        && let Ok(conv) = rag.history.load_conversation(&meta.id) {
             for msg in &conv.messages {
                 match msg.role {
                     Role::System => {}
                     Role::User => {
-                        if let Some(content) = &msg.content {
-                            if !content.is_empty() {
+                        if let Some(content) = &msg.content
+                            && !content.is_empty() {
                                 println!("  {}", "you".green().bold());
                                 for line in content.split('\n') {
                                     println!("  {line}");
                                 }
                                 println!();
                             }
-                        }
                     }
                     Role::Assistant => {
                         let mut printed_header = false;
-                        if let Some(content) = &msg.content {
-                            if !content.is_empty() {
+                        if let Some(content) = &msg.content
+                            && !content.is_empty() {
                                 println!("  {}", "openheim".yellow().bold());
                                 printed_header = true;
                                 for line in content.split('\n') {
                                     println!("  {line}");
                                 }
                             }
-                        }
                         if let Some(tool_calls) = &msg.tool_calls {
                             for tc in tool_calls {
                                 if !printed_header {
@@ -335,7 +331,6 @@ fn open_session(meta: &ConversationMeta) {
                 }
             }
         }
-    }
 
     println!("  {}", divider.dimmed());
     println!();

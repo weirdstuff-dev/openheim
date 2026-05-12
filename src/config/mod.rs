@@ -56,7 +56,7 @@ pub fn load_config() -> Result<AppConfig> {
     let path = config_path()?;
     if !path.exists() {
         return Err(Error::config(format!(
-            "Config file not found at {}. Run `openheim --init` to create one.",
+            "Config file not found at {}. Run `openheim init` to create one.",
             path.display()
         )));
     }
