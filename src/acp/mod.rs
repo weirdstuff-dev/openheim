@@ -303,11 +303,18 @@ pub async fn serve(
                     Err(e) => return responder.respond_with_internal_error(e.to_string()),
                 };
 
+                let mut session_config = state_load.config.clone();
+                if let Some(model) = &conversation.meta.model {
+                    session_config.model = model.clone();
+                }
+                if let Some(provider) = &conversation.meta.provider {
+                    session_config.provider_name = provider.clone();
+                }
                 state_load.sessions.write().await.insert(
                     req.session_id.0.to_string(),
                     SessionState {
                         chat_id: uuid,
-                        config: state_load.config.clone(),
+                        config: session_config,
                         cwd: req.cwd.clone(),
                         skills: conversation.meta.skills.clone(),
                     },
