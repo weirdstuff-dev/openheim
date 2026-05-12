@@ -3,6 +3,10 @@
 # <img src="hexagon-multiple-green.svg" width="36" height="36" alt="" valign="middle" /> openheim
 
 [openheim.io](https://openheim.io)
+
+[![CI](https://github.com/weirdstuff-dev/openheim/actions/workflows/ci.yml/badge.svg)](https://github.com/weirdstuff-dev/openheim/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/weirdstuff-dev/openheim)](./LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)](https://www.rust-lang.org)
 </div>
 
 **A fast, multi-provider LLM agent runtime built in Rust.**
