@@ -29,6 +29,7 @@ use crate::{
     acp::{self, AgentState},
     config::load_config,
     core::models::{FileEntry, FsRequest, FsResponse},
+    error::Error as AppError,
     rag::RagContext,
 };
 
@@ -115,9 +116,9 @@ async fn mcp_servers_handler(State(state): State<Arc<AgentState>>) -> impl IntoR
 async fn sessions_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
     match state.rag.history.list_conversations() {
         Ok(metas) => Json(metas).into_response(),
-        Err(e) => (
+        Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
+            Json(serde_json::json!({ "error": "failed to load conversations" })),
         )
             .into_response(),
     }
@@ -139,9 +140,14 @@ async fn session_handler(
     };
     match state.rag.history.load_conversation(&uuid) {
         Ok(conv) => Json(conv).into_response(),
-        Err(e) => (
+        Err(AppError::Other(_)) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": e.to_string() })),
+            Json(serde_json::json!({ "error": "session not found" })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "failed to load session" })),
         )
             .into_response(),
     }
