@@ -37,6 +37,20 @@ pub fn init_config() -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Load AppConfig from a specific path
+pub fn load_config_from(path: impl AsRef<std::path::Path>) -> Result<AppConfig> {
+    let path = path.as_ref();
+    if !path.exists() {
+        return Err(Error::config(format!(
+            "Config file not found at {}",
+            path.display()
+        )));
+    }
+    let contents = std::fs::read_to_string(path)?;
+    let config: AppConfig = toml::from_str(&contents)?;
+    Ok(config)
+}
+
 /// Load AppConfig from ~/.openheim/config.toml
 pub fn load_config() -> Result<AppConfig> {
     let path = config_path()?;

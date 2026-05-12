@@ -233,6 +233,15 @@ impl HistoryManager {
         Ok(())
     }
 
+    pub fn delete_conversation(&self, id: &Uuid) -> Result<()> {
+        let path = self.conversation_path(id);
+        if !path.exists() {
+            return Err(Error::Other(format!("Conversation {id} not found")));
+        }
+        std::fs::remove_file(&path)?;
+        Ok(())
+    }
+
     pub fn list_conversations(&self) -> Result<Vec<ConversationMeta>> {
         let mut metas = Vec::new();
         for entry in std::fs::read_dir(&self.history_dir)? {
