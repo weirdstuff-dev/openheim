@@ -64,7 +64,10 @@ impl ToolHandler for ExecuteCommandTool {
         if output.status.success() {
             Ok(stdout)
         } else {
-            Ok(format!("Command failed:\nStdout: {}\nStderr: {}", stdout, stderr))
+            Ok(format!(
+                "Command failed:\nStdout: {}\nStderr: {}",
+                stdout, stderr
+            ))
         }
     }
 }

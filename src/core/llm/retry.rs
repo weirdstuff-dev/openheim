@@ -49,9 +49,9 @@ impl LlmClient for RetryClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::models::Role;
     use crate::error::Error;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use crate::core::models::Role;
 
     fn ok_choice(content: &str) -> Choice {
         Choice {
@@ -71,7 +71,11 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for AlwaysOk {
-        async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> crate::error::Result<Choice> {
+        async fn send(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+        ) -> crate::error::Result<Choice> {
             Ok(ok_choice("success"))
         }
     }
@@ -81,8 +85,15 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for AlwaysFailNonRetryable {
-        async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> crate::error::Result<Choice> {
-            Err(Error::HttpError { status: 400, body: "bad request".into() })
+        async fn send(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+        ) -> crate::error::Result<Choice> {
+            Err(Error::HttpError {
+                status: 400,
+                body: "bad request".into(),
+            })
         }
     }
 
@@ -93,10 +104,17 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for FailThenSucceed {
-        async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> crate::error::Result<Choice> {
+        async fn send(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+        ) -> crate::error::Result<Choice> {
             let remaining = self.remaining_failures.fetch_sub(1, Ordering::SeqCst);
             if remaining > 0 {
-                Err(Error::HttpError { status: 429, body: "rate limited".into() })
+                Err(Error::HttpError {
+                    status: 429,
+                    body: "rate limited".into(),
+                })
             } else {
                 Ok(ok_choice("recovered"))
             }
@@ -110,9 +128,16 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for AlwaysFailRetryable {
-        async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> crate::error::Result<Choice> {
+        async fn send(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+        ) -> crate::error::Result<Choice> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
-            Err(Error::HttpError { status: 503, body: "service unavailable".into() })
+            Err(Error::HttpError {
+                status: 503,
+                body: "service unavailable".into(),
+            })
         }
     }
 
@@ -129,7 +154,10 @@ mod tests {
         let client = RetryClient::new(Arc::new(AlwaysFailNonRetryable));
         let result = client.send(&[], &[]).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::HttpError { status: 400, .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::HttpError { status: 400, .. }
+        ));
     }
 
     #[tokio::test]
@@ -140,7 +168,10 @@ mod tests {
         let client = RetryClient::new(inner);
         let result = client.send(&[], &[]).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().message.content.as_deref(), Some("recovered"));
+        assert_eq!(
+            result.unwrap().message.content.as_deref(),
+            Some("recovered")
+        );
     }
 
     #[tokio::test]

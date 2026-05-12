@@ -31,7 +31,9 @@ pub struct SystemToolExecutor {
 
 impl SystemToolExecutor {
     pub fn new() -> Self {
-        Self { handlers: HashMap::new() }
+        Self {
+            handlers: HashMap::new(),
+        }
     }
 
     pub async fn build(

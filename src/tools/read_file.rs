@@ -39,9 +39,7 @@ impl ToolHandler for ReadFileTool {
             .as_str()
             .ok_or_else(|| Error::ParseError("Missing 'path' argument".to_string()))?;
 
-        let content = fs::read_to_string(path)
-            .await
-            .map_err(Error::IoError)?;
+        let content = fs::read_to_string(path).await.map_err(Error::IoError)?;
         Ok(content)
     }
 }

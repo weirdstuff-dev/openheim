@@ -7,8 +7,7 @@ use std::{
 };
 
 use agent_client_protocol::{
-    Agent, Client, ConnectionTo, Dispatch, ConnectTo,
-    on_receive_dispatch, on_receive_request,
+    Agent, Client, ConnectTo, ConnectionTo, Dispatch, on_receive_dispatch, on_receive_request,
     schema::{
         AgentCapabilities, ContentBlock, ContentChunk, Implementation, InitializeRequest,
         InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
@@ -49,11 +48,7 @@ pub struct AgentState {
 }
 
 impl AgentState {
-    pub async fn new(
-        config: AgentConfig,
-        app_config: AppConfig,
-        rag: RagContext,
-    ) -> Result<Self> {
+    pub async fn new(config: AgentConfig, app_config: AppConfig, rag: RagContext) -> Result<Self> {
         let http_client = build_http_client(config.timeout_secs)?;
         let llm = create_client(&config, &http_client);
         let (sys_executor, mcp_statuses) = SystemToolExecutor::build(&app_config.mcp_servers).await;
@@ -82,7 +77,12 @@ impl AgentState {
             .unwrap_or_else(|| self.config.clone());
         self.sessions.write().await.insert(
             session_key.clone(),
-            SessionState { chat_id, config, cwd, skills },
+            SessionState {
+                chat_id,
+                config,
+                cwd,
+                skills,
+            },
         );
         Ok(session_key)
     }
@@ -135,7 +135,10 @@ impl AgentState {
                         ContentBlock::from(content),
                     )));
                 }
-                StreamEvent::ToolCall { tool_name, arguments } => {
+                StreamEvent::ToolCall {
+                    tool_name,
+                    arguments,
+                } => {
                     let id = Uuid::new_v4().to_string();
                     last_tool_call_id = Some(id.clone());
                     let raw_input = serde_json::from_str(&arguments).ok();
@@ -162,9 +165,10 @@ impl AgentState {
 
         let history = self.rag.history.clone();
         let conv_to_save = conversation.clone();
-        if let Err(e) = tokio::task::spawn_blocking(move || history.save_conversation(&conv_to_save))
-            .await
-            .unwrap_or_else(|e| Err(Error::Other(e.to_string())))
+        if let Err(e) =
+            tokio::task::spawn_blocking(move || history.save_conversation(&conv_to_save))
+                .await
+                .unwrap_or_else(|e| Err(Error::Other(e.to_string())))
         {
             tracing::warn!("failed to save conversation: {e}");
         }
@@ -179,11 +183,7 @@ impl AgentState {
             .map_err(|e| Error::Other(e.to_string()))??;
         Ok(metas
             .iter()
-            .filter(|m| {
-                cwd.is_none_or(|filter| {
-                    m.cwd.as_deref() == Some(filter)
-                })
-            })
+            .filter(|m| cwd.is_none_or(|filter| m.cwd.as_deref() == Some(filter)))
             .map(|m| {
                 let path = m.cwd.clone().unwrap_or_else(|| PathBuf::from("/"));
                 let mut info = SessionInfo::new(m.id.to_string(), path);
@@ -236,12 +236,12 @@ impl AgentState {
                 continue;
             }
             let update = match msg.role {
-                Role::User => SessionUpdate::UserMessageChunk(ContentChunk::new(
-                    ContentBlock::from(text),
-                )),
-                Role::Assistant => SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                    ContentBlock::from(text),
-                )),
+                Role::User => {
+                    SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::from(text)))
+                }
+                Role::Assistant => {
+                    SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::from(text)))
+                }
                 _ => continue,
             };
             on_update(update);
@@ -285,9 +285,10 @@ pub async fn serve(
                     meta.insert("mcp_servers".to_string(), val);
                 }
                 if let Ok(skills) = state_init.rag.skills.list_skills()
-                    && let Ok(val) = serde_json::to_value(skills) {
-                        meta.insert("skills".to_string(), val);
-                    }
+                    && let Ok(val) = serde_json::to_value(skills)
+                {
+                    meta.insert("skills".to_string(), val);
+                }
                 if let Ok(val) = serde_json::to_value(state_init.executor.list_tools()) {
                     meta.insert("tools".to_string(), val);
                 }
@@ -297,8 +298,7 @@ pub async fn serve(
                             AgentCapabilities::new()
                                 .load_session(true)
                                 .session_capabilities(
-                                    SessionCapabilities::new()
-                                        .list(SessionListCapabilities::new()),
+                                    SessionCapabilities::new().list(SessionListCapabilities::new()),
                                 ),
                         )
                         .agent_info(Implementation::new("openheim", env!("CARGO_PKG_VERSION")))
@@ -322,7 +322,10 @@ pub async fn serve(
                     .and_then(|v| v.as_str())
                     .map(String::from);
 
-                match state_session.acp_new_session(model.as_deref(), skills, req.cwd).await {
+                match state_session
+                    .acp_new_session(model.as_deref(), skills, req.cwd)
+                    .await
+                {
                     Ok(session_key) => responder.respond(NewSessionResponse::new(session_key)),
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
                 }

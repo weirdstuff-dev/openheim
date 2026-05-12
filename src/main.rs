@@ -13,7 +13,12 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
     /// Comma-separated skills to activate for this session (e.g. --skills rust,nodejs)
-    #[arg(long = "skills", value_name = "NAMES", value_delimiter = ',', global = false)]
+    #[arg(
+        long = "skills",
+        value_name = "NAMES",
+        value_delimiter = ',',
+        global = false
+    )]
     skills: Vec<String>,
 }
 
@@ -42,9 +47,10 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
-    fmt::Subscriber::builder().with_env_filter(env_filter).init();
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    fmt::Subscriber::builder()
+        .with_env_filter(env_filter)
+        .init();
 
     let cli = Cli::parse();
 
@@ -73,18 +79,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
-        Some(Command::Init) => {
-            match init_config() {
-                Ok(path) => {
-                    println!("Config file created at {}", path.display());
-                    println!("Edit it to configure your LLM providers.");
-                }
-                Err(e) => {
-                    eprintln!("Error: {e}");
-                    std::process::exit(1);
-                }
+        Some(Command::Init) => match init_config() {
+            Ok(path) => {
+                println!("Config file created at {}", path.display());
+                println!("Edit it to configure your LLM providers.");
             }
-        }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        },
     }
 
     Ok(())

@@ -12,7 +12,6 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use tower_http::cors::{Any, CorsLayer};
 use futures::{
     SinkExt, StreamExt,
     channel::mpsc::{self, UnboundedSender},
@@ -21,6 +20,7 @@ use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::fs;
+use tower_http::cors::{Any, CorsLayer};
 use walkdir::WalkDir;
 
 use agent_client_protocol::Lines;
@@ -245,7 +245,10 @@ struct FsState {
 
 impl FsState {
     fn new() -> Self {
-        Self { workspace_root: None, _watcher: None }
+        Self {
+            workspace_root: None,
+            _watcher: None,
+        }
     }
 
     async fn handle(&mut self, req: FsRequest, tx: UnboundedSender<WsOutbound>) {
@@ -258,41 +261,37 @@ impl FsState {
             FsRequest::List { path, recursive } => {
                 match validate_path_opt(&self.workspace_root, &path) {
                     Some(validated) => {
-                        let entries =
-                            list_directory(&validated, recursive.unwrap_or(false)).await;
-                        let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::FileList {
-                            path,
-                            entries,
-                        }));
+                        let entries = list_directory(&validated, recursive.unwrap_or(false)).await;
+                        let _ = tx
+                            .unbounded_send(WsOutbound::Fs(FsResponse::FileList { path, entries }));
                     }
                     None => send_path_error(&tx),
                 }
             }
-            FsRequest::Read { path } => {
-                match validate_path_opt(&self.workspace_root, &path) {
-                    Some(validated) => {
-                        let resp = match fs::read_to_string(&validated).await {
-                            Ok(content) => FsResponse::FileContent { path, content },
-                            Err(e) => FsResponse::Error {
-                                message: format!("Failed to read: {e}"),
-                            },
-                        };
-                        let _ = tx.unbounded_send(WsOutbound::Fs(resp));
-                    }
-                    None => send_path_error(&tx),
+            FsRequest::Read { path } => match validate_path_opt(&self.workspace_root, &path) {
+                Some(validated) => {
+                    let resp = match fs::read_to_string(&validated).await {
+                        Ok(content) => FsResponse::FileContent { path, content },
+                        Err(e) => FsResponse::Error {
+                            message: format!("Failed to read: {e}"),
+                        },
+                    };
+                    let _ = tx.unbounded_send(WsOutbound::Fs(resp));
                 }
-            }
+                None => send_path_error(&tx),
+            },
             FsRequest::Write { path, content } => {
                 match validate_path_opt(&self.workspace_root, &path) {
                     Some(validated) => {
                         if let Some(parent) = validated.parent()
                             && !parent.exists()
-                                && let Err(e) = fs::create_dir_all(parent).await {
-                                    let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
-                                        message: format!("Failed to create dirs: {e}"),
-                                    }));
-                                    return;
-                                }
+                            && let Err(e) = fs::create_dir_all(parent).await
+                        {
+                            let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
+                                message: format!("Failed to create dirs: {e}"),
+                            }));
+                            return;
+                        }
                         let resp = match fs::write(&validated, content).await {
                             Ok(()) => FsResponse::WriteSuccess { path },
                             Err(e) => FsResponse::Error {
@@ -304,43 +303,39 @@ impl FsState {
                     None => send_path_error(&tx),
                 }
             }
-            FsRequest::Mkdir { path } => {
-                match validate_path_opt(&self.workspace_root, &path) {
-                    Some(validated) => {
-                        let resp = match fs::create_dir_all(&validated).await {
-                            Ok(()) => FsResponse::MkdirSuccess { path },
+            FsRequest::Mkdir { path } => match validate_path_opt(&self.workspace_root, &path) {
+                Some(validated) => {
+                    let resp = match fs::create_dir_all(&validated).await {
+                        Ok(()) => FsResponse::MkdirSuccess { path },
+                        Err(e) => FsResponse::Error {
+                            message: format!("Failed to mkdir: {e}"),
+                        },
+                    };
+                    let _ = tx.unbounded_send(WsOutbound::Fs(resp));
+                }
+                None => send_path_error(&tx),
+            },
+            FsRequest::Delete { path } => match validate_path_opt(&self.workspace_root, &path) {
+                Some(validated) => {
+                    let resp = if validated.is_dir() {
+                        match fs::remove_dir_all(&validated).await {
+                            Ok(()) => FsResponse::DeleteSuccess { path },
                             Err(e) => FsResponse::Error {
-                                message: format!("Failed to mkdir: {e}"),
+                                message: format!("Failed to delete dir: {e}"),
                             },
-                        };
-                        let _ = tx.unbounded_send(WsOutbound::Fs(resp));
-                    }
-                    None => send_path_error(&tx),
+                        }
+                    } else {
+                        match fs::remove_file(&validated).await {
+                            Ok(()) => FsResponse::DeleteSuccess { path },
+                            Err(e) => FsResponse::Error {
+                                message: format!("Failed to delete file: {e}"),
+                            },
+                        }
+                    };
+                    let _ = tx.unbounded_send(WsOutbound::Fs(resp));
                 }
-            }
-            FsRequest::Delete { path } => {
-                match validate_path_opt(&self.workspace_root, &path) {
-                    Some(validated) => {
-                        let resp = if validated.is_dir() {
-                            match fs::remove_dir_all(&validated).await {
-                                Ok(()) => FsResponse::DeleteSuccess { path },
-                                Err(e) => FsResponse::Error {
-                                    message: format!("Failed to delete dir: {e}"),
-                                },
-                            }
-                        } else {
-                            match fs::remove_file(&validated).await {
-                                Ok(()) => FsResponse::DeleteSuccess { path },
-                                Err(e) => FsResponse::Error {
-                                    message: format!("Failed to delete file: {e}"),
-                                },
-                            }
-                        };
-                        let _ = tx.unbounded_send(WsOutbound::Fs(resp));
-                    }
-                    None => send_path_error(&tx),
-                }
-            }
+                None => send_path_error(&tx),
+            },
             FsRequest::Rename { from, to } => {
                 match (
                     validate_path_opt(&self.workspace_root, &from),
@@ -438,7 +433,11 @@ fn send_path_error(tx: &UnboundedSender<WsOutbound>) {
 fn validate_path_opt(workspace: &Option<PathBuf>, path: &str) -> Option<PathBuf> {
     let workspace = workspace.as_ref()?;
     let requested = PathBuf::from(path);
-    let canonical = if requested.is_absolute() { requested } else { workspace.join(&requested) };
+    let canonical = if requested.is_absolute() {
+        requested
+    } else {
+        workspace.join(&requested)
+    };
 
     let check_path = if canonical.exists() {
         canonical.canonicalize().ok()?
@@ -458,7 +457,11 @@ fn validate_path_opt(workspace: &Option<PathBuf>, path: &str) -> Option<PathBuf>
     };
 
     let workspace_canonical = workspace.canonicalize().ok()?;
-    if check_path.starts_with(&workspace_canonical) { Some(check_path) } else { None }
+    if check_path.starts_with(&workspace_canonical) {
+        Some(check_path)
+    } else {
+        None
+    }
 }
 
 async fn list_directory(path: &Path, recursive: bool) -> Vec<FileEntry> {
@@ -491,12 +494,20 @@ fn path_to_file_entry(path: &Path) -> Option<FileEntry> {
     let name = path.file_name()?.to_string_lossy().to_string();
     let is_dir = path.is_dir();
     let metadata = path.metadata().ok();
-    let size = metadata.as_ref().and_then(|m| if m.is_file() { Some(m.len()) } else { None });
+    let size = metadata
+        .as_ref()
+        .and_then(|m| if m.is_file() { Some(m.len()) } else { None });
     let modified = metadata.as_ref().and_then(|m| {
         m.modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
     });
-    Some(FileEntry { path: path.to_string_lossy().to_string(), name, is_dir, size, modified })
+    Some(FileEntry {
+        path: path.to_string_lossy().to_string(),
+        name,
+        is_dir,
+        size,
+        modified,
+    })
 }

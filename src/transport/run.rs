@@ -2,12 +2,11 @@ use std::io::Write as _;
 use std::sync::Arc;
 
 use agent_client_protocol::{
-    ByteStreams, Client,
+    ByteStreams, Client, SessionMessage,
     schema::{
         ContentBlock, InitializeRequest, ProtocolVersion, SessionNotification, SessionUpdate,
     },
     util::MatchDispatch,
-    SessionMessage,
 };
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -48,17 +47,16 @@ pub async fn run_headless(prompt: String, model: Option<String>) -> crate::error
                             SessionMessage::StopReason(_) => break,
                             SessionMessage::SessionMessage(dispatch) => {
                                 MatchDispatch::new(dispatch)
-                                    .if_notification(
-                                        async |notif: SessionNotification| {
-                                            if let SessionUpdate::AgentMessageChunk(chunk) =
-                                                notif.update
-                                                && let ContentBlock::Text(t) = chunk.content {
-                                                    print!("{}", t.text);
-                                                    let _ = std::io::stdout().flush();
-                                                }
-                                            Ok(())
-                                        },
-                                    )
+                                    .if_notification(async |notif: SessionNotification| {
+                                        if let SessionUpdate::AgentMessageChunk(chunk) =
+                                            notif.update
+                                            && let ContentBlock::Text(t) = chunk.content
+                                        {
+                                            print!("{}", t.text);
+                                            let _ = std::io::stdout().flush();
+                                        }
+                                        Ok(())
+                                    })
                                     .await
                                     .otherwise_ignore()?;
                             }

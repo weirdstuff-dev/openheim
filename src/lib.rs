@@ -13,8 +13,8 @@ pub mod tui;
 pub use config::{AgentConfig, AppConfig, McpServerConfig, ModelsInfo};
 pub use core::{agent, llm, models};
 pub use error::{Error, Result};
-pub use models::*;
 pub use llm::{AnthropicClient, GeminiClient, LlmClient, OpenAiClient, OpenAiCompatibleClient};
+pub use models::*;
 pub use rag::{Conversation, ConversationMeta, HistoryManager, PromptBuilder, RagContext};
 
 // Library facade

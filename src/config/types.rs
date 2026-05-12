@@ -104,11 +104,23 @@ impl AppConfig {
             .iter()
             .map(|(name, cfg)| {
                 let info = if cfg.command.is_some() {
-                    McpServerInfo { transport: "stdio", command: cfg.command.clone(), url: None }
+                    McpServerInfo {
+                        transport: "stdio",
+                        command: cfg.command.clone(),
+                        url: None,
+                    }
                 } else if cfg.url.is_some() {
-                    McpServerInfo { transport: "http", command: None, url: cfg.url.clone() }
+                    McpServerInfo {
+                        transport: "http",
+                        command: None,
+                        url: cfg.url.clone(),
+                    }
                 } else {
-                    McpServerInfo { transport: "unknown", command: None, url: None }
+                    McpServerInfo {
+                        transport: "unknown",
+                        command: None,
+                        url: None,
+                    }
                 };
                 (name.clone(), info)
             })
@@ -164,7 +176,13 @@ fn default_timeout_secs() -> u64 {
 }
 
 impl AgentConfig {
-    pub fn new(provider_name: String, api_base: String, api_key: String, model: String, max_iterations: usize) -> Self {
+    pub fn new(
+        provider_name: String,
+        api_base: String,
+        api_key: String,
+        model: String,
+        max_iterations: usize,
+    ) -> Self {
         Self {
             provider_name,
             api_base,
@@ -225,16 +243,22 @@ mod tests {
     #[test]
     fn resolve_api_key_from_env_var() {
         let var_name = "OPENHEIM_TEST_KEY_ENV";
-        unsafe { std::env::set_var(var_name, "secret-from-env"); }
+        unsafe {
+            std::env::set_var(var_name, "secret-from-env");
+        }
         let provider = sample_provider(Some(var_name), Some("inline-key"));
         assert_eq!(provider.resolve_api_key(), "secret-from-env");
-        unsafe { std::env::remove_var(var_name); }
+        unsafe {
+            std::env::remove_var(var_name);
+        }
     }
 
     #[test]
     fn resolve_api_key_falls_back_to_inline() {
         let var_name = "OPENHEIM_TEST_KEY_MISSING";
-        unsafe { std::env::remove_var(var_name); }
+        unsafe {
+            std::env::remove_var(var_name);
+        }
         let provider = sample_provider(Some(var_name), Some("inline-key"));
         assert_eq!(provider.resolve_api_key(), "inline-key");
     }
@@ -242,7 +266,9 @@ mod tests {
     #[test]
     fn resolve_api_key_returns_empty_when_none() {
         let var_name = "OPENHEIM_TEST_KEY_NONE";
-        unsafe { std::env::remove_var(var_name); }
+        unsafe {
+            std::env::remove_var(var_name);
+        }
         let provider = sample_provider(Some(var_name), None);
         assert_eq!(provider.resolve_api_key(), "");
     }
@@ -256,10 +282,14 @@ mod tests {
     #[test]
     fn resolve_api_key_empty_env_var_falls_back() {
         let var_name = "OPENHEIM_TEST_KEY_EMPTY";
-        unsafe { std::env::set_var(var_name, "  "); }
+        unsafe {
+            std::env::set_var(var_name, "  ");
+        }
         let provider = sample_provider(Some(var_name), Some("fallback"));
         assert_eq!(provider.resolve_api_key(), "fallback");
-        unsafe { std::env::remove_var(var_name); }
+        unsafe {
+            std::env::remove_var(var_name);
+        }
     }
 
     #[test]
@@ -287,14 +317,26 @@ mod tests {
 
     #[test]
     fn arc_with_max_iterations_reuses_arc_when_same() {
-        let cfg = Arc::new(AgentConfig::new("p".into(), "b".into(), "k".into(), "m".into(), 10));
+        let cfg = Arc::new(AgentConfig::new(
+            "p".into(),
+            "b".into(),
+            "k".into(),
+            "m".into(),
+            10,
+        ));
         let same = cfg.arc_with_max_iterations(10);
         assert!(Arc::ptr_eq(&cfg, &same));
     }
 
     #[test]
     fn arc_with_max_iterations_creates_new_when_different() {
-        let cfg = Arc::new(AgentConfig::new("p".into(), "b".into(), "k".into(), "m".into(), 10));
+        let cfg = Arc::new(AgentConfig::new(
+            "p".into(),
+            "b".into(),
+            "k".into(),
+            "m".into(),
+            10,
+        ));
         let different = cfg.arc_with_max_iterations(20);
         assert!(!Arc::ptr_eq(&cfg, &different));
         assert_eq!(different.max_iterations, 20);

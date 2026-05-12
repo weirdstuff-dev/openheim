@@ -178,7 +178,10 @@ pub enum FsRequest {
 
     /// List directory contents
     #[serde(rename = "list")]
-    List { path: String, recursive: Option<bool> },
+    List {
+        path: String,
+        recursive: Option<bool>,
+    },
 
     /// Read file contents
     #[serde(rename = "read")]
@@ -215,7 +218,10 @@ pub enum FsResponse {
     Unwatched,
 
     #[serde(rename = "file_list")]
-    FileList { path: String, entries: Vec<FileEntry> },
+    FileList {
+        path: String,
+        entries: Vec<FileEntry>,
+    },
 
     #[serde(rename = "file_content")]
     FileContent { path: String, content: String },
@@ -234,7 +240,10 @@ pub enum FsResponse {
 
     /// File system change event (from watcher)
     #[serde(rename = "fs_event")]
-    FsEvent { event_kind: String, paths: Vec<String> },
+    FsEvent {
+        event_kind: String,
+        paths: Vec<String>,
+    },
 
     #[serde(rename = "error")]
     Error { message: String },
@@ -346,16 +355,31 @@ mod tests {
     fn role_serializes_to_lowercase() {
         assert_eq!(serde_json::to_string(&Role::System).unwrap(), "\"system\"");
         assert_eq!(serde_json::to_string(&Role::User).unwrap(), "\"user\"");
-        assert_eq!(serde_json::to_string(&Role::Assistant).unwrap(), "\"assistant\"");
+        assert_eq!(
+            serde_json::to_string(&Role::Assistant).unwrap(),
+            "\"assistant\""
+        );
         assert_eq!(serde_json::to_string(&Role::Tool).unwrap(), "\"tool\"");
     }
 
     #[test]
     fn role_deserializes_from_lowercase() {
-        assert_eq!(serde_json::from_str::<Role>("\"system\"").unwrap(), Role::System);
-        assert_eq!(serde_json::from_str::<Role>("\"user\"").unwrap(), Role::User);
-        assert_eq!(serde_json::from_str::<Role>("\"assistant\"").unwrap(), Role::Assistant);
-        assert_eq!(serde_json::from_str::<Role>("\"tool\"").unwrap(), Role::Tool);
+        assert_eq!(
+            serde_json::from_str::<Role>("\"system\"").unwrap(),
+            Role::System
+        );
+        assert_eq!(
+            serde_json::from_str::<Role>("\"user\"").unwrap(),
+            Role::User
+        );
+        assert_eq!(
+            serde_json::from_str::<Role>("\"assistant\"").unwrap(),
+            Role::Assistant
+        );
+        assert_eq!(
+            serde_json::from_str::<Role>("\"tool\"").unwrap(),
+            Role::Tool
+        );
     }
 
     #[test]
@@ -397,7 +421,9 @@ mod tests {
     fn fs_request_deserializes_write() {
         let json = r#"{"action": "write", "path": "a.txt", "content": "hello"}"#;
         let req: FsRequest = serde_json::from_str(json).unwrap();
-        assert!(matches!(req, FsRequest::Write { path, content } if path == "a.txt" && content == "hello"));
+        assert!(
+            matches!(req, FsRequest::Write { path, content } if path == "a.txt" && content == "hello")
+        );
     }
 
     #[test]
@@ -409,7 +435,9 @@ mod tests {
 
     #[test]
     fn fs_response_serializes_with_type_tag() {
-        let resp = FsResponse::Connected { message: "ok".into() };
+        let resp = FsResponse::Connected {
+            message: "ok".into(),
+        };
         let json: Value = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["type"], "connected");
         assert_eq!(json["message"], "ok");
@@ -417,7 +445,9 @@ mod tests {
 
     #[test]
     fn fs_response_error_serializes() {
-        let resp = FsResponse::Error { message: "not found".into() };
+        let resp = FsResponse::Error {
+            message: "not found".into(),
+        };
         let json: Value = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["type"], "error");
         assert_eq!(json["message"], "not found");

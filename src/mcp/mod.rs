@@ -79,7 +79,13 @@ async fn connect_server(name: &str, config: &McpServerConfig) -> Result<Vec<Box<
     // combined name is a valid identifier for tool-call APIs.
     let prefix: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
 
     let handlers = tools

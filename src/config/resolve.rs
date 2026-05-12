@@ -3,7 +3,10 @@ use crate::error::{Error, Result};
 
 fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<()> {
     if provider.api_base.is_empty() {
-        return Err(Error::config(format!("Provider '{}' has an empty api_base", name)));
+        return Err(Error::config(format!(
+            "Provider '{}' has an empty api_base",
+            name
+        )));
     }
     if !provider.api_base.starts_with("http://") && !provider.api_base.starts_with("https://") {
         return Err(Error::config(format!(
@@ -29,7 +32,7 @@ impl AppConfig {
             None => self.resolve_default(),
         }
     }
-    
+
     fn resolve_default(&self) -> Result<AgentConfig> {
         let provider = self.providers.get(&self.default_provider).ok_or_else(|| {
             Error::config(format!(

@@ -92,7 +92,11 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for DummyClient {
-        async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> crate::error::Result<Choice> {
+        async fn send(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+        ) -> crate::error::Result<Choice> {
             unimplemented!()
         }
     }
@@ -156,14 +160,9 @@ mod tests {
             10,
         );
 
-        let (_client, cfg) = resolve_client_and_config(
-            None,
-            Some(25),
-            &app_config,
-            default_llm,
-            &default_config,
-        )
-        .unwrap();
+        let (_client, cfg) =
+            resolve_client_and_config(None, Some(25), &app_config, default_llm, &default_config)
+                .unwrap();
 
         assert_eq!(cfg.max_iterations, 25);
     }
@@ -210,6 +209,12 @@ mod tests {
         );
 
         assert!(result.is_err());
-        assert!(result.err().unwrap().to_string().contains("nonexistent-model"));
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("nonexistent-model")
+        );
     }
 }

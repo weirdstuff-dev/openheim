@@ -50,9 +50,7 @@ impl ToolHandler for WriteFileTool {
         if let Some(parent) = Path::new(path).parent()
             && !parent.as_os_str().is_empty()
         {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(Error::IoError)?;
+            fs::create_dir_all(parent).await.map_err(Error::IoError)?;
         }
 
         fs::write(path, content).await.map_err(Error::IoError)?;

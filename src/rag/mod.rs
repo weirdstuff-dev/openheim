@@ -30,12 +30,9 @@ impl RagContext {
         model: Option<String>,
         provider: Option<String>,
     ) -> Result<(Conversation, PromptBuilder)> {
-        let conversation = self.history.resolve_conversation(
-            chat_id,
-            model,
-            provider,
-            skill_names.to_vec(),
-        )?;
+        let conversation =
+            self.history
+                .resolve_conversation(chat_id, model, provider, skill_names.to_vec())?;
 
         let mut builder = PromptBuilder::new();
 

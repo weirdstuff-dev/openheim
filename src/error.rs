@@ -63,7 +63,10 @@ mod tests {
     }
 
     fn http_err(status: u16) -> Error {
-        Error::HttpError { status, body: "error".into() }
+        Error::HttpError {
+            status,
+            body: "error".into(),
+        }
     }
 
     #[test]
@@ -74,7 +77,11 @@ mod tests {
     #[test]
     fn is_retryable_for_5xx() {
         for code in [500u16, 502, 503, 504] {
-            assert!(http_err(code).is_retryable(), "expected retryable for status {}", code);
+            assert!(
+                http_err(code).is_retryable(),
+                "expected retryable for status {}",
+                code
+            );
         }
     }
 

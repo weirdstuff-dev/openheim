@@ -29,7 +29,13 @@ impl McpToolHandler {
         let schema = serde_json::to_value(&tool.input_schema)
             .unwrap_or_else(|_| serde_json::json!({"type": "object", "properties": {}}));
 
-        Self { client, tool_name, prefixed_name, description, schema }
+        Self {
+            client,
+            tool_name,
+            prefixed_name,
+            description,
+            schema,
+        }
     }
 }
 

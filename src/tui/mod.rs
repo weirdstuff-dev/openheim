@@ -2,13 +2,12 @@ use std::io::{Write, stdout};
 use std::sync::Arc;
 
 use agent_client_protocol::{
-    ByteStreams, Client,
+    ByteStreams, Client, SessionMessage,
     schema::{
         ContentBlock, InitializeRequest, NewSessionRequest, ProtocolVersion, SessionNotification,
         SessionUpdate, ToolCallStatus,
     },
     util::MatchDispatch,
-    SessionMessage,
 };
 use colored::Colorize;
 use rustyline::DefaultEditor;
@@ -48,10 +47,14 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
     let client_transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
 
     tokio::spawn(acp::serve(server_transport, state));
-    tokio::spawn(run_acp_client(client_transport, prompt_rx, update_tx, skills.clone()));
+    tokio::spawn(run_acp_client(
+        client_transport,
+        prompt_rx,
+        update_tx,
+        skills.clone(),
+    ));
 
-    let mut editor = DefaultEditor::new()
-        .map_err(|e| crate::error::Error::Other(e.to_string()))?;
+    let mut editor = DefaultEditor::new().map_err(|e| crate::error::Error::Other(e.to_string()))?;
 
     println!("{}", "openheim".yellow().bold());
     if skills.is_empty() {
@@ -104,29 +107,30 @@ fn handle_command(
         "q" | "quit" => return true,
         "sessions" => {
             if let Ok(rag) = RagContext::new()
-                && let Ok(metas) = rag.history.list_conversations() {
-                    if metas.is_empty() {
-                        println!("{}", "  no sessions yet".dimmed());
-                    } else {
-                        println!();
-                        for (i, meta) in metas.iter().enumerate() {
-                            let title = meta.title.as_deref().unwrap_or("(untitled)");
-                            let date = meta.updated_at.format("%Y-%m-%d %H:%M").to_string();
-                            let model = meta.model.as_deref().unwrap_or("?");
-                            println!(
-                                "  {}  {}  ·  {}  ·  {}",
-                                format!("{}", i + 1).dimmed(),
-                                title,
-                                date.dimmed(),
-                                model.dimmed(),
-                            );
-                        }
-                        *sessions = metas;
-                        println!();
-                        println!("{}", "  :open <n> to load a session".dimmed());
-                    }
+                && let Ok(metas) = rag.history.list_conversations()
+            {
+                if metas.is_empty() {
+                    println!("{}", "  no sessions yet".dimmed());
+                } else {
                     println!();
+                    for (i, meta) in metas.iter().enumerate() {
+                        let title = meta.title.as_deref().unwrap_or("(untitled)");
+                        let date = meta.updated_at.format("%Y-%m-%d %H:%M").to_string();
+                        let model = meta.model.as_deref().unwrap_or("?");
+                        println!(
+                            "  {}  {}  ·  {}  ·  {}",
+                            format!("{}", i + 1).dimmed(),
+                            title,
+                            date.dimmed(),
+                            model.dimmed(),
+                        );
+                    }
+                    *sessions = metas;
+                    println!();
+                    println!("{}", "  :open <n> to load a session".dimmed());
                 }
+                println!();
+            }
         }
         "open" => {
             if let Ok(n) = arg.parse::<usize>() {
@@ -174,10 +178,7 @@ fn handle_command(
                 }
             }
             println!();
-            println!(
-                "  {}  ~/.openheim/config.toml",
-                "edit config:".dimmed()
-            );
+            println!("  {}  ~/.openheim/config.toml", "edit config:".dimmed());
             println!();
         }
         "mcp" => {
@@ -250,7 +251,10 @@ fn handle_command(
             println!();
         }
         unknown => {
-            println!("{}", format!(":{unknown}: unknown command  (try :help)").red());
+            println!(
+                "{}",
+                format!(":{unknown}: unknown command  (try :help)").red()
+            );
         }
     }
     false
@@ -266,71 +270,74 @@ fn open_session(meta: &ConversationMeta) {
     println!();
 
     if let Ok(rag) = RagContext::new()
-        && let Ok(conv) = rag.history.load_conversation(&meta.id) {
-            for msg in &conv.messages {
-                match msg.role {
-                    Role::System => {}
-                    Role::User => {
-                        if let Some(content) = &msg.content
-                            && !content.is_empty() {
-                                println!("  {}", "you".green().bold());
-                                for line in content.split('\n') {
-                                    println!("  {line}");
-                                }
-                                println!();
-                            }
+        && let Ok(conv) = rag.history.load_conversation(&meta.id)
+    {
+        for msg in &conv.messages {
+            match msg.role {
+                Role::System => {}
+                Role::User => {
+                    if let Some(content) = &msg.content
+                        && !content.is_empty()
+                    {
+                        println!("  {}", "you".green().bold());
+                        for line in content.split('\n') {
+                            println!("  {line}");
+                        }
+                        println!();
                     }
-                    Role::Assistant => {
-                        let mut printed_header = false;
-                        if let Some(content) = &msg.content
-                            && !content.is_empty() {
+                }
+                Role::Assistant => {
+                    let mut printed_header = false;
+                    if let Some(content) = &msg.content
+                        && !content.is_empty()
+                    {
+                        println!("  {}", "openheim".yellow().bold());
+                        printed_header = true;
+                        for line in content.split('\n') {
+                            println!("  {line}");
+                        }
+                    }
+                    if let Some(tool_calls) = &msg.tool_calls {
+                        for tc in tool_calls {
+                            if !printed_header {
                                 println!("  {}", "openheim".yellow().bold());
                                 printed_header = true;
-                                for line in content.split('\n') {
-                                    println!("  {line}");
-                                }
                             }
-                        if let Some(tool_calls) = &msg.tool_calls {
-                            for tc in tool_calls {
-                                if !printed_header {
-                                    println!("  {}", "openheim".yellow().bold());
-                                    printed_header = true;
-                                }
-                                let args = &tc.function.arguments;
-                                let preview: String = args.chars().take(60).collect();
-                                let preview = if args.chars().count() > 60 {
-                                    format!("{preview}…")
-                                } else {
-                                    preview
-                                };
-                                println!(
-                                    "  {} {} {}",
-                                    "⚙".cyan(),
-                                    tc.function.name.cyan().bold(),
-                                    preview.dimmed()
-                                );
-                            }
-                        }
-                        if printed_header {
-                            println!();
+                            let args = &tc.function.arguments;
+                            let preview: String = args.chars().take(60).collect();
+                            let preview = if args.chars().count() > 60 {
+                                format!("{preview}…")
+                            } else {
+                                preview
+                            };
+                            println!(
+                                "  {} {} {}",
+                                "⚙".cyan(),
+                                tc.function.name.cyan().bold(),
+                                preview.dimmed()
+                            );
                         }
                     }
-                    Role::Tool => {
-                        if let Some(content) = &msg.content {
-                            let flat: String = content
-                                .chars()
-                                .take(100)
-                                .collect::<String>()
-                                .replace('\n', " ");
-                            let flat = flat.trim().to_string();
-                            if !flat.is_empty() {
-                                println!("    {} {}", "→".dimmed(), flat.dimmed());
-                            }
+                    if printed_header {
+                        println!();
+                    }
+                }
+                Role::Tool => {
+                    if let Some(content) = &msg.content {
+                        let flat: String = content
+                            .chars()
+                            .take(100)
+                            .collect::<String>()
+                            .replace('\n', " ");
+                        let flat = flat.trim().to_string();
+                        if !flat.is_empty() {
+                            println!("    {} {}", "→".dimmed(), flat.dimmed());
                         }
                     }
                 }
             }
         }
+    }
 
     println!("  {}", divider.dimmed());
     println!();
@@ -442,8 +449,7 @@ async fn run_acp_client(
                 .block_task()
                 .await?;
 
-            let cwd = std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let request = if skills.is_empty() {
                 NewSessionRequest::new(cwd)
             } else {
@@ -466,58 +472,48 @@ async fn run_acp_client(
                                 SessionMessage::SessionMessage(dispatch) => {
                                     let tx = update_tx.clone();
                                     MatchDispatch::new(dispatch)
-                                        .if_notification(
-                                            async move |notif: SessionNotification| {
-                                                match notif.update {
-                                                    SessionUpdate::AgentMessageChunk(chunk) => {
-                                                        if let ContentBlock::Text(t) = chunk.content
-                                                        {
-                                                            let _ = tx
-                                                                .send(AgentUpdate::TextChunk(
-                                                                    t.text,
-                                                                ))
-                                                                .await;
-                                                        }
-                                                    }
-                                                    SessionUpdate::ToolCall(tc) => {
-                                                        let args = tc
-                                                            .raw_input
-                                                            .as_ref()
-                                                            .map(|v| v.to_string())
-                                                            .unwrap_or_default();
+                                        .if_notification(async move |notif: SessionNotification| {
+                                            match notif.update {
+                                                SessionUpdate::AgentMessageChunk(chunk) => {
+                                                    if let ContentBlock::Text(t) = chunk.content {
                                                         let _ = tx
-                                                            .send(AgentUpdate::ToolCall {
-                                                                name: tc.title.clone(),
-                                                                args,
-                                                            })
+                                                            .send(AgentUpdate::TextChunk(t.text))
                                                             .await;
                                                     }
-                                                    SessionUpdate::ToolCallUpdate(tcu) => {
-                                                        if matches!(
-                                                            tcu.fields.status,
-                                                            Some(ToolCallStatus::Completed)
-                                                                | Some(ToolCallStatus::Failed)
-                                                        ) {
-                                                            let result = match tcu.fields.raw_output
-                                                            {
-                                                                Some(
-                                                                    serde_json::Value::String(s),
-                                                                ) => s,
-                                                                Some(v) => v.to_string(),
-                                                                None => String::new(),
-                                                            };
-                                                            let _ = tx
-                                                                .send(AgentUpdate::ToolResult(
-                                                                    result,
-                                                                ))
-                                                                .await;
-                                                        }
-                                                    }
-                                                    _ => {}
                                                 }
-                                                Ok(())
-                                            },
-                                        )
+                                                SessionUpdate::ToolCall(tc) => {
+                                                    let args = tc
+                                                        .raw_input
+                                                        .as_ref()
+                                                        .map(|v| v.to_string())
+                                                        .unwrap_or_default();
+                                                    let _ = tx
+                                                        .send(AgentUpdate::ToolCall {
+                                                            name: tc.title.clone(),
+                                                            args,
+                                                        })
+                                                        .await;
+                                                }
+                                                SessionUpdate::ToolCallUpdate(tcu) => {
+                                                    if matches!(
+                                                        tcu.fields.status,
+                                                        Some(ToolCallStatus::Completed)
+                                                            | Some(ToolCallStatus::Failed)
+                                                    ) {
+                                                        let result = match tcu.fields.raw_output {
+                                                            Some(serde_json::Value::String(s)) => s,
+                                                            Some(v) => v.to_string(),
+                                                            None => String::new(),
+                                                        };
+                                                        let _ = tx
+                                                            .send(AgentUpdate::ToolResult(result))
+                                                            .await;
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                            Ok(())
+                                        })
                                         .await
                                         .otherwise_ignore()?;
                                 }

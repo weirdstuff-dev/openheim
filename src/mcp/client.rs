@@ -19,11 +19,13 @@ impl McpClient {
     pub async fn connect(name: &str, config: &McpServerConfig) -> Result<Self> {
         if let Some(ref url) = config.url {
             let transport = StreamableHttpClientTransport::from_uri(url.as_str());
-            let service = ()
-                .serve(transport)
-                .await
-                .map_err(|e| Error::Other(format!("MCP HTTP connect to '{}' failed: {}", name, e)))?;
-            Ok(Self { service, server_name: name.to_string() })
+            let service = ().serve(transport).await.map_err(|e| {
+                Error::Other(format!("MCP HTTP connect to '{}' failed: {}", name, e))
+            })?;
+            Ok(Self {
+                service,
+                server_name: name.to_string(),
+            })
         } else if let Some(ref command) = config.command {
             let mut cmd = tokio::process::Command::new(command);
             cmd.args(&config.args);
@@ -32,11 +34,13 @@ impl McpClient {
             }
             let transport = TokioChildProcess::new(cmd)
                 .map_err(|e| Error::Other(format!("MCP spawn '{}' failed: {}", name, e)))?;
-            let service = ()
-                .serve(transport)
-                .await
-                .map_err(|e| Error::Other(format!("MCP stdio connect to '{}' failed: {}", name, e)))?;
-            Ok(Self { service, server_name: name.to_string() })
+            let service = ().serve(transport).await.map_err(|e| {
+                Error::Other(format!("MCP stdio connect to '{}' failed: {}", name, e))
+            })?;
+            Ok(Self {
+                service,
+                server_name: name.to_string(),
+            })
         } else {
             Err(Error::ConfigError(format!(
                 "MCP server '{}' must have either 'command' (stdio) or 'url' (HTTP)",
@@ -46,24 +50,28 @@ impl McpClient {
     }
 
     pub async fn list_tools(&self) -> Result<Vec<Tool>> {
-        self.service
-            .list_all_tools()
-            .await
-            .map_err(|e| Error::Other(format!("MCP list_tools failed for '{}': {}", self.server_name, e)))
+        self.service.list_all_tools().await.map_err(|e| {
+            Error::Other(format!(
+                "MCP list_tools failed for '{}': {}",
+                self.server_name, e
+            ))
+        })
     }
 
     pub async fn call_tool(&self, name: &str, args_json: &str) -> Result<String> {
         let params = build_call_params(name, args_json)?;
 
-        let result = self
-            .service
-            .peer()
-            .call_tool(params)
-            .await
-            .map_err(|e| Error::ToolExecutionError(format!("MCP tool '{}' on '{}' failed: {}", name, self.server_name, e)))?;
+        let result = self.service.peer().call_tool(params).await.map_err(|e| {
+            Error::ToolExecutionError(format!(
+                "MCP tool '{}' on '{}' failed: {}",
+                name, self.server_name, e
+            ))
+        })?;
 
         if result.is_error.unwrap_or(false) {
-            return Err(Error::ToolExecutionError(extract_text_content(&result.content)));
+            return Err(Error::ToolExecutionError(extract_text_content(
+                &result.content,
+            )));
         }
 
         Ok(extract_text_content(&result.content))
@@ -89,7 +97,11 @@ fn extract_text_content(content: &[Content]) -> String {
             RawContent::Resource(r) => match &r.resource {
                 ResourceContents::TextResourceContents { text, .. } => text.clone(),
                 ResourceContents::BlobResourceContents { uri, mime_type, .. } => {
-                    format!("[blob: {} ({})]", uri, mime_type.as_deref().unwrap_or("unknown"))
+                    format!(
+                        "[blob: {} ({})]",
+                        uri,
+                        mime_type.as_deref().unwrap_or("unknown")
+                    )
                 }
             },
             RawContent::ResourceLink(l) => format!("[resource: {}]", l.uri),

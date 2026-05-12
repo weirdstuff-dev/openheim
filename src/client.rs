@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     acp::AgentState,
     config::{
-        load_config, load_config_from, AgentConfig, AppConfig, McpServerConfig, ProviderConfig,
+        AgentConfig, AppConfig, McpServerConfig, ProviderConfig, load_config, load_config_from,
     },
     error::Result,
     mcp::McpServerStatus,
@@ -67,8 +67,13 @@ impl OpenheimClient {
         cwd: PathBuf,
         on_history: impl FnMut(SessionUpdate) + Send,
     ) -> Result<SessionHandle> {
-        self.state.acp_load_session(session_id, cwd, on_history).await?;
-        Ok(SessionHandle { id: session_id.to_string(), state: self.state.clone() })
+        self.state
+            .acp_load_session(session_id, cwd, on_history)
+            .await?;
+        Ok(SessionHandle {
+            id: session_id.to_string(),
+            state: self.state.clone(),
+        })
     }
 
     /// Fetch the full `Conversation` (messages + metadata) for a session id.
@@ -146,8 +151,14 @@ impl<'a> SessionBuilder<'a> {
 
     /// Create the session and return a handle for prompting.
     pub async fn start(self) -> Result<SessionHandle> {
-        let id = self.state.acp_new_session(self.model.as_deref(), self.skills, self.cwd).await?;
-        Ok(SessionHandle { id, state: self.state.clone() })
+        let id = self
+            .state
+            .acp_new_session(self.model.as_deref(), self.skills, self.cwd)
+            .await?;
+        Ok(SessionHandle {
+            id,
+            state: self.state.clone(),
+        })
     }
 }
 
@@ -171,7 +182,9 @@ impl SessionHandle {
         text: &str,
         on_update: impl FnMut(SessionUpdate) + Send,
     ) -> Result<()> {
-        self.state.acp_prompt(&self.id, text.to_string(), on_update).await
+        self.state
+            .acp_prompt(&self.id, text.to_string(), on_update)
+            .await
     }
 }
 

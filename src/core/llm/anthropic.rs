@@ -21,7 +21,13 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
-    pub fn new(client: ReqwestClient, api_base: String, api_key: String, model: String, max_tokens: Option<u32>) -> Self {
+    pub fn new(
+        client: ReqwestClient,
+        api_base: String,
+        api_key: String,
+        model: String,
+        max_tokens: Option<u32>,
+    ) -> Self {
         Self {
             client,
             api_base,
@@ -126,16 +132,19 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
             Role::Assistant => {
                 let mut blocks = Vec::new();
                 if let Some(text) = &msg.content
-                    && !text.is_empty() {
-                        blocks.push(AnthropicContentBlock::Text { text: text.clone() });
-                    }
+                    && !text.is_empty()
+                {
+                    blocks.push(AnthropicContentBlock::Text { text: text.clone() });
+                }
                 if let Some(tool_calls) = &msg.tool_calls {
                     for tc in tool_calls {
-                        let input: Value = serde_json::from_str(&tc.function.arguments)
-                            .map_err(|e| Error::ParseError(format!(
-                                "invalid JSON in tool call arguments for '{}': {}",
-                                tc.function.name, e
-                            )))?;
+                        let input: Value =
+                            serde_json::from_str(&tc.function.arguments).map_err(|e| {
+                                Error::ParseError(format!(
+                                    "invalid JSON in tool call arguments for '{}': {}",
+                                    tc.function.name, e
+                                ))
+                            })?;
                         blocks.push(AnthropicContentBlock::ToolUse {
                             id: tc.id.clone(),
                             name: tc.function.name.clone(),
@@ -236,7 +245,11 @@ impl LlmClient for AnthropicClient {
                 .filter(|m| m.role == Role::System)
                 .filter_map(|m| m.content.as_deref())
                 .collect();
-            if parts.is_empty() { None } else { Some(parts.join("\n\n")) }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n\n"))
+            }
         };
 
         let request = AnthropicRequest {
@@ -262,7 +275,10 @@ impl LlmClient for AnthropicClient {
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_else(|_| "<failed to read error body>".into());
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to read error body>".into());
             return Err(Error::HttpError { status, body });
         }
 
@@ -284,7 +300,9 @@ mod tests {
         let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
-        assert!(matches!(&result[0].content[0], AnthropicContentBlock::Text { text } if text == "hello"));
+        assert!(
+            matches!(&result[0].content[0], AnthropicContentBlock::Text { text } if text == "hello")
+        );
     }
 
     #[test]
@@ -413,7 +431,9 @@ mod tests {
     fn convert_response_mixed_text_and_tool() {
         let resp = AnthropicResponse {
             content: vec![
-                AnthropicResponseBlock::Text { text: "Let me read that.".into() },
+                AnthropicResponseBlock::Text {
+                    text: "Let me read that.".into(),
+                },
                 AnthropicResponseBlock::ToolUse {
                     id: "call_1".into(),
                     name: "read_file".into(),
@@ -431,24 +451,35 @@ mod tests {
     fn convert_response_stop_reason_mapping() {
         // end_turn -> stop
         let resp = AnthropicResponse {
-            content: vec![AnthropicResponseBlock::Text { text: "done".into() }],
+            content: vec![AnthropicResponseBlock::Text {
+                text: "done".into(),
+            }],
             stop_reason: Some("end_turn".into()),
         };
-        assert_eq!(convert_response(resp).finish_reason.as_deref(), Some("stop"));
+        assert_eq!(
+            convert_response(resp).finish_reason.as_deref(),
+            Some("stop")
+        );
 
         // tool_use -> tool_calls
         let resp = AnthropicResponse {
             content: vec![AnthropicResponseBlock::Text { text: "x".into() }],
             stop_reason: Some("tool_use".into()),
         };
-        assert_eq!(convert_response(resp).finish_reason.as_deref(), Some("tool_calls"));
+        assert_eq!(
+            convert_response(resp).finish_reason.as_deref(),
+            Some("tool_calls")
+        );
 
         // max_tokens passes through
         let resp = AnthropicResponse {
             content: vec![AnthropicResponseBlock::Text { text: "x".into() }],
             stop_reason: Some("max_tokens".into()),
         };
-        assert_eq!(convert_response(resp).finish_reason.as_deref(), Some("max_tokens"));
+        assert_eq!(
+            convert_response(resp).finish_reason.as_deref(),
+            Some("max_tokens")
+        );
 
         // None stays None
         let resp = AnthropicResponse {

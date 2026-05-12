@@ -21,7 +21,9 @@ mod tests {
     #[test]
     fn create_and_load_conversation_roundtrip() {
         let (mgr, _dir) = make_manager();
-        let conv = mgr.create_conversation(Some("gpt-4".into()), Some("openai".into()), vec![]).unwrap();
+        let conv = mgr
+            .create_conversation(Some("gpt-4".into()), Some("openai".into()), vec![])
+            .unwrap();
         let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
         assert_eq!(loaded.meta.id, conv.meta.id);
         assert_eq!(loaded.meta.model.as_deref(), Some("gpt-4"));
@@ -98,8 +100,12 @@ mod tests {
     #[test]
     fn resolve_conversation_loads_existing_by_id() {
         let (mgr, _dir) = make_manager();
-        let existing = mgr.create_conversation(Some("gpt-4".into()), None, vec![]).unwrap();
-        let resolved = mgr.resolve_conversation(Some(existing.meta.id), None, None, vec![]).unwrap();
+        let existing = mgr
+            .create_conversation(Some("gpt-4".into()), None, vec![])
+            .unwrap();
+        let resolved = mgr
+            .resolve_conversation(Some(existing.meta.id), None, None, vec![])
+            .unwrap();
         assert_eq!(resolved.meta.id, existing.meta.id);
         assert_eq!(resolved.meta.model.as_deref(), Some("gpt-4"));
     }
@@ -108,7 +114,9 @@ mod tests {
     fn resolve_conversation_creates_new_for_unknown_id() {
         let (mgr, _dir) = make_manager();
         let new_id = Uuid::new_v4();
-        let resolved = mgr.resolve_conversation(Some(new_id), Some("claude".into()), None, vec![]).unwrap();
+        let resolved = mgr
+            .resolve_conversation(Some(new_id), Some("claude".into()), None, vec![])
+            .unwrap();
         assert_eq!(resolved.meta.id, new_id);
         assert_eq!(resolved.meta.model.as_deref(), Some("claude"));
     }
@@ -125,7 +133,9 @@ mod tests {
     #[test]
     fn conversation_skills_are_persisted() {
         let (mgr, _dir) = make_manager();
-        let conv = mgr.create_conversation(None, None, vec!["coding".into(), "rust".into()]).unwrap();
+        let conv = mgr
+            .create_conversation(None, None, vec!["coding".into(), "rust".into()])
+            .unwrap();
         let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
         assert_eq!(loaded.meta.skills, vec!["coding", "rust"]);
     }
@@ -221,10 +231,11 @@ impl HistoryManager {
 
         if conv_to_save.meta.title.is_none()
             && let Some(msg) = conv_to_save.messages.iter().find(|m| m.role == Role::User)
-                && let Some(content) = &msg.content {
-                    let title: String = content.chars().take(80).collect();
-                    conv_to_save.meta.title = Some(title);
-                }
+            && let Some(content) = &msg.content
+        {
+            let title: String = content.chars().take(80).collect();
+            conv_to_save.meta.title = Some(title);
+        }
 
         let json = serde_json::to_string_pretty(&conv_to_save)?;
         std::fs::write(&path, json)?;

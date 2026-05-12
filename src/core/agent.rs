@@ -41,7 +41,9 @@ where
         let iter_num = iteration + 1;
 
         if let Some(cb) = callback.as_mut() {
-            cb(StreamEvent::IterationStart { iteration: iter_num });
+            cb(StreamEvent::IterationStart {
+                iteration: iter_num,
+            });
         }
 
         let choice = call_llm(llm, messages, &tools, prompt_builder).await?;
@@ -79,7 +81,11 @@ where
                     result: result.clone(),
                 });
 
-                messages.push(Message::tool_result(tool_call.id.clone(), tool_name.clone(), result));
+                messages.push(Message::tool_result(
+                    tool_call.id.clone(),
+                    tool_name.clone(),
+                    result,
+                ));
             }
 
             steps.push(AgentStep {
@@ -146,15 +152,8 @@ pub async fn run_agent_with_history(
     messages: &mut Vec<Message>,
     prompt_builder: Option<&PromptBuilder>,
 ) -> Result<AgentResult> {
-    run_agent_loop::<fn(StreamEvent)>(
-        &llm,
-        &tool_executor,
-        config,
-        messages,
-        prompt_builder,
-        None,
-    )
-    .await
+    run_agent_loop::<fn(StreamEvent)>(&llm, &tool_executor, config, messages, prompt_builder, None)
+        .await
 }
 
 pub async fn run_agent_streaming_with_history<F>(
@@ -184,8 +183,8 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn make_config(max_iterations: usize) -> AgentConfig {
         AgentConfig {
@@ -271,7 +270,10 @@ mod tests {
         }
 
         async fn execute(&self, name: &str, args_json: &str) -> Result<String> {
-            self.calls.lock().unwrap().push((name.into(), args_json.into()));
+            self.calls
+                .lock()
+                .unwrap()
+                .push((name.into(), args_json.into()));
             Ok(self.result.clone())
         }
     }
@@ -280,7 +282,9 @@ mod tests {
 
     #[async_trait]
     impl ToolExecutor for FailingToolExecutor {
-        fn list_tools(&self) -> Vec<Tool> { vec![] }
+        fn list_tools(&self) -> Vec<Tool> {
+            vec![]
+        }
         async fn execute(&self, _name: &str, _args: &str) -> Result<String> {
             Err(Error::ApiError("tool failed".into()))
         }
@@ -288,16 +292,14 @@ mod tests {
 
     #[tokio::test]
     async fn agent_stops_on_finish_reason_stop() {
-        let llm = Arc::new(MockLlm::new(vec![
-            text_choice("done", "stop"),
-        ]));
+        let llm = Arc::new(MockLlm::new(vec![text_choice("done", "stop")]));
         let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));
         let config = make_config(10);
         let mut messages = vec![Message::user("hi".into())];
 
-        let result = run_agent_with_history(
-            llm.clone(), executor, &config, &mut messages, None,
-        ).await.unwrap();
+        let result = run_agent_with_history(llm.clone(), executor, &config, &mut messages, None)
+            .await
+            .unwrap();
 
         assert_eq!(result.final_response, "done");
         assert_eq!(result.iterations_used, 1);
@@ -314,9 +316,10 @@ mod tests {
         let config = make_config(10);
         let mut messages = vec![Message::user("read a.txt".into())];
 
-        let result = run_agent_with_history(
-            llm.clone(), executor.clone(), &config, &mut messages, None,
-        ).await.unwrap();
+        let result =
+            run_agent_with_history(llm.clone(), executor.clone(), &config, &mut messages, None)
+                .await
+                .unwrap();
 
         assert_eq!(result.final_response, "here is the file content");
         assert_eq!(result.iterations_used, 2);
@@ -338,9 +341,9 @@ mod tests {
         let config = make_config(3);
         let mut messages = vec![Message::user("loop".into())];
 
-        let result = run_agent_with_history(
-            llm, executor, &config, &mut messages, None,
-        ).await.unwrap();
+        let result = run_agent_with_history(llm, executor, &config, &mut messages, None)
+            .await
+            .unwrap();
 
         assert_eq!(result.iterations_used, 3);
     }
@@ -357,18 +360,36 @@ mod tests {
 
         let mut events = Vec::new();
         let result = run_agent_streaming_with_history(
-            llm, executor, &config, &mut messages, None,
+            llm,
+            executor,
+            &config,
+            &mut messages,
+            None,
             |event| events.push(event),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.final_response, "all done");
 
         // Check event sequence
-        assert!(matches!(events[0], StreamEvent::IterationStart { iteration: 1 }));
-        assert!(matches!(&events[1], StreamEvent::ToolCall { tool_name, .. } if tool_name == "echo"));
-        assert!(matches!(&events[2], StreamEvent::ToolResult { tool_name, .. } if tool_name == "echo"));
-        assert!(matches!(events[3], StreamEvent::IterationStart { iteration: 2 }));
-        assert!(matches!(&events[4], StreamEvent::LlmResponse { content } if content == "all done"));
+        assert!(matches!(
+            events[0],
+            StreamEvent::IterationStart { iteration: 1 }
+        ));
+        assert!(
+            matches!(&events[1], StreamEvent::ToolCall { tool_name, .. } if tool_name == "echo")
+        );
+        assert!(
+            matches!(&events[2], StreamEvent::ToolResult { tool_name, .. } if tool_name == "echo")
+        );
+        assert!(matches!(
+            events[3],
+            StreamEvent::IterationStart { iteration: 2 }
+        ));
+        assert!(
+            matches!(&events[4], StreamEvent::LlmResponse { content } if content == "all done")
+        );
         assert!(matches!(&events[5], StreamEvent::Finished { .. }));
     }
 
@@ -383,13 +404,19 @@ mod tests {
         let mut messages = vec![Message::user("do something".into())];
 
         // Should not propagate the error; LLM should receive it as a tool result
-        let result = run_agent_with_history(
-            llm, executor, &config, &mut messages, None,
-        ).await.unwrap();
+        let result = run_agent_with_history(llm, executor, &config, &mut messages, None)
+            .await
+            .unwrap();
 
         assert_eq!(result.final_response, "I got an error");
         // The tool result message should contain the error text
         let tool_result_msg = messages.iter().find(|m| m.tool_call_id.is_some()).unwrap();
-        assert!(tool_result_msg.content.as_deref().unwrap_or("").contains("Error:"));
+        assert!(
+            tool_result_msg
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .contains("Error:")
+        );
     }
 }

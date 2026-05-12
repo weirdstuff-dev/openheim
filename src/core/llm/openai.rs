@@ -16,7 +16,13 @@ pub struct OpenAiClient {
 }
 
 impl OpenAiClient {
-    pub fn new(client: ReqwestClient, api_base: String, api_key: String, model: String, max_tokens: Option<u32>) -> Self {
+    pub fn new(
+        client: ReqwestClient,
+        api_base: String,
+        api_key: String,
+        model: String,
+        max_tokens: Option<u32>,
+    ) -> Self {
         Self {
             client,
             api_base,
@@ -56,7 +62,10 @@ pub(super) async fn send_openai_style(
 
     if !response.status().is_success() {
         let status = response.status().as_u16();
-        let body = response.text().await.unwrap_or_else(|_| "<failed to read error body>".into());
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<failed to read error body>".into());
         return Err(Error::HttpError { status, body });
     }
 
@@ -72,6 +81,15 @@ pub(super) async fn send_openai_style(
 #[async_trait]
 impl LlmClient for OpenAiClient {
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
-        send_openai_style(&self.client, &self.api_base, &self.api_key, &self.model, self.max_tokens, messages, tools).await
+        send_openai_style(
+            &self.client,
+            &self.api_base,
+            &self.api_key,
+            &self.model,
+            self.max_tokens,
+            messages,
+            tools,
+        )
+        .await
     }
 }

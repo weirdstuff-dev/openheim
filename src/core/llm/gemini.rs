@@ -18,7 +18,13 @@ pub struct GeminiClient {
 }
 
 impl GeminiClient {
-    pub fn new(client: ReqwestClient, api_base: String, api_key: String, model: String, max_tokens: Option<u32>) -> Self {
+    pub fn new(
+        client: ReqwestClient,
+        api_base: String,
+        api_key: String,
+        model: String,
+        max_tokens: Option<u32>,
+    ) -> Self {
         Self {
             client,
             api_base,
@@ -115,20 +121,23 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<GeminiContent>> {
             Role::Assistant => {
                 let mut parts = Vec::new();
                 if let Some(text) = &msg.content
-                    && !text.is_empty() {
-                        parts.push(GeminiPart {
-                            text: Some(text.clone()),
-                            function_call: None,
-                            function_response: None,
-                        });
-                    }
+                    && !text.is_empty()
+                {
+                    parts.push(GeminiPart {
+                        text: Some(text.clone()),
+                        function_call: None,
+                        function_response: None,
+                    });
+                }
                 if let Some(tool_calls) = &msg.tool_calls {
                     for tc in tool_calls {
-                        let args: Value = serde_json::from_str(&tc.function.arguments)
-                            .map_err(|e| Error::ParseError(format!(
-                                "invalid JSON in tool call arguments for '{}': {}",
-                                tc.function.name, e
-                            )))?;
+                        let args: Value =
+                            serde_json::from_str(&tc.function.arguments).map_err(|e| {
+                                Error::ParseError(format!(
+                                    "invalid JSON in tool call arguments for '{}': {}",
+                                    tc.function.name, e
+                                ))
+                            })?;
                         parts.push(GeminiPart {
                             text: None,
                             function_call: Some(GeminiFunctionCall {
@@ -149,7 +158,9 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<GeminiContent>> {
             Role::Tool => {
                 // Tool results become functionResponse parts in a user turn.
                 // Gemini matches by function name, not by call id.
-                let name = msg.tool_name.clone()
+                let name = msg
+                    .tool_name
+                    .clone()
                     .or_else(|| msg.tool_call_id.clone())
                     .unwrap_or_default();
                 let part = GeminiPart {
@@ -318,12 +329,14 @@ impl LlmClient for GeminiClient {
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_else(|_| "<failed to read error body>".into());
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to read error body>".into());
             return Err(Error::HttpError { status, body });
         }
 
-        let gemini_response: GeminiResponse =
-            response.json().await.map_err(Error::ReqwestError)?;
+        let gemini_response: GeminiResponse = response.json().await.map_err(Error::ReqwestError)?;
 
         convert_response(gemini_response)
     }
@@ -372,7 +385,10 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "model");
         assert!(result[0].parts[0].function_call.is_some());
-        assert_eq!(result[0].parts[0].function_call.as_ref().unwrap().name, "read_file");
+        assert_eq!(
+            result[0].parts[0].function_call.as_ref().unwrap().name,
+            "read_file"
+        );
     }
 
     #[test]
@@ -494,20 +510,40 @@ mod tests {
         // STOP -> stop
         let resp = GeminiResponse {
             candidates: vec![GeminiCandidate {
-                content: GeminiContent { role: "model".into(), parts: vec![GeminiPart { text: Some("x".into()), function_call: None, function_response: None }] },
+                content: GeminiContent {
+                    role: "model".into(),
+                    parts: vec![GeminiPart {
+                        text: Some("x".into()),
+                        function_call: None,
+                        function_response: None,
+                    }],
+                },
                 finish_reason: Some("STOP".into()),
             }],
         };
-        assert_eq!(convert_response(resp).unwrap().finish_reason.as_deref(), Some("stop"));
+        assert_eq!(
+            convert_response(resp).unwrap().finish_reason.as_deref(),
+            Some("stop")
+        );
 
         // MAX_TOKENS -> length
         let resp = GeminiResponse {
             candidates: vec![GeminiCandidate {
-                content: GeminiContent { role: "model".into(), parts: vec![GeminiPart { text: Some("x".into()), function_call: None, function_response: None }] },
+                content: GeminiContent {
+                    role: "model".into(),
+                    parts: vec![GeminiPart {
+                        text: Some("x".into()),
+                        function_call: None,
+                        function_response: None,
+                    }],
+                },
                 finish_reason: Some("MAX_TOKENS".into()),
             }],
         };
-        assert_eq!(convert_response(resp).unwrap().finish_reason.as_deref(), Some("length"));
+        assert_eq!(
+            convert_response(resp).unwrap().finish_reason.as_deref(),
+            Some("length")
+        );
     }
 
     #[test]

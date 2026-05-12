@@ -17,7 +17,13 @@ pub struct OpenAiCompatibleClient {
 }
 
 impl OpenAiCompatibleClient {
-    pub fn new(client: ReqwestClient, api_base: String, api_key: String, model: String, max_tokens: Option<u32>) -> Self {
+    pub fn new(
+        client: ReqwestClient,
+        api_base: String,
+        api_key: String,
+        model: String,
+        max_tokens: Option<u32>,
+    ) -> Self {
         Self {
             client,
             api_base,
@@ -31,6 +37,15 @@ impl OpenAiCompatibleClient {
 #[async_trait]
 impl LlmClient for OpenAiCompatibleClient {
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
-        send_openai_style(&self.client, &self.api_base, &self.api_key, &self.model, self.max_tokens, messages, tools).await
+        send_openai_style(
+            &self.client,
+            &self.api_base,
+            &self.api_key,
+            &self.model,
+            self.max_tokens,
+            messages,
+            tools,
+        )
+        .await
     }
 }
