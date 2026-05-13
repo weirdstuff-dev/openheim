@@ -365,6 +365,16 @@ impl FsState {
             return;
         }
 
+        let workspace_canonical = match workspace_path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
+                    message: format!("Failed to resolve path: {e}"),
+                }));
+                return;
+            }
+        };
+
         self.stop_watching();
 
         let (notify_tx, mut notify_rx) = mpsc::unbounded::<notify::Result<Event>>();
@@ -400,13 +410,13 @@ impl FsState {
 
         match watcher_result {
             Ok(mut watcher) => {
-                if let Err(e) = watcher.watch(&workspace_path, RecursiveMode::Recursive) {
+                if let Err(e) = watcher.watch(&workspace_canonical, RecursiveMode::Recursive) {
                     let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
                         message: format!("Failed to watch: {e}"),
                     }));
                     return;
                 }
-                self.workspace_root = Some(workspace_path);
+                self.workspace_root = Some(workspace_canonical);
                 self._watcher = Some(watcher);
                 let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Watching { path }));
             }
@@ -432,19 +442,33 @@ fn send_path_error(tx: &UnboundedSender<WsOutbound>) {
 
 fn validate_path_opt(workspace: &Option<PathBuf>, path: &str) -> Option<PathBuf> {
     let workspace = workspace.as_ref()?;
+    let workspace_canonical = workspace.canonicalize().ok()?;
+
     let requested = PathBuf::from(path);
+
     let canonical = if requested.is_absolute() {
         requested
     } else {
-        workspace.join(&requested)
+        if let Ok(cwd) = std::env::current_dir() {
+            let from_cwd = cwd.join(&requested);
+            if from_cwd.exists() {
+                if let Ok(c) = from_cwd.canonicalize() {
+                    if c.starts_with(&workspace_canonical) {
+                        return Some(c);
+                    }
+                }
+            }
+        }
+        // Fallback: treat path as relative to the workspace root
+        workspace_canonical.join(&requested)
     };
 
     let check_path = if canonical.exists() {
         canonical.canonicalize().ok()?
     } else {
-        let workspace_canonical = workspace.canonicalize().ok()?;
-        let mut parent = canonical.parent()?;
+        let mut parent = canonical.as_path();
         loop {
+            parent = parent.parent()?;
             if parent.exists() {
                 let canonical_ancestor = parent.canonicalize().ok()?;
                 if !canonical_ancestor.starts_with(&workspace_canonical) {
@@ -452,11 +476,9 @@ fn validate_path_opt(workspace: &Option<PathBuf>, path: &str) -> Option<PathBuf>
                 }
                 return Some(canonical);
             }
-            parent = parent.parent()?;
         }
     };
 
-    let workspace_canonical = workspace.canonicalize().ok()?;
     if check_path.starts_with(&workspace_canonical) {
         Some(check_path)
     } else {
