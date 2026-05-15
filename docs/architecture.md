@@ -99,7 +99,7 @@ User / Client
                      │ acp_prompt()
                      ▼
 ┌─────────────────────────────────────────────┐
-│            rag::RagContext::prepare          │
+│            rag::RagContext::prepare         │
 │                                             │
 │  1. Load conversation from disk (history)   │
 │  2. Load skill files by name                │
@@ -122,7 +122,7 @@ User / Client
 │    │      executor.execute(name, args)   │  │
 │    │      append tool result message     │  │
 │    │      emit StreamEvent::ToolCall/    │  │
-│    │           ToolResult               │  │
+│    │           ToolResult                │  │
 │    │    else if finish == "stop":        │  │
 │    │      emit StreamEvent::Finished     │  │
 │    │      break                          │  │
@@ -133,17 +133,17 @@ User / Client
            │                  │
            ▼                  ▼
 ┌──────────────────┐  ┌──────────────────────┐
-│   LLM Backend    │  │    Tool Executor      │
-│                  │  │                       │
-│  AnthropicClient │  │  Built-in tools:      │
-│  OpenAiClient    │  │    execute_command    │
-│  GeminiClient    │  │    read_file          │
-│  OpenAiCompatible│  │    write_file         │
-│  (+ RetryClient) │  │                       │
-│                  │  │  MCP tools:           │
-└──────────────────┘  │    {server}__{tool}   │
-                       │    (via rmcp)         │
-                       └──────────────────────┘
+│   LLM Backend    │  │    Tool Executor     │
+│                  │  │                      │
+│  AnthropicClient │  │  Built-in tools:     │
+│  OpenAiClient    │  │    execute_command   │
+│  GeminiClient    │  │    read_file         │
+│  OpenAiCompatible│  │    write_file        │
+│  (+ RetryClient) │  │                      │
+│                  │  │  MCP tools:          │
+└──────────────────┘  │    {server}__{tool}  │
+                      │    (via rmcp)        │
+                      └──────────────────────┘
 ```
 
 ---
