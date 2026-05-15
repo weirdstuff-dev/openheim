@@ -1,7 +1,9 @@
 use std::fmt;
 
+/// All errors that openheim can produce.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Non-HTTP error returned by an LLM provider (e.g. auth rejection in the response body).
     #[error("API error: {0}")]
     ApiError(String),
 
@@ -35,6 +37,7 @@ pub enum Error {
 }
 
 impl Error {
+    /// Convenience constructor for [`Error::ConfigError`].
     pub fn config(msg: impl fmt::Display) -> Self {
         Error::ConfigError(msg.to_string())
     }

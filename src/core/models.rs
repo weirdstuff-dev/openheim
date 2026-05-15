@@ -2,17 +2,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-// Chat API Models
-
+/// Chat role for a conversation message.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
     User,
     Assistant,
+    /// Tool result injected back into the conversation after a tool call.
     Tool,
 }
 
+/// Serialised body sent to a chat-completion endpoint.
 #[derive(Debug, Serialize, Clone)]
 pub struct ChatRequest {
     pub model: String,
@@ -23,6 +24,7 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
 }
 
+/// A single message in a conversation thread, compatible with the OpenAI chat format.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Message {
     pub role: Role,
@@ -67,6 +69,7 @@ impl Message {
     }
 }
 
+/// A tool-call request emitted by the LLM inside an assistant message.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ToolCall {
     pub id: String,
@@ -75,12 +78,15 @@ pub struct ToolCall {
     pub function: FunctionCall,
 }
 
+/// Function name and JSON-encoded arguments from a tool call.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FunctionCall {
     pub name: String,
+    /// JSON string of the arguments object.
     pub arguments: String,
 }
 
+/// A tool available to the agent, serialised in the OpenAI function-calling format.
 #[derive(Debug, Serialize, Clone)]
 pub struct Tool {
     #[serde(rename = "type")]
@@ -88,25 +94,29 @@ pub struct Tool {
     pub function: FunctionDefinition,
 }
 
+/// Metadata describing a callable tool function.
 #[derive(Debug, Serialize, Clone)]
 pub struct FunctionDefinition {
     pub name: String,
     pub description: String,
+    /// JSON Schema object describing the function's parameters.
     pub parameters: Value,
 }
 
+/// Raw response from a chat-completion endpoint.
 #[derive(Debug, Deserialize)]
 pub struct ChatResponse {
     pub choices: Vec<Choice>,
 }
 
+/// A single completion choice returned by the provider.
 #[derive(Debug, Deserialize)]
 pub struct Choice {
     pub message: Message,
     pub finish_reason: Option<String>,
 }
 
-// Agent Result Models
+/// One iteration of an agent run, including the LLM response and any tools invoked.
 #[derive(Debug, Serialize, Clone)]
 pub struct AgentStep {
     pub iteration: usize,
@@ -114,6 +124,7 @@ pub struct AgentStep {
     pub tool_calls: Option<Vec<ToolExecutionResult>>,
 }
 
+/// Result of executing a single tool during an agent step.
 #[derive(Debug, Serialize, Clone)]
 pub struct ToolExecutionResult {
     pub tool_name: String,
@@ -121,6 +132,7 @@ pub struct ToolExecutionResult {
     pub result: String,
 }
 
+/// Final output of a completed agent run.
 #[derive(Debug, Serialize)]
 pub struct AgentResult {
     pub final_response: String,
@@ -128,21 +140,26 @@ pub struct AgentResult {
     pub iterations_used: usize,
 }
 
-// Streaming Events
+/// Streaming event emitted during an agent run over a WebSocket connection.
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "event_type")]
 pub enum StreamEvent {
+    /// Signals the start of a new reasoning iteration.
     #[serde(rename = "iteration_start")]
     IterationStart { iteration: usize },
+    /// The agent is about to invoke a tool.
     #[serde(rename = "tool_call")]
     ToolCall {
         tool_name: String,
         arguments: String,
     },
+    /// A tool has finished executing.
     #[serde(rename = "tool_result")]
     ToolResult { tool_name: String, result: String },
+    /// A chunk of text from the LLM.
     #[serde(rename = "llm_response")]
     LlmResponse { content: String },
+    /// The agent has finished; `final_response` is the complete answer.
     #[serde(rename = "finished")]
     Finished {
         final_response: String,
@@ -249,8 +266,7 @@ pub enum FsResponse {
     Error { message: String },
 }
 
-// Agent WebSocket types
-
+/// Inbound prompt request over the agent WebSocket channel.
 #[derive(Debug, Deserialize)]
 pub struct WsRequest {
     pub prompt: String,
@@ -264,6 +280,7 @@ pub struct WsRequest {
     pub skills: Option<Vec<String>>,
 }
 
+/// Outbound response over the agent WebSocket channel.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 pub enum WsResponse {

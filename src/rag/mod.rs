@@ -1,3 +1,5 @@
+//! Conversation history and skill injection for agent prompts.
+
 pub mod history;
 pub mod prompt;
 pub mod skills;
@@ -9,13 +11,17 @@ pub use skills::SkillsManager;
 use crate::error::Result;
 use uuid::Uuid;
 
+/// Holds the conversation history store and skill definitions used to build agent prompts.
 #[derive(Clone)]
 pub struct RagContext {
+    /// Persisted conversation history.
     pub history: HistoryManager,
+    /// Named skill files loaded from `~/.openheim/skills/`.
     pub skills: SkillsManager,
 }
 
 impl RagContext {
+    /// Initialise history and skills from the default openheim data directory.
     pub fn new() -> Result<Self> {
         Ok(Self {
             history: HistoryManager::new()?,
@@ -23,6 +29,11 @@ impl RagContext {
         })
     }
 
+    /// Load or create a conversation and build the prompt context for an agent turn.
+    ///
+    /// Returns the resolved [`Conversation`] and a [`PromptBuilder`] already populated
+    /// with any requested skills. When `chat_id` refers to an existing conversation the
+    /// skills stored on that conversation take precedence over `skill_names`.
     pub fn prepare(
         &self,
         chat_id: Option<Uuid>,

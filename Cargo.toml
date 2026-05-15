@@ -2,6 +2,14 @@
 name = "openheim"
 version = "0.1.0"
 edition = "2024"
+description = "A fast, multi-provider LLM agent runtime written in Rust"
+license = "MIT"
+repository = "https://github.com/weirdstuff-dev/openheim"
+homepage = "https://openheim.io"
+documentation = "https://docs.rs/openheim"
+keywords = ["agent", "llm", "ai", "mcp", "async"]
+categories = ["command-line-utilities", "asynchronous"]
+rust-version = "1.85"
 
 [lib]
 name = "openheim"
