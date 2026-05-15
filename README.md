@@ -5,6 +5,8 @@
 [openheim.io](https://openheim.io)
 
 [![CI](https://github.com/weirdstuff-dev/openheim/actions/workflows/ci.yml/badge.svg)](https://github.com/weirdstuff-dev/openheim/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/openheim)](https://crates.io/crates/openheim)
+[![docs.rs](https://img.shields.io/docsrs/openheim)](https://docs.rs/openheim)
 [![License](https://img.shields.io/github/license/weirdstuff-dev/openheim)](./LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)](https://www.rust-lang.org)
 </div>
@@ -50,8 +52,14 @@ Openheim is built in Rust from the ground up:
 ### Install
 
 ```bash
+cargo install openheim
+```
+
+Or build from source:
+
+```bash
 git clone https://github.com/weirdstuff-dev/openheim.git
-cd openheim
+cd openheim-core
 cargo build --release
 ```
 
@@ -68,22 +76,20 @@ vim ~/.openheim/config.toml
 Example config:
 
 ```toml
-default_provider = "openai"
+default_provider = "anthropic"
 max_iterations = 10
-
-[providers.openai]
-api_base = "https://api.openai.com/v1"
-default_model = "gpt-4"
-models = ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
-env_var = "OPENAI_API_KEY"
-# timeout_secs = 120  # Request timeout in seconds (default: 120)
-# max_tokens = 4096   # Maximum output tokens for LLM responses
 
 [providers.anthropic]
 api_base = "https://api.anthropic.com/v1"
-default_model = "claude-sonnet-4-5-20250929"
-models = ["claude-sonnet-4-5-20250929", "claude-3-5-sonnet-20241022", "claude-3-opus-20240229"]
+default_model = "claude-sonnet-4-6"
+models = ["claude-sonnet-4-6", "claude-opus-4-7"]
 env_var = "ANTHROPIC_API_KEY"
+
+[providers.openai]
+api_base = "https://api.openai.com/v1"
+default_model = "gpt-4o"
+models = ["gpt-4o", "gpt-4-turbo"]
+env_var = "OPENAI_API_KEY"
 
 [providers.gemini]
 api_base = "https://generativelanguage.googleapis.com/v1beta"
@@ -94,8 +100,8 @@ env_var = "GEMINI_API_KEY"
 # Local Ollama (no API key needed)
 [providers.ollama]
 api_base = "http://localhost:11434/v1"
-default_model = "llama2"
-models = ["llama2", "mistral", "codellama"]
+default_model = "llama3"
+models = ["llama3", "mistral", "codellama"]
 
 # MCP servers — tools are exposed as "{server_name}__{tool_name}"
 # [mcp_servers.filesystem]
@@ -119,7 +125,7 @@ cargo run -- --skills rust,debugging
 cargo run -- run "List the files in the current directory"
 
 # Single headless prompt with a model override
-cargo run -- run "Hello" --model gpt-4-turbo
+cargo run -- run "Hello" --model gpt-4o
 
 # ACP stdio agent (for Zed, Claude Code, and other ACP clients)
 cargo run -- acp
@@ -192,7 +198,23 @@ Every message is wrapped in `{ "channel": "<agent|fs>", "data": <payload> }`.
 | `GET /api/sessions` | All persisted sessions (metadata only, newest first) |
 | `GET /api/sessions/{id}` | Full conversation — messages, tool calls, and metadata |
 
-> **Frontend / WebSocket implementors:** see [OPENHEIM_SPEC.md](./OPENHEIM_SPEC.md) for the complete protocol reference, TypeScript interfaces, and sequence diagrams.
+> **Frontend / WebSocket implementors:** see [docs/api.md](./docs/api.md) for the complete protocol reference, TypeScript interfaces, and sequence diagrams.
+
+---
+
+## Documentation
+
+| Guide | Description |
+|-------|-------------|
+| [docs/architecture.md](./docs/architecture.md) | Module map and prompt flow |
+| [docs/configuration.md](./docs/configuration.md) | Full `config.toml` reference |
+| [docs/library.md](./docs/library.md) | Embedding openheim as a Rust library |
+| [docs/skills.md](./docs/skills.md) | Writing and enabling skill files |
+| [docs/deployment.md](./docs/deployment.md) | Docker, systemd, reverse proxy, enterprise |
+| [docs/custom-tools.md](./docs/custom-tools.md) | Implementing a custom `ToolHandler` |
+| [docs/custom-llm-provider.md](./docs/custom-llm-provider.md) | Implementing a custom `LlmClient` |
+| [docs/api.md](./docs/api.md) | REST + WebSocket API spec |
+| [docs.rs/openheim](https://docs.rs/openheim) | Rust API reference (auto-generated) |
 
 ---
 
@@ -203,7 +225,7 @@ Openheim can be embedded directly in your Rust application via the `openheim` cr
 ```toml
 # Cargo.toml
 [dependencies]
-openheim = { path = "../openheim-core" }
+openheim = "0.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -255,7 +277,6 @@ src/
     stdio.rs        ACP-over-stdio transport (for editor integrations)
     ws.rs           Multiplexed WebSocket server (axum) + REST API + filesystem channel
     run.rs          Headless single-prompt transport
-    WS_SPEC.md      Full WebSocket protocol reference for frontend implementors
   tui/              Interactive rustyline REPL
 ```
 

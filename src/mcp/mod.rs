@@ -10,20 +10,34 @@ use tool_handler::McpToolHandler;
 
 use crate::{config::McpServerConfig, error::Result, tools::ToolHandler};
 
+/// Connection status and tool-count summary for a single MCP server.
+///
+/// Returned by [`OpenheimClient::mcp_servers`] so callers can inspect which
+/// servers connected successfully and how many tools each one exposed.
 #[derive(Debug, Clone, Serialize)]
 pub struct McpServerStatus {
+    /// Name of the server as defined in the configuration.
     pub name: String,
+    /// Transport type: `"stdio"`, `"http"`, or `"unknown"`.
     pub transport: &'static str,
+    /// Spawn command for stdio servers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// Base URL for HTTP servers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     pub connected: bool,
     pub tool_count: usize,
+    /// Error message if the server failed to connect.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
+/// Connects to all configured MCP servers and returns their tool handlers and statuses.
+///
+/// Connection failures are non-fatal: a server that fails to connect produces a
+/// [`McpServerStatus`] with `connected: false` and an error message, and the
+/// function continues with the remaining servers.
 pub(crate) async fn load_mcp_tools(
     configs: &BTreeMap<String, McpServerConfig>,
 ) -> (Vec<Box<dyn ToolHandler>>, Vec<McpServerStatus>) {

@@ -1,3 +1,22 @@
+//! WebSocket + REST transport: serves the agent over an axum HTTP server.
+//!
+//! Exposes the following endpoints:
+//!
+//! | Endpoint | Description |
+//! |----------|-------------|
+//! | `GET /ws` | WebSocket endpoint; multiplexes ACP agent messages and filesystem events |
+//! | `GET /api/config` | Resolved configuration (providers, models) |
+//! | `GET /api/models` | Available providers and their model lists |
+//! | `GET /api/skills` | Installed skill names |
+//! | `GET /api/tools` | Registered tool definitions |
+//! | `GET /api/mcp-servers` | MCP server connection statuses |
+//! | `GET /api/sessions` | Conversation history listing |
+//! | `GET /api/sessions/{id}` | Single conversation by UUID |
+//!
+//! WebSocket messages are JSON-encoded with a `channel` discriminator:
+//! - `{"channel":"agent","data":{…}}` — ACP protocol frames
+//! - `{"channel":"fs","data":{…}}` — filesystem sidecar (watch / list / read / write / mkdir / delete / rename)
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,6 +70,9 @@ enum WsOutbound {
     Fs(FsResponse),
 }
 
+/// Loads configuration, initialises the agent runtime, and starts the HTTP/WebSocket server.
+///
+/// Blocks until a Ctrl-C signal is received, then shuts down gracefully.
 pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
     let app_config = load_config()?;
     let agent_config = app_config.resolve(None)?;

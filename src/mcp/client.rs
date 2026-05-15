@@ -10,12 +10,21 @@ use crate::{
     error::{Error, Result},
 };
 
+/// Low-level MCP client wrapping an active [`rmcp`] service connection.
+///
+/// Created by [`McpClient::connect`] and shared via `Arc` across all
+/// [`McpToolHandler`]s that belong to the same server.
 pub struct McpClient {
     service: RunningService<RoleClient, ()>,
     pub server_name: String,
 }
 
 impl McpClient {
+    /// Connects to an MCP server using the transport specified in `config`.
+    ///
+    /// - `config.url` set → connects via Streamable HTTP.
+    /// - `config.command` set → spawns the process and connects via stdio.
+    /// - Neither set → returns [`Error::ConfigError`].
     pub async fn connect(name: &str, config: &McpServerConfig) -> Result<Self> {
         if let Some(ref url) = config.url {
             let transport = StreamableHttpClientTransport::from_uri(url.as_str());
@@ -49,6 +58,7 @@ impl McpClient {
         }
     }
 
+    /// Returns all tools advertised by the MCP server.
     pub async fn list_tools(&self) -> Result<Vec<Tool>> {
         self.service.list_all_tools().await.map_err(|e| {
             Error::Other(format!(
@@ -58,6 +68,13 @@ impl McpClient {
         })
     }
 
+    /// Invokes a tool by name with JSON-encoded arguments.
+    ///
+    /// `args_json` must be a JSON object string (e.g. `{"path":"/tmp"}`). An empty
+    /// string or `"{}"` is treated as no arguments.
+    ///
+    /// Returns the concatenated text content of all response blocks, or an error
+    /// if the server reports `is_error: true`.
     pub async fn call_tool(&self, name: &str, args_json: &str) -> Result<String> {
         let params = build_call_params(name, args_json)?;
 

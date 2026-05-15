@@ -9,7 +9,7 @@ Openheim can be embedded directly in your Rust application. The library exposes 
 ```toml
 # Cargo.toml
 [dependencies]
-openheim = { path = "../openheim-core" }   # or version once published
+openheim = "0.1"
 tokio = { version = "1", features = ["full"] }
 ```
 

@@ -7,6 +7,8 @@ use crate::error::Result;
 use crate::rag::PromptBuilder;
 use crate::tools::ToolExecutor;
 
+/// Sends a request to the LLM, optionally applying a [`PromptBuilder`] to inject
+/// skill-based system content before the message history.
 async fn call_llm(
     llm: &Arc<dyn LlmClient>,
     messages: &[Message],
@@ -22,6 +24,16 @@ async fn call_llm(
     }
 }
 
+/// Core agent loop: repeatedly calls the LLM and executes tool calls until a
+/// final text response with `finish_reason == "stop"` is produced or
+/// `config.max_iterations` is reached.
+///
+/// Appends all assistant and tool-result messages to `messages` in place so the
+/// caller retains a complete history after this returns.
+///
+/// If `callback` is `Some`, a [`StreamEvent`] is emitted for each significant
+/// step: iteration start, tool calls, tool results, LLM text responses, and
+/// the final completion.
 async fn run_agent_loop<F>(
     llm: &Arc<dyn LlmClient>,
     tool_executor: &Arc<dyn ToolExecutor>,
@@ -145,6 +157,19 @@ where
     })
 }
 
+/// Runs the agent loop against an existing message history without streaming.
+///
+/// `messages` is extended in place with the full conversation turn — assistant
+/// messages and tool results. The caller is responsible for persisting the
+/// updated history after this returns.
+///
+/// # Arguments
+///
+/// * `llm` — LLM backend to use for inference
+/// * `tool_executor` — resolves and executes tool calls made by the LLM
+/// * `config` — agent settings, including `max_iterations`
+/// * `messages` — conversation history; mutated in place
+/// * `prompt_builder` — if `Some`, prepends skill-based system content to each LLM request
 pub async fn run_agent_with_history(
     llm: Arc<dyn LlmClient>,
     tool_executor: Arc<dyn ToolExecutor>,
@@ -156,6 +181,11 @@ pub async fn run_agent_with_history(
         .await
 }
 
+/// Streaming variant of [`run_agent_with_history`].
+///
+/// Identical in behaviour, but emits [`StreamEvent`]s via `callback` as the
+/// agent progresses through iterations, tool calls, and LLM responses.
+/// The callback is invoked synchronously on the same task and must not block.
 pub async fn run_agent_streaming_with_history<F>(
     llm: Arc<dyn LlmClient>,
     tool_executor: Arc<dyn ToolExecutor>,

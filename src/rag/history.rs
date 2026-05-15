@@ -141,6 +141,10 @@ mod tests {
     }
 }
 
+/// Persistent metadata for a conversation session.
+///
+/// Stored in the `meta` field of each conversation JSON file. Does not include
+/// the full message history — use [`Conversation`] for that.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationMeta {
     pub id: Uuid,
@@ -150,14 +154,20 @@ pub struct ConversationMeta {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Title derived from the first user message (up to 80 characters). Set on
+    /// the first [`HistoryManager::save_conversation`] call that includes messages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Names of skills active in this conversation (correspond to `~/.openheim/skills/*.md`).
     #[serde(default)]
     pub skills: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cwd: Option<std::path::PathBuf>,
 }
 
+/// A complete conversation: metadata plus the full ordered message list.
+///
+/// Serialised to `~/.openheim/history/{id}.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     pub meta: ConversationMeta,
@@ -170,12 +180,20 @@ struct ConversationEnvelope {
     meta: ConversationMeta,
 }
 
+/// Manages persisted conversation history on disk.
+///
+/// Each conversation is stored as a separate JSON file in `~/.openheim/history/`
+/// (or a custom directory when constructed with [`HistoryManager::with_dir`]).
+/// Files are named `{uuid}.json` and contain both [`ConversationMeta`] and the
+/// full `messages` array.
 #[derive(Clone)]
 pub struct HistoryManager {
     history_dir: PathBuf,
 }
 
 impl HistoryManager {
+    /// Creates a `HistoryManager` backed by `~/.openheim/history/`, creating the
+    /// directory if it doesn't exist.
     pub fn new() -> Result<Self> {
         let dir = config_dir()?.join("history");
         std::fs::create_dir_all(&dir)?;
@@ -186,6 +204,10 @@ impl HistoryManager {
         self.history_dir.join(format!("{}.json", id))
     }
 
+    /// Creates a new conversation, persists it immediately, and returns it.
+    ///
+    /// The conversation starts with no messages and no title. The title is derived
+    /// from the first user message when [`save_conversation`] is later called.
     pub fn create_conversation(
         &self,
         model: Option<String>,
@@ -210,6 +232,9 @@ impl HistoryManager {
         Ok(conv)
     }
 
+    /// Loads a conversation from disk by its UUID.
+    ///
+    /// Returns an error if the file does not exist or cannot be deserialised.
     pub fn load_conversation(&self, id: &Uuid) -> Result<Conversation> {
         let path = self.conversation_path(id);
         if !path.exists() {
@@ -224,6 +249,10 @@ impl HistoryManager {
         Ok(conv)
     }
 
+    /// Saves a conversation to disk, updating `updated_at` to now.
+    ///
+    /// If the conversation has no title yet and contains at least one user message,
+    /// the title is set to the first 80 characters of that message.
     pub fn save_conversation(&self, conv: &Conversation) -> Result<()> {
         let path = self.conversation_path(&conv.meta.id);
         let mut conv_to_save = conv.clone();
@@ -242,6 +271,9 @@ impl HistoryManager {
         Ok(())
     }
 
+    /// Deletes a conversation file by UUID.
+    ///
+    /// Returns an error if the conversation does not exist.
     pub fn delete_conversation(&self, id: &Uuid) -> Result<()> {
         let path = self.conversation_path(id);
         if !path.exists() {
@@ -251,6 +283,9 @@ impl HistoryManager {
         Ok(())
     }
 
+    /// Returns metadata for all persisted conversations, sorted newest-first by `updated_at`.
+    ///
+    /// Only the `meta` portion of each file is deserialised; message bodies are not loaded.
     pub fn list_conversations(&self) -> Result<Vec<ConversationMeta>> {
         let mut metas = Vec::new();
         for entry in std::fs::read_dir(&self.history_dir)? {
@@ -267,6 +302,9 @@ impl HistoryManager {
         Ok(metas)
     }
 
+    /// Returns the most-recently-updated conversation, or `None` if none exist.
+    ///
+    /// Loads the full conversation (messages + metadata) for the most recent entry.
     pub fn get_last_conversation(&self) -> Result<Option<Conversation>> {
         let metas = self.list_conversations()?;
         match metas.first() {
@@ -280,6 +318,12 @@ impl HistoryManager {
         Self { history_dir: dir }
     }
 
+    /// Resolves or creates a conversation for a new agent session.
+    ///
+    /// - `chat_id` is `Some` and the file exists → loads and returns it.
+    /// - `chat_id` is `Some` but the file doesn't exist → creates a new conversation
+    ///   with that exact ID (useful for client-assigned IDs).
+    /// - `chat_id` is `None` → creates a fresh conversation with a new UUID.
     pub fn resolve_conversation(
         &self,
         chat_id: Option<Uuid>,

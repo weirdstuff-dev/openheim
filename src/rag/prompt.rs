@@ -1,5 +1,13 @@
 use crate::core::models::{Message, Role};
 
+/// Builds an LLM message sequence by prepending skill content as a system message.
+///
+/// Skills are accumulated with [`add_skill`] and combined into a single system
+/// message joined by `---` separators. That message is inserted at position 0,
+/// followed by the existing conversation history.
+///
+/// If no skills have been added, [`build`] returns the history unchanged with no
+/// system message prepended.
 #[derive(Default)]
 pub struct PromptBuilder {
     system_parts: Vec<String>,
@@ -10,11 +18,20 @@ impl PromptBuilder {
         Self::default()
     }
 
+    /// Registers a skill to be included in the system message.
+    ///
+    /// Each call appends a `## Skill: {name}` section. Multiple skills are joined
+    /// with `\n\n---\n\n` when [`build`] is called.
     pub fn add_skill(&mut self, name: &str, content: &str) {
         self.system_parts
             .push(format!("## Skill: {}\n\n{}", name, content));
     }
 
+    /// Constructs the full message list for an LLM request.
+    ///
+    /// Prepends a system message containing all registered skill sections to
+    /// `history`. If no skills have been registered, `history` is returned as-is
+    /// with no system message added.
     pub fn build(&self, history: &[Message]) -> Vec<Message> {
         let mut messages = Vec::new();
 

@@ -1,3 +1,9 @@
+//! Headless transport: runs a single agent prompt in-process and streams output to stdout.
+//!
+//! Used by `openheim run "<prompt>"`. Spins up a fully-featured ACP server on an
+//! in-process duplex pipe, connects an ACP client to it, sends the prompt, and
+//! prints streamed text chunks to stdout as they arrive.
+
 use std::io::Write as _;
 use std::sync::Arc;
 
@@ -16,6 +22,11 @@ use crate::{
     rag::RagContext,
 };
 
+/// Runs the agent against `prompt` using an in-process ACP session and prints
+/// the streamed response to stdout.
+///
+/// `model` overrides the default model from the configuration file. If `None`,
+/// the provider's configured default is used.
 pub async fn run_headless(prompt: String, model: Option<String>) -> crate::error::Result<()> {
     let app_config = load_config()?;
     let agent_config = app_config.resolve(model.as_deref())?;

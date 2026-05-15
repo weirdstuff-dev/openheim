@@ -1,3 +1,5 @@
+//! Built-in tool: `read_file` — reads a file from disk and returns its contents.
+
 use async_trait::async_trait;
 use serde_json::json;
 use tokio::fs;
@@ -7,6 +9,10 @@ use crate::error::{Error, Result};
 
 use super::ToolHandler;
 
+/// Reads a file at the given path and returns its UTF-8 contents.
+///
+/// Returns an error if the file does not exist, cannot be read, or is not
+/// valid UTF-8.
 pub struct ReadFileTool;
 
 #[async_trait]
