@@ -1,3 +1,55 @@
+//! Tool abstraction layer: trait definitions, built-in tools, and the runtime
+//! executor that routes LLM tool calls to the correct handler.
+//!
+//! # Built-in tools
+//!
+//! Three tools are registered by default via [`SystemToolExecutor::register_builtins`]:
+//!
+//! | Name | Description |
+//! |------|-------------|
+//! | `execute_command` | Run a shell command (`sh -c` on Unix, `cmd /C` on Windows) |
+//! | `read_file` | Read a file from disk |
+//! | `write_file` | Write a file to disk, creating parent directories as needed |
+//!
+//! Additional tools are loaded from MCP servers and registered under the
+//! `{server_name}__{tool_name}` namespace.
+//!
+//! # Implementing a custom tool
+//!
+//! ```rust,no_run
+//! use async_trait::async_trait;
+//! use serde_json::json;
+//!
+//! struct GreetTool;
+//!
+//! # use openheim::tools::ToolHandler;
+//! # use openheim::core::models::{Tool, FunctionDefinition};
+//! # use openheim::error::Result;
+//! #[async_trait]
+//! impl ToolHandler for GreetTool {
+//!     fn definition(&self) -> Tool {
+//!         Tool {
+//!             tool_type: "function".to_string(),
+//!             function: FunctionDefinition {
+//!                 name: "greet".to_string(),
+//!                 description: "Greet someone by name.".to_string(),
+//!                 parameters: json!({
+//!                     "type": "object",
+//!                     "properties": { "name": { "type": "string" } },
+//!                     "required": ["name"]
+//!                 }),
+//!             },
+//!         }
+//!     }
+//!
+//!     async fn execute(&self, args: &str) -> Result<String> {
+//!         let v: serde_json::Value = serde_json::from_str(args)?;
+//!         let name = v["name"].as_str().unwrap_or("world");
+//!         Ok(format!("Hello, {name}!"))
+//!     }
+//! }
+//! ```
+
 mod execute_command;
 mod read_file;
 mod write_file;
@@ -19,23 +71,44 @@ pub trait ToolHandler: Send + Sync {
     async fn execute(&self, args: &str) -> Result<String>;
 }
 
+/// Routes LLM tool-call requests to the correct [`ToolHandler`].
+///
+/// The production implementation is [`SystemToolExecutor`]. Tests typically use
+/// lightweight mock implementations of this trait.
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {
+    /// Returns the list of tools available to the LLM.
     fn list_tools(&self) -> Vec<Tool>;
+
+    /// Dispatches a tool call by name with JSON-encoded arguments.
+    ///
+    /// Returns the tool output as a string, or an error if the tool is unknown
+    /// or its execution fails.
     async fn execute(&self, name: &str, args_json: &str) -> Result<String>;
 }
 
+/// The default tool executor used by the agent runtime.
+///
+/// Maintains a registry of [`ToolHandler`]s keyed by tool name and dispatches
+/// LLM tool calls to the appropriate handler. Built-in tools are registered via
+/// [`register_builtins`]; MCP tools are added during [`build`].
 pub struct SystemToolExecutor {
     handlers: HashMap<String, Box<dyn ToolHandler>>,
 }
 
 impl SystemToolExecutor {
+    /// Creates an empty executor with no registered tools.
     pub fn new() -> Self {
         Self {
             handlers: HashMap::new(),
         }
     }
 
+    /// Builds a fully-configured executor: registers built-in tools then connects
+    /// to all configured MCP servers and registers their tools.
+    ///
+    /// Returns the executor alongside [`McpServerStatus`] entries for each server
+    /// so callers can inspect which connections succeeded.
     pub async fn build(
         mcp_configs: &BTreeMap<String, McpServerConfig>,
     ) -> (Self, Vec<crate::mcp::McpServerStatus>) {
@@ -48,12 +121,17 @@ impl SystemToolExecutor {
         (executor, statuses)
     }
 
+    /// Registers the three built-in tools: `execute_command`, `read_file`, `write_file`.
     pub fn register_builtins(&mut self) {
         self.register(Box::new(execute_command::ExecuteCommandTool));
         self.register(Box::new(read_file::ReadFileTool));
         self.register(Box::new(write_file::WriteFileTool));
     }
 
+    /// Registers a single tool handler.
+    ///
+    /// If a tool with the same name is already registered it is overwritten and a
+    /// warning is logged.
     pub fn register(&mut self, handler: Box<dyn ToolHandler>) {
         let name = handler.definition().function.name.clone();
         if self.handlers.contains_key(&name) {

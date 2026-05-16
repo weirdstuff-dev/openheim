@@ -1,3 +1,5 @@
+//! Built-in tool: `write_file` — writes content to a file, creating parent directories as needed.
+
 use async_trait::async_trait;
 use serde_json::json;
 use std::path::Path;
@@ -8,6 +10,9 @@ use crate::error::{Error, Result};
 
 use super::ToolHandler;
 
+/// Writes content to a file at the given path, creating any missing parent directories.
+///
+/// Creates the file if it does not exist; overwrites it if it does.
 pub struct WriteFileTool;
 
 #[async_trait]

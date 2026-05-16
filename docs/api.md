@@ -4,7 +4,7 @@
 > **Base URL:** `http://{host}:{port}` (default `0.0.0.0:1217`)
 > **Protocol:** REST + multiplexed WebSocket over ACP (Agent Client Protocol)
 
-This document describes every HTTP and WebSocket endpoint the Openheim server exposes. It is intended for the frontend team to implement a complete UI client.
+This document describes every HTTP and WebSocket endpoint that openheim server exposes.
 
 ---
 
@@ -1596,18 +1596,18 @@ Frontend                        Openheim Server                  LLM
    │                                  │                           │
    │  WS connect to /ws               │                           │
    │─────────────────────────────────►│                           │
-   │  { channel:"fs", type:"connected"}│                           │
+   │ { channel:"fs", type:"connected"}│                           │
    │◄─────────────────────────────────│                           │
    │                                  │                           │
    │  { channel:"agent",              │                           │
-   │    method:"initialize", ... }     │                           │
+   │   method:"initialize", ... }     │                           │
    │─────────────────────────────────►│                           │
    │  { channel:"agent",              │                           │
    │    result: { ... _meta } }       │                           │
    │◄─────────────────────────────────│                           │
    │                                  │                           │
    │  { channel:"agent",              │                           │
-   │    method:"session/new", ... }    │                           │
+   │   method:"session/new", ... }    │                           │
    │─────────────────────────────────►│                           │
    │  { channel:"agent",              │                           │
    │    result:{sessionId:"uuid"} }   │                           │
@@ -1652,10 +1652,10 @@ Frontend                        Openheim Server
    │                                  │
    │  GET /api/sessions               │
    │─────────────────────────────────►│
-   │  [ { id, title, updatedAt }, ... ]│
+   │ [ { id, title, updatedAt }, ... ]│
    │◄─────────────────────────────────│
    │                                  │
-   │  (user picks a session from list) │
+   │ (user picks a session from list) │
    │                                  │
    │  { channel:"agent",              │
    │    method:"session/load",        │
@@ -1686,33 +1686,33 @@ Frontend                        Openheim Server
 ```
 Frontend                        Openheim Server
    │                                  │
-   │  { channel:"fs", action:"watch",│
+   │  { channel:"fs", action:"watch", │
    │    path:"/workspace" }           │
    │─────────────────────────────────►│
    │  { channel:"fs", type:"watching",│
    │    path:"/workspace" }           │
    │◄─────────────────────────────────│
    │                                  │
-   │  { channel:"fs", action:"list", │
+   │  { channel:"fs", action:"list",  │
    │    path:"src" }                  │
    │─────────────────────────────────►│
-   │  { channel:"fs", type:"file_list",│
+   │ { channel:"fs", type:"file_list",│
    │    entries:[...] }               │
    │◄─────────────────────────────────│
    │                                  │
-   │  { channel:"fs", action:"read", │
+   │  { channel:"fs", action:"read",  │
    │    path:"src/main.rs" }          │
    │─────────────────────────────────►│
-   │  { channel:"fs",                │
+   │  { channel:"fs",                 │
    │    type:"file_content",          │
    │    content:"fn main() {...}" }   │
    │◄─────────────────────────────────│
    │                                  │
    │  ... (user edits file externally)│
-   │  { channel:"fs",                │
+   │   { channel:"fs",                │
    │    type:"fs_event",              │
    │    eventKind:"Modify(File)",     │
-   │    paths:["/workspace/src/main.rs"]}
+   │ paths:["/workspace/src/main.rs"]}|
    │◄─────────────────────────────────│
 ```
 

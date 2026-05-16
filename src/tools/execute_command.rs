@@ -1,3 +1,5 @@
+//! Built-in tool: `execute_command` — runs a shell command and returns its output.
+
 use async_trait::async_trait;
 use serde_json::json;
 use tokio::process::Command;
@@ -7,6 +9,12 @@ use crate::error::{Error, Result};
 
 use super::ToolHandler;
 
+/// Executes an arbitrary shell command and returns stdout on success, or a
+/// combined stdout+stderr diagnostic string on failure.
+///
+/// Uses `sh -c` on Unix and `cmd /C` on Windows. Non-zero exit codes produce
+/// a descriptive string rather than an error so the LLM can interpret and react
+/// to the failure output.
 pub struct ExecuteCommandTool;
 
 #[async_trait]

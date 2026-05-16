@@ -11,6 +11,9 @@ keywords = ["agent", "llm", "ai", "mcp", "async"]
 categories = ["command-line-utilities", "asynchronous"]
 rust-version = "1.85"
 
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lib]
 name = "openheim"
 path = "src/lib.rs"
