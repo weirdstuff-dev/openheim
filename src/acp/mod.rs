@@ -231,20 +231,45 @@ impl AgentState {
         );
 
         for msg in &conversation.messages {
-            let text = msg.content.clone().unwrap_or_default();
-            if text.is_empty() {
-                continue;
-            }
-            let update = match msg.role {
+            match msg.role {
                 Role::User => {
-                    SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::from(text)))
+                    let text = msg.content.clone().unwrap_or_default();
+                    if !text.is_empty() {
+                        on_update(SessionUpdate::UserMessageChunk(ContentChunk::new(
+                            ContentBlock::from(text),
+                        )));
+                    }
                 }
                 Role::Assistant => {
-                    SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::from(text)))
+                    let text = msg.content.clone().unwrap_or_default();
+                    if !text.is_empty() {
+                        on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                            ContentBlock::from(text),
+                        )));
+                    }
+                    if let Some(tool_calls) = &msg.tool_calls {
+                        for tc in tool_calls {
+                            let raw_input = serde_json::from_str(&tc.function.arguments).ok();
+                            on_update(SessionUpdate::ToolCall(
+                                AcpToolCall::new(tc.id.clone(), &tc.function.name)
+                                    .status(ToolCallStatus::Completed)
+                                    .raw_input(raw_input),
+                            ));
+                        }
+                    }
                 }
-                _ => continue,
-            };
-            on_update(update);
+                Role::Tool => {
+                    if let (Some(id), Some(content)) = (&msg.tool_call_id, &msg.content) {
+                        on_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                            id.clone(),
+                            ToolCallUpdateFields::new()
+                                .status(ToolCallStatus::Completed)
+                                .raw_output(serde_json::Value::String(content.clone())),
+                        )));
+                    }
+                }
+                _ => {}
+            }
         }
 
         Ok(())
