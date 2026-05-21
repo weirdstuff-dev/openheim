@@ -148,12 +148,19 @@ impl AgentState {
                             .raw_input(raw_input),
                     ));
                 }
-                StreamEvent::ToolResult { result, .. } => {
+                StreamEvent::ToolResult {
+                    result, is_error, ..
+                } => {
                     if let Some(id) = last_tool_call_id.take() {
+                        let status = if is_error {
+                            ToolCallStatus::Failed
+                        } else {
+                            ToolCallStatus::Completed
+                        };
                         on_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                             id,
                             ToolCallUpdateFields::new()
-                                .status(ToolCallStatus::Completed)
+                                .status(status)
                                 .raw_output(serde_json::Value::String(result)),
                         )));
                     }
@@ -270,10 +277,15 @@ impl AgentState {
                 }
                 Role::Tool => {
                     if let (Some(id), Some(content)) = (&msg.tool_call_id, &msg.content) {
+                        let status = if msg.is_error {
+                            ToolCallStatus::Failed
+                        } else {
+                            ToolCallStatus::Completed
+                        };
                         on_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                             id.clone(),
                             ToolCallUpdateFields::new()
-                                .status(ToolCallStatus::Completed)
+                                .status(status)
                                 .raw_output(serde_json::Value::String(content.clone())),
                         )));
                     }

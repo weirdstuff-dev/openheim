@@ -43,6 +43,7 @@ impl PromptBuilder {
                 tool_calls: None,
                 tool_call_id: None,
                 tool_name: None,
+                is_error: false,
             });
         }
 

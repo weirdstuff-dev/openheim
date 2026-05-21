@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
 /// Chat role for a conversation message.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -35,6 +39,10 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    /// Whether the tool returned an error. Stored in history so replayed sessions
+    /// can surface the correct status without heuristics.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_error: bool,
 }
 
 impl Message {
@@ -45,6 +53,7 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
+            is_error: false,
         }
     }
 
@@ -55,16 +64,23 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
+            is_error: false,
         }
     }
 
-    pub fn tool_result(tool_call_id: String, tool_name: String, content: String) -> Self {
+    pub fn tool_result(
+        tool_call_id: String,
+        tool_name: String,
+        content: String,
+        is_error: bool,
+    ) -> Self {
         Self {
             role: Role::Tool,
             content: Some(content),
             tool_calls: None,
             tool_call_id: Some(tool_call_id),
             tool_name: Some(tool_name),
+            is_error,
         }
     }
 }
@@ -155,7 +171,11 @@ pub enum StreamEvent {
     },
     /// A tool has finished executing.
     #[serde(rename = "tool_result")]
-    ToolResult { tool_name: String, result: String },
+    ToolResult {
+        tool_name: String,
+        result: String,
+        is_error: bool,
+    },
     /// A chunk of text from the LLM.
     #[serde(rename = "llm_response")]
     LlmResponse { content: String },
@@ -360,11 +380,13 @@ mod tests {
 
     #[test]
     fn message_tool_result_sets_correct_fields() {
-        let msg = Message::tool_result("call_1".into(), "read_file".into(), "content".into());
+        let msg =
+            Message::tool_result("call_1".into(), "read_file".into(), "content".into(), false);
         assert_eq!(msg.role, Role::Tool);
         assert_eq!(msg.content.as_deref(), Some("content"));
         assert_eq!(msg.tool_call_id.as_deref(), Some("call_1"));
         assert_eq!(msg.tool_name.as_deref(), Some("read_file"));
+        assert!(!msg.is_error);
         assert!(msg.tool_calls.is_none());
     }
 
