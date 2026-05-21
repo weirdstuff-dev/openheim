@@ -373,8 +373,18 @@ mod tests {
     #[test]
     fn convert_messages_merges_consecutive_tool_results() {
         let messages = vec![
-            Message::tool_result("call_1".into(), "read_file".into(), "content1".into(), false),
-            Message::tool_result("call_2".into(), "write_file".into(), "content2".into(), false),
+            Message::tool_result(
+                "call_1".into(),
+                "read_file".into(),
+                "content1".into(),
+                false,
+            ),
+            Message::tool_result(
+                "call_2".into(),
+                "write_file".into(),
+                "content2".into(),
+                false,
+            ),
         ];
         let result = convert_messages(&messages).unwrap();
         // Both tool results should merge into a single user message
