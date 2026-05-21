@@ -249,7 +249,17 @@ impl AgentState {
                     }
                     if let Some(tool_calls) = &msg.tool_calls {
                         for tc in tool_calls {
-                            let raw_input = serde_json::from_str(&tc.function.arguments).ok();
+                            let raw_input = match serde_json::from_str(&tc.function.arguments) {
+                                Ok(v) => Some(v),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        tool_call_id = %tc.id,
+                                        tool_name = %tc.function.name,
+                                        "failed to parse tool call arguments: {e}"
+                                    );
+                                    None
+                                }
+                            };
                             on_update(SessionUpdate::ToolCall(
                                 AcpToolCall::new(tc.id.clone(), &tc.function.name)
                                     .status(ToolCallStatus::Completed)
