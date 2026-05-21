@@ -21,10 +21,10 @@ Openheim runs an iterative agent loop — it calls your LLM, executes tools on i
 
 Openheim is built in Rust from the ground up:
 
-- **Low memory** — runs in a fraction of the RAM a Python agent would need
-- **Fast startup** — no interpreter warmup
-- **True concurrency** — async Tokio runtime, multiple agents without threading headaches
-- **Safe by default** — Rust's ownership model means fewer footguns in long-running agent processes
+- **Low memory**
+- **Fast startup**
+- **True concurrency**
+- **Memory-safe by default**
 
 ---
 
