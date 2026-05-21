@@ -1,6 +1,6 @@
 [package]
 name = "openheim"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A fast, multi-provider LLM agent runtime written in Rust"
 license = "MIT"
