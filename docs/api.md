@@ -341,6 +341,14 @@ Returns the full conversation for a session, including all messages.
       "tool_calls": null,
       "tool_call_id": "call_abc123",
       "tool_name": "read_file"
+    },
+    {
+      "role": "tool",
+      "content": "Error: permission denied: /etc/shadow",
+      "tool_calls": null,
+      "tool_call_id": "call_def456",
+      "tool_name": "read_file",
+      "is_error": true
     }
   ]
 }
@@ -354,6 +362,14 @@ Returns the full conversation for a session, including all messages.
 | `"assistant"` | LLM response text or tool call request |
 | `"tool"` | Tool execution result fed back to the LLM |
 | `"system"` | System prompt injected by the agent (skills, context) |
+
+**`role: "tool"` fields:**
+
+| Field | Type | Description |
+|---|---|---|
+| `tool_call_id` | `string` | ID linking this result to the assistant's tool call request |
+| `tool_name` | `string` | Name of the tool that was invoked |
+| `is_error` | `boolean` | `true` if the tool returned an error. Omitted from JSON when `false` (i.e. absence means success). Also forwarded to Anthropic as `is_error` in the tool result block so the LLM receives accurate signal. |
 
 **Error `400`** — if `:id` is not a valid UUID:
 
@@ -736,7 +752,7 @@ The flow is:
 }
 ```
 
-> Tool call messages from the original session are **not** replayed — only user and assistant text. Use `GET /api/sessions/:id` if you need the raw tool call history.
+> Tool calls from the original session **are** replayed: assistant tool-call requests arrive as `tool_call` notifications (`status: "in_progress"`), and tool results arrive as `tool_call_update` notifications with `status: "completed"` or `status: "failed"` — the correct status is preserved in the stored history via the `is_error` field on the message.
 
 **Response (after all history has been replayed):**
 
@@ -1354,6 +1370,7 @@ interface Message {
   tool_calls?: ToolCall[] | null;
   tool_call_id?: string | null; // present on role:"tool" messages
   tool_name?: string | null;    // present on role:"tool" messages
+  is_error?: boolean;           // true when the tool returned an error; omitted when false
 }
 
 interface ToolCall {
