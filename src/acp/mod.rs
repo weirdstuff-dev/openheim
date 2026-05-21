@@ -148,12 +148,19 @@ impl AgentState {
                             .raw_input(raw_input),
                     ));
                 }
-                StreamEvent::ToolResult { result, .. } => {
+                StreamEvent::ToolResult {
+                    result, is_error, ..
+                } => {
                     if let Some(id) = last_tool_call_id.take() {
+                        let status = if is_error {
+                            ToolCallStatus::Failed
+                        } else {
+                            ToolCallStatus::Completed
+                        };
                         on_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                             id,
                             ToolCallUpdateFields::new()
-                                .status(ToolCallStatus::Completed)
+                                .status(status)
                                 .raw_output(serde_json::Value::String(result)),
                         )));
                     }
@@ -231,20 +238,60 @@ impl AgentState {
         );
 
         for msg in &conversation.messages {
-            let text = msg.content.clone().unwrap_or_default();
-            if text.is_empty() {
-                continue;
-            }
-            let update = match msg.role {
+            match msg.role {
                 Role::User => {
-                    SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::from(text)))
+                    let text = msg.content.clone().unwrap_or_default();
+                    if !text.is_empty() {
+                        on_update(SessionUpdate::UserMessageChunk(ContentChunk::new(
+                            ContentBlock::from(text),
+                        )));
+                    }
                 }
                 Role::Assistant => {
-                    SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::from(text)))
+                    let text = msg.content.clone().unwrap_or_default();
+                    if !text.is_empty() {
+                        on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                            ContentBlock::from(text),
+                        )));
+                    }
+                    if let Some(tool_calls) = &msg.tool_calls {
+                        for tc in tool_calls {
+                            let raw_input = match serde_json::from_str(&tc.function.arguments) {
+                                Ok(v) => Some(v),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        tool_call_id = %tc.id,
+                                        tool_name = %tc.function.name,
+                                        "failed to parse tool call arguments: {e}"
+                                    );
+                                    None
+                                }
+                            };
+                            on_update(SessionUpdate::ToolCall(
+                                AcpToolCall::new(tc.id.clone(), &tc.function.name)
+                                    .status(ToolCallStatus::InProgress)
+                                    .raw_input(raw_input),
+                            ));
+                        }
+                    }
                 }
-                _ => continue,
-            };
-            on_update(update);
+                Role::Tool => {
+                    if let (Some(id), Some(content)) = (&msg.tool_call_id, &msg.content) {
+                        let status = if msg.is_error {
+                            ToolCallStatus::Failed
+                        } else {
+                            ToolCallStatus::Completed
+                        };
+                        on_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                            id.clone(),
+                            ToolCallUpdateFields::new()
+                                .status(status)
+                                .raw_output(serde_json::Value::String(content.clone())),
+                        )));
+                    }
+                }
+                _ => {}
+            }
         }
 
         Ok(())

@@ -11,6 +11,10 @@ use super::LlmClient;
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
 #[derive(Clone)]
 pub struct AnthropicClient {
     client: ReqwestClient,
@@ -72,6 +76,8 @@ enum AnthropicContentBlock {
     ToolResult {
         tool_use_id: String,
         content: String,
+        #[serde(skip_serializing_if = "is_false")]
+        is_error: bool,
     },
 }
 
@@ -115,6 +121,7 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
                 let block = AnthropicContentBlock::ToolResult {
                     tool_use_id: msg.tool_call_id.clone().unwrap_or_default(),
                     content: msg.content.clone().unwrap_or_default(),
+                    is_error: msg.is_error,
                 };
                 // Merge into the last user message if it exists, otherwise create new
                 if let Some(last) = result.last_mut() {
@@ -231,6 +238,7 @@ fn convert_response(resp: AnthropicResponse) -> Choice {
             },
             tool_call_id: None,
             tool_name: None,
+            is_error: false,
         },
         finish_reason,
     }
@@ -313,6 +321,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
+            is_error: false,
         }];
         let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 0);
@@ -333,6 +342,7 @@ mod tests {
             }]),
             tool_call_id: None,
             tool_name: None,
+            is_error: false,
         }];
         let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
@@ -355,6 +365,7 @@ mod tests {
             }]),
             tool_call_id: None,
             tool_name: None,
+            is_error: false,
         }];
         assert!(convert_messages(&messages).is_err());
     }
@@ -362,8 +373,18 @@ mod tests {
     #[test]
     fn convert_messages_merges_consecutive_tool_results() {
         let messages = vec![
-            Message::tool_result("call_1".into(), "read_file".into(), "content1".into()),
-            Message::tool_result("call_2".into(), "write_file".into(), "content2".into()),
+            Message::tool_result(
+                "call_1".into(),
+                "read_file".into(),
+                "content1".into(),
+                false,
+            ),
+            Message::tool_result(
+                "call_2".into(),
+                "write_file".into(),
+                "content2".into(),
+                false,
+            ),
         ];
         let result = convert_messages(&messages).unwrap();
         // Both tool results should merge into a single user message

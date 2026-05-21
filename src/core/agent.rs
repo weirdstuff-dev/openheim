@@ -75,15 +75,16 @@ where
                     });
                 }
 
-                let result = match tool_executor.execute(tool_name, arguments).await {
-                    Ok(r) => r,
-                    Err(e) => format!("Error: {e}"),
+                let (result, is_error) = match tool_executor.execute(tool_name, arguments).await {
+                    Ok(r) => (r, false),
+                    Err(e) => (format!("Error: {e}"), true),
                 };
 
                 if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::ToolResult {
                         tool_name: tool_name.clone(),
                         result: result.clone(),
+                        is_error,
                     });
                 }
 
@@ -97,6 +98,7 @@ where
                     tool_call.id.clone(),
                     tool_name.clone(),
                     result,
+                    is_error,
                 ));
             }
 
@@ -245,6 +247,7 @@ mod tests {
                 }]),
                 tool_call_id: None,
                 tool_name: None,
+                is_error: false,
             },
             finish_reason: Some("tool_calls".into()),
         }
