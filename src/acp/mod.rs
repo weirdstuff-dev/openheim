@@ -269,7 +269,7 @@ impl AgentState {
                             };
                             on_update(SessionUpdate::ToolCall(
                                 AcpToolCall::new(tc.id.clone(), &tc.function.name)
-                                    .status(ToolCallStatus::Completed)
+                                    .status(ToolCallStatus::InProgress)
                                     .raw_input(raw_input),
                             ));
                         }
