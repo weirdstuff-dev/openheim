@@ -317,6 +317,103 @@ pub(crate) fn render_model_picker(
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+pub(crate) fn render_session_picker(
+    f: &mut Frame,
+    area: Rect,
+    items: &[crate::rag::ConversationMeta],
+    selected: usize,
+) {
+    if items.is_empty() {
+        return;
+    }
+
+    let max_title = items
+        .iter()
+        .map(|m| m.title.as_deref().unwrap_or("(untitled)").chars().count())
+        .max()
+        .unwrap_or(10);
+
+    let max_meta = items
+        .iter()
+        .map(|m| {
+            let date = m.updated_at.format("%Y-%m-%d %H:%M").to_string();
+            let model = m.model.as_deref().unwrap_or("?");
+            date.len() + 5 + model.len()
+        })
+        .max()
+        .unwrap_or(20);
+
+    let content_w = max_title + 4 + max_meta;
+    let popup_w = ((content_w + 6) as u16).max(40).min(area.width.saturating_sub(4));
+    let popup_h = ((items.len() + 2) as u16).max(5).min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup_rect = Rect::new(x, y, popup_w, popup_h);
+
+    f.render_widget(Clear, popup_rect);
+
+    let dim = Style::default().fg(Color::DarkGray);
+    let block = Block::default()
+        .title(
+            Line::from(Span::styled(
+                " sessions ",
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ))
+            .centered(),
+        )
+        .title_bottom(Line::from(Span::styled(" ↑/↓  enter  esc ", dim)).centered())
+        .borders(Borders::ALL)
+        .border_style(dim);
+
+    let inner = block.inner(popup_rect);
+    f.render_widget(block, popup_rect);
+
+    let visible_h = inner.height as usize;
+    if visible_h == 0 {
+        return;
+    }
+
+    let start = selected.saturating_sub(visible_h.saturating_sub(1));
+    let end = (start + visible_h).min(items.len());
+    let start = start.min(end);
+    let inner_w = inner.width as usize;
+
+    let lines: Vec<Line<'static>> = items[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, meta)| {
+            let idx = start + i;
+            let title = meta.title.as_deref().unwrap_or("(untitled)").to_string();
+            let date = meta.updated_at.format("%Y-%m-%d %H:%M").to_string();
+            let model = meta.model.as_deref().unwrap_or("?").to_string();
+            let meta_str = format!("{date}  ·  {model}");
+
+            if idx == selected {
+                let label = format!("  {title}  {meta_str}");
+                let truncated: String = label.chars().take(inner_w).collect();
+                let padding = " ".repeat(inner_w.saturating_sub(truncated.chars().count()));
+                Line::styled(
+                    format!("{truncated}{padding}"),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                let gap = " ".repeat(max_title.saturating_sub(title.chars().count()) + 4);
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(title, Style::default().fg(Color::White)),
+                    Span::raw(gap),
+                    Span::styled(meta_str, Style::default().fg(Color::DarkGray)),
+                ])
+            }
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 pub(crate) fn render_config_viewer(
     f: &mut Frame,
     area: Rect,

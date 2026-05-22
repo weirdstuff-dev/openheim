@@ -3,12 +3,14 @@ mod render;
 mod types;
 
 use std::io;
-use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::{ContentBlock, SessionUpdate, ToolCallStatus};
 use crossterm::{
-    event::{Event, EventStream},
+    event::{
+        Event, EventStream, KeyEventKind, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -33,23 +35,23 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
         .await
         .map_err(|e| crate::error::Error::Other(e.to_string()))?;
 
-    let session = Arc::new(
-        client
-            .new_session()
-            .skills(skills.clone())
-            .start()
-            .await
-            .map_err(|e| crate::error::Error::Other(e.to_string()))?,
-    );
+    let session = client
+        .new_session()
+        .skills(skills.clone())
+        .start()
+        .await
+        .map_err(|e| crate::error::Error::Other(e.to_string()))?;
 
     let (update_tx, mut update_rx) = mpsc::unbounded_channel::<AgentUpdate>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<String>();
     let (switch_model_tx, mut switch_model_rx) = mpsc::unbounded_channel::<String>();
+    let (switch_session_tx, mut switch_session_rx) =
+        mpsc::unbounded_channel::<(String, std::path::PathBuf)>();
 
     {
-        let session = Arc::clone(&session);
         let update_tx = update_tx.clone();
         tokio::spawn(async move {
+            let mut session = session;
             loop {
                 tokio::select! {
                     maybe_prompt = prompt_rx.recv() => {
@@ -82,25 +84,58 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                             None => break,
                         }
                     }
+                    maybe_switch = switch_session_rx.recv() => {
+                        match maybe_switch {
+                            Some((session_id, cwd)) => {
+                                match session.restore(&session_id, cwd).await {
+                                    Ok(restored) => { session = restored; }
+                                    Err(e) => {
+                                        let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
+                                    }
+                                }
+                            }
+                            None => break,
+                        }
+                    }
                 }
             }
         });
     }
 
-    let mut app = App::new(agent_config, app_config, skills, prompt_tx, switch_model_tx);
+    let mut app = App::new(agent_config, app_config, skills, prompt_tx, switch_model_tx, switch_session_tx);
 
     enable_raw_mode().map_err(|e| crate::error::Error::Other(e.to_string()))?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)
         .map_err(|e| crate::error::Error::Other(e.to_string()))?;
+
+    // Enable keyboard enhancement on supporting terminals so that arrow-key
+    // escape sequences (\x1b[B etc.) are never ambiguously split into a
+    // spurious Esc + characters, which caused `[B` to appear in the input.
+    let kbd_enhanced =
+        crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    if kbd_enhanced {
+        execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+            )
+        )
+        .ok();
+    }
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal =
         Terminal::new(backend).map_err(|e| crate::error::Error::Other(e.to_string()))?;
 
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
+        if kbd_enhanced {
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = disable_raw_mode();
         original_hook(info);
     }));
 
@@ -125,7 +160,9 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
             }
             maybe = events.next() => {
                 match maybe {
-                    Some(Ok(Event::Key(key))) => app.handle_key(key),
+                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                        app.handle_key(key);
+                    }
                     Some(Ok(Event::Resize(_, _))) => app.cached_width = 0,
                     Some(Err(_)) | None => break,
                     _ => {}
@@ -137,9 +174,12 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
         }
     }
 
-    disable_raw_mode().map_err(|e| crate::error::Error::Other(e.to_string()))?;
+    if kbd_enhanced {
+        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags).ok();
+    }
     execute!(terminal.backend_mut(), LeaveAlternateScreen)
         .map_err(|e| crate::error::Error::Other(e.to_string()))?;
+    disable_raw_mode().map_err(|e| crate::error::Error::Other(e.to_string()))?;
     terminal
         .show_cursor()
         .map_err(|e| crate::error::Error::Other(e.to_string()))?;

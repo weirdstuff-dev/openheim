@@ -35,6 +35,7 @@ pub(super) struct App {
     pub(super) cached_width: u16,
     prompt_tx: mpsc::UnboundedSender<String>,
     switch_model_tx: mpsc::UnboundedSender<String>,
+    switch_session_tx: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
     picker_items: Vec<(String, String)>,
     picker_selected: usize,
     config_rows: Vec<ConfigRow>,
@@ -48,6 +49,7 @@ impl App {
         skills: Vec<String>,
         prompt_tx: mpsc::UnboundedSender<String>,
         switch_model_tx: mpsc::UnboundedSender<String>,
+        switch_session_tx: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
     ) -> Self {
         Self {
             items: Vec::new(),
@@ -68,6 +70,7 @@ impl App {
             cached_width: 0,
             prompt_tx,
             switch_model_tx,
+            switch_session_tx,
             picker_items: Vec::new(),
             picker_selected: 0,
             config_rows: Vec::new(),
@@ -109,6 +112,33 @@ impl App {
                 self.agent_config.model = model.clone();
                 self.push(ChatItem::SystemInfo(format!("switched to {provider} / {model}")));
             }
+        }
+    }
+
+    fn handle_session_picker_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.should_quit = true;
+            }
+            KeyCode::Up => {
+                self.picker_selected = self.picker_selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                if !self.sessions.is_empty() {
+                    self.picker_selected =
+                        (self.picker_selected + 1).min(self.sessions.len() - 1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(meta) = self.sessions.get(self.picker_selected).cloned() {
+                    self.screen = Screen::Chat;
+                    self.open_session(&meta);
+                }
+            }
+            KeyCode::Esc => {
+                self.screen = self.pre_picker_screen;
+            }
+            _ => {}
         }
     }
 
@@ -170,6 +200,10 @@ impl App {
         }
         if self.screen == Screen::ConfigViewer {
             self.handle_config_viewer_key(key);
+            return;
+        }
+        if self.screen == Screen::SessionPicker {
+            self.handle_session_picker_key(key);
             return;
         }
         match key.code {
@@ -256,8 +290,7 @@ impl App {
             "help" => self.push(ChatItem::SystemInfo(
                 ":help              show this\n\
                  :q / :quit         exit\n\
-                 :sessions          list saved sessions\n\
-                 :open <n>          view session n (run :sessions first)\n\
+                 :sessions          browse and restore saved sessions\n\
                  :config            current config\n\
                  :models            list available models\n\
                  :models <name>     switch to model mid-session\n\
@@ -271,34 +304,13 @@ impl App {
                     self.push(ChatItem::SystemInfo("no sessions yet".to_string()));
                 }
                 Ok(metas) => {
-                    let mut lines = Vec::new();
-                    for (i, meta) in metas.iter().enumerate() {
-                        let title = meta.title.as_deref().unwrap_or("(untitled)");
-                        let date = meta.updated_at.format("%Y-%m-%d %H:%M").to_string();
-                        let model = meta.model.as_deref().unwrap_or("?");
-                        lines.push(format!("  {}  {}  ·  {}  ·  {}", i + 1, title, date, model));
-                    }
-                    lines.push(String::new());
-                    lines.push(":open <n> to view".to_string());
                     self.sessions = metas;
-                    self.push(ChatItem::SystemInfo(lines.join("\n")));
+                    self.picker_selected = 0;
+                    self.pre_picker_screen = self.screen;
+                    self.screen = Screen::SessionPicker;
                 }
                 Err(e) => self.push(ChatItem::Err(e.to_string())),
             },
-            "open" => {
-                if let Ok(n) = arg.parse::<usize>() {
-                    if n == 0 || n > self.sessions.len() {
-                        self.push(ChatItem::SystemInfo(format!(
-                            "no session {n}  (run :sessions first)"
-                        )));
-                    } else {
-                        let meta = self.sessions[n - 1].clone();
-                        self.open_session(&meta);
-                    }
-                } else {
-                    self.push(ChatItem::SystemInfo("usage: :open <number>".to_string()));
-                }
-            }
             "config" => {
                 let ac = &self.agent_config;
                 let mut rows = vec![
@@ -455,7 +467,13 @@ impl App {
             Err(e) => self.push(ChatItem::Err(e.to_string())),
         }
 
-        self.push(ChatItem::SystemInfo("───".to_string()));
+        self.push(ChatItem::SystemInfo("─── session restored".to_string()));
+
+        let cwd = meta
+            .cwd
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
+        let _ = self.switch_session_tx.send((meta.id.to_string(), cwd));
     }
 
     pub(super) fn draw(&mut self, f: &mut Frame) {
@@ -468,7 +486,9 @@ impl App {
         let [content_area, input_area] = [chunks[0], chunks[1]];
 
         let bg_screen = match self.screen {
-            Screen::ModelPicker | Screen::ConfigViewer => self.pre_picker_screen,
+            Screen::ModelPicker | Screen::ConfigViewer | Screen::SessionPicker => {
+                self.pre_picker_screen
+            }
             s => s,
         };
 
@@ -502,7 +522,9 @@ impl App {
             self.cursor,
             left_label.as_deref(),
             &right_label,
-            self.screen != Screen::ModelPicker && self.screen != Screen::ConfigViewer,
+            self.screen != Screen::ModelPicker
+                && self.screen != Screen::ConfigViewer
+                && self.screen != Screen::SessionPicker,
         );
 
         if self.screen == Screen::ModelPicker {
@@ -510,6 +532,9 @@ impl App {
         }
         if self.screen == Screen::ConfigViewer {
             render::render_config_viewer(f, area, &self.config_rows, self.config_scroll);
+        }
+        if self.screen == Screen::SessionPicker {
+            render::render_session_picker(f, area, &self.sessions, self.picker_selected);
         }
     }
 
