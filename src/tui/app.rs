@@ -42,6 +42,8 @@ pub(super) struct App {
     config_scroll: usize,
     skills_items: Vec<String>,
     skills_scroll: usize,
+    mcp_rows: Vec<ConfigRow>,
+    mcp_scroll: usize,
 }
 
 impl App {
@@ -79,6 +81,8 @@ impl App {
             config_scroll: 0,
             skills_items: Vec::new(),
             skills_scroll: 0,
+            mcp_rows: Vec::new(),
+            mcp_scroll: 0,
         }
     }
 
@@ -194,6 +198,30 @@ impl App {
         }
     }
 
+    fn handle_mcp_viewer_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.should_quit = true;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.mcp_scroll = self.mcp_scroll.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.mcp_scroll += 1;
+            }
+            KeyCode::PageUp => {
+                self.mcp_scroll = self.mcp_scroll.saturating_sub(5);
+            }
+            KeyCode::PageDown => {
+                self.mcp_scroll += 5;
+            }
+            KeyCode::Esc => {
+                self.screen = self.pre_picker_screen;
+            }
+            _ => {}
+        }
+    }
+
     fn handle_picker_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -236,6 +264,10 @@ impl App {
         }
         if self.screen == Screen::SkillsViewer {
             self.handle_skills_viewer_key(key);
+            return;
+        }
+        if self.screen == Screen::McpViewer {
+            self.handle_mcp_viewer_key(key);
             return;
         }
         match key.code {
@@ -389,23 +421,36 @@ impl App {
                             .to_string(),
                     ));
                 } else {
-                    let mut lines = Vec::new();
-                    for (sname, server) in &self.app_config.mcp_servers {
-                        lines.push(format!("● {sname}"));
+                    let mut rows = Vec::new();
+                    let mut iter = self.app_config.mcp_servers.iter().peekable();
+                    while let Some((sname, server)) = iter.next() {
+                        rows.push(ConfigRow::Header(sname.clone()));
                         if let Some(cmd) = &server.command {
                             let args_str = server.args.join(" ");
-                            let cmd_line = if args_str.is_empty() {
+                            let val = if args_str.is_empty() {
                                 cmd.clone()
                             } else {
                                 format!("{cmd} {args_str}")
                             };
-                            lines.push(format!("  stdio  {cmd_line}"));
+                            rows.push(ConfigRow::Entry {
+                                key: "stdio".to_string(),
+                                val,
+                            });
                         }
                         if let Some(url) = &server.url {
-                            lines.push(format!("  http   {url}"));
+                            rows.push(ConfigRow::Entry {
+                                key: "http".to_string(),
+                                val: url.clone(),
+                            });
+                        }
+                        if iter.peek().is_some() {
+                            rows.push(ConfigRow::Blank);
                         }
                     }
-                    self.push(ChatItem::SystemInfo(lines.join("\n")));
+                    self.mcp_rows = rows;
+                    self.mcp_scroll = 0;
+                    self.pre_picker_screen = self.screen;
+                    self.screen = Screen::McpViewer;
                 }
             }
             "models" => {
@@ -522,7 +567,8 @@ impl App {
             Screen::ModelPicker
             | Screen::ConfigViewer
             | Screen::SessionPicker
-            | Screen::SkillsViewer => self.pre_picker_screen,
+            | Screen::SkillsViewer
+            | Screen::McpViewer => self.pre_picker_screen,
             s => s,
         };
 
@@ -559,7 +605,8 @@ impl App {
             self.screen != Screen::ModelPicker
                 && self.screen != Screen::ConfigViewer
                 && self.screen != Screen::SessionPicker
-                && self.screen != Screen::SkillsViewer,
+                && self.screen != Screen::SkillsViewer
+                && self.screen != Screen::McpViewer,
         );
 
         if self.screen == Screen::ModelPicker {
@@ -573,6 +620,9 @@ impl App {
         }
         if self.screen == Screen::SkillsViewer {
             render::render_skills_viewer(f, area, &self.skills_items, self.skills_scroll);
+        }
+        if self.screen == Screen::McpViewer {
+            render::render_mcp_viewer(f, area, &self.mcp_rows, self.mcp_scroll);
         }
     }
 

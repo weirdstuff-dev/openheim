@@ -508,6 +508,93 @@ pub(crate) fn render_config_viewer(
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+pub(crate) fn render_mcp_viewer(
+    f: &mut Frame,
+    area: Rect,
+    rows: &[ConfigRow],
+    scroll: usize,
+) {
+    let entry_key_w = rows
+        .iter()
+        .filter_map(|r| {
+            if let ConfigRow::Entry { key, .. } = r { Some(key.chars().count()) } else { None }
+        })
+        .max()
+        .unwrap_or(5);
+    let entry_val_w = rows
+        .iter()
+        .filter_map(|r| {
+            if let ConfigRow::Entry { val, .. } = r { Some(val.chars().count()) } else { None }
+        })
+        .max()
+        .unwrap_or(20);
+    let header_w = rows
+        .iter()
+        .filter_map(|r| {
+            if let ConfigRow::Header(h) = r { Some(h.chars().count() + 2) } else { None }
+        })
+        .max()
+        .unwrap_or(0);
+    let content_w = (entry_key_w + 4 + entry_val_w).max(header_w);
+
+    let popup_w = ((content_w + 6) as u16).max(40).min(area.width.saturating_sub(4));
+    let popup_h = ((rows.len() + 2) as u16).max(6).min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup_rect = Rect::new(x, y, popup_w, popup_h);
+
+    f.render_widget(Clear, popup_rect);
+
+    let dim = Style::default().fg(Color::DarkGray);
+    let block = Block::default()
+        .title(
+            Line::from(Span::styled(
+                " mcp servers ",
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ))
+            .centered(),
+        )
+        .title_bottom(Line::from(Span::styled(" ↑/↓  esc ", dim)).centered())
+        .borders(Borders::ALL)
+        .border_style(dim);
+
+    let inner = block.inner(popup_rect);
+    f.render_widget(block, popup_rect);
+
+    let visible_h = inner.height as usize;
+    if visible_h == 0 {
+        return;
+    }
+    let scroll = scroll.min(rows.len().saturating_sub(visible_h));
+    let end = (scroll + visible_h).min(rows.len());
+
+    let lines: Vec<Line<'static>> = rows[scroll..end]
+        .iter()
+        .map(|row| match row {
+            ConfigRow::Blank => Line::default(),
+            ConfigRow::Header(h) => Line::from(Span::styled(
+                format!("  {h}"),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            )),
+            ConfigRow::Entry { key, val } => {
+                let gap = " ".repeat(entry_key_w.saturating_sub(key.chars().count()) + 2);
+                Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled(key.clone(), Style::default().fg(Color::DarkGray)),
+                    Span::raw(gap),
+                    Span::styled(val.clone(), Style::default().fg(Color::White)),
+                ])
+            }
+            ConfigRow::Item(s) => Line::from(vec![
+                Span::raw("    "),
+                Span::styled(s.clone(), Style::default().fg(Color::White)),
+            ]),
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 pub(crate) fn render_skills_viewer(
     f: &mut Frame,
     area: Rect,
