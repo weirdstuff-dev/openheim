@@ -195,6 +195,23 @@ impl SessionHandle {
     pub async fn switch_model(&self, model: &str) -> Result<(String, String)> {
         self.state.acp_update_session_model(&self.id, model).await
     }
+
+    /// Restore a persisted session as the active session for this handle.
+    ///
+    /// Registers the conversation in the agent state so subsequent `prompt`
+    /// calls continue from its history. Pass a no-op callback — the TUI
+    /// already replays history visually before calling this.
+    pub async fn restore(
+        &self,
+        session_id: &str,
+        cwd: std::path::PathBuf,
+    ) -> Result<SessionHandle> {
+        self.state.acp_load_session(session_id, cwd, |_| {}).await?;
+        Ok(SessionHandle {
+            id: session_id.to_string(),
+            state: Arc::clone(&self.state),
+        })
+    }
 }
 
 // ── OpenheimBuilder ───────────────────────────────────────────────────────────
