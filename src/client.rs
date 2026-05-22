@@ -186,6 +186,15 @@ impl SessionHandle {
             .acp_prompt(&self.id, text.to_string(), on_update)
             .await
     }
+
+    /// Switch the model for this session mid-conversation.
+    ///
+    /// The model must be listed under a provider in the config. Returns
+    /// `(provider_name, model_name)` on success; the next prompt will use
+    /// the new model while preserving conversation history.
+    pub async fn switch_model(&self, model: &str) -> Result<(String, String)> {
+        self.state.acp_update_session_model(&self.id, model).await
+    }
 }
 
 // ── OpenheimBuilder ───────────────────────────────────────────────────────────

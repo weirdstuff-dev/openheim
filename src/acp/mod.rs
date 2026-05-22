@@ -87,6 +87,22 @@ impl AgentState {
         Ok(session_key)
     }
 
+    pub async fn acp_update_session_model(
+        &self,
+        session_id: &str,
+        model: &str,
+    ) -> Result<(String, String)> {
+        let new_config = self.app_config.resolve(Some(model))?;
+        let provider_name = new_config.provider_name.clone();
+        let model_name = new_config.model.clone();
+        let mut sessions = self.sessions.write().await;
+        let s = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| Error::Other(format!("session not found: {session_id}")))?;
+        s.config = new_config;
+        Ok((provider_name, model_name))
+    }
+
     pub async fn acp_prompt<F>(
         &self,
         session_id: &str,
@@ -101,8 +117,16 @@ impl AgentState {
             let s = sessions
                 .get(session_id)
                 .ok_or_else(|| Error::Other(format!("session not found: {session_id}")))?;
+            let llm = if s.config.provider_name != self.config.provider_name
+                || s.config.model != self.config.model
+            {
+                let http_client = crate::config::build_http_client(s.config.timeout_secs)?;
+                crate::config::create_client(&s.config, &http_client)
+            } else {
+                self.llm.clone()
+            };
             (
-                self.llm.clone(),
+                llm,
                 self.executor.clone(),
                 s.config.clone(),
                 s.chat_id,
