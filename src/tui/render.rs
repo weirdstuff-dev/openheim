@@ -206,10 +206,25 @@ pub(crate) fn render_welcome(
     f.render_widget(Paragraph::new(lines), area);
 }
 
-pub(crate) fn render_input_bar(f: &mut Frame, area: Rect, input: &str, cursor: usize) {
-    let block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(Color::DarkGray));
+pub(crate) fn render_input_bar(
+    f: &mut Frame,
+    area: Rect,
+    input: &str,
+    cursor: usize,
+    left_label: Option<&str>,
+    right_label: &str,
+) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut block = Block::default().borders(Borders::TOP).border_style(dim);
+
+    if let Some(left) = left_label {
+        block = block
+            .title_top(Line::from(Span::styled(format!("─── {left} "), dim)).left_aligned());
+    }
+    block = block.title_top(
+        Line::from(Span::styled(format!(" {right_label} ───"), dim)).right_aligned(),
+    );
+
     let inner = block.inner(area);
     f.render_widget(block, area);
 

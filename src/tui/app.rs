@@ -351,12 +351,10 @@ impl App {
         let area = f.area();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(3)])
+            .constraints([Constraint::Fill(1), Constraint::Length(3)])
             .split(area);
 
-        let [status_area, content_area, input_area] = [chunks[0], chunks[1], chunks[2]];
-
-        self.draw_status_bar(f, status_area);
+        let [content_area, input_area] = [chunks[0], chunks[1]];
 
         if self.screen == Screen::Welcome {
             let model = self.agent_config.model.clone();
@@ -367,32 +365,27 @@ impl App {
             self.draw_chat(f, content_area);
         }
 
-        let input = self.input.clone();
-        render::render_input_bar(f, input_area, &input, self.cursor);
-    }
-
-    fn draw_status_bar(&self, f: &mut Frame, area: ratatui::layout::Rect) {
         let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let text = match &self.status {
-            Status::Idle => {
-                let model = &self.agent_config.model;
-                let provider = &self.agent_config.provider_name;
-                if self.skills.is_empty() {
-                    format!("  {model}  ·  {provider}")
-                } else {
-                    format!("  {model}  ·  {provider}  ·  skills: {}", self.skills.join(", "))
-                }
-            }
+        let left_label = match &self.status {
+            Status::Idle => None,
             Status::Thinking => {
-                format!("  {}  thinking…", spinner[self.spinner_frame % spinner.len()])
+                Some(format!("{} thinking…", spinner[self.spinner_frame % spinner.len()]))
             }
             Status::Streaming => {
-                format!("  {}  streaming…", spinner[self.spinner_frame % spinner.len()])
+                Some(format!("{} streaming…", spinner[self.spinner_frame % spinner.len()]))
             }
         };
-        f.render_widget(
-            Paragraph::new(text).style(Style::default().fg(Color::DarkGray)),
-            area,
+        let right_label =
+            format!("{} · {}", self.agent_config.provider_name, self.agent_config.model);
+
+        let input = self.input.clone();
+        render::render_input_bar(
+            f,
+            input_area,
+            &input,
+            self.cursor,
+            left_label.as_deref(),
+            &right_label,
         );
     }
 
