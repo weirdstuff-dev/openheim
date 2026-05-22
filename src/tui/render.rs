@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 
 use super::types::ChatItem;
@@ -213,6 +213,7 @@ pub(crate) fn render_input_bar(
     cursor: usize,
     left_label: Option<&str>,
     right_label: &str,
+    show_cursor: bool,
 ) {
     let dim = Style::default().fg(Color::DarkGray);
     let mut block = Block::default().borders(Borders::TOP).border_style(dim);
@@ -231,13 +232,92 @@ pub(crate) fn render_input_bar(
     let prompt_prefix = "  › ";
     f.render_widget(Paragraph::new(format!("{prompt_prefix}{input}")), inner);
 
-    let cursor_col = inner.x
-        + prompt_prefix.chars().count() as u16
-        + input[..cursor].chars().count() as u16;
-    f.set_cursor_position((
-        cursor_col.min(inner.x + inner.width.saturating_sub(1)),
-        inner.y,
-    ));
+    if show_cursor {
+        let cursor_col = inner.x
+            + prompt_prefix.chars().count() as u16
+            + input[..cursor].chars().count() as u16;
+        f.set_cursor_position((
+            cursor_col.min(inner.x + inner.width.saturating_sub(1)),
+            inner.y,
+        ));
+    }
+}
+
+pub(crate) fn render_model_picker(
+    f: &mut Frame,
+    area: Rect,
+    items: &[(String, String)],
+    selected: usize,
+) {
+    let max_label = items
+        .iter()
+        .map(|(p, m)| p.chars().count() + 2 + m.chars().count())
+        .max()
+        .unwrap_or(20);
+
+    let popup_w = ((max_label + 6) as u16).max(32).min(area.width.saturating_sub(4));
+    let popup_h = ((items.len() + 2) as u16).max(5).min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup_rect = Rect::new(x, y, popup_w, popup_h);
+
+    f.render_widget(Clear, popup_rect);
+
+    let dim = Style::default().fg(Color::DarkGray);
+    let block = Block::default()
+        .title(
+            Line::from(Span::styled(
+                " models ",
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ))
+            .centered(),
+        )
+        .title_bottom(
+            Line::from(Span::styled(" ↑/↓  enter  esc ", dim)).centered(),
+        )
+        .borders(Borders::ALL)
+        .border_style(dim);
+
+    let inner = block.inner(popup_rect);
+    f.render_widget(block, popup_rect);
+
+    let visible_h = inner.height as usize;
+    if visible_h == 0 {
+        return;
+    }
+    let start = selected.saturating_sub(visible_h.saturating_sub(1));
+    let end = (start + visible_h).min(items.len());
+    let start = start.min(end);
+    let inner_w = inner.width as usize;
+
+    let lines: Vec<Line<'static>> = items[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, (provider, model))| {
+            let idx = start + i;
+            if idx == selected {
+                let label = format!("  {provider}  {model}");
+                let truncated: String = label.chars().take(inner_w).collect();
+                let padding = " ".repeat(inner_w.saturating_sub(truncated.chars().count()));
+                Line::styled(
+                    format!("{truncated}{padding}"),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(provider.clone(), Style::default().fg(Color::DarkGray)),
+                    Span::raw("  "),
+                    Span::styled(model.clone(), Style::default().fg(Color::White)),
+                ])
+            }
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 // Word-wraps `text` to `width` chars, preserving newlines as paragraph breaks.

@@ -5,6 +5,7 @@ pub(crate) enum AgentUpdate {
     ToolResult { result: String, is_error: bool },
     Done,
     Error(String),
+    ModelChanged { provider: String, model: String },
 }
 
 #[derive(Debug, Clone)]
@@ -28,4 +29,5 @@ pub(crate) enum Status {
 pub(crate) enum Screen {
     Welcome,
     Chat,
+    ModelPicker,
 }

@@ -44,29 +44,50 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
 
     let (update_tx, mut update_rx) = mpsc::unbounded_channel::<AgentUpdate>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<String>();
+    let (switch_model_tx, mut switch_model_rx) = mpsc::unbounded_channel::<String>();
 
     {
         let session = Arc::clone(&session);
         let update_tx = update_tx.clone();
         tokio::spawn(async move {
-            while let Some(prompt) = prompt_rx.recv().await {
-                let tx_cb = update_tx.clone();
-                let result = session
-                    .prompt(&prompt, move |update| convert_update(&tx_cb, update))
-                    .await;
-                match result {
-                    Ok(()) => {
-                        let _ = update_tx.send(AgentUpdate::Done);
+            loop {
+                tokio::select! {
+                    maybe_prompt = prompt_rx.recv() => {
+                        match maybe_prompt {
+                            Some(prompt) => {
+                                let tx_cb = update_tx.clone();
+                                let result = session
+                                    .prompt(&prompt, move |update| convert_update(&tx_cb, update))
+                                    .await;
+                                match result {
+                                    Ok(()) => { let _ = update_tx.send(AgentUpdate::Done); }
+                                    Err(e) => { let _ = update_tx.send(AgentUpdate::Error(e.to_string())); }
+                                }
+                            }
+                            None => break,
+                        }
                     }
-                    Err(e) => {
-                        let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
+                    maybe_model = switch_model_rx.recv() => {
+                        match maybe_model {
+                            Some(model) => {
+                                match session.switch_model(&model).await {
+                                    Ok((provider, model)) => {
+                                        let _ = update_tx.send(AgentUpdate::ModelChanged { provider, model });
+                                    }
+                                    Err(e) => {
+                                        let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
+                                    }
+                                }
+                            }
+                            None => break,
+                        }
                     }
                 }
             }
         });
     }
 
-    let mut app = App::new(agent_config, app_config, skills, prompt_tx);
+    let mut app = App::new(agent_config, app_config, skills, prompt_tx, switch_model_tx);
 
     enable_raw_mode().map_err(|e| crate::error::Error::Other(e.to_string()))?;
     let mut stdout = io::stdout();

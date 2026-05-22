@@ -26,6 +26,7 @@ pub(super) struct App {
     pub(super) status: Status,
     pub(super) should_quit: bool,
     screen: Screen,
+    pre_picker_screen: Screen,
     agent_config: AgentConfig,
     app_config: AppConfig,
     skills: Vec<String>,
@@ -33,6 +34,9 @@ pub(super) struct App {
     cached_lines: Vec<Line<'static>>,
     pub(super) cached_width: u16,
     prompt_tx: mpsc::UnboundedSender<String>,
+    switch_model_tx: mpsc::UnboundedSender<String>,
+    picker_items: Vec<(String, String)>,
+    picker_selected: usize,
 }
 
 impl App {
@@ -41,6 +45,7 @@ impl App {
         app_config: AppConfig,
         skills: Vec<String>,
         prompt_tx: mpsc::UnboundedSender<String>,
+        switch_model_tx: mpsc::UnboundedSender<String>,
     ) -> Self {
         Self {
             items: Vec::new(),
@@ -52,6 +57,7 @@ impl App {
             status: Status::Idle,
             should_quit: false,
             screen: Screen::Welcome,
+            pre_picker_screen: Screen::Welcome,
             agent_config,
             app_config,
             skills,
@@ -59,6 +65,9 @@ impl App {
             cached_lines: Vec::new(),
             cached_width: 0,
             prompt_tx,
+            switch_model_tx,
+            picker_items: Vec::new(),
+            picker_selected: 0,
         }
     }
 
@@ -91,10 +100,46 @@ impl App {
                 self.status = Status::Idle;
                 self.push(ChatItem::Err(e));
             }
+            AgentUpdate::ModelChanged { provider, model } => {
+                self.agent_config.provider_name = provider.clone();
+                self.agent_config.model = model.clone();
+                self.push(ChatItem::SystemInfo(format!("switched to {provider} / {model}")));
+            }
+        }
+    }
+
+    fn handle_picker_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.should_quit = true;
+            }
+            KeyCode::Up => {
+                self.picker_selected = self.picker_selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                if !self.picker_items.is_empty() {
+                    self.picker_selected =
+                        (self.picker_selected + 1).min(self.picker_items.len() - 1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Some((_, model)) = self.picker_items.get(self.picker_selected) {
+                    let _ = self.switch_model_tx.send(model.clone());
+                }
+                self.screen = Screen::Chat;
+            }
+            KeyCode::Esc => {
+                self.screen = self.pre_picker_screen;
+            }
+            _ => {}
         }
     }
 
     pub(super) fn handle_key(&mut self, key: KeyEvent) {
+        if self.screen == Screen::ModelPicker {
+            self.handle_picker_key(key);
+            return;
+        }
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
@@ -177,13 +222,15 @@ impl App {
         match name {
             "q" | "quit" => self.should_quit = true,
             "help" => self.push(ChatItem::SystemInfo(
-                ":help         show this\n\
-                 :q / :quit    exit\n\
-                 :sessions     list saved sessions\n\
-                 :open <n>     view session n (run :sessions first)\n\
-                 :config       current config\n\
-                 :mcp          MCP servers\n\
-                 :skills       available skills\n\n\
+                ":help              show this\n\
+                 :q / :quit         exit\n\
+                 :sessions          list saved sessions\n\
+                 :open <n>          view session n (run :sessions first)\n\
+                 :config            current config\n\
+                 :models            list available models\n\
+                 :models <name>     switch to model mid-session\n\
+                 :mcp               MCP servers\n\
+                 :skills            available skills\n\n\
                  ↑/↓  scroll · PgUp/PgDn  page · Ctrl+C  quit"
                     .to_string(),
             )),
@@ -276,6 +323,29 @@ impl App {
                     self.push(ChatItem::SystemInfo(lines.join("\n")));
                 }
             }
+            "models" => {
+                if arg.is_empty() {
+                    let info = self.app_config.models_info();
+                    let mut items: Vec<(String, String)> = info
+                        .providers
+                        .into_iter()
+                        .flat_map(|(provider, p)| {
+                            p.models.into_iter().map(move |m| (provider.clone(), m))
+                        })
+                        .collect();
+                    items.sort();
+                    let selected = items
+                        .iter()
+                        .position(|(_, m)| m == &self.agent_config.model)
+                        .unwrap_or(0);
+                    self.picker_items = items;
+                    self.picker_selected = selected;
+                    self.pre_picker_screen = self.screen;
+                    self.screen = Screen::ModelPicker;
+                } else {
+                    let _ = self.switch_model_tx.send(arg.to_string());
+                }
+            }
             "skills" => match SkillsManager::new().and_then(|m| m.list_skills()) {
                 Ok(names) if names.is_empty() => {
                     self.push(ChatItem::SystemInfo(
@@ -356,7 +426,13 @@ impl App {
 
         let [content_area, input_area] = [chunks[0], chunks[1]];
 
-        if self.screen == Screen::Welcome {
+        let bg_screen = if self.screen == Screen::ModelPicker {
+            self.pre_picker_screen
+        } else {
+            self.screen
+        };
+
+        if bg_screen == Screen::Welcome {
             let model = self.agent_config.model.clone();
             let provider = self.agent_config.provider_name.clone();
             let skills = self.skills.clone();
@@ -386,7 +462,12 @@ impl App {
             self.cursor,
             left_label.as_deref(),
             &right_label,
+            self.screen != Screen::ModelPicker,
         );
+
+        if self.screen == Screen::ModelPicker {
+            render::render_model_picker(f, area, &self.picker_items, self.picker_selected);
+        }
     }
 
     fn draw_chat(&mut self, f: &mut Frame, area: ratatui::layout::Rect) {
