@@ -30,4 +30,13 @@ pub(crate) enum Screen {
     Welcome,
     Chat,
     ModelPicker,
+    ConfigViewer,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ConfigRow {
+    Blank,
+    Header(String),
+    Entry { key: String, val: String },
+    Item(String),
 }

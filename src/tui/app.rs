@@ -14,7 +14,7 @@ use crate::{
 };
 
 use super::render;
-use super::types::{AgentUpdate, ChatItem, Screen, Status};
+use super::types::{AgentUpdate, ChatItem, ConfigRow, Screen, Status};
 
 pub(super) struct App {
     pub(super) items: Vec<ChatItem>,
@@ -37,6 +37,8 @@ pub(super) struct App {
     switch_model_tx: mpsc::UnboundedSender<String>,
     picker_items: Vec<(String, String)>,
     picker_selected: usize,
+    config_rows: Vec<ConfigRow>,
+    config_scroll: usize,
 }
 
 impl App {
@@ -68,6 +70,8 @@ impl App {
             switch_model_tx,
             picker_items: Vec::new(),
             picker_selected: 0,
+            config_rows: Vec::new(),
+            config_scroll: 0,
         }
     }
 
@@ -108,6 +112,30 @@ impl App {
         }
     }
 
+    fn handle_config_viewer_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.should_quit = true;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.config_scroll = self.config_scroll.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.config_scroll += 1;
+            }
+            KeyCode::PageUp => {
+                self.config_scroll = self.config_scroll.saturating_sub(5);
+            }
+            KeyCode::PageDown => {
+                self.config_scroll += 5;
+            }
+            KeyCode::Esc => {
+                self.screen = self.pre_picker_screen;
+            }
+            _ => {}
+        }
+    }
+
     fn handle_picker_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -138,6 +166,10 @@ impl App {
     pub(super) fn handle_key(&mut self, key: KeyEvent) {
         if self.screen == Screen::ModelPicker {
             self.handle_picker_key(key);
+            return;
+        }
+        if self.screen == Screen::ConfigViewer {
+            self.handle_config_viewer_key(key);
             return;
         }
         match key.code {
@@ -269,32 +301,41 @@ impl App {
             }
             "config" => {
                 let ac = &self.agent_config;
-                let mut lines = vec![
-                    format!("Provider        {}", ac.provider_name),
-                    format!("Model           {}", ac.model),
-                    format!("Max iterations  {}", ac.max_iterations),
-                    format!("Timeout         {}s", ac.timeout_secs),
+                let mut rows = vec![
+                    ConfigRow::Entry { key: "Provider".to_string(), val: ac.provider_name.clone() },
+                    ConfigRow::Entry { key: "Model".to_string(), val: ac.model.clone() },
+                    ConfigRow::Entry {
+                        key: "Max iterations".to_string(),
+                        val: ac.max_iterations.to_string(),
+                    },
+                    ConfigRow::Entry {
+                        key: "Timeout".to_string(),
+                        val: format!("{}s", ac.timeout_secs),
+                    },
                 ];
                 if !self.app_config.providers.is_empty() {
-                    lines.push(String::new());
-                    lines.push("Providers".to_string());
+                    rows.push(ConfigRow::Blank);
+                    rows.push(ConfigRow::Header("Providers".to_string()));
                     for (pname, p) in &self.app_config.providers {
-                        let suffix = if pname == &self.app_config.default_provider {
-                            "  (default)"
+                        let label = if pname == &self.app_config.default_provider {
+                            format!("{pname}  (default)")
                         } else {
-                            ""
+                            pname.clone()
                         };
-                        lines.push(format!("  {pname}{suffix}  {}", p.default_model));
+                        rows.push(ConfigRow::Entry { key: label, val: p.default_model.clone() });
                     }
                 }
                 if !self.app_config.mcp_servers.is_empty() {
-                    lines.push(String::new());
-                    lines.push("MCP Servers".to_string());
+                    rows.push(ConfigRow::Blank);
+                    rows.push(ConfigRow::Header("MCP Servers".to_string()));
                     for sname in self.app_config.mcp_servers.keys() {
-                        lines.push(format!("  {sname}"));
+                        rows.push(ConfigRow::Item(sname.clone()));
                     }
                 }
-                self.push(ChatItem::SystemInfo(lines.join("\n")));
+                self.config_rows = rows;
+                self.config_scroll = 0;
+                self.pre_picker_screen = self.screen;
+                self.screen = Screen::ConfigViewer;
             }
             "mcp" => {
                 if self.app_config.mcp_servers.is_empty() {
@@ -426,10 +467,9 @@ impl App {
 
         let [content_area, input_area] = [chunks[0], chunks[1]];
 
-        let bg_screen = if self.screen == Screen::ModelPicker {
-            self.pre_picker_screen
-        } else {
-            self.screen
+        let bg_screen = match self.screen {
+            Screen::ModelPicker | Screen::ConfigViewer => self.pre_picker_screen,
+            s => s,
         };
 
         if bg_screen == Screen::Welcome {
@@ -462,11 +502,14 @@ impl App {
             self.cursor,
             left_label.as_deref(),
             &right_label,
-            self.screen != Screen::ModelPicker,
+            self.screen != Screen::ModelPicker && self.screen != Screen::ConfigViewer,
         );
 
         if self.screen == Screen::ModelPicker {
             render::render_model_picker(f, area, &self.picker_items, self.picker_selected);
+        }
+        if self.screen == Screen::ConfigViewer {
+            render::render_config_viewer(f, area, &self.config_rows, self.config_scroll);
         }
     }
 
