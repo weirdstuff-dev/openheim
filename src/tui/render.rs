@@ -126,14 +126,7 @@ pub(crate) fn render_welcome(
     provider: &str,
     skills: &[String],
 ) {
-    #[rustfmt::skip]
-    const LOGO: &[&str] = &[
-        "  ___  _ __   ___ _ __  | |__   ___(_)_ __ ___  ",
-        r" / _ \| '_ \ / _ \ '_ \ | '_ \ / _ \ | '_ ` _ \ ",
-        "| (_) | |_) |  __/ | | || | | |  __/ | | | | | |",
-        r" \___/| .__/ \___|_| |_||_| |_|\___|_|_| |_| |_|",
-        "      |_|                                        ",
-    ];
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
 
     const COMMANDS: &[(&str, &str)] = &[
         (":help", "show all commands"),
@@ -151,23 +144,27 @@ pub(crate) fn render_welcome(
     };
     let hint = "type a message to start";
 
-    // logo + blank + subtitle + blank*2 + hint + blank + commands
-    let content_h = LOGO.len() + 1 + 1 + 2 + 1 + 1 + COMMANDS.len();
+    // title + blank + subtitle + blank*2 + hint + blank + commands
+    let content_h = 1 + 1 + 1 + 2 + 1 + 1 + COMMANDS.len();
     let top_pad = (area.height as usize).saturating_sub(content_h) / 2;
     let w = area.width as usize;
 
     let center = |text_w: usize| " ".repeat(w.saturating_sub(text_w) / 2);
 
+    let title = format!("openheim  v{VERSION}");
+    let title_pad = center(title.chars().count());
     let mut lines: Vec<Line<'static>> = (0..top_pad).map(|_| Line::default()).collect();
-
-    let logo_w = LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    let logo_pad = center(logo_w);
-    for &logo_line in LOGO {
-        lines.push(Line::styled(
-            format!("{logo_pad}{logo_line}"),
+    lines.push(Line::from(vec![
+        Span::raw(title_pad),
+        Span::styled(
+            "openheim".to_string(),
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-        ));
-    }
+        ),
+        Span::styled(
+            format!("  v{VERSION}"),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
 
     lines.push(Line::default());
 
