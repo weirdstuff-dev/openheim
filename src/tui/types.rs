@@ -32,6 +32,7 @@ pub(crate) enum Screen {
     ModelPicker,
     ConfigViewer,
     SessionPicker,
+    SkillsViewer,
 }
 
 #[derive(Debug, Clone)]

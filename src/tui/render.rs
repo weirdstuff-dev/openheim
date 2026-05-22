@@ -508,6 +508,64 @@ pub(crate) fn render_config_viewer(
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+pub(crate) fn render_skills_viewer(
+    f: &mut Frame,
+    area: Rect,
+    items: &[String],
+    scroll: usize,
+) {
+    let max_w = items.iter().map(|s| s.chars().count()).max().unwrap_or(10);
+    let content_w = max_w + 4;
+    let popup_w = ((content_w + 6) as u16).max(36).min(area.width.saturating_sub(4));
+    let popup_h = ((items.len() + 4) as u16).max(6).min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup_rect = Rect::new(x, y, popup_w, popup_h);
+
+    f.render_widget(Clear, popup_rect);
+
+    let dim = Style::default().fg(Color::DarkGray);
+    let block = Block::default()
+        .title(
+            Line::from(Span::styled(
+                " skills ",
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ))
+            .centered(),
+        )
+        .title_bottom(
+            Line::from(Span::styled(
+                " activate: openheim --skills <name>,... · ↑/↓  esc ",
+                dim,
+            ))
+            .centered(),
+        )
+        .borders(Borders::ALL)
+        .border_style(dim);
+
+    let inner = block.inner(popup_rect);
+    f.render_widget(block, popup_rect);
+
+    let visible_h = inner.height as usize;
+    if visible_h == 0 || items.is_empty() {
+        return;
+    }
+    let scroll = scroll.min(items.len().saturating_sub(visible_h));
+    let end = (scroll + visible_h).min(items.len());
+
+    let lines: Vec<Line<'static>> = items[scroll..end]
+        .iter()
+        .map(|name| {
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(name.clone(), Style::default().fg(Color::White)),
+            ])
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 // Word-wraps `text` to `width` chars, preserving newlines as paragraph breaks.
 pub(crate) fn word_wrap(text: &str, width: usize) -> Vec<String> {
     if width == 0 {

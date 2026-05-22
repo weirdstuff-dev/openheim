@@ -40,6 +40,8 @@ pub(super) struct App {
     picker_selected: usize,
     config_rows: Vec<ConfigRow>,
     config_scroll: usize,
+    skills_items: Vec<String>,
+    skills_scroll: usize,
 }
 
 impl App {
@@ -75,6 +77,8 @@ impl App {
             picker_selected: 0,
             config_rows: Vec::new(),
             config_scroll: 0,
+            skills_items: Vec::new(),
+            skills_scroll: 0,
         }
     }
 
@@ -166,6 +170,30 @@ impl App {
         }
     }
 
+    fn handle_skills_viewer_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.should_quit = true;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.skills_scroll = self.skills_scroll.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.skills_scroll += 1;
+            }
+            KeyCode::PageUp => {
+                self.skills_scroll = self.skills_scroll.saturating_sub(5);
+            }
+            KeyCode::PageDown => {
+                self.skills_scroll += 5;
+            }
+            KeyCode::Esc => {
+                self.screen = self.pre_picker_screen;
+            }
+            _ => {}
+        }
+    }
+
     fn handle_picker_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -204,6 +232,10 @@ impl App {
         }
         if self.screen == Screen::SessionPicker {
             self.handle_session_picker_key(key);
+            return;
+        }
+        if self.screen == Screen::SkillsViewer {
+            self.handle_skills_viewer_key(key);
             return;
         }
         match key.code {
@@ -407,10 +439,11 @@ impl App {
                             .to_string(),
                     ));
                 }
-                Ok(mut names) => {
-                    names.push(String::new());
-                    names.push("activate with: openheim --skills <name>,...".to_string());
-                    self.push(ChatItem::SystemInfo(names.join("\n")));
+                Ok(names) => {
+                    self.skills_items = names;
+                    self.skills_scroll = 0;
+                    self.pre_picker_screen = self.screen;
+                    self.screen = Screen::SkillsViewer;
                 }
                 Err(e) => self.push(ChatItem::Err(e.to_string())),
             },
@@ -486,9 +519,10 @@ impl App {
         let [content_area, input_area] = [chunks[0], chunks[1]];
 
         let bg_screen = match self.screen {
-            Screen::ModelPicker | Screen::ConfigViewer | Screen::SessionPicker => {
-                self.pre_picker_screen
-            }
+            Screen::ModelPicker
+            | Screen::ConfigViewer
+            | Screen::SessionPicker
+            | Screen::SkillsViewer => self.pre_picker_screen,
             s => s,
         };
 
@@ -524,7 +558,8 @@ impl App {
             &right_label,
             self.screen != Screen::ModelPicker
                 && self.screen != Screen::ConfigViewer
-                && self.screen != Screen::SessionPicker,
+                && self.screen != Screen::SessionPicker
+                && self.screen != Screen::SkillsViewer,
         );
 
         if self.screen == Screen::ModelPicker {
@@ -535,6 +570,9 @@ impl App {
         }
         if self.screen == Screen::SessionPicker {
             render::render_session_picker(f, area, &self.sessions, self.picker_selected);
+        }
+        if self.screen == Screen::SkillsViewer {
+            render::render_skills_viewer(f, area, &self.skills_items, self.skills_scroll);
         }
     }
 
