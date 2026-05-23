@@ -62,6 +62,14 @@ impl AppConfig {
             ))
         })?;
         validate_provider(provider_name, provider)?;
+        if !provider.models.is_empty() && !provider.models.contains(&model.to_string()) {
+            return Err(Error::config(format!(
+                "Model '{}' is not allowed for provider '{}'. Allowed models: [{}]",
+                model,
+                provider_name,
+                provider.models.join(", ")
+            )));
+        }
         Ok(AgentConfig {
             provider_name: provider_name.to_string(),
             api_base: provider.api_base.clone(),
@@ -224,5 +232,34 @@ mod tests {
     fn validate_accepts_valid_provider() {
         let p = provider_with_base("https://api.example.com");
         assert!(validate_provider("test", &p).is_ok());
+    }
+
+    #[test]
+    fn resolve_with_provider_rejects_unlisted_model() {
+        let config = sample_config();
+        let err = config
+            .resolve_with_provider("openai", "gpt-99")
+            .unwrap_err();
+        assert!(err.to_string().contains("gpt-99"));
+        assert!(err.to_string().contains("openai"));
+    }
+
+    #[test]
+    fn resolve_with_provider_accepts_listed_model() {
+        let config = sample_config();
+        let agent = config
+            .resolve_with_provider("openai", "gpt-3.5-turbo")
+            .unwrap();
+        assert_eq!(agent.model, "gpt-3.5-turbo");
+    }
+
+    #[test]
+    fn resolve_with_provider_allows_any_model_when_list_empty() {
+        let mut config = sample_config();
+        config.providers.get_mut("openai").unwrap().models.clear();
+        let agent = config
+            .resolve_with_provider("openai", "any-future-model")
+            .unwrap();
+        assert_eq!(agent.model, "any-future-model");
     }
 }
