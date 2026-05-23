@@ -90,17 +90,16 @@ pub(crate) fn build_lines(items: &[ChatItem], width: u16, theme: Color) -> Vec<L
                     Span::styled(preview, Style::default().fg(Color::DarkGray)),
                 ]));
             }
-            ChatItem::ToolResult { result, is_error } => {
+            ChatItem::ToolResult { result, .. } => {
                 let flat: String = result
                     .chars()
                     .take(200)
                     .map(|c| if c == '\n' { ' ' } else { c })
                     .collect();
-                let color = if *is_error { Color::Red } else { Color::DarkGray };
                 lines.push(Line::from(vec![
                     Span::raw("    "),
-                    Span::styled("→ ", Style::default().fg(color)),
-                    Span::styled(flat.trim().to_string(), Style::default().fg(color)),
+                    Span::styled("→ ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(flat.trim().to_string(), Style::default().fg(Color::DarkGray)),
                 ]));
             }
             ChatItem::SystemInfo(text) => {
