@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::{ContentBlock, SessionUpdate, ToolCallStatus};
 use crossterm::{
+    cursor::Show,
     event::{
         Event, EventStream, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
         PushKeyboardEnhancementFlags,
@@ -22,6 +23,21 @@ use crate::{client::OpenheimClient, config::load_config};
 
 use app::App;
 use types::AgentUpdate;
+
+struct TerminalGuard {
+    kbd_enhanced: bool,
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        if self.kbd_enhanced {
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), Show);
+    }
+}
 
 pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
     let app_config = load_config()?;
@@ -129,14 +145,10 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    let _guard = TerminalGuard { kbd_enhanced };
 
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if kbd_enhanced {
-            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
-        }
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
-        let _ = disable_raw_mode();
         original_hook(info);
     }));
 
@@ -172,13 +184,6 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
             }
         }
     }
-
-    if kbd_enhanced {
-        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags).ok();
-    }
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    disable_raw_mode()?;
-    terminal.show_cursor()?;
 
     Ok(())
 }
