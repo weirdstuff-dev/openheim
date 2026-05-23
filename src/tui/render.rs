@@ -9,15 +9,7 @@ use ratatui::{
 use super::types::{ChatItem, ConfigRow};
 
 pub(crate) const THEME_COLORS: &[&str] = &[
-    "white",
-    "gray",
-    "blue",
-    "cyan",
-    "magenta",
-    "green",
-    "yellow",
-    "red",
-    "pink",
+    "white", "gray", "blue", "cyan", "magenta", "green", "yellow", "red", "pink",
 ];
 
 pub(crate) fn theme_color(name: &str) -> Color {
@@ -33,6 +25,24 @@ pub(crate) fn theme_color(name: &str) -> Color {
         "pink" => Color::LightRed,
         _ => Color::White,
     }
+}
+
+fn centered_popup(area: Rect, w: u16, h: u16) -> Rect {
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    Rect::new(x, y, w, h)
+}
+
+fn highlight_row(label: &str, inner_w: usize) -> Line<'static> {
+    let truncated: String = label.chars().take(inner_w).collect();
+    let padding = " ".repeat(inner_w.saturating_sub(truncated.chars().count()));
+    Line::styled(
+        format!("{truncated}{padding}"),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
 pub(crate) fn build_lines(items: &[ChatItem], width: u16, theme: Color) -> Vec<Line<'static>> {
@@ -63,7 +73,9 @@ pub(crate) fn build_lines(items: &[ChatItem], width: u16, theme: Color) -> Vec<L
                     preview
                 };
                 let call_color = match items.get(idx + 1) {
-                    Some(ChatItem::ToolResult { is_error: false, .. }) => Color::Green,
+                    Some(ChatItem::ToolResult {
+                        is_error: false, ..
+                    }) => Color::Green,
                     Some(ChatItem::ToolResult { is_error: true, .. }) => Color::Red,
                     _ => theme,
                 };
@@ -79,8 +91,11 @@ pub(crate) fn build_lines(items: &[ChatItem], width: u16, theme: Color) -> Vec<L
                 ]));
             }
             ChatItem::ToolResult { result, .. } => {
-                let flat: String =
-                    result.chars().take(200).collect::<String>().replace('\n', " ");
+                let flat: String = result
+                    .chars()
+                    .take(200)
+                    .map(|c| if c == '\n' { ' ' } else { c })
+                    .collect();
                 lines.push(Line::from(vec![
                     Span::raw("    "),
                     Span::styled("→ ", Style::default().fg(Color::DarkGray)),
@@ -119,7 +134,12 @@ fn user_bubble(text: &str, width: u16, theme: Color) -> Vec<Line<'static>> {
     let content_max = 50usize.min(width.saturating_sub(8) as usize).max(1);
 
     let wrapped = word_wrap(text, content_max);
-    let content_w = wrapped.iter().map(|l| l.chars().count()).max().unwrap_or(0).max(1);
+    let content_w = wrapped
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(1);
 
     let border = Style::default().fg(theme);
     let text_style = Style::default().fg(theme);
@@ -191,12 +211,11 @@ pub(crate) fn render_welcome(
         Span::raw(title_pad),
         Span::styled(
             "openheim".to_string(),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!("  v{VERSION}"),
-            Style::default().fg(theme),
-        ),
+        Span::styled(format!("  v{VERSION}"), Style::default().fg(theme)),
     ]));
 
     lines.push(Line::default());
@@ -218,8 +237,16 @@ pub(crate) fn render_welcome(
 
     lines.push(Line::default());
 
-    let cmd_key_w = COMMANDS.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
-    let cmd_desc_w = COMMANDS.iter().map(|(_, d)| d.chars().count()).max().unwrap_or(0);
+    let cmd_key_w = COMMANDS
+        .iter()
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(0);
+    let cmd_desc_w = COMMANDS
+        .iter()
+        .map(|(_, d)| d.chars().count())
+        .max()
+        .unwrap_or(0);
     let cmd_block_w = cmd_key_w + 6 + cmd_desc_w;
     let cmd_pad = center(cmd_block_w);
 
@@ -236,6 +263,7 @@ pub(crate) fn render_welcome(
     f.render_widget(Paragraph::new(lines), area);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_input_bar(
     f: &mut Frame,
     area: Rect,
@@ -250,27 +278,24 @@ pub(crate) fn render_input_bar(
     let mut block = Block::default().borders(Borders::TOP).border_style(dim);
 
     if let Some(left) = left_label {
-        block = block
-            .title_top(Line::from(Span::styled(format!("─── {left} "), dim)).left_aligned());
+        block =
+            block.title_top(Line::from(Span::styled(format!("─── {left} "), dim)).left_aligned());
     }
-    block = block.title_top(
-        Line::from(Span::styled(format!(" {right_label} ───"), dim)).right_aligned(),
-    );
+    block = block
+        .title_top(Line::from(Span::styled(format!(" {right_label} ───"), dim)).right_aligned());
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let prompt_prefix = "  › ";
     f.render_widget(
-        Paragraph::new(format!("{prompt_prefix}{input}"))
-            .style(Style::default().fg(Color::White)),
+        Paragraph::new(format!("{prompt_prefix}{input}")).style(Style::default().fg(Color::White)),
         inner,
     );
 
     if show_cursor {
-        let cursor_col = inner.x
-            + prompt_prefix.chars().count() as u16
-            + input[..cursor].chars().count() as u16;
+        let cursor_col =
+            inner.x + prompt_prefix.chars().count() as u16 + input[..cursor].chars().count() as u16;
         f.set_cursor_position((
             cursor_col.min(inner.x + inner.width.saturating_sub(1)),
             inner.y,
@@ -291,11 +316,13 @@ pub(crate) fn render_model_picker(
         .max()
         .unwrap_or(20);
 
-    let popup_w = ((max_label + 6) as u16).max(32).min(area.width.saturating_sub(4));
-    let popup_h = ((items.len() + 2) as u16).max(5).min(area.height.saturating_sub(4));
-    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-    let popup_rect = Rect::new(x, y, popup_w, popup_h);
+    let popup_w = ((max_label + 6) as u16)
+        .max(32)
+        .min(area.width.saturating_sub(4));
+    let popup_h = ((items.len() + 2) as u16)
+        .max(5)
+        .min(area.height.saturating_sub(4));
+    let popup_rect = centered_popup(area, popup_w, popup_h);
 
     f.render_widget(Clear, popup_rect);
 
@@ -304,13 +331,13 @@ pub(crate) fn render_model_picker(
         .title(
             Line::from(Span::styled(
                 " models ",
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ))
             .centered(),
         )
-        .title_bottom(
-            Line::from(Span::styled(" ↑/↓  enter  esc ", dim)).centered(),
-        )
+        .title_bottom(Line::from(Span::styled(" ↑/↓  enter  esc ", dim)).centered())
         .borders(Borders::ALL)
         .border_style(dim);
 
@@ -332,16 +359,7 @@ pub(crate) fn render_model_picker(
         .map(|(i, (provider, model))| {
             let idx = start + i;
             if idx == selected {
-                let label = format!("  {provider}  {model}");
-                let truncated: String = label.chars().take(inner_w).collect();
-                let padding = " ".repeat(inner_w.saturating_sub(truncated.chars().count()));
-                Line::styled(
-                    format!("{truncated}{padding}"),
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )
+                highlight_row(&format!("  {provider}  {model}"), inner_w)
             } else {
                 Line::from(vec![
                     Span::raw("  "),
@@ -384,11 +402,13 @@ pub(crate) fn render_session_picker(
         .unwrap_or(20);
 
     let content_w = max_title + 4 + max_meta;
-    let popup_w = ((content_w + 6) as u16).max(40).min(area.width.saturating_sub(4));
-    let popup_h = ((items.len() + 2) as u16).max(5).min(area.height.saturating_sub(4));
-    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-    let popup_rect = Rect::new(x, y, popup_w, popup_h);
+    let popup_w = ((content_w + 6) as u16)
+        .max(40)
+        .min(area.width.saturating_sub(4));
+    let popup_h = ((items.len() + 2) as u16)
+        .max(5)
+        .min(area.height.saturating_sub(4));
+    let popup_rect = centered_popup(area, popup_w, popup_h);
 
     f.render_widget(Clear, popup_rect);
 
@@ -397,7 +417,9 @@ pub(crate) fn render_session_picker(
         .title(
             Line::from(Span::styled(
                 " sessions ",
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ))
             .centered(),
         )
@@ -429,16 +451,7 @@ pub(crate) fn render_session_picker(
             let meta_str = format!("{date}  ·  {model}");
 
             if idx == selected {
-                let label = format!("  {title}  {meta_str}");
-                let truncated: String = label.chars().take(inner_w).collect();
-                let padding = " ".repeat(inner_w.saturating_sub(truncated.chars().count()));
-                Line::styled(
-                    format!("{truncated}{padding}"),
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )
+                highlight_row(&format!("  {title}  {meta_str}"), inner_w)
             } else {
                 let gap = " ".repeat(max_title.saturating_sub(title.chars().count()) + 4);
                 Line::from(vec![
@@ -461,92 +474,7 @@ pub(crate) fn render_config_viewer(
     scroll: usize,
     theme: Color,
 ) {
-    let entry_key_w = rows
-        .iter()
-        .filter_map(|r| {
-            if let ConfigRow::Entry { key, .. } = r { Some(key.chars().count()) } else { None }
-        })
-        .max()
-        .unwrap_or(10);
-    let entry_val_w = rows
-        .iter()
-        .filter_map(|r| {
-            if let ConfigRow::Entry { val, .. } = r { Some(val.chars().count()) } else { None }
-        })
-        .max()
-        .unwrap_or(10);
-    let item_w = rows
-        .iter()
-        .filter_map(|r| {
-            if let ConfigRow::Item(s) = r { Some(s.chars().count() + 4) } else { None }
-        })
-        .max()
-        .unwrap_or(0);
-    let header_w = rows
-        .iter()
-        .filter_map(|r| {
-            if let ConfigRow::Header(h) = r { Some(h.chars().count() + 2) } else { None }
-        })
-        .max()
-        .unwrap_or(0);
-    let content_w = (entry_key_w + 4 + entry_val_w).max(item_w).max(header_w);
-
-    let popup_w = ((content_w + 6) as u16).max(36).min(area.width.saturating_sub(4));
-    let popup_h = ((rows.len() + 2) as u16).max(6).min(area.height.saturating_sub(4));
-    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-    let popup_rect = Rect::new(x, y, popup_w, popup_h);
-
-    f.render_widget(Clear, popup_rect);
-
-    let dim = Style::default().fg(theme);
-    let block = Block::default()
-        .title(
-            Line::from(Span::styled(
-                " config ",
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-            ))
-            .centered(),
-        )
-        .title_bottom(Line::from(Span::styled(" ↑/↓  esc ", dim)).centered())
-        .borders(Borders::ALL)
-        .border_style(dim);
-
-    let inner = block.inner(popup_rect);
-    f.render_widget(block, popup_rect);
-
-    let visible_h = inner.height as usize;
-    if visible_h == 0 {
-        return;
-    }
-    let scroll = scroll.min(rows.len().saturating_sub(visible_h));
-    let end = (scroll + visible_h).min(rows.len());
-
-    let lines: Vec<Line<'static>> = rows[scroll..end]
-        .iter()
-        .map(|row| match row {
-            ConfigRow::Blank => Line::default(),
-            ConfigRow::Header(h) => Line::from(Span::styled(
-                format!("  {h}"),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-            )),
-            ConfigRow::Entry { key, val } => {
-                let gap = " ".repeat(entry_key_w.saturating_sub(key.chars().count()) + 2);
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(key.clone(), Style::default().fg(theme)),
-                    Span::raw(gap),
-                    Span::styled(val.clone(), Style::default().fg(Color::White)),
-                ])
-            }
-            ConfigRow::Item(s) => Line::from(vec![
-                Span::raw("    "),
-                Span::styled(s.clone(), Style::default().fg(Color::White)),
-            ]),
-        })
-        .collect();
-
-    f.render_widget(Paragraph::new(lines), inner);
+    render_rows_popup(f, area, rows, scroll, " config ", 36, "  ", theme);
 }
 
 pub(crate) fn render_mcp_viewer(
@@ -556,34 +484,37 @@ pub(crate) fn render_mcp_viewer(
     scroll: usize,
     theme: Color,
 ) {
-    let entry_key_w = rows
-        .iter()
-        .filter_map(|r| {
-            if let ConfigRow::Entry { key, .. } = r { Some(key.chars().count()) } else { None }
-        })
-        .max()
-        .unwrap_or(5);
-    let entry_val_w = rows
-        .iter()
-        .filter_map(|r| {
-            if let ConfigRow::Entry { val, .. } = r { Some(val.chars().count()) } else { None }
-        })
-        .max()
-        .unwrap_or(20);
-    let header_w = rows
-        .iter()
-        .filter_map(|r| {
-            if let ConfigRow::Header(h) = r { Some(h.chars().count() + 2) } else { None }
-        })
-        .max()
-        .unwrap_or(0);
-    let content_w = (entry_key_w + 4 + entry_val_w).max(header_w);
+    render_rows_popup(f, area, rows, scroll, " mcp servers ", 40, "    ", theme);
+}
 
-    let popup_w = ((content_w + 6) as u16).max(40).min(area.width.saturating_sub(4));
-    let popup_h = ((rows.len() + 2) as u16).max(6).min(area.height.saturating_sub(4));
-    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-    let popup_rect = Rect::new(x, y, popup_w, popup_h);
+fn render_rows_popup(
+    f: &mut Frame,
+    area: Rect,
+    rows: &[ConfigRow],
+    scroll: usize,
+    title: &'static str,
+    min_popup_w: u16,
+    entry_prefix: &'static str,
+    theme: Color,
+) {
+    let (entry_key_w, entry_val_w, item_w, header_w) =
+        rows.iter().fold((0, 0, 0, 0), |(ek, ev, iw, hw), row| match row {
+            ConfigRow::Entry { key, val } => {
+                (ek.max(key.chars().count()), ev.max(val.chars().count()), iw, hw)
+            }
+            ConfigRow::Item(s) => (ek, ev, iw.max(s.chars().count() + 4), hw),
+            ConfigRow::Header(h) => (ek, ev, iw, hw.max(h.chars().count() + 2)),
+            ConfigRow::Blank => (ek, ev, iw, hw),
+        });
+
+    let content_w = (entry_key_w + 4 + entry_val_w).max(item_w).max(header_w);
+    let popup_w = ((content_w + 6) as u16)
+        .max(min_popup_w)
+        .min(area.width.saturating_sub(4));
+    let popup_h = ((rows.len() + 2) as u16)
+        .max(6)
+        .min(area.height.saturating_sub(4));
+    let popup_rect = centered_popup(area, popup_w, popup_h);
 
     f.render_widget(Clear, popup_rect);
 
@@ -591,8 +522,10 @@ pub(crate) fn render_mcp_viewer(
     let block = Block::default()
         .title(
             Line::from(Span::styled(
-                " mcp servers ",
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                title,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ))
             .centered(),
         )
@@ -616,12 +549,14 @@ pub(crate) fn render_mcp_viewer(
             ConfigRow::Blank => Line::default(),
             ConfigRow::Header(h) => Line::from(Span::styled(
                 format!("  {h}"),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             )),
             ConfigRow::Entry { key, val } => {
                 let gap = " ".repeat(entry_key_w.saturating_sub(key.chars().count()) + 2);
                 Line::from(vec![
-                    Span::raw("    "),
+                    Span::raw(entry_prefix),
                     Span::styled(key.clone(), Style::default().fg(theme)),
                     Span::raw(gap),
                     Span::styled(val.clone(), Style::default().fg(Color::White)),
@@ -646,11 +581,13 @@ pub(crate) fn render_skills_viewer(
 ) {
     let max_w = items.iter().map(|s| s.chars().count()).max().unwrap_or(10);
     let content_w = max_w + 4;
-    let popup_w = ((content_w + 6) as u16).max(36).min(area.width.saturating_sub(4));
-    let popup_h = ((items.len() + 4) as u16).max(6).min(area.height.saturating_sub(4));
-    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-    let popup_rect = Rect::new(x, y, popup_w, popup_h);
+    let popup_w = ((content_w + 6) as u16)
+        .max(36)
+        .min(area.width.saturating_sub(4));
+    let popup_h = ((items.len() + 4) as u16)
+        .max(6)
+        .min(area.height.saturating_sub(4));
+    let popup_rect = centered_popup(area, popup_w, popup_h);
 
     f.render_widget(Clear, popup_rect);
 
@@ -659,7 +596,9 @@ pub(crate) fn render_skills_viewer(
         .title(
             Line::from(Span::styled(
                 " skills ",
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ))
             .centered(),
         )
@@ -704,11 +643,13 @@ pub(crate) fn render_theme_picker(
     theme: Color,
 ) {
     let max_w = THEME_COLORS.iter().map(|n| n.len()).max().unwrap_or(10);
-    let popup_w = ((max_w + 8) as u16).max(24).min(area.width.saturating_sub(4));
-    let popup_h = (THEME_COLORS.len() as u16 + 2).max(5).min(area.height.saturating_sub(4));
-    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-    let popup_rect = Rect::new(x, y, popup_w, popup_h);
+    let popup_w = ((max_w + 8) as u16)
+        .max(24)
+        .min(area.width.saturating_sub(4));
+    let popup_h = (THEME_COLORS.len() as u16 + 2)
+        .max(5)
+        .min(area.height.saturating_sub(4));
+    let popup_rect = centered_popup(area, popup_w, popup_h);
 
     f.render_widget(Clear, popup_rect);
 
@@ -717,7 +658,9 @@ pub(crate) fn render_theme_picker(
         .title(
             Line::from(Span::styled(
                 " theme ",
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ))
             .centered(),
         )
@@ -760,8 +703,7 @@ pub(crate) fn render_theme_picker(
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-// Word-wraps `text` to `width` chars, preserving newlines as paragraph breaks.
-pub(crate) fn word_wrap(text: &str, width: usize) -> Vec<String> {
+fn word_wrap(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return text.lines().map(String::from).collect();
     }

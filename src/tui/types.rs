@@ -37,6 +37,20 @@ pub(crate) enum Screen {
     ThemePicker,
 }
 
+impl Screen {
+    pub(crate) fn is_overlay(self) -> bool {
+        matches!(
+            self,
+            Screen::ModelPicker
+                | Screen::ConfigViewer
+                | Screen::SessionPicker
+                | Screen::SkillsViewer
+                | Screen::McpViewer
+                | Screen::ThemePicker
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum ConfigRow {
     Blank,

@@ -4,15 +4,25 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Paragraph},
 };
 use tokio::sync::mpsc;
+
+use crate::{
+    config::{AgentConfig, AppConfig},
+    rag::{ConversationMeta, RagContext, SkillsManager},
+};
+
+use super::render;
+use super::types::{AgentUpdate, ChatItem, ConfigRow, Screen, Status};
 
 fn save_theme_to_config(name: &str) -> crate::error::Result<()> {
     let path = crate::config::config_path()?;
     let contents = std::fs::read_to_string(&path)?;
     let new_line = format!("theme_color = \"{name}\"");
-    let has_theme = contents.lines().any(|l| l.trim_start().starts_with("theme_color"));
+    let has_theme = contents
+        .lines()
+        .any(|l| l.trim_start().starts_with("theme_color"));
     let updated: String = if has_theme {
         contents
             .lines()
@@ -42,14 +52,6 @@ fn save_theme_to_config(name: &str) -> crate::error::Result<()> {
     std::fs::write(&path, format!("{updated}{trailing}"))?;
     Ok(())
 }
-
-use crate::{
-    config::{AgentConfig, AppConfig},
-    rag::{ConversationMeta, RagContext, SkillsManager},
-};
-
-use super::render;
-use super::types::{AgentUpdate, ChatItem, ConfigRow, Screen, Status};
 
 pub(super) struct App {
     pub(super) items: Vec<ChatItem>,
@@ -93,7 +95,11 @@ impl App {
         switch_model_tx: mpsc::UnboundedSender<String>,
         switch_session_tx: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
     ) -> Self {
-        let theme_name = app_config.theme_color.as_deref().unwrap_or("dark_gray").to_string();
+        let theme_name = app_config
+            .theme_color
+            .as_deref()
+            .unwrap_or("gray")
+            .to_string();
         let theme_color = render::theme_color(&theme_name);
         Self {
             items: Vec::new(),
@@ -161,7 +167,9 @@ impl App {
             AgentUpdate::ModelChanged { provider, model } => {
                 self.agent_config.provider_name = provider.clone();
                 self.agent_config.model = model.clone();
-                self.push(ChatItem::SystemInfo(format!("switched to {provider} / {model}")));
+                self.push(ChatItem::SystemInfo(format!(
+                    "switched to {provider} / {model}"
+                )));
             }
         }
     }
@@ -176,8 +184,7 @@ impl App {
             }
             KeyCode::Down => {
                 if !self.sessions.is_empty() {
-                    self.picker_selected =
-                        (self.picker_selected + 1).min(self.sessions.len() - 1);
+                    self.picker_selected = (self.picker_selected + 1).min(self.sessions.len() - 1);
                 }
             }
             KeyCode::Enter => {
@@ -193,76 +200,36 @@ impl App {
         }
     }
 
-    fn handle_config_viewer_key(&mut self, key: KeyEvent) {
+    fn handle_scroll_key(
+        key: KeyEvent,
+        scroll: &mut usize,
+        should_quit: &mut bool,
+        screen: &mut Screen,
+        prev: Screen,
+    ) {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
+                *should_quit = true;
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.config_scroll = self.config_scroll.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.config_scroll += 1;
-            }
-            KeyCode::PageUp => {
-                self.config_scroll = self.config_scroll.saturating_sub(5);
-            }
-            KeyCode::PageDown => {
-                self.config_scroll += 5;
-            }
-            KeyCode::Esc => {
-                self.screen = self.pre_picker_screen;
-            }
+            KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
+            KeyCode::PageUp => *scroll = scroll.saturating_sub(5),
+            KeyCode::PageDown => *scroll = scroll.saturating_add(5),
+            KeyCode::Esc => *screen = prev,
             _ => {}
         }
+    }
+
+    fn handle_config_viewer_key(&mut self, key: KeyEvent) {
+        Self::handle_scroll_key(key, &mut self.config_scroll, &mut self.should_quit, &mut self.screen, self.pre_picker_screen);
     }
 
     fn handle_skills_viewer_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.skills_scroll = self.skills_scroll.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.skills_scroll += 1;
-            }
-            KeyCode::PageUp => {
-                self.skills_scroll = self.skills_scroll.saturating_sub(5);
-            }
-            KeyCode::PageDown => {
-                self.skills_scroll += 5;
-            }
-            KeyCode::Esc => {
-                self.screen = self.pre_picker_screen;
-            }
-            _ => {}
-        }
+        Self::handle_scroll_key(key, &mut self.skills_scroll, &mut self.should_quit, &mut self.screen, self.pre_picker_screen);
     }
 
     fn handle_mcp_viewer_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.mcp_scroll = self.mcp_scroll.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.mcp_scroll += 1;
-            }
-            KeyCode::PageUp => {
-                self.mcp_scroll = self.mcp_scroll.saturating_sub(5);
-            }
-            KeyCode::PageDown => {
-                self.mcp_scroll += 5;
-            }
-            KeyCode::Esc => {
-                self.screen = self.pre_picker_screen;
-            }
-            _ => {}
-        }
+        Self::handle_scroll_key(key, &mut self.mcp_scroll, &mut self.should_quit, &mut self.screen, self.pre_picker_screen);
     }
 
     fn handle_theme_picker_key(&mut self, key: KeyEvent) {
@@ -274,8 +241,7 @@ impl App {
                 self.theme_selected = self.theme_selected.saturating_sub(1);
             }
             KeyCode::Down => {
-                self.theme_selected =
-                    (self.theme_selected + 1).min(render::THEME_COLORS.len() - 1);
+                self.theme_selected = (self.theme_selected + 1).min(render::THEME_COLORS.len() - 1);
             }
             KeyCode::Enter => {
                 let name = render::THEME_COLORS[self.theme_selected].to_string();
@@ -302,7 +268,7 @@ impl App {
         }
     }
 
-    fn handle_picker_key(&mut self, key: KeyEvent) {
+    fn handle_model_picker_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
@@ -329,30 +295,20 @@ impl App {
         }
     }
 
+    fn push_screen(&mut self, next: Screen) {
+        self.pre_picker_screen = self.screen;
+        self.screen = next;
+    }
+
     pub(super) fn handle_key(&mut self, key: KeyEvent) {
-        if self.screen == Screen::ModelPicker {
-            self.handle_picker_key(key);
-            return;
-        }
-        if self.screen == Screen::ConfigViewer {
-            self.handle_config_viewer_key(key);
-            return;
-        }
-        if self.screen == Screen::SessionPicker {
-            self.handle_session_picker_key(key);
-            return;
-        }
-        if self.screen == Screen::SkillsViewer {
-            self.handle_skills_viewer_key(key);
-            return;
-        }
-        if self.screen == Screen::McpViewer {
-            self.handle_mcp_viewer_key(key);
-            return;
-        }
-        if self.screen == Screen::ThemePicker {
-            self.handle_theme_picker_key(key);
-            return;
+        match self.screen {
+            Screen::ModelPicker => { self.handle_model_picker_key(key); return; }
+            Screen::ConfigViewer => { self.handle_config_viewer_key(key); return; }
+            Screen::SessionPicker => { self.handle_session_picker_key(key); return; }
+            Screen::SkillsViewer => { self.handle_skills_viewer_key(key); return; }
+            Screen::McpViewer => { self.handle_mcp_viewer_key(key); return; }
+            Screen::ThemePicker => { self.handle_theme_picker_key(key); return; }
+            Screen::Welcome | Screen::Chat => {}
         }
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -388,25 +344,25 @@ impl App {
             }
             KeyCode::Backspace => {
                 if self.cursor > 0 {
-                    let prev = prev_char_boundary(&self.input, self.cursor);
+                    let prev = self.input.floor_char_boundary(self.cursor - 1);
                     self.input.drain(prev..self.cursor);
                     self.cursor = prev;
                 }
             }
             KeyCode::Delete => {
                 if self.cursor < self.input.len() {
-                    let next = next_char_boundary(&self.input, self.cursor);
+                    let next = self.input.ceil_char_boundary(self.cursor + 1);
                     self.input.drain(self.cursor..next);
                 }
             }
             KeyCode::Left => {
                 if self.cursor > 0 {
-                    self.cursor = prev_char_boundary(&self.input, self.cursor);
+                    self.cursor = self.input.floor_char_boundary(self.cursor - 1);
                 }
             }
             KeyCode::Right => {
                 if self.cursor < self.input.len() {
-                    self.cursor = next_char_boundary(&self.input, self.cursor);
+                    self.cursor = self.input.ceil_char_boundary(self.cursor + 1);
                 }
             }
             KeyCode::Home => self.cursor = 0,
@@ -456,16 +412,21 @@ impl App {
                 Ok(metas) => {
                     self.sessions = metas;
                     self.picker_selected = 0;
-                    self.pre_picker_screen = self.screen;
-                    self.screen = Screen::SessionPicker;
+                    self.push_screen(Screen::SessionPicker);
                 }
                 Err(e) => self.push(ChatItem::Err(e.to_string())),
             },
             "config" => {
                 let ac = &self.agent_config;
                 let mut rows = vec![
-                    ConfigRow::Entry { key: "Provider".to_string(), val: ac.provider_name.clone() },
-                    ConfigRow::Entry { key: "Model".to_string(), val: ac.model.clone() },
+                    ConfigRow::Entry {
+                        key: "Provider".to_string(),
+                        val: ac.provider_name.clone(),
+                    },
+                    ConfigRow::Entry {
+                        key: "Model".to_string(),
+                        val: ac.model.clone(),
+                    },
                     ConfigRow::Entry {
                         key: "Max iterations".to_string(),
                         val: ac.max_iterations.to_string(),
@@ -484,7 +445,10 @@ impl App {
                         } else {
                             pname.clone()
                         };
-                        rows.push(ConfigRow::Entry { key: label, val: p.default_model.clone() });
+                        rows.push(ConfigRow::Entry {
+                            key: label,
+                            val: p.default_model.clone(),
+                        });
                     }
                 }
                 if !self.app_config.mcp_servers.is_empty() {
@@ -496,8 +460,7 @@ impl App {
                 }
                 self.config_rows = rows;
                 self.config_scroll = 0;
-                self.pre_picker_screen = self.screen;
-                self.screen = Screen::ConfigViewer;
+                self.push_screen(Screen::ConfigViewer);
             }
             "mcp" => {
                 if self.app_config.mcp_servers.is_empty() {
@@ -535,8 +498,7 @@ impl App {
                     }
                     self.mcp_rows = rows;
                     self.mcp_scroll = 0;
-                    self.pre_picker_screen = self.screen;
-                    self.screen = Screen::McpViewer;
+                    self.push_screen(Screen::McpViewer);
                 }
             }
             "models" => {
@@ -556,8 +518,7 @@ impl App {
                         .unwrap_or(0);
                     self.picker_items = items;
                     self.picker_selected = selected;
-                    self.pre_picker_screen = self.screen;
-                    self.screen = Screen::ModelPicker;
+                    self.push_screen(Screen::ModelPicker);
                 } else {
                     let _ = self.switch_model_tx.send(arg.to_string());
                 }
@@ -573,8 +534,7 @@ impl App {
                 Ok(names) => {
                     self.skills_items = names;
                     self.skills_scroll = 0;
-                    self.pre_picker_screen = self.screen;
-                    self.screen = Screen::SkillsViewer;
+                    self.push_screen(Screen::SkillsViewer);
                 }
                 Err(e) => self.push(ChatItem::Err(e.to_string())),
             },
@@ -584,8 +544,7 @@ impl App {
                         .iter()
                         .position(|&n| n == self.theme_color_name)
                         .unwrap_or(0);
-                    self.pre_picker_screen = self.screen;
-                    self.screen = Screen::ThemePicker;
+                    self.push_screen(Screen::ThemePicker);
                 } else if render::THEME_COLORS.contains(&arg) {
                     self.apply_theme(arg);
                 } else {
@@ -666,74 +625,65 @@ impl App {
 
         let [content_area, input_area] = [chunks[0], chunks[1]];
 
-        let bg_screen = match self.screen {
-            Screen::ModelPicker
-            | Screen::ConfigViewer
-            | Screen::SessionPicker
-            | Screen::SkillsViewer
-            | Screen::McpViewer
-            | Screen::ThemePicker => self.pre_picker_screen,
-            s => s,
-        };
+        let bg_screen = if self.screen.is_overlay() { self.pre_picker_screen } else { self.screen };
 
         if bg_screen == Screen::Welcome {
-            let model = self.agent_config.model.clone();
-            let provider = self.agent_config.provider_name.clone();
-            let skills = self.skills.clone();
-            render::render_welcome(f, content_area, &model, &provider, &skills, self.theme_color);
+            render::render_welcome(
+                f,
+                content_area,
+                &self.agent_config.model,
+                &self.agent_config.provider_name,
+                &self.skills,
+                self.theme_color,
+            );
         } else {
             self.draw_chat(f, content_area);
         }
 
-        let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let frame = SPINNER[self.spinner_frame % SPINNER.len()];
         let left_label = match &self.status {
             Status::Idle => None,
-            Status::Thinking => {
-                Some(format!("{} thinking…", spinner[self.spinner_frame % spinner.len()]))
-            }
-            Status::Streaming => {
-                Some(format!("{} streaming…", spinner[self.spinner_frame % spinner.len()]))
-            }
+            Status::Thinking => Some(format!("{frame} thinking…")),
+            Status::Streaming => Some(format!("{frame} streaming…")),
         };
-        let right_label =
-            format!("{} · {}", self.agent_config.provider_name, self.agent_config.model);
+        let right_label = format!(
+            "{} · {}",
+            self.agent_config.provider_name, self.agent_config.model
+        );
 
-        let input = self.input.clone();
         let theme = self.theme_color;
         render::render_input_bar(
             f,
             input_area,
-            &input,
+            &self.input,
             self.cursor,
             left_label.as_deref(),
             &right_label,
-            self.screen != Screen::ModelPicker
-                && self.screen != Screen::ConfigViewer
-                && self.screen != Screen::SessionPicker
-                && self.screen != Screen::SkillsViewer
-                && self.screen != Screen::McpViewer
-                && self.screen != Screen::ThemePicker,
+            !self.screen.is_overlay(),
             theme,
         );
 
-        if self.screen == Screen::ModelPicker {
-            render::render_model_picker(f, area, &self.picker_items, self.picker_selected, theme);
-        }
-        if self.screen == Screen::ConfigViewer {
-            render::render_config_viewer(f, area, &self.config_rows, self.config_scroll, theme);
-        }
-        if self.screen == Screen::SessionPicker {
-            render::render_session_picker(f, area, &self.sessions, self.picker_selected, theme);
-        }
-        if self.screen == Screen::SkillsViewer {
-            render::render_skills_viewer(f, area, &self.skills_items, self.skills_scroll, theme);
-        }
-        if self.screen == Screen::McpViewer {
-            render::render_mcp_viewer(f, area, &self.mcp_rows, self.mcp_scroll, theme);
-        }
-        if self.screen == Screen::ThemePicker {
-            let current = self.theme_color_name.clone();
-            render::render_theme_picker(f, area, self.theme_selected, &current, theme);
+        match self.screen {
+            Screen::ModelPicker => {
+                render::render_model_picker(f, area, &self.picker_items, self.picker_selected, theme);
+            }
+            Screen::ConfigViewer => {
+                render::render_config_viewer(f, area, &self.config_rows, self.config_scroll, theme);
+            }
+            Screen::SessionPicker => {
+                render::render_session_picker(f, area, &self.sessions, self.picker_selected, theme);
+            }
+            Screen::SkillsViewer => {
+                render::render_skills_viewer(f, area, &self.skills_items, self.skills_scroll, theme);
+            }
+            Screen::McpViewer => {
+                render::render_mcp_viewer(f, area, &self.mcp_rows, self.mcp_scroll, theme);
+            }
+            Screen::ThemePicker => {
+                render::render_theme_picker(f, area, self.theme_selected, &self.theme_color_name, theme);
+            }
+            Screen::Welcome | Screen::Chat => {}
         }
     }
 
@@ -759,8 +709,11 @@ impl App {
 
         let start = self.scroll;
         let end = (start + visible_h).min(total);
-        let visible: Vec<Line<'static>> =
-            if start < end { self.cached_lines[start..end].to_vec() } else { vec![] };
+        let visible: Vec<Line<'static>> = if start < end {
+            self.cached_lines[start..end].to_vec()
+        } else {
+            vec![]
+        };
 
         let scroll_hint = if !self.pinned && max_scroll > 0 {
             format!(" {}% ↑ ", (self.scroll * 100) / max_scroll)
@@ -768,35 +721,15 @@ impl App {
             String::new()
         };
 
-        use ratatui::widgets::{Block, Borders};
         let chat_block = Block::default()
             .borders(Borders::NONE)
-            .title_bottom(Line::from(
-                Span::styled(scroll_hint, Style::default().fg(self.theme_color)),
-            ));
+            .title_bottom(Line::from(Span::styled(
+                scroll_hint,
+                Style::default().fg(self.theme_color),
+            )));
         let chat_inner = chat_block.inner(area);
         f.render_widget(chat_block, area);
         f.render_widget(Paragraph::new(visible), chat_inner);
     }
 }
 
-fn prev_char_boundary(s: &str, pos: usize) -> usize {
-    let mut p = pos;
-    loop {
-        if p == 0 {
-            return 0;
-        }
-        p -= 1;
-        if s.is_char_boundary(p) {
-            return p;
-        }
-    }
-}
-
-fn next_char_boundary(s: &str, pos: usize) -> usize {
-    let mut p = pos + 1;
-    while p <= s.len() && !s.is_char_boundary(p) {
-        p += 1;
-    }
-    p.min(s.len())
-}
