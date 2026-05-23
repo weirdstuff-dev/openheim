@@ -344,25 +344,25 @@ impl App {
             }
             KeyCode::Backspace => {
                 if self.cursor > 0 {
-                    let prev = prev_char_boundary(&self.input, self.cursor);
+                    let prev = self.input.floor_char_boundary(self.cursor - 1);
                     self.input.drain(prev..self.cursor);
                     self.cursor = prev;
                 }
             }
             KeyCode::Delete => {
                 if self.cursor < self.input.len() {
-                    let next = next_char_boundary(&self.input, self.cursor);
+                    let next = self.input.ceil_char_boundary(self.cursor + 1);
                     self.input.drain(self.cursor..next);
                 }
             }
             KeyCode::Left => {
                 if self.cursor > 0 {
-                    self.cursor = prev_char_boundary(&self.input, self.cursor);
+                    self.cursor = self.input.floor_char_boundary(self.cursor - 1);
                 }
             }
             KeyCode::Right => {
                 if self.cursor < self.input.len() {
-                    self.cursor = next_char_boundary(&self.input, self.cursor);
+                    self.cursor = self.input.ceil_char_boundary(self.cursor + 1);
                 }
             }
             KeyCode::Home => self.cursor = 0,
@@ -733,23 +733,3 @@ impl App {
     }
 }
 
-fn prev_char_boundary(s: &str, pos: usize) -> usize {
-    let mut p = pos;
-    loop {
-        if p == 0 {
-            return 0;
-        }
-        p -= 1;
-        if s.is_char_boundary(p) {
-            return p;
-        }
-    }
-}
-
-fn next_char_boundary(s: &str, pos: usize) -> usize {
-    let mut p = pos + 1;
-    while p <= s.len() && !s.is_char_boundary(p) {
-        p += 1;
-    }
-    p.min(s.len())
-}
