@@ -33,6 +33,18 @@ fn centered_popup(area: Rect, w: u16, h: u16) -> Rect {
     Rect::new(x, y, w, h)
 }
 
+fn highlight_row(label: &str, inner_w: usize) -> Line<'static> {
+    let truncated: String = label.chars().take(inner_w).collect();
+    let padding = " ".repeat(inner_w.saturating_sub(truncated.chars().count()));
+    Line::styled(
+        format!("{truncated}{padding}"),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
 pub(crate) fn build_lines(items: &[ChatItem], width: u16, theme: Color) -> Vec<Line<'static>> {
     let inner_w = width.saturating_sub(2) as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -350,16 +362,7 @@ pub(crate) fn render_model_picker(
         .map(|(i, (provider, model))| {
             let idx = start + i;
             if idx == selected {
-                let label = format!("  {provider}  {model}");
-                let truncated: String = label.chars().take(inner_w).collect();
-                let padding = " ".repeat(inner_w.saturating_sub(truncated.chars().count()));
-                Line::styled(
-                    format!("{truncated}{padding}"),
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )
+                highlight_row(&format!("  {provider}  {model}"), inner_w)
             } else {
                 Line::from(vec![
                     Span::raw("  "),
@@ -451,16 +454,7 @@ pub(crate) fn render_session_picker(
             let meta_str = format!("{date}  ·  {model}");
 
             if idx == selected {
-                let label = format!("  {title}  {meta_str}");
-                let truncated: String = label.chars().take(inner_w).collect();
-                let padding = " ".repeat(inner_w.saturating_sub(truncated.chars().count()));
-                Line::styled(
-                    format!("{truncated}{padding}"),
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )
+                highlight_row(&format!("  {title}  {meta_str}"), inner_w)
             } else {
                 let gap = " ".repeat(max_title.saturating_sub(title.chars().count()) + 4);
                 Line::from(vec![
