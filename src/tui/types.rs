@@ -34,6 +34,7 @@ pub(crate) enum Screen {
     SessionPicker,
     SkillsViewer,
     McpViewer,
+    ThemePicker,
 }
 
 #[derive(Debug, Clone)]

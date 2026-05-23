@@ -373,6 +373,7 @@ fn build_programmatic(
     let app_config = AppConfig {
         default_provider: provider.clone(),
         max_iterations: max_iter,
+        theme_color: None,
         providers,
         mcp_servers: BTreeMap::new(),
     };

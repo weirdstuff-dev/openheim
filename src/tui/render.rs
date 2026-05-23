@@ -8,18 +8,48 @@ use ratatui::{
 
 use super::types::{ChatItem, ConfigRow};
 
-pub(crate) fn build_lines(items: &[ChatItem], width: u16) -> Vec<Line<'static>> {
+pub(crate) const THEME_COLORS: &[&str] = &[
+    "white",
+    "gray",
+    "blue",
+    "cyan",
+    "magenta",
+    "green",
+    "yellow",
+    "red",
+    "pink",
+];
+
+pub(crate) fn theme_color(name: &str) -> Color {
+    match name {
+        "white" => Color::White,
+        "gray" => Color::DarkGray,
+        "blue" => Color::Blue,
+        "cyan" => Color::Cyan,
+        "magenta" => Color::LightMagenta,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "red" => Color::Red,
+        "pink" => Color::LightRed,
+        _ => Color::White,
+    }
+}
+
+pub(crate) fn build_lines(items: &[ChatItem], width: u16, theme: Color) -> Vec<Line<'static>> {
     let inner_w = width.saturating_sub(2) as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    for item in items {
+    for (idx, item) in items.iter().enumerate() {
         match item {
             ChatItem::UserMessage(text) => {
-                lines.extend(user_bubble(text, width));
+                lines.extend(user_bubble(text, width, theme));
             }
             ChatItem::AssistantMessage(text) => {
                 for wl in word_wrap(text, inner_w) {
-                    lines.push(Line::raw(format!("  {wl}")));
+                    lines.push(Line::from(Span::styled(
+                        format!("  {wl}"),
+                        Style::default().fg(Color::White),
+                    )));
                 }
                 lines.push(Line::default());
             }
@@ -32,36 +62,36 @@ pub(crate) fn build_lines(items: &[ChatItem], width: u16) -> Vec<Line<'static>> 
                 } else {
                     preview
                 };
+                let call_color = match items.get(idx + 1) {
+                    Some(ChatItem::ToolResult { is_error: false, .. }) => Color::Green,
+                    Some(ChatItem::ToolResult { is_error: true, .. }) => Color::Red,
+                    _ => theme,
+                };
                 lines.push(Line::from(vec![
                     Span::raw("  "),
-                    Span::styled("⚙ ", Style::default().fg(Color::Cyan)),
+                    Span::styled("⚙ ", Style::default().fg(call_color)),
                     Span::styled(
                         name.clone(),
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default().fg(call_color).add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(" "),
                     Span::styled(preview, Style::default().fg(Color::DarkGray)),
                 ]));
             }
-            ChatItem::ToolResult { result, is_error } => {
+            ChatItem::ToolResult { result, .. } => {
                 let flat: String =
                     result.chars().take(200).collect::<String>().replace('\n', " ");
-                let style = if *is_error {
-                    Style::default().fg(Color::Red)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
                 lines.push(Line::from(vec![
                     Span::raw("    "),
-                    Span::styled("→ ", style),
-                    Span::styled(flat.trim().to_string(), style),
+                    Span::styled("→ ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(flat.trim().to_string(), Style::default().fg(Color::DarkGray)),
                 ]));
             }
             ChatItem::SystemInfo(text) => {
                 for line in text.lines() {
                     lines.push(Line::from(Span::styled(
                         format!("  {line}"),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme),
                     )));
                 }
                 lines.push(Line::default());
@@ -85,13 +115,14 @@ pub(crate) fn build_lines(items: &[ChatItem], width: u16) -> Vec<Line<'static>> 
 //                             │ list files in    │
 //                             │ src/             │
 //                             ╰──────────────────╯
-fn user_bubble(text: &str, width: u16) -> Vec<Line<'static>> {
+fn user_bubble(text: &str, width: u16, theme: Color) -> Vec<Line<'static>> {
     let content_max = 50usize.min(width.saturating_sub(8) as usize).max(1);
 
     let wrapped = word_wrap(text, content_max);
     let content_w = wrapped.iter().map(|l| l.chars().count()).max().unwrap_or(0).max(1);
 
-    let border = Style::default().fg(Color::Green);
+    let border = Style::default().fg(theme);
+    let text_style = Style::default().fg(theme);
     let mut out: Vec<Line<'static>> = Vec::new();
 
     out.push(Line::from(vec![
@@ -104,8 +135,8 @@ fn user_bubble(text: &str, width: u16) -> Vec<Line<'static>> {
         out.push(Line::from(vec![
             Span::raw("  "),
             Span::styled("│ ".to_string(), border),
-            Span::raw(content_line.clone()),
-            Span::raw(gap),
+            Span::styled(content_line.clone(), text_style),
+            Span::styled(gap, text_style),
             Span::styled(" │".to_string(), border),
         ]));
     }
@@ -125,6 +156,7 @@ pub(crate) fn render_welcome(
     model: &str,
     provider: &str,
     skills: &[String],
+    theme: Color,
 ) {
     const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -134,6 +166,7 @@ pub(crate) fn render_welcome(
         (":sessions", "past sessions"),
         (":skills", "available skills"),
         (":mcp", "MCP servers"),
+        (":theme", "change accent color"),
         (":q", "quit"),
     ];
 
@@ -162,7 +195,7 @@ pub(crate) fn render_welcome(
         ),
         Span::styled(
             format!("  v{VERSION}"),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme),
         ),
     ]));
 
@@ -171,7 +204,7 @@ pub(crate) fn render_welcome(
     let sub_pad = center(subtitle.chars().count());
     lines.push(Line::styled(
         format!("{sub_pad}{subtitle}"),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme),
     ));
 
     lines.push(Line::default());
@@ -180,7 +213,7 @@ pub(crate) fn render_welcome(
     let hint_pad = center(hint.chars().count());
     lines.push(Line::styled(
         format!("{hint_pad}{hint}"),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme),
     ));
 
     lines.push(Line::default());
@@ -196,7 +229,7 @@ pub(crate) fn render_welcome(
             Span::raw(cmd_pad.clone()),
             Span::styled(key.to_string(), Style::default().fg(Color::White)),
             Span::raw(gap),
-            Span::styled(desc.to_string(), Style::default().fg(Color::DarkGray)),
+            Span::styled(desc.to_string(), Style::default().fg(theme)),
         ]));
     }
 
@@ -211,8 +244,9 @@ pub(crate) fn render_input_bar(
     left_label: Option<&str>,
     right_label: &str,
     show_cursor: bool,
+    theme: Color,
 ) {
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(theme);
     let mut block = Block::default().borders(Borders::TOP).border_style(dim);
 
     if let Some(left) = left_label {
@@ -227,7 +261,11 @@ pub(crate) fn render_input_bar(
     f.render_widget(block, area);
 
     let prompt_prefix = "  › ";
-    f.render_widget(Paragraph::new(format!("{prompt_prefix}{input}")), inner);
+    f.render_widget(
+        Paragraph::new(format!("{prompt_prefix}{input}"))
+            .style(Style::default().fg(Color::White)),
+        inner,
+    );
 
     if show_cursor {
         let cursor_col = inner.x
@@ -245,6 +283,7 @@ pub(crate) fn render_model_picker(
     area: Rect,
     items: &[(String, String)],
     selected: usize,
+    theme: Color,
 ) {
     let max_label = items
         .iter()
@@ -260,7 +299,7 @@ pub(crate) fn render_model_picker(
 
     f.render_widget(Clear, popup_rect);
 
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(theme);
     let block = Block::default()
         .title(
             Line::from(Span::styled(
@@ -306,7 +345,7 @@ pub(crate) fn render_model_picker(
             } else {
                 Line::from(vec![
                     Span::raw("  "),
-                    Span::styled(provider.clone(), Style::default().fg(Color::DarkGray)),
+                    Span::styled(provider.clone(), Style::default().fg(theme)),
                     Span::raw("  "),
                     Span::styled(model.clone(), Style::default().fg(Color::White)),
                 ])
@@ -322,6 +361,7 @@ pub(crate) fn render_session_picker(
     area: Rect,
     items: &[crate::rag::ConversationMeta],
     selected: usize,
+    theme: Color,
 ) {
     if items.is_empty() {
         return;
@@ -352,7 +392,7 @@ pub(crate) fn render_session_picker(
 
     f.render_widget(Clear, popup_rect);
 
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(theme);
     let block = Block::default()
         .title(
             Line::from(Span::styled(
@@ -405,7 +445,7 @@ pub(crate) fn render_session_picker(
                     Span::raw("  "),
                     Span::styled(title, Style::default().fg(Color::White)),
                     Span::raw(gap),
-                    Span::styled(meta_str, Style::default().fg(Color::DarkGray)),
+                    Span::styled(meta_str, Style::default().fg(theme)),
                 ])
             }
         })
@@ -419,6 +459,7 @@ pub(crate) fn render_config_viewer(
     area: Rect,
     rows: &[ConfigRow],
     scroll: usize,
+    theme: Color,
 ) {
     let entry_key_w = rows
         .iter()
@@ -458,7 +499,7 @@ pub(crate) fn render_config_viewer(
 
     f.render_widget(Clear, popup_rect);
 
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(theme);
     let block = Block::default()
         .title(
             Line::from(Span::styled(
@@ -493,7 +534,7 @@ pub(crate) fn render_config_viewer(
                 let gap = " ".repeat(entry_key_w.saturating_sub(key.chars().count()) + 2);
                 Line::from(vec![
                     Span::raw("  "),
-                    Span::styled(key.clone(), Style::default().fg(Color::DarkGray)),
+                    Span::styled(key.clone(), Style::default().fg(theme)),
                     Span::raw(gap),
                     Span::styled(val.clone(), Style::default().fg(Color::White)),
                 ])
@@ -513,6 +554,7 @@ pub(crate) fn render_mcp_viewer(
     area: Rect,
     rows: &[ConfigRow],
     scroll: usize,
+    theme: Color,
 ) {
     let entry_key_w = rows
         .iter()
@@ -545,7 +587,7 @@ pub(crate) fn render_mcp_viewer(
 
     f.render_widget(Clear, popup_rect);
 
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(theme);
     let block = Block::default()
         .title(
             Line::from(Span::styled(
@@ -580,7 +622,7 @@ pub(crate) fn render_mcp_viewer(
                 let gap = " ".repeat(entry_key_w.saturating_sub(key.chars().count()) + 2);
                 Line::from(vec![
                     Span::raw("    "),
-                    Span::styled(key.clone(), Style::default().fg(Color::DarkGray)),
+                    Span::styled(key.clone(), Style::default().fg(theme)),
                     Span::raw(gap),
                     Span::styled(val.clone(), Style::default().fg(Color::White)),
                 ])
@@ -600,6 +642,7 @@ pub(crate) fn render_skills_viewer(
     area: Rect,
     items: &[String],
     scroll: usize,
+    theme: Color,
 ) {
     let max_w = items.iter().map(|s| s.chars().count()).max().unwrap_or(10);
     let content_w = max_w + 4;
@@ -611,7 +654,7 @@ pub(crate) fn render_skills_viewer(
 
     f.render_widget(Clear, popup_rect);
 
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(theme);
     let block = Block::default()
         .title(
             Line::from(Span::styled(
@@ -647,6 +690,70 @@ pub(crate) fn render_skills_viewer(
                 Span::raw("  "),
                 Span::styled(name.clone(), Style::default().fg(Color::White)),
             ])
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+pub(crate) fn render_theme_picker(
+    f: &mut Frame,
+    area: Rect,
+    selected: usize,
+    current_name: &str,
+    theme: Color,
+) {
+    let max_w = THEME_COLORS.iter().map(|n| n.len()).max().unwrap_or(10);
+    let popup_w = ((max_w + 8) as u16).max(24).min(area.width.saturating_sub(4));
+    let popup_h = (THEME_COLORS.len() as u16 + 2).max(5).min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup_rect = Rect::new(x, y, popup_w, popup_h);
+
+    f.render_widget(Clear, popup_rect);
+
+    let dim = Style::default().fg(theme);
+    let block = Block::default()
+        .title(
+            Line::from(Span::styled(
+                " theme ",
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ))
+            .centered(),
+        )
+        .title_bottom(Line::from(Span::styled(" ↑/↓  enter  esc ", dim)).centered())
+        .borders(Borders::ALL)
+        .border_style(dim);
+
+    let inner = block.inner(popup_rect);
+    f.render_widget(block, popup_rect);
+
+    if inner.height == 0 {
+        return;
+    }
+
+    let lines: Vec<Line<'static>> = THEME_COLORS
+        .iter()
+        .enumerate()
+        .map(|(i, &name)| {
+            let color = theme_color(name);
+            let is_selected = i == selected;
+            let is_current = name == current_name;
+            let marker = if is_current { "·" } else { " " };
+            if is_selected {
+                Line::from(vec![
+                    Span::styled("> ", Style::default().fg(Color::White)),
+                    Span::styled(
+                        format!("{name} {marker}"),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    ),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(format!("{name} {marker}"), Style::default().fg(color)),
+                ])
+            }
         })
         .collect();
 

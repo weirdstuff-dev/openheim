@@ -118,6 +118,7 @@ mod tests {
         AppConfig {
             default_provider: "openai".into(),
             max_iterations: 5,
+            theme_color: None,
             providers,
             mcp_servers: BTreeMap::new(),
         }
@@ -157,6 +158,7 @@ mod tests {
         let config = AppConfig {
             default_provider: "nonexistent".into(),
             max_iterations: 10,
+            theme_color: None,
             providers: BTreeMap::new(),
             mcp_servers: BTreeMap::new(),
         };

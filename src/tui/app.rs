@@ -8,6 +8,41 @@ use ratatui::{
 };
 use tokio::sync::mpsc;
 
+fn save_theme_to_config(name: &str) -> crate::error::Result<()> {
+    let path = crate::config::config_path()?;
+    let contents = std::fs::read_to_string(&path)?;
+    let new_line = format!("theme_color = \"{name}\"");
+    let has_theme = contents.lines().any(|l| l.trim_start().starts_with("theme_color"));
+    let updated: String = if has_theme {
+        contents
+            .lines()
+            .map(|l| {
+                if l.trim_start().starts_with("theme_color") {
+                    new_line.clone()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        let mut lines: Vec<String> = contents.lines().map(String::from).collect();
+        let insert_pos = lines
+            .iter()
+            .rposition(|l| {
+                l.trim_start().starts_with("max_iterations")
+                    || l.trim_start().starts_with("default_provider")
+            })
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        lines.insert(insert_pos, new_line);
+        lines.join("\n")
+    };
+    let trailing = if contents.ends_with('\n') { "\n" } else { "" };
+    std::fs::write(&path, format!("{updated}{trailing}"))?;
+    Ok(())
+}
+
 use crate::{
     config::{AgentConfig, AppConfig},
     rag::{ConversationMeta, RagContext, SkillsManager},
@@ -44,6 +79,9 @@ pub(super) struct App {
     skills_scroll: usize,
     mcp_rows: Vec<ConfigRow>,
     mcp_scroll: usize,
+    theme_color: Color,
+    theme_color_name: String,
+    theme_selected: usize,
 }
 
 impl App {
@@ -55,6 +93,8 @@ impl App {
         switch_model_tx: mpsc::UnboundedSender<String>,
         switch_session_tx: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
     ) -> Self {
+        let theme_name = app_config.theme_color.as_deref().unwrap_or("dark_gray").to_string();
+        let theme_color = render::theme_color(&theme_name);
         Self {
             items: Vec::new(),
             input: String::new(),
@@ -83,6 +123,9 @@ impl App {
             skills_scroll: 0,
             mcp_rows: Vec::new(),
             mcp_scroll: 0,
+            theme_color,
+            theme_color_name: theme_name,
+            theme_selected: 0,
         }
     }
 
@@ -222,6 +265,43 @@ impl App {
         }
     }
 
+    fn handle_theme_picker_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.should_quit = true;
+            }
+            KeyCode::Up => {
+                self.theme_selected = self.theme_selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                self.theme_selected =
+                    (self.theme_selected + 1).min(render::THEME_COLORS.len() - 1);
+            }
+            KeyCode::Enter => {
+                let name = render::THEME_COLORS[self.theme_selected].to_string();
+                self.screen = Screen::Chat;
+                self.apply_theme(&name);
+            }
+            KeyCode::Esc => {
+                self.screen = self.pre_picker_screen;
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_theme(&mut self, name: &str) {
+        self.theme_color = render::theme_color(name);
+        self.theme_color_name = name.to_string();
+        self.cached_width = 0;
+        self.app_config.theme_color = Some(name.to_string());
+        match save_theme_to_config(name) {
+            Ok(()) => self.push(ChatItem::SystemInfo(format!("theme set to {name}"))),
+            Err(e) => self.push(ChatItem::SystemInfo(format!(
+                "theme set to {name} (could not save: {e})"
+            ))),
+        }
+    }
+
     fn handle_picker_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -268,6 +348,10 @@ impl App {
         }
         if self.screen == Screen::McpViewer {
             self.handle_mcp_viewer_key(key);
+            return;
+        }
+        if self.screen == Screen::ThemePicker {
+            self.handle_theme_picker_key(key);
             return;
         }
         match key.code {
@@ -359,7 +443,9 @@ impl App {
                  :models            list available models\n\
                  :models <name>     switch to model mid-session\n\
                  :mcp               MCP servers\n\
-                 :skills            available skills\n\n\
+                 :skills            available skills\n\
+                 :theme             change accent color\n\
+                 :theme <name>      apply color directly\n\n\
                  ↑/↓  scroll · PgUp/PgDn  page · Ctrl+C  quit"
                     .to_string(),
             )),
@@ -492,6 +578,23 @@ impl App {
                 }
                 Err(e) => self.push(ChatItem::Err(e.to_string())),
             },
+            "theme" => {
+                if arg.is_empty() {
+                    self.theme_selected = render::THEME_COLORS
+                        .iter()
+                        .position(|&n| n == self.theme_color_name)
+                        .unwrap_or(0);
+                    self.pre_picker_screen = self.screen;
+                    self.screen = Screen::ThemePicker;
+                } else if render::THEME_COLORS.contains(&arg) {
+                    self.apply_theme(arg);
+                } else {
+                    self.push(ChatItem::SystemInfo(format!(
+                        ":{arg}: unknown theme  (available: {})",
+                        render::THEME_COLORS.join(", ")
+                    )));
+                }
+            }
             unknown => self.push(ChatItem::SystemInfo(format!(
                 ":{unknown}: unknown command  (try :help)"
             ))),
@@ -568,7 +671,8 @@ impl App {
             | Screen::ConfigViewer
             | Screen::SessionPicker
             | Screen::SkillsViewer
-            | Screen::McpViewer => self.pre_picker_screen,
+            | Screen::McpViewer
+            | Screen::ThemePicker => self.pre_picker_screen,
             s => s,
         };
 
@@ -576,7 +680,7 @@ impl App {
             let model = self.agent_config.model.clone();
             let provider = self.agent_config.provider_name.clone();
             let skills = self.skills.clone();
-            render::render_welcome(f, content_area, &model, &provider, &skills);
+            render::render_welcome(f, content_area, &model, &provider, &skills, self.theme_color);
         } else {
             self.draw_chat(f, content_area);
         }
@@ -595,6 +699,7 @@ impl App {
             format!("{} · {}", self.agent_config.provider_name, self.agent_config.model);
 
         let input = self.input.clone();
+        let theme = self.theme_color;
         render::render_input_bar(
             f,
             input_area,
@@ -606,30 +711,36 @@ impl App {
                 && self.screen != Screen::ConfigViewer
                 && self.screen != Screen::SessionPicker
                 && self.screen != Screen::SkillsViewer
-                && self.screen != Screen::McpViewer,
+                && self.screen != Screen::McpViewer
+                && self.screen != Screen::ThemePicker,
+            theme,
         );
 
         if self.screen == Screen::ModelPicker {
-            render::render_model_picker(f, area, &self.picker_items, self.picker_selected);
+            render::render_model_picker(f, area, &self.picker_items, self.picker_selected, theme);
         }
         if self.screen == Screen::ConfigViewer {
-            render::render_config_viewer(f, area, &self.config_rows, self.config_scroll);
+            render::render_config_viewer(f, area, &self.config_rows, self.config_scroll, theme);
         }
         if self.screen == Screen::SessionPicker {
-            render::render_session_picker(f, area, &self.sessions, self.picker_selected);
+            render::render_session_picker(f, area, &self.sessions, self.picker_selected, theme);
         }
         if self.screen == Screen::SkillsViewer {
-            render::render_skills_viewer(f, area, &self.skills_items, self.skills_scroll);
+            render::render_skills_viewer(f, area, &self.skills_items, self.skills_scroll, theme);
         }
         if self.screen == Screen::McpViewer {
-            render::render_mcp_viewer(f, area, &self.mcp_rows, self.mcp_scroll);
+            render::render_mcp_viewer(f, area, &self.mcp_rows, self.mcp_scroll, theme);
+        }
+        if self.screen == Screen::ThemePicker {
+            let current = self.theme_color_name.clone();
+            render::render_theme_picker(f, area, self.theme_selected, &current, theme);
         }
     }
 
     fn draw_chat(&mut self, f: &mut Frame, area: ratatui::layout::Rect) {
         let chat_w = area.width;
         if self.cached_width != chat_w {
-            self.cached_lines = render::build_lines(&self.items, chat_w);
+            self.cached_lines = render::build_lines(&self.items, chat_w, self.theme_color);
             self.cached_width = chat_w;
         }
 
@@ -661,7 +772,7 @@ impl App {
         let chat_block = Block::default()
             .borders(Borders::NONE)
             .title_bottom(Line::from(
-                Span::styled(scroll_hint, Style::default().fg(Color::DarkGray)),
+                Span::styled(scroll_hint, Style::default().fg(self.theme_color)),
             ));
         let chat_inner = chat_block.inner(area);
         f.render_widget(chat_block, area);

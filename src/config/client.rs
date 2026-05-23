@@ -118,6 +118,7 @@ mod tests {
         AppConfig {
             default_provider: "openai".into(),
             max_iterations: 10,
+            theme_color: None,
             providers,
             mcp_servers: BTreeMap::new(),
         }
