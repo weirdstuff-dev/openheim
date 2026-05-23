@@ -257,6 +257,14 @@ impl AgentState {
                     .model
                     .clone()
                     .unwrap_or_else(|| provider_cfg.default_model.clone());
+            } else {
+                let warning = format!(
+                    "[warning] Provider '{}' from this session is not configured. Falling back to the default provider '{}'.",
+                    provider_name, session_config.provider_name
+                );
+                on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                    ContentBlock::from(warning),
+                )));
             }
         } else if let Some(model) = &conversation.meta.model {
             session_config.model = model.clone();
