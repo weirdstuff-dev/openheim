@@ -662,12 +662,12 @@ impl App {
                 .app_config
                 .providers
                 .contains_key(provider_name.as_str())
-            {
-                self.push(ChatItem::SystemInfo(format!(
-                    "warning: provider '{}' is not configured; using default provider instead.",
-                    provider_name
-                )));
-            }
+        {
+            self.push(ChatItem::SystemInfo(format!(
+                "warning: provider '{}' is not configured; using default provider instead.",
+                provider_name
+            )));
+        }
 
         self.push(ChatItem::SystemInfo("─── session restored".to_string()));
 
