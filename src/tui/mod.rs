@@ -108,10 +108,9 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
         switch_session_tx,
     );
 
-    enable_raw_mode().map_err(|e| crate::error::Error::Other(e.to_string()))?;
+    enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)
-        .map_err(|e| crate::error::Error::Other(e.to_string()))?;
+    execute!(stdout, EnterAlternateScreen)?;
 
     // Enable keyboard enhancement on supporting terminals so that arrow-key
     // escape sequences (\x1b[B etc.) are never ambiguously split into a
@@ -129,8 +128,7 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
     }
 
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal =
-        Terminal::new(backend).map_err(|e| crate::error::Error::Other(e.to_string()))?;
+    let mut terminal = Terminal::new(backend)?;
 
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -147,9 +145,7 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
-        terminal
-            .draw(|f| app.draw(f))
-            .map_err(|e| crate::error::Error::Other(e.to_string()))?;
+        terminal.draw(|f| app.draw(f))?;
 
         if app.should_quit {
             break;
@@ -180,12 +176,9 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
     if kbd_enhanced {
         execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags).ok();
     }
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)
-        .map_err(|e| crate::error::Error::Other(e.to_string()))?;
-    disable_raw_mode().map_err(|e| crate::error::Error::Other(e.to_string()))?;
-    terminal
-        .show_cursor()
-        .map_err(|e| crate::error::Error::Other(e.to_string()))?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    disable_raw_mode()?;
+    terminal.show_cursor()?;
 
     Ok(())
 }
