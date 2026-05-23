@@ -244,11 +244,21 @@ impl AgentState {
             .map_err(|e| Error::Other(e.to_string()))??;
 
         let mut session_config = self.config.clone();
-        if let Some(model) = &conversation.meta.model {
+        if let Some(provider_name) = &conversation.meta.provider {
+            if let Some(provider_cfg) = self.app_config.providers.get(provider_name) {
+                session_config.provider_name = provider_name.clone();
+                session_config.api_base = provider_cfg.api_base.clone();
+                session_config.api_key = provider_cfg.resolve_api_key();
+                session_config.timeout_secs = provider_cfg.timeout_secs.unwrap_or(120);
+                session_config.max_tokens = provider_cfg.max_tokens;
+                session_config.model = conversation
+                    .meta
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| provider_cfg.default_model.clone());
+            }
+        } else if let Some(model) = &conversation.meta.model {
             session_config.model = model.clone();
-        }
-        if let Some(provider) = &conversation.meta.provider {
-            session_config.provider_name = provider.clone();
         }
 
         self.sessions.write().await.insert(
