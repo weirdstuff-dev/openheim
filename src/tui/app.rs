@@ -610,6 +610,11 @@ impl App {
     fn open_session(&mut self, meta: &ConversationMeta) {
         use crate::core::models::Role;
 
+        self.items.clear();
+        self.status = Status::Idle;
+        self.scroll = 0;
+        self.pinned = true;
+
         let title = meta.title.as_deref().unwrap_or("(untitled)");
         self.push(ChatItem::SystemInfo(format!("─── {title}")));
 
