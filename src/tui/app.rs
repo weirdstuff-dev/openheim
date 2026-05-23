@@ -98,7 +98,7 @@ impl App {
         let theme_name = app_config
             .theme_color
             .as_deref()
-            .unwrap_or("dark_gray")
+            .unwrap_or("gray")
             .to_string();
         let theme_color = render::theme_color(&theme_name);
         Self {
