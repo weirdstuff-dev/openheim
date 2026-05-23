@@ -8,8 +8,8 @@ use std::time::Duration;
 use agent_client_protocol::schema::{ContentBlock, SessionUpdate, ToolCallStatus};
 use crossterm::{
     event::{
-        Event, EventStream, KeyEventKind, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        Event, EventStream, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -18,10 +18,7 @@ use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
-use crate::{
-    client::OpenheimClient,
-    config::load_config,
-};
+use crate::{client::OpenheimClient, config::load_config};
 
 use app::App;
 use types::AgentUpdate;
@@ -102,7 +99,14 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
         });
     }
 
-    let mut app = App::new(agent_config, app_config, skills, prompt_tx, switch_model_tx, switch_session_tx);
+    let mut app = App::new(
+        agent_config,
+        app_config,
+        skills,
+        prompt_tx,
+        switch_model_tx,
+        switch_session_tx,
+    );
 
     enable_raw_mode().map_err(|e| crate::error::Error::Other(e.to_string()))?;
     let mut stdout = io::stdout();
@@ -112,8 +116,7 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
     // Enable keyboard enhancement on supporting terminals so that arrow-key
     // escape sequences (\x1b[B etc.) are never ambiguously split into a
     // spurious Esc + characters, which caused `[B` to appear in the input.
-    let kbd_enhanced =
-        crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    let kbd_enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
     if kbd_enhanced {
         execute!(
             stdout,
@@ -195,8 +198,15 @@ fn convert_update(tx: &mpsc::UnboundedSender<AgentUpdate>, update: SessionUpdate
             }
         }
         SessionUpdate::ToolCall(tc) => {
-            let args = tc.raw_input.as_ref().map(|v| v.to_string()).unwrap_or_default();
-            let _ = tx.send(AgentUpdate::ToolCall { name: tc.title.clone(), args });
+            let args = tc
+                .raw_input
+                .as_ref()
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            let _ = tx.send(AgentUpdate::ToolCall {
+                name: tc.title.clone(),
+                args,
+            });
         }
         SessionUpdate::ToolCallUpdate(tcu) => {
             if matches!(

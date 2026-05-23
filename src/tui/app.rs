@@ -12,7 +12,9 @@ fn save_theme_to_config(name: &str) -> crate::error::Result<()> {
     let path = crate::config::config_path()?;
     let contents = std::fs::read_to_string(&path)?;
     let new_line = format!("theme_color = \"{name}\"");
-    let has_theme = contents.lines().any(|l| l.trim_start().starts_with("theme_color"));
+    let has_theme = contents
+        .lines()
+        .any(|l| l.trim_start().starts_with("theme_color"));
     let updated: String = if has_theme {
         contents
             .lines()
@@ -93,7 +95,11 @@ impl App {
         switch_model_tx: mpsc::UnboundedSender<String>,
         switch_session_tx: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
     ) -> Self {
-        let theme_name = app_config.theme_color.as_deref().unwrap_or("dark_gray").to_string();
+        let theme_name = app_config
+            .theme_color
+            .as_deref()
+            .unwrap_or("dark_gray")
+            .to_string();
         let theme_color = render::theme_color(&theme_name);
         Self {
             items: Vec::new(),
@@ -161,7 +167,9 @@ impl App {
             AgentUpdate::ModelChanged { provider, model } => {
                 self.agent_config.provider_name = provider.clone();
                 self.agent_config.model = model.clone();
-                self.push(ChatItem::SystemInfo(format!("switched to {provider} / {model}")));
+                self.push(ChatItem::SystemInfo(format!(
+                    "switched to {provider} / {model}"
+                )));
             }
         }
     }
@@ -176,8 +184,7 @@ impl App {
             }
             KeyCode::Down => {
                 if !self.sessions.is_empty() {
-                    self.picker_selected =
-                        (self.picker_selected + 1).min(self.sessions.len() - 1);
+                    self.picker_selected = (self.picker_selected + 1).min(self.sessions.len() - 1);
                 }
             }
             KeyCode::Enter => {
@@ -274,8 +281,7 @@ impl App {
                 self.theme_selected = self.theme_selected.saturating_sub(1);
             }
             KeyCode::Down => {
-                self.theme_selected =
-                    (self.theme_selected + 1).min(render::THEME_COLORS.len() - 1);
+                self.theme_selected = (self.theme_selected + 1).min(render::THEME_COLORS.len() - 1);
             }
             KeyCode::Enter => {
                 let name = render::THEME_COLORS[self.theme_selected].to_string();
@@ -464,8 +470,14 @@ impl App {
             "config" => {
                 let ac = &self.agent_config;
                 let mut rows = vec![
-                    ConfigRow::Entry { key: "Provider".to_string(), val: ac.provider_name.clone() },
-                    ConfigRow::Entry { key: "Model".to_string(), val: ac.model.clone() },
+                    ConfigRow::Entry {
+                        key: "Provider".to_string(),
+                        val: ac.provider_name.clone(),
+                    },
+                    ConfigRow::Entry {
+                        key: "Model".to_string(),
+                        val: ac.model.clone(),
+                    },
                     ConfigRow::Entry {
                         key: "Max iterations".to_string(),
                         val: ac.max_iterations.to_string(),
@@ -484,7 +496,10 @@ impl App {
                         } else {
                             pname.clone()
                         };
-                        rows.push(ConfigRow::Entry { key: label, val: p.default_model.clone() });
+                        rows.push(ConfigRow::Entry {
+                            key: label,
+                            val: p.default_model.clone(),
+                        });
                     }
                 }
                 if !self.app_config.mcp_servers.is_empty() {
@@ -680,7 +695,14 @@ impl App {
             let model = self.agent_config.model.clone();
             let provider = self.agent_config.provider_name.clone();
             let skills = self.skills.clone();
-            render::render_welcome(f, content_area, &model, &provider, &skills, self.theme_color);
+            render::render_welcome(
+                f,
+                content_area,
+                &model,
+                &provider,
+                &skills,
+                self.theme_color,
+            );
         } else {
             self.draw_chat(f, content_area);
         }
@@ -688,15 +710,19 @@ impl App {
         let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let left_label = match &self.status {
             Status::Idle => None,
-            Status::Thinking => {
-                Some(format!("{} thinking…", spinner[self.spinner_frame % spinner.len()]))
-            }
-            Status::Streaming => {
-                Some(format!("{} streaming…", spinner[self.spinner_frame % spinner.len()]))
-            }
+            Status::Thinking => Some(format!(
+                "{} thinking…",
+                spinner[self.spinner_frame % spinner.len()]
+            )),
+            Status::Streaming => Some(format!(
+                "{} streaming…",
+                spinner[self.spinner_frame % spinner.len()]
+            )),
         };
-        let right_label =
-            format!("{} · {}", self.agent_config.provider_name, self.agent_config.model);
+        let right_label = format!(
+            "{} · {}",
+            self.agent_config.provider_name, self.agent_config.model
+        );
 
         let input = self.input.clone();
         let theme = self.theme_color;
@@ -759,8 +785,11 @@ impl App {
 
         let start = self.scroll;
         let end = (start + visible_h).min(total);
-        let visible: Vec<Line<'static>> =
-            if start < end { self.cached_lines[start..end].to_vec() } else { vec![] };
+        let visible: Vec<Line<'static>> = if start < end {
+            self.cached_lines[start..end].to_vec()
+        } else {
+            vec![]
+        };
 
         let scroll_hint = if !self.pinned && max_scroll > 0 {
             format!(" {}% ↑ ", (self.scroll * 100) / max_scroll)
@@ -771,9 +800,10 @@ impl App {
         use ratatui::widgets::{Block, Borders};
         let chat_block = Block::default()
             .borders(Borders::NONE)
-            .title_bottom(Line::from(
-                Span::styled(scroll_hint, Style::default().fg(self.theme_color)),
-            ));
+            .title_bottom(Line::from(Span::styled(
+                scroll_hint,
+                Style::default().fg(self.theme_color),
+            )));
         let chat_inner = chat_block.inner(area);
         f.render_widget(chat_block, area);
         f.render_widget(Paragraph::new(visible), chat_inner);
