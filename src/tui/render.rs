@@ -56,10 +56,21 @@ pub(crate) fn build_lines(items: &[ChatItem], width: u16, theme: Color) -> Vec<L
             }
             ChatItem::AssistantMessage(text) => {
                 for wl in word_wrap(text, inner_w) {
-                    lines.push(Line::from(Span::styled(
-                        format!("  {wl}"),
-                        Style::default().fg(Color::White),
-                    )));
+                    if wl.chars().count() <= inner_w {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {wl}"),
+                            Style::default().fg(Color::White),
+                        )));
+                    } else {
+                        let chars: Vec<char> = wl.chars().collect();
+                        for chunk in chars.chunks(inner_w.max(1)) {
+                            let s: String = chunk.iter().collect();
+                            lines.push(Line::from(Span::styled(
+                                format!("  {s}"),
+                                Style::default().fg(Color::White),
+                            )));
+                        }
+                    }
                 }
                 lines.push(Line::default());
             }
@@ -136,7 +147,20 @@ pub(crate) fn build_lines(items: &[ChatItem], width: u16, theme: Color) -> Vec<L
 fn user_bubble(text: &str, width: u16, theme: Color) -> Vec<Line<'static>> {
     let content_max = 50usize.min(width.saturating_sub(8) as usize).max(1);
 
-    let wrapped = word_wrap(text, content_max);
+    let wrapped = {
+        let mut out = Vec::new();
+        for line in word_wrap(text, content_max) {
+            if line.chars().count() <= content_max {
+                out.push(line);
+            } else {
+                let chars: Vec<char> = line.chars().collect();
+                for chunk in chars.chunks(content_max) {
+                    out.push(chunk.iter().collect());
+                }
+            }
+        }
+        out
+    };
     let content_w = wrapped
         .iter()
         .map(|l| l.chars().count())
