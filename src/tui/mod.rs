@@ -41,7 +41,7 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
 
     let (update_tx, mut update_rx) = mpsc::unbounded_channel::<AgentUpdate>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<String>();
-    let (switch_model_tx, mut switch_model_rx) = mpsc::unbounded_channel::<String>();
+    let (switch_model_tx, mut switch_model_rx) = mpsc::unbounded_channel::<(String, String)>();
     let (switch_session_tx, mut switch_session_rx) =
         mpsc::unbounded_channel::<(String, std::path::PathBuf)>();
 
@@ -68,8 +68,8 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                     }
                     maybe_model = switch_model_rx.recv() => {
                         match maybe_model {
-                            Some(model) => {
-                                match session.switch_model(&model).await {
+                            Some((provider, model)) => {
+                                match session.switch_model(&provider, &model).await {
                                     Ok((provider, model)) => {
                                         let _ = update_tx.send(AgentUpdate::ModelChanged { provider, model });
                                     }

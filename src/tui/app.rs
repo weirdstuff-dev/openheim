@@ -71,7 +71,7 @@ pub(super) struct App {
     cached_lines: Vec<Line<'static>>,
     pub(super) cached_width: u16,
     prompt_tx: mpsc::UnboundedSender<String>,
-    switch_model_tx: mpsc::UnboundedSender<String>,
+    switch_model_tx: mpsc::UnboundedSender<(String, String)>,
     switch_session_tx: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
     picker_items: Vec<(String, String)>,
     picker_selected: usize,
@@ -92,7 +92,7 @@ impl App {
         app_config: AppConfig,
         skills: Vec<String>,
         prompt_tx: mpsc::UnboundedSender<String>,
-        switch_model_tx: mpsc::UnboundedSender<String>,
+        switch_model_tx: mpsc::UnboundedSender<(String, String)>,
         switch_session_tx: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
     ) -> Self {
         let theme_name = app_config
@@ -301,8 +301,10 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if let Some((_, model)) = self.picker_items.get(self.picker_selected) {
-                    let _ = self.switch_model_tx.send(model.clone());
+                if let Some((provider, model)) = self.picker_items.get(self.picker_selected) {
+                    let _ = self
+                        .switch_model_tx
+                        .send((provider.clone(), model.clone()));
                 }
                 self.screen = Screen::Chat;
             }
@@ -556,7 +558,16 @@ impl App {
                     self.picker_selected = selected;
                     self.push_screen(Screen::ModelPicker);
                 } else {
-                    let _ = self.switch_model_tx.send(arg.to_string());
+                    match self.app_config.resolve(Some(arg)) {
+                        Ok(config) => {
+                            let _ = self
+                                .switch_model_tx
+                                .send((config.provider_name, config.model));
+                        }
+                        Err(e) => {
+                            self.push(ChatItem::SystemInfo(format!("unknown model: {e}")));
+                        }
+                    }
                 }
             }
             "skills" => match SkillsManager::new().and_then(|m| m.list_skills()) {

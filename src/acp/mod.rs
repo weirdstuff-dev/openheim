@@ -90,9 +90,10 @@ impl AgentState {
     pub async fn acp_update_session_model(
         &self,
         session_id: &str,
+        provider: &str,
         model: &str,
     ) -> Result<(String, String)> {
-        let new_config = self.app_config.resolve(Some(model))?;
+        let new_config = self.app_config.resolve_with_provider(provider, model)?;
         let provider_name = new_config.provider_name.clone();
         let model_name = new_config.model.clone();
         let mut sessions = self.sessions.write().await;

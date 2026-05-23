@@ -53,6 +53,26 @@ impl AppConfig {
         })
     }
 
+    pub fn resolve_with_provider(&self, provider_name: &str, model: &str) -> Result<AgentConfig> {
+        let provider = self.providers.get(provider_name).ok_or_else(|| {
+            Error::config(format!(
+                "Provider '{}' not found in config. Available providers: {}",
+                provider_name,
+                self.provider_names()
+            ))
+        })?;
+        validate_provider(provider_name, provider)?;
+        Ok(AgentConfig {
+            provider_name: provider_name.to_string(),
+            api_base: provider.api_base.clone(),
+            api_key: provider.resolve_api_key(),
+            model: model.to_string(),
+            max_iterations: self.max_iterations,
+            timeout_secs: provider.timeout_secs.unwrap_or(120),
+            max_tokens: provider.max_tokens,
+        })
+    }
+
     fn resolve_model(&self, model_name: &str) -> Result<AgentConfig> {
         for (name, provider) in &self.providers {
             if provider.models.contains(&model_name.to_string()) {
