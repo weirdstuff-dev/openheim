@@ -90,19 +90,17 @@ pub(crate) fn build_lines(items: &[ChatItem], width: u16, theme: Color) -> Vec<L
                     Span::styled(preview, Style::default().fg(Color::DarkGray)),
                 ]));
             }
-            ChatItem::ToolResult { result, .. } => {
+            ChatItem::ToolResult { result, is_error } => {
                 let flat: String = result
                     .chars()
                     .take(200)
-                    .collect::<String>()
-                    .replace('\n', " ");
+                    .map(|c| if c == '\n' { ' ' } else { c })
+                    .collect();
+                let color = if *is_error { Color::Red } else { Color::DarkGray };
                 lines.push(Line::from(vec![
                     Span::raw("    "),
-                    Span::styled("→ ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        flat.trim().to_string(),
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    Span::styled("→ ", Style::default().fg(color)),
+                    Span::styled(flat.trim().to_string(), Style::default().fg(color)),
                 ]));
             }
             ChatItem::SystemInfo(text) => {
@@ -706,8 +704,7 @@ pub(crate) fn render_theme_picker(
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-// Word-wraps `text` to `width` chars, preserving newlines as paragraph breaks.
-pub(crate) fn word_wrap(text: &str, width: usize) -> Vec<String> {
+fn word_wrap(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return text.lines().map(String::from).collect();
     }

@@ -8,6 +8,14 @@ use ratatui::{
 };
 use tokio::sync::mpsc;
 
+use crate::{
+    config::{AgentConfig, AppConfig},
+    rag::{ConversationMeta, RagContext, SkillsManager},
+};
+
+use super::render;
+use super::types::{AgentUpdate, ChatItem, ConfigRow, Screen, Status};
+
 fn save_theme_to_config(name: &str) -> crate::error::Result<()> {
     let path = crate::config::config_path()?;
     let contents = std::fs::read_to_string(&path)?;
@@ -44,14 +52,6 @@ fn save_theme_to_config(name: &str) -> crate::error::Result<()> {
     std::fs::write(&path, format!("{updated}{trailing}"))?;
     Ok(())
 }
-
-use crate::{
-    config::{AgentConfig, AppConfig},
-    rag::{ConversationMeta, RagContext, SkillsManager},
-};
-
-use super::render;
-use super::types::{AgentUpdate, ChatItem, ConfigRow, Screen, Status};
 
 pub(super) struct App {
     pub(super) items: Vec<ChatItem>,
