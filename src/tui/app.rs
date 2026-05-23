@@ -200,76 +200,36 @@ impl App {
         }
     }
 
-    fn handle_config_viewer_key(&mut self, key: KeyEvent) {
+    fn handle_scroll_key(
+        key: KeyEvent,
+        scroll: &mut usize,
+        should_quit: &mut bool,
+        screen: &mut Screen,
+        prev: Screen,
+    ) {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
+                *should_quit = true;
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.config_scroll = self.config_scroll.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.config_scroll += 1;
-            }
-            KeyCode::PageUp => {
-                self.config_scroll = self.config_scroll.saturating_sub(5);
-            }
-            KeyCode::PageDown => {
-                self.config_scroll += 5;
-            }
-            KeyCode::Esc => {
-                self.screen = self.pre_picker_screen;
-            }
+            KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
+            KeyCode::PageUp => *scroll = scroll.saturating_sub(5),
+            KeyCode::PageDown => *scroll = scroll.saturating_add(5),
+            KeyCode::Esc => *screen = prev,
             _ => {}
         }
+    }
+
+    fn handle_config_viewer_key(&mut self, key: KeyEvent) {
+        Self::handle_scroll_key(key, &mut self.config_scroll, &mut self.should_quit, &mut self.screen, self.pre_picker_screen);
     }
 
     fn handle_skills_viewer_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.skills_scroll = self.skills_scroll.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.skills_scroll += 1;
-            }
-            KeyCode::PageUp => {
-                self.skills_scroll = self.skills_scroll.saturating_sub(5);
-            }
-            KeyCode::PageDown => {
-                self.skills_scroll += 5;
-            }
-            KeyCode::Esc => {
-                self.screen = self.pre_picker_screen;
-            }
-            _ => {}
-        }
+        Self::handle_scroll_key(key, &mut self.skills_scroll, &mut self.should_quit, &mut self.screen, self.pre_picker_screen);
     }
 
     fn handle_mcp_viewer_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.mcp_scroll = self.mcp_scroll.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.mcp_scroll += 1;
-            }
-            KeyCode::PageUp => {
-                self.mcp_scroll = self.mcp_scroll.saturating_sub(5);
-            }
-            KeyCode::PageDown => {
-                self.mcp_scroll += 5;
-            }
-            KeyCode::Esc => {
-                self.screen = self.pre_picker_screen;
-            }
-            _ => {}
-        }
+        Self::handle_scroll_key(key, &mut self.mcp_scroll, &mut self.should_quit, &mut self.screen, self.pre_picker_screen);
     }
 
     fn handle_theme_picker_key(&mut self, key: KeyEvent) {
