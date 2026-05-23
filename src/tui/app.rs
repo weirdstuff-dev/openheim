@@ -302,9 +302,7 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some((provider, model)) = self.picker_items.get(self.picker_selected) {
-                    let _ = self
-                        .switch_model_tx
-                        .send((provider.clone(), model.clone()));
+                    let _ = self.switch_model_tx.send((provider.clone(), model.clone()));
                 }
                 self.screen = Screen::Chat;
             }
