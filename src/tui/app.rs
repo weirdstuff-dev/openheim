@@ -221,15 +221,33 @@ impl App {
     }
 
     fn handle_config_viewer_key(&mut self, key: KeyEvent) {
-        Self::handle_scroll_key(key, &mut self.config_scroll, &mut self.should_quit, &mut self.screen, self.pre_picker_screen);
+        Self::handle_scroll_key(
+            key,
+            &mut self.config_scroll,
+            &mut self.should_quit,
+            &mut self.screen,
+            self.pre_picker_screen,
+        );
     }
 
     fn handle_skills_viewer_key(&mut self, key: KeyEvent) {
-        Self::handle_scroll_key(key, &mut self.skills_scroll, &mut self.should_quit, &mut self.screen, self.pre_picker_screen);
+        Self::handle_scroll_key(
+            key,
+            &mut self.skills_scroll,
+            &mut self.should_quit,
+            &mut self.screen,
+            self.pre_picker_screen,
+        );
     }
 
     fn handle_mcp_viewer_key(&mut self, key: KeyEvent) {
-        Self::handle_scroll_key(key, &mut self.mcp_scroll, &mut self.should_quit, &mut self.screen, self.pre_picker_screen);
+        Self::handle_scroll_key(
+            key,
+            &mut self.mcp_scroll,
+            &mut self.should_quit,
+            &mut self.screen,
+            self.pre_picker_screen,
+        );
     }
 
     fn handle_theme_picker_key(&mut self, key: KeyEvent) {
@@ -302,12 +320,30 @@ impl App {
 
     pub(super) fn handle_key(&mut self, key: KeyEvent) {
         match self.screen {
-            Screen::ModelPicker => { self.handle_model_picker_key(key); return; }
-            Screen::ConfigViewer => { self.handle_config_viewer_key(key); return; }
-            Screen::SessionPicker => { self.handle_session_picker_key(key); return; }
-            Screen::SkillsViewer => { self.handle_skills_viewer_key(key); return; }
-            Screen::McpViewer => { self.handle_mcp_viewer_key(key); return; }
-            Screen::ThemePicker => { self.handle_theme_picker_key(key); return; }
+            Screen::ModelPicker => {
+                self.handle_model_picker_key(key);
+                return;
+            }
+            Screen::ConfigViewer => {
+                self.handle_config_viewer_key(key);
+                return;
+            }
+            Screen::SessionPicker => {
+                self.handle_session_picker_key(key);
+                return;
+            }
+            Screen::SkillsViewer => {
+                self.handle_skills_viewer_key(key);
+                return;
+            }
+            Screen::McpViewer => {
+                self.handle_mcp_viewer_key(key);
+                return;
+            }
+            Screen::ThemePicker => {
+                self.handle_theme_picker_key(key);
+                return;
+            }
             Screen::Welcome | Screen::Chat => {}
         }
         match key.code {
@@ -572,17 +608,17 @@ impl App {
                     match msg.role {
                         Role::System => {}
                         Role::User => {
-                            if let Some(content) = &msg.content {
-                                if !content.is_empty() {
-                                    self.push(ChatItem::UserMessage(content.clone()));
-                                }
+                            if let Some(content) = &msg.content
+                                && !content.is_empty()
+                            {
+                                self.push(ChatItem::UserMessage(content.clone()));
                             }
                         }
                         Role::Assistant => {
-                            if let Some(content) = &msg.content {
-                                if !content.is_empty() {
-                                    self.push(ChatItem::AssistantMessage(content.clone()));
-                                }
+                            if let Some(content) = &msg.content
+                                && !content.is_empty()
+                            {
+                                self.push(ChatItem::AssistantMessage(content.clone()));
                             }
                             if let Some(tool_calls) = &msg.tool_calls {
                                 for tc in tool_calls {
@@ -625,7 +661,11 @@ impl App {
 
         let [content_area, input_area] = [chunks[0], chunks[1]];
 
-        let bg_screen = if self.screen.is_overlay() { self.pre_picker_screen } else { self.screen };
+        let bg_screen = if self.screen.is_overlay() {
+            self.pre_picker_screen
+        } else {
+            self.screen
+        };
 
         if bg_screen == Screen::Welcome {
             render::render_welcome(
@@ -666,7 +706,13 @@ impl App {
 
         match self.screen {
             Screen::ModelPicker => {
-                render::render_model_picker(f, area, &self.picker_items, self.picker_selected, theme);
+                render::render_model_picker(
+                    f,
+                    area,
+                    &self.picker_items,
+                    self.picker_selected,
+                    theme,
+                );
             }
             Screen::ConfigViewer => {
                 render::render_config_viewer(f, area, &self.config_rows, self.config_scroll, theme);
@@ -675,13 +721,25 @@ impl App {
                 render::render_session_picker(f, area, &self.sessions, self.picker_selected, theme);
             }
             Screen::SkillsViewer => {
-                render::render_skills_viewer(f, area, &self.skills_items, self.skills_scroll, theme);
+                render::render_skills_viewer(
+                    f,
+                    area,
+                    &self.skills_items,
+                    self.skills_scroll,
+                    theme,
+                );
             }
             Screen::McpViewer => {
                 render::render_mcp_viewer(f, area, &self.mcp_rows, self.mcp_scroll, theme);
             }
             Screen::ThemePicker => {
-                render::render_theme_picker(f, area, self.theme_selected, &self.theme_color_name, theme);
+                render::render_theme_picker(
+                    f,
+                    area,
+                    self.theme_selected,
+                    &self.theme_color_name,
+                    theme,
+                );
             }
             Screen::Welcome | Screen::Chat => {}
         }
@@ -732,4 +790,3 @@ impl App {
         f.render_widget(Paragraph::new(visible), chat_inner);
     }
 }
-

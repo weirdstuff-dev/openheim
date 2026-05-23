@@ -9,7 +9,7 @@ homepage = "https://openheim.io"
 documentation = "https://docs.rs/openheim"
 keywords = ["agent", "llm", "ai", "mcp", "async"]
 categories = ["command-line-utilities", "asynchronous"]
-rust-version = "1.85"
+rust-version = "1.91"
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]

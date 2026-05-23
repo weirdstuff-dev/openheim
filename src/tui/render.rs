@@ -99,7 +99,10 @@ pub(crate) fn build_lines(items: &[ChatItem], width: u16, theme: Color) -> Vec<L
                 lines.push(Line::from(vec![
                     Span::raw("    "),
                     Span::styled("→ ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(flat.trim().to_string(), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        flat.trim().to_string(),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]));
             }
             ChatItem::SystemInfo(text) => {
@@ -487,6 +490,7 @@ pub(crate) fn render_mcp_viewer(
     render_rows_popup(f, area, rows, scroll, " mcp servers ", 40, "    ", theme);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_rows_popup(
     f: &mut Frame,
     area: Rect,
@@ -498,14 +502,18 @@ fn render_rows_popup(
     theme: Color,
 ) {
     let (entry_key_w, entry_val_w, item_w, header_w) =
-        rows.iter().fold((0, 0, 0, 0), |(ek, ev, iw, hw), row| match row {
-            ConfigRow::Entry { key, val } => {
-                (ek.max(key.chars().count()), ev.max(val.chars().count()), iw, hw)
-            }
-            ConfigRow::Item(s) => (ek, ev, iw.max(s.chars().count() + 4), hw),
-            ConfigRow::Header(h) => (ek, ev, iw, hw.max(h.chars().count() + 2)),
-            ConfigRow::Blank => (ek, ev, iw, hw),
-        });
+        rows.iter()
+            .fold((0, 0, 0, 0), |(ek, ev, iw, hw), row| match row {
+                ConfigRow::Entry { key, val } => (
+                    ek.max(key.chars().count()),
+                    ev.max(val.chars().count()),
+                    iw,
+                    hw,
+                ),
+                ConfigRow::Item(s) => (ek, ev, iw.max(s.chars().count() + 4), hw),
+                ConfigRow::Header(h) => (ek, ev, iw, hw.max(h.chars().count() + 2)),
+                ConfigRow::Blank => (ek, ev, iw, hw),
+            });
 
     let content_w = (entry_key_w + 4 + entry_val_w).max(item_w).max(header_w);
     let popup_w = ((content_w + 6) as u16)
