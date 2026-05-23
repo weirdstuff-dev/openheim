@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Paragraph},
 };
 use tokio::sync::mpsc;
 
@@ -308,7 +308,7 @@ impl App {
         }
     }
 
-    fn handle_picker_key(&mut self, key: KeyEvent) {
+    fn handle_model_picker_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
@@ -335,30 +335,20 @@ impl App {
         }
     }
 
+    fn push_screen(&mut self, next: Screen) {
+        self.pre_picker_screen = self.screen;
+        self.screen = next;
+    }
+
     pub(super) fn handle_key(&mut self, key: KeyEvent) {
-        if self.screen == Screen::ModelPicker {
-            self.handle_picker_key(key);
-            return;
-        }
-        if self.screen == Screen::ConfigViewer {
-            self.handle_config_viewer_key(key);
-            return;
-        }
-        if self.screen == Screen::SessionPicker {
-            self.handle_session_picker_key(key);
-            return;
-        }
-        if self.screen == Screen::SkillsViewer {
-            self.handle_skills_viewer_key(key);
-            return;
-        }
-        if self.screen == Screen::McpViewer {
-            self.handle_mcp_viewer_key(key);
-            return;
-        }
-        if self.screen == Screen::ThemePicker {
-            self.handle_theme_picker_key(key);
-            return;
+        match self.screen {
+            Screen::ModelPicker => { self.handle_model_picker_key(key); return; }
+            Screen::ConfigViewer => { self.handle_config_viewer_key(key); return; }
+            Screen::SessionPicker => { self.handle_session_picker_key(key); return; }
+            Screen::SkillsViewer => { self.handle_skills_viewer_key(key); return; }
+            Screen::McpViewer => { self.handle_mcp_viewer_key(key); return; }
+            Screen::ThemePicker => { self.handle_theme_picker_key(key); return; }
+            Screen::Welcome | Screen::Chat => {}
         }
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -462,8 +452,7 @@ impl App {
                 Ok(metas) => {
                     self.sessions = metas;
                     self.picker_selected = 0;
-                    self.pre_picker_screen = self.screen;
-                    self.screen = Screen::SessionPicker;
+                    self.push_screen(Screen::SessionPicker);
                 }
                 Err(e) => self.push(ChatItem::Err(e.to_string())),
             },
@@ -511,8 +500,7 @@ impl App {
                 }
                 self.config_rows = rows;
                 self.config_scroll = 0;
-                self.pre_picker_screen = self.screen;
-                self.screen = Screen::ConfigViewer;
+                self.push_screen(Screen::ConfigViewer);
             }
             "mcp" => {
                 if self.app_config.mcp_servers.is_empty() {
@@ -550,8 +538,7 @@ impl App {
                     }
                     self.mcp_rows = rows;
                     self.mcp_scroll = 0;
-                    self.pre_picker_screen = self.screen;
-                    self.screen = Screen::McpViewer;
+                    self.push_screen(Screen::McpViewer);
                 }
             }
             "models" => {
@@ -571,8 +558,7 @@ impl App {
                         .unwrap_or(0);
                     self.picker_items = items;
                     self.picker_selected = selected;
-                    self.pre_picker_screen = self.screen;
-                    self.screen = Screen::ModelPicker;
+                    self.push_screen(Screen::ModelPicker);
                 } else {
                     let _ = self.switch_model_tx.send(arg.to_string());
                 }
@@ -588,8 +574,7 @@ impl App {
                 Ok(names) => {
                     self.skills_items = names;
                     self.skills_scroll = 0;
-                    self.pre_picker_screen = self.screen;
-                    self.screen = Screen::SkillsViewer;
+                    self.push_screen(Screen::SkillsViewer);
                 }
                 Err(e) => self.push(ChatItem::Err(e.to_string())),
             },
@@ -599,8 +584,7 @@ impl App {
                         .iter()
                         .position(|&n| n == self.theme_color_name)
                         .unwrap_or(0);
-                    self.pre_picker_screen = self.screen;
-                    self.screen = Screen::ThemePicker;
+                    self.push_screen(Screen::ThemePicker);
                 } else if render::THEME_COLORS.contains(&arg) {
                     self.apply_theme(arg);
                 } else {
@@ -681,85 +665,65 @@ impl App {
 
         let [content_area, input_area] = [chunks[0], chunks[1]];
 
-        let bg_screen = match self.screen {
-            Screen::ModelPicker
-            | Screen::ConfigViewer
-            | Screen::SessionPicker
-            | Screen::SkillsViewer
-            | Screen::McpViewer
-            | Screen::ThemePicker => self.pre_picker_screen,
-            s => s,
-        };
+        let bg_screen = if self.screen.is_overlay() { self.pre_picker_screen } else { self.screen };
 
         if bg_screen == Screen::Welcome {
-            let model = self.agent_config.model.clone();
-            let provider = self.agent_config.provider_name.clone();
-            let skills = self.skills.clone();
             render::render_welcome(
                 f,
                 content_area,
-                &model,
-                &provider,
-                &skills,
+                &self.agent_config.model,
+                &self.agent_config.provider_name,
+                &self.skills,
                 self.theme_color,
             );
         } else {
             self.draw_chat(f, content_area);
         }
 
-        let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let frame = SPINNER[self.spinner_frame % SPINNER.len()];
         let left_label = match &self.status {
             Status::Idle => None,
-            Status::Thinking => Some(format!(
-                "{} thinking…",
-                spinner[self.spinner_frame % spinner.len()]
-            )),
-            Status::Streaming => Some(format!(
-                "{} streaming…",
-                spinner[self.spinner_frame % spinner.len()]
-            )),
+            Status::Thinking => Some(format!("{frame} thinking…")),
+            Status::Streaming => Some(format!("{frame} streaming…")),
         };
         let right_label = format!(
             "{} · {}",
             self.agent_config.provider_name, self.agent_config.model
         );
 
-        let input = self.input.clone();
         let theme = self.theme_color;
         render::render_input_bar(
             f,
             input_area,
-            &input,
+            &self.input,
             self.cursor,
             left_label.as_deref(),
             &right_label,
-            self.screen != Screen::ModelPicker
-                && self.screen != Screen::ConfigViewer
-                && self.screen != Screen::SessionPicker
-                && self.screen != Screen::SkillsViewer
-                && self.screen != Screen::McpViewer
-                && self.screen != Screen::ThemePicker,
+            !self.screen.is_overlay(),
             theme,
         );
 
-        if self.screen == Screen::ModelPicker {
-            render::render_model_picker(f, area, &self.picker_items, self.picker_selected, theme);
-        }
-        if self.screen == Screen::ConfigViewer {
-            render::render_config_viewer(f, area, &self.config_rows, self.config_scroll, theme);
-        }
-        if self.screen == Screen::SessionPicker {
-            render::render_session_picker(f, area, &self.sessions, self.picker_selected, theme);
-        }
-        if self.screen == Screen::SkillsViewer {
-            render::render_skills_viewer(f, area, &self.skills_items, self.skills_scroll, theme);
-        }
-        if self.screen == Screen::McpViewer {
-            render::render_mcp_viewer(f, area, &self.mcp_rows, self.mcp_scroll, theme);
-        }
-        if self.screen == Screen::ThemePicker {
-            let current = self.theme_color_name.clone();
-            render::render_theme_picker(f, area, self.theme_selected, &current, theme);
+        match self.screen {
+            Screen::ModelPicker => {
+                render::render_model_picker(f, area, &self.picker_items, self.picker_selected, theme);
+            }
+            Screen::ConfigViewer => {
+                render::render_config_viewer(f, area, &self.config_rows, self.config_scroll, theme);
+            }
+            Screen::SessionPicker => {
+                render::render_session_picker(f, area, &self.sessions, self.picker_selected, theme);
+            }
+            Screen::SkillsViewer => {
+                render::render_skills_viewer(f, area, &self.skills_items, self.skills_scroll, theme);
+            }
+            Screen::McpViewer => {
+                render::render_mcp_viewer(f, area, &self.mcp_rows, self.mcp_scroll, theme);
+            }
+            Screen::ThemePicker => {
+                render::render_theme_picker(f, area, self.theme_selected, &self.theme_color_name, theme);
+            }
+            Screen::Welcome | Screen::Chat => {}
         }
     }
 
@@ -797,7 +761,6 @@ impl App {
             String::new()
         };
 
-        use ratatui::widgets::{Block, Borders};
         let chat_block = Block::default()
             .borders(Borders::NONE)
             .title_bottom(Line::from(Span::styled(
