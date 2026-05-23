@@ -657,8 +657,8 @@ impl App {
             Err(e) => self.push(ChatItem::Err(e.to_string())),
         }
 
-        if let Some(provider_name) = &meta.provider {
-            if !self
+        if let Some(provider_name) = &meta.provider
+            && !self
                 .app_config
                 .providers
                 .contains_key(provider_name.as_str())
@@ -668,7 +668,6 @@ impl App {
                     provider_name
                 )));
             }
-        }
 
         self.push(ChatItem::SystemInfo("─── session restored".to_string()));
 
