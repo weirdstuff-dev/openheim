@@ -223,11 +223,14 @@ pub(crate) fn render_welcome(
     const COMMANDS: &[(&str, &str)] = &[
         (":help", "show all commands"),
         (":config", "current config"),
-        (":sessions", "past sessions"),
+        (":models", "list available models"),
+        (":models <name>", "switch model mid-session"),
+        (":sessions", "browse and restore saved sessions"),
         (":skills", "available skills"),
         (":mcp", "MCP servers"),
         (":theme", "change accent color"),
-        (":q", "quit"),
+        (":theme <name>", "apply color directly"),
+        (":q / :quit", "exit"),
     ];
 
     let subtitle = if skills.is_empty() {
