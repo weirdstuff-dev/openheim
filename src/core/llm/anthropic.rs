@@ -261,14 +261,18 @@ fn extract_system(messages: &[Message]) -> Option<String> {
         .filter(|m| m.role == Role::System)
         .filter_map(|m| m.content.as_deref())
         .collect();
-    if parts.is_empty() { None } else { Some(parts.join("\n\n")) }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
 }
 
 /// Returns a thinking config if the model supports extended thinking and
 /// `max_tokens` is large enough to accommodate a reasonable budget.
 fn thinking_config(model: &str, max_tokens: u32) -> Option<AnthropicThinkingConfig> {
-    let supported = model.contains("claude-3-7")
-        || (model.starts_with("claude-") && model.contains("-4-"));
+    let supported =
+        model.contains("claude-3-7") || (model.starts_with("claude-") && model.contains("-4-"));
     if !supported || max_tokens < 2048 {
         return None;
     }
@@ -434,8 +438,7 @@ impl LlmClient for AnthropicClient {
                             }
                             "thinking_delta" => {
                                 if let Some(thinking) = delta["thinking"].as_str() {
-                                    let _ =
-                                        chunk_tx.send(LlmChunk::Thinking(thinking.to_string()));
+                                    let _ = chunk_tx.send(LlmChunk::Thinking(thinking.to_string()));
                                 }
                             }
                             "input_json_delta" => {

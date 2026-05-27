@@ -81,10 +81,7 @@ pub(crate) fn build_lines(items: &[ChatItem], width: u16, theme: Color) -> Vec<L
                 for (i, wl) in word_wrap(text, wrap_w).iter().enumerate() {
                     let prefix = if i == 0 { "  ≫ " } else { "     " };
                     lines.push(Line::from(vec![
-                        Span::styled(
-                            prefix.to_string(),
-                            Style::default().fg(Color::DarkGray),
-                        ),
+                        Span::styled(prefix.to_string(), Style::default().fg(Color::DarkGray)),
                         Span::styled(wl.clone(), Style::default().fg(Color::DarkGray)),
                     ]));
                 }

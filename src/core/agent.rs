@@ -76,8 +76,7 @@ where
 
         let choice = if callback.is_some() {
             let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<LlmChunk>();
-            let choice_fut =
-                call_llm_streaming(llm, messages, &tools, prompt_builder, chunk_tx);
+            let choice_fut = call_llm_streaming(llm, messages, &tools, prompt_builder, chunk_tx);
             tokio::pin!(choice_fut);
 
             let mut maybe_choice: Option<Result<Choice>> = None;
@@ -103,8 +102,11 @@ where
                     }
                 }
             }
-            maybe_choice
-                .unwrap_or_else(|| Err(crate::error::Error::Other("stream ended prematurely".into())))?
+            maybe_choice.unwrap_or_else(|| {
+                Err(crate::error::Error::Other(
+                    "stream ended prematurely".into(),
+                ))
+            })?
         } else {
             call_llm(llm, messages, &tools, prompt_builder).await?
         };

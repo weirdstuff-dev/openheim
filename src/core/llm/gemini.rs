@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use crate::core::models::{Choice, FunctionCall, Message, Role, Tool, ToolCall};
 use crate::error::{Error, Result};
 
-use super::{LlmClient, LlmChunk};
+use super::{LlmChunk, LlmClient};
 
 #[derive(Clone)]
 pub struct GeminiClient {
@@ -394,7 +394,9 @@ impl LlmClient for GeminiClient {
             line_buf.push_str(&String::from_utf8_lossy(&bytes));
 
             loop {
-                let Some(pos) = line_buf.find('\n') else { break };
+                let Some(pos) = line_buf.find('\n') else {
+                    break;
+                };
                 let line = line_buf[..pos].trim_end_matches('\r').to_string();
                 line_buf = line_buf[pos + 1..].to_string();
 
@@ -445,8 +447,16 @@ impl LlmClient for GeminiClient {
         Ok(Choice {
             message: Message {
                 role: Role::Assistant,
-                content: if text_buf.is_empty() { None } else { Some(text_buf) },
-                tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+                content: if text_buf.is_empty() {
+                    None
+                } else {
+                    Some(text_buf)
+                },
+                tool_calls: if tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(tool_calls)
+                },
                 tool_call_id: None,
                 tool_name: None,
                 is_error: false,

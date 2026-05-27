@@ -7,7 +7,7 @@ use crate::core::models::{
 };
 use crate::error::{Error, Result};
 
-use super::{LlmClient, LlmChunk};
+use super::{LlmChunk, LlmClient};
 
 #[derive(Clone)]
 pub struct OpenAiClient {
@@ -98,8 +98,7 @@ pub(super) async fn send_openai_style_streaming(
         max_tokens,
     };
 
-    let mut body =
-        serde_json::to_value(&request).map_err(|e| Error::ParseError(e.to_string()))?;
+    let mut body = serde_json::to_value(&request).map_err(|e| Error::ParseError(e.to_string()))?;
     body["stream"] = serde_json::Value::Bool(true);
 
     let endpoint = format!("{}/chat/completions", api_base.trim_end_matches('/'));
@@ -141,7 +140,9 @@ pub(super) async fn send_openai_style_streaming(
         line_buf.push_str(&String::from_utf8_lossy(&bytes));
 
         loop {
-            let Some(pos) = line_buf.find('\n') else { break };
+            let Some(pos) = line_buf.find('\n') else {
+                break;
+            };
             let line = line_buf[..pos].trim_end_matches('\r').to_string();
             line_buf = line_buf[pos + 1..].to_string();
 
@@ -206,7 +207,11 @@ pub(super) async fn send_openai_style_streaming(
         }
     }
 
-    let content = if text_buf.is_empty() { None } else { Some(text_buf) };
+    let content = if text_buf.is_empty() {
+        None
+    } else {
+        Some(text_buf)
+    };
     let tool_calls: Vec<ToolCall> = tool_acc
         .into_iter()
         .enumerate()

@@ -5,8 +5,8 @@ use tokio::sync::mpsc;
 use crate::core::models::{Choice, Message, Tool};
 use crate::error::Result;
 
-use super::{LlmClient, LlmChunk};
 use super::openai::{send_openai_style, send_openai_style_streaming};
+use super::{LlmChunk, LlmClient};
 
 #[derive(Clone)]
 pub struct OpenAiCompatibleClient {
