@@ -46,7 +46,7 @@ dirs = "6.0"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 rmcp = { version = "1.6.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
-agent-client-protocol = "0.11.1"
+agent-client-protocol = { version = "0.11.1", features = ["unstable_session_model"] }
 agent-client-protocol-tokio = "0.11.1"
 tokio-util = { version = "0.7", features = ["compat"] }
 tower-http = { version = "0.6", features = ["cors"] }

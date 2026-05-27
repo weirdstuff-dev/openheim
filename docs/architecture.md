@@ -60,10 +60,16 @@ src/
 │   ├── client.rs       McpClient — rmcp service wrapper
 │   └── tool_handler.rs McpToolHandler — bridges MCP tools to ToolHandler
 │
-└── transport/          Transport-specific entry points
-    ├── stdio.rs        ACP over stdin/stdout
-    ├── ws.rs           ACP + REST over WebSocket (axum)
-    └── run.rs          Headless single-prompt mode
+├── transport/          Transport-specific entry points
+│   ├── stdio.rs        ACP over stdin/stdout
+│   ├── ws.rs           ACP + REST over WebSocket (axum)
+│   └── run.rs          Headless single-prompt mode
+│
+└── tui/                Interactive terminal UI (ratatui)
+    ├── mod.rs          Entry point — event loop, AgentUpdate channel
+    ├── app.rs          App state, command dispatch (:models, :theme, …)
+    ├── render.rs       Frame rendering, theme colors, chat item layout
+    └── types.rs        ChatItem, AgentUpdate, Status, Screen enums
 ```
 
 ---

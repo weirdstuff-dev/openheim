@@ -14,6 +14,7 @@ cargo run -- init
 |---|---|---|---|
 | `default_provider` | string | — | Provider to use when no `--model` override is given (must match a key under `[providers]`) |
 | `max_iterations` | integer | `10` | Maximum number of agent loop iterations per prompt before stopping |
+| `theme_color` | string | `"white"` | TUI accent color. Valid values: `white`, `gray`, `blue`, `cyan`, `magenta`, `green`, `yellow`, `red`, `pink`. Can also be changed at runtime with `:theme` |
 
 ```toml
 default_provider = "anthropic"

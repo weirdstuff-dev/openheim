@@ -11,9 +11,10 @@ use agent_client_protocol::{
     schema::{
         AgentCapabilities, ContentBlock, ContentChunk, Implementation, InitializeRequest,
         InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-        LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
-        SessionCapabilities, SessionInfo, SessionListCapabilities, SessionNotification,
-        SessionUpdate, StopReason, TextContent, ToolCall as AcpToolCall, ToolCallStatus,
+        LoadSessionResponse, ModelInfo, NewSessionRequest, NewSessionResponse, PromptRequest,
+        PromptResponse, SessionCapabilities, SessionInfo, SessionListCapabilities,
+        SessionModelState, SessionNotification, SessionUpdate, SetSessionModelRequest,
+        SetSessionModelResponse, StopReason, TextContent, ToolCall as AcpToolCall, ToolCallStatus,
         ToolCallUpdate, ToolCallUpdateFields,
     },
     util::internal_error,
@@ -102,6 +103,41 @@ impl AgentState {
             .ok_or_else(|| Error::Other(format!("session not found: {session_id}")))?;
         s.config = new_config;
         Ok((provider_name, model_name))
+    }
+
+    pub async fn acp_set_session_model(
+        &self,
+        session_id: &str,
+        model_id: &str,
+    ) -> Result<(String, String)> {
+        let new_config = self.app_config.resolve(Some(model_id))?;
+        let provider_name = new_config.provider_name.clone();
+        let model_name = new_config.model.clone();
+        let mut sessions = self.sessions.write().await;
+        let s = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| Error::Other(format!("session not found: {session_id}")))?;
+        s.config = new_config;
+        Ok((provider_name, model_name))
+    }
+
+    pub fn session_model_state(&self, current_model: &str) -> SessionModelState {
+        let available_models = self
+            .app_config
+            .providers
+            .iter()
+            .flat_map(|(provider_name, p)| {
+                p.models.iter().map(move |m| {
+                    let mut meta = serde_json::Map::new();
+                    meta.insert(
+                        "provider".to_string(),
+                        serde_json::Value::String(provider_name.clone()),
+                    );
+                    ModelInfo::new(m.clone(), m.clone()).meta(meta)
+                })
+            })
+            .collect();
+        SessionModelState::new(current_model.to_string(), available_models)
     }
 
     pub async fn acp_prompt<F>(
@@ -374,6 +410,7 @@ pub async fn serve(
     let state_prompt = state.clone();
     let state_list = state.clone();
     let state_load = state.clone();
+    let state_set_model = state.clone();
 
     Agent
         .builder()
@@ -395,6 +432,12 @@ pub async fn serve(
                 if let Ok(val) = serde_json::to_value(state_init.executor.list_tools()) {
                     meta.insert("tools".to_string(), val);
                 }
+                // Advertise that thinking content arrives as AgentMessageChunk with
+                // content._meta.kind == "thinking" (ACP _meta extensibility).
+                meta.insert(
+                    "thinking".to_string(),
+                    serde_json::json!({ "meta_key": "kind", "meta_value": "thinking" }),
+                );
                 responder.respond(
                     InitializeResponse::new(req.protocol_version)
                         .agent_capabilities(
@@ -425,11 +468,19 @@ pub async fn serve(
                     .and_then(|v| v.as_str())
                     .map(String::from);
 
+                let current_model = model
+                    .as_deref()
+                    .unwrap_or(&state_session.config.model)
+                    .to_string();
+                let model_state = state_session.session_model_state(&current_model);
+
                 match state_session
                     .acp_new_session(model.as_deref(), skills, req.cwd)
                     .await
                 {
-                    Ok(session_key) => responder.respond(NewSessionResponse::new(session_key)),
+                    Ok(session_key) => {
+                        responder.respond(NewSessionResponse::new(session_key).models(model_state))
+                    }
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
                 }
             },
@@ -487,6 +538,20 @@ pub async fn serve(
 
                 match result {
                     Ok(()) => responder.respond(LoadSessionResponse::new()),
+                    Err(e) => responder.respond_with_internal_error(e.to_string()),
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: SetSessionModelRequest, responder, _cx: ConnectionTo<Client>| {
+                let session_id = req.session_id.0.as_ref().to_string();
+                let model_id = req.model_id.0.as_ref();
+                match state_set_model
+                    .acp_set_session_model(&session_id, model_id)
+                    .await
+                {
+                    Ok(_) => responder.respond(SetSessionModelResponse::new()),
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
                 }
             },
