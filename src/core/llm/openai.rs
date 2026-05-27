@@ -81,6 +81,7 @@ pub(super) async fn send_openai_style(
         .ok_or_else(|| Error::ApiError("No response from LLM".to_string()))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn send_openai_style_streaming(
     client: &ReqwestClient,
     api_base: &str,
@@ -170,18 +171,16 @@ pub(super) async fn send_openai_style_streaming(
 
             let delta = &choice["delta"];
 
-            if let Some(reasoning) = delta["reasoning_content"].as_str() {
-                if !reasoning.is_empty() {
+            if let Some(reasoning) = delta["reasoning_content"].as_str()
+                && !reasoning.is_empty() {
                     let _ = chunk_tx.send(LlmChunk::Thinking(reasoning.to_string()));
                 }
-            }
 
-            if let Some(content) = delta["content"].as_str() {
-                if !content.is_empty() {
+            if let Some(content) = delta["content"].as_str()
+                && !content.is_empty() {
                     text_buf.push_str(content);
                     let _ = chunk_tx.send(LlmChunk::Text(content.to_string()));
                 }
-            }
 
             if let Some(tcs) = delta["tool_calls"].as_array() {
                 for tc in tcs {

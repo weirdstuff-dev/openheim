@@ -201,8 +201,7 @@ fn convert_update(tx: &mpsc::UnboundedSender<AgentUpdate>, update: SessionUpdate
                     .meta
                     .as_ref()
                     .and_then(|m| m.get("kind"))
-                    .and_then(|v| v.as_str())
-                    .map_or(false, |s| s == "thinking");
+                    .and_then(|v| v.as_str()) == Some("thinking");
                 if is_thinking {
                     let _ = tx.send(AgentUpdate::ThinkingChunk(t.text));
                 } else {

@@ -424,12 +424,11 @@ impl LlmClient for GeminiClient {
                 }
 
                 for part in candidate.content.parts {
-                    if let Some(text) = part.text {
-                        if !text.is_empty() {
+                    if let Some(text) = part.text
+                        && !text.is_empty() {
                             text_buf.push_str(&text);
                             let _ = chunk_tx.send(LlmChunk::Text(text));
                         }
-                    }
                     if let Some(fc) = part.function_call {
                         tool_calls.push(ToolCall {
                             id: format!("call_{}", tool_calls.len()),
