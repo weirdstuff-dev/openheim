@@ -74,6 +74,22 @@ pub(crate) fn build_lines(items: &[ChatItem], width: u16, theme: Color) -> Vec<L
                 }
                 lines.push(Line::default());
             }
+            ChatItem::Thinking(text) => {
+                // Show thinking as a dimmed, indented block prefixed with a marker.
+                let prefix_len = 4; // "  ≫ " length
+                let wrap_w = inner_w.saturating_sub(prefix_len);
+                for (i, wl) in word_wrap(text, wrap_w).iter().enumerate() {
+                    let prefix = if i == 0 { "  ≫ " } else { "     " };
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            prefix.to_string(),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::styled(wl.clone(), Style::default().fg(Color::DarkGray)),
+                    ]));
+                }
+                lines.push(Line::default());
+            }
             ChatItem::ToolCall { name, args } => {
                 let used = 4 + name.chars().count();
                 let preview_w = inner_w.saturating_sub(used + 1);

@@ -1,6 +1,7 @@
 #[derive(Debug, Clone)]
 pub(crate) enum AgentUpdate {
     TextChunk(String),
+    ThinkingChunk(String),
     ToolCall { name: String, args: String },
     ToolResult { result: String, is_error: bool },
     Done,
@@ -12,6 +13,7 @@ pub(crate) enum AgentUpdate {
 pub(crate) enum ChatItem {
     UserMessage(String),
     AssistantMessage(String),
+    Thinking(String),
     ToolCall { name: String, args: String },
     ToolResult { result: String, is_error: bool },
     SystemInfo(String),

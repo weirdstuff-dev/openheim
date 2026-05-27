@@ -13,8 +13,8 @@ use agent_client_protocol::{
         InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
         LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
         SessionCapabilities, SessionInfo, SessionListCapabilities, SessionNotification,
-        SessionUpdate, StopReason, ToolCall as AcpToolCall, ToolCallStatus, ToolCallUpdate,
-        ToolCallUpdateFields,
+        SessionUpdate, StopReason, TextContent, ToolCall as AcpToolCall, ToolCallStatus,
+        ToolCallUpdate, ToolCallUpdateFields,
     },
     util::internal_error,
 };
@@ -158,6 +158,19 @@ impl AgentState {
                 StreamEvent::LlmResponse { content } => {
                     on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
                         ContentBlock::from(content),
+                    )));
+                }
+                StreamEvent::ThinkingContent { content } => {
+                    // Tunnel thinking through ContentBlock::Text using a meta tag so
+                    // it survives the ACP layer (ContentBlock has no Thinking variant).
+                    let mut meta = serde_json::Map::new();
+                    meta.insert(
+                        "kind".to_string(),
+                        serde_json::Value::String("thinking".to_string()),
+                    );
+                    let text = TextContent::new(content).meta(meta);
+                    on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                        ContentBlock::Text(text),
                     )));
                 }
                 StreamEvent::ToolCall {

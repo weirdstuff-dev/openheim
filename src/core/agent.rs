@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
+use tokio::sync::mpsc;
+
 use crate::config::AgentConfig;
-use crate::core::llm::LlmClient;
+use crate::core::llm::{LlmChunk, LlmClient};
 use crate::core::models::*;
 use crate::error::Result;
 use crate::rag::PromptBuilder;
 use crate::tools::ToolExecutor;
 
-/// Sends a request to the LLM, optionally applying a [`PromptBuilder`] to inject
-/// skill-based system content before the message history.
 async fn call_llm(
     llm: &Arc<dyn LlmClient>,
     messages: &[Message],
@@ -21,6 +21,22 @@ async fn call_llm(
             llm.send(&built, tools).await
         }
         None => llm.send(messages, tools).await,
+    }
+}
+
+async fn call_llm_streaming(
+    llm: &Arc<dyn LlmClient>,
+    messages: &[Message],
+    tools: &[Tool],
+    prompt_builder: Option<&PromptBuilder>,
+    chunk_tx: mpsc::UnboundedSender<LlmChunk>,
+) -> Result<Choice> {
+    match prompt_builder {
+        Some(builder) => {
+            let built = builder.build(messages);
+            llm.send_streaming(&built, tools, chunk_tx).await
+        }
+        None => llm.send_streaming(messages, tools, chunk_tx).await,
     }
 }
 
@@ -58,7 +74,40 @@ where
             });
         }
 
-        let choice = call_llm(llm, messages, &tools, prompt_builder).await?;
+        let choice = if callback.is_some() {
+            let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<LlmChunk>();
+            let choice_fut =
+                call_llm_streaming(llm, messages, &tools, prompt_builder, chunk_tx);
+            tokio::pin!(choice_fut);
+
+            let mut maybe_choice: Option<Result<Choice>> = None;
+            loop {
+                tokio::select! {
+                    result = &mut choice_fut, if maybe_choice.is_none() => {
+                        maybe_choice = Some(result);
+                    }
+                    maybe_chunk = chunk_rx.recv() => {
+                        match maybe_chunk {
+                            Some(LlmChunk::Text(text)) => {
+                                if let Some(cb) = callback.as_mut() {
+                                    cb(StreamEvent::LlmResponse { content: text });
+                                }
+                            }
+                            Some(LlmChunk::Thinking(thought)) => {
+                                if let Some(cb) = callback.as_mut() {
+                                    cb(StreamEvent::ThinkingContent { content: thought });
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+            maybe_choice
+                .unwrap_or_else(|| Err(crate::error::Error::Other("stream ended prematurely".into())))?
+        } else {
+            call_llm(llm, messages, &tools, prompt_builder).await?
+        };
         messages.push(choice.message.clone());
 
         if let Some(tool_calls) = &choice.message.tool_calls {
@@ -108,12 +157,8 @@ where
                 tool_calls: Some(tool_results),
             });
         } else if let Some(content) = &choice.message.content {
-            if let Some(cb) = callback.as_mut() {
-                cb(StreamEvent::LlmResponse {
-                    content: content.clone(),
-                });
-            }
-
+            // LlmResponse chunks already fired per-token from the streaming select
+            // loop above; just record the final text here.
             final_response = content.clone();
 
             steps.push(AgentStep {

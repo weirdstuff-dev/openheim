@@ -61,7 +61,7 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
     let (switch_session_tx, mut switch_session_rx) =
         mpsc::unbounded_channel::<(String, std::path::PathBuf)>();
 
-    {
+    let agent_handle = {
         let update_tx = update_tx.clone();
         tokio::spawn(async move {
             let mut session = session;
@@ -112,8 +112,8 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                     }
                 }
             }
-        });
-    }
+        })
+    };
 
     let mut app = App::new(
         agent_config,
@@ -185,6 +185,11 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
         }
     }
 
+    // Drop app first so all channel senders close, signaling the agent task to exit.
+    drop(app);
+    agent_handle.abort();
+    let _ = agent_handle.await;
+
     Ok(())
 }
 
@@ -192,7 +197,17 @@ fn convert_update(tx: &mpsc::UnboundedSender<AgentUpdate>, update: SessionUpdate
     match update {
         SessionUpdate::AgentMessageChunk(chunk) => {
             if let ContentBlock::Text(t) = chunk.content {
-                let _ = tx.send(AgentUpdate::TextChunk(t.text));
+                let is_thinking = t
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get("kind"))
+                    .and_then(|v| v.as_str())
+                    .map_or(false, |s| s == "thinking");
+                if is_thinking {
+                    let _ = tx.send(AgentUpdate::ThinkingChunk(t.text));
+                } else {
+                    let _ = tx.send(AgentUpdate::TextChunk(t.text));
+                }
             }
         }
         SessionUpdate::ToolCall(tc) => {

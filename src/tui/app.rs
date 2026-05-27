@@ -150,6 +150,14 @@ impl App {
                 }
                 self.cached_width = 0;
             }
+            AgentUpdate::ThinkingChunk(text) => {
+                self.status = Status::Streaming;
+                match self.items.last_mut() {
+                    Some(ChatItem::Thinking(existing)) => existing.push_str(&text),
+                    _ => self.items.push(ChatItem::Thinking(text)),
+                }
+                self.cached_width = 0;
+            }
             AgentUpdate::ToolCall { name, args } => {
                 self.status = Status::Thinking;
                 self.push(ChatItem::ToolCall { name, args });
