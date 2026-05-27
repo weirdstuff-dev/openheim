@@ -186,6 +186,34 @@ impl SessionHandle {
             .acp_prompt(&self.id, text.to_string(), on_update)
             .await
     }
+
+    /// Switch the model for this session mid-conversation.
+    ///
+    /// The model must be listed under a provider in the config. Returns
+    /// `(provider_name, model_name)` on success; the next prompt will use
+    /// the new model while preserving conversation history.
+    pub async fn switch_model(&self, provider: &str, model: &str) -> Result<(String, String)> {
+        self.state
+            .acp_update_session_model(&self.id, provider, model)
+            .await
+    }
+
+    /// Restore a persisted session as the active session for this handle.
+    ///
+    /// Registers the conversation in the agent state so subsequent `prompt`
+    /// calls continue from its history. Pass a no-op callback — the TUI
+    /// already replays history visually before calling this.
+    pub async fn restore(
+        &self,
+        session_id: &str,
+        cwd: std::path::PathBuf,
+    ) -> Result<SessionHandle> {
+        self.state.acp_load_session(session_id, cwd, |_| {}).await?;
+        Ok(SessionHandle {
+            id: session_id.to_string(),
+            state: Arc::clone(&self.state),
+        })
+    }
 }
 
 // ── OpenheimBuilder ───────────────────────────────────────────────────────────
@@ -347,6 +375,7 @@ fn build_programmatic(
     let app_config = AppConfig {
         default_provider: provider.clone(),
         max_iterations: max_iter,
+        theme_color: None,
         providers,
         mcp_servers: BTreeMap::new(),
     };

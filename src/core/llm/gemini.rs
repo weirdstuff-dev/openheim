@@ -2,11 +2,12 @@ use async_trait::async_trait;
 use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::mpsc;
 
 use crate::core::models::{Choice, FunctionCall, Message, Role, Tool, ToolCall};
 use crate::error::{Error, Result};
 
-use super::LlmClient;
+use super::{LlmChunk, LlmClient};
 
 #[derive(Clone)]
 pub struct GeminiClient {
@@ -245,7 +246,7 @@ fn convert_response(resp: GeminiResponse) -> Result<Choice> {
                 call_type: "function".to_string(),
                 function: FunctionCall {
                     name: fc.name,
-                    arguments: serde_json::to_string(&fc.args).unwrap_or_default(),
+                    arguments: serde_json::to_string(&fc.args)?,
                 },
             });
         }
@@ -280,28 +281,30 @@ fn convert_response(resp: GeminiResponse) -> Result<Choice> {
     })
 }
 
+fn gemini_system_instruction(messages: &[Message]) -> Option<GeminiContent> {
+    let parts: Vec<&str> = messages
+        .iter()
+        .filter(|m| m.role == Role::System)
+        .filter_map(|m| m.content.as_deref())
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(GeminiContent {
+            role: "user".to_string(),
+            parts: vec![GeminiPart {
+                text: Some(parts.join("\n\n")),
+                function_call: None,
+                function_response: None,
+            }],
+        })
+    }
+}
+
 #[async_trait]
 impl LlmClient for GeminiClient {
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
-        let system_instruction: Option<GeminiContent> = {
-            let parts: Vec<&str> = messages
-                .iter()
-                .filter(|m| m.role == Role::System)
-                .filter_map(|m| m.content.as_deref())
-                .collect();
-            if parts.is_empty() {
-                None
-            } else {
-                Some(GeminiContent {
-                    role: "user".to_string(),
-                    parts: vec![GeminiPart {
-                        text: Some(parts.join("\n\n")),
-                        function_call: None,
-                        function_response: None,
-                    }],
-                })
-            }
-        };
+        let system_instruction = gemini_system_instruction(messages);
 
         let request = GeminiRequest {
             contents: convert_messages(messages)?,
@@ -340,6 +343,126 @@ impl LlmClient for GeminiClient {
         let gemini_response: GeminiResponse = response.json().await.map_err(Error::ReqwestError)?;
 
         convert_response(gemini_response)
+    }
+
+    async fn send_streaming(
+        &self,
+        messages: &[Message],
+        tools: &[Tool],
+        chunk_tx: mpsc::UnboundedSender<LlmChunk>,
+    ) -> Result<Choice> {
+        let request = GeminiRequest {
+            contents: convert_messages(messages)?,
+            tools: convert_tools(tools),
+            generation_config: self.max_tokens.map(|t| GeminiGenerationConfig {
+                max_output_tokens: t,
+            }),
+            system_instruction: gemini_system_instruction(messages),
+        };
+
+        let endpoint = format!(
+            "{}/models/{}:streamGenerateContent",
+            self.api_base.trim_end_matches('/'),
+            self.model
+        );
+
+        let mut response = self
+            .client
+            .post(&endpoint)
+            .query(&[("key", &self.api_key), ("alt", &"sse".to_string())])
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .send()
+            .await
+            .map_err(Error::ReqwestError)?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to read error body>".into());
+            return Err(Error::HttpError { status, body });
+        }
+
+        let mut text_buf = String::new();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut finish_reason: Option<String> = None;
+        let mut line_buf = String::new();
+
+        while let Some(bytes) = response.chunk().await.map_err(Error::ReqwestError)? {
+            line_buf.push_str(&String::from_utf8_lossy(&bytes));
+
+            loop {
+                let Some(pos) = line_buf.find('\n') else {
+                    break;
+                };
+                let line = line_buf[..pos].trim_end_matches('\r').to_string();
+                line_buf.drain(..=pos);
+
+                if line.is_empty() || line.starts_with(':') {
+                    continue;
+                }
+                let Some(data) = line.strip_prefix("data: ") else {
+                    continue;
+                };
+
+                let Ok(event) = serde_json::from_str::<GeminiResponse>(data) else {
+                    continue;
+                };
+
+                let Some(candidate) = event.candidates.into_iter().next() else {
+                    continue;
+                };
+
+                if let Some(fr) = candidate.finish_reason {
+                    finish_reason = Some(match fr.as_str() {
+                        "STOP" => "stop".to_string(),
+                        "MAX_TOKENS" => "length".to_string(),
+                        other => other.to_lowercase(),
+                    });
+                }
+
+                for part in candidate.content.parts {
+                    if let Some(text) = part.text
+                        && !text.is_empty()
+                    {
+                        text_buf.push_str(&text);
+                        let _ = chunk_tx.send(LlmChunk::Text(text));
+                    }
+                    if let Some(fc) = part.function_call {
+                        tool_calls.push(ToolCall {
+                            id: format!("call_{}", tool_calls.len()),
+                            call_type: "function".to_string(),
+                            function: FunctionCall {
+                                name: fc.name,
+                                arguments: serde_json::to_string(&fc.args)?,
+                            },
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(Choice {
+            message: Message {
+                role: Role::Assistant,
+                content: if text_buf.is_empty() {
+                    None
+                } else {
+                    Some(text_buf)
+                },
+                tool_calls: if tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(tool_calls)
+                },
+                tool_call_id: None,
+                tool_name: None,
+                is_error: false,
+            },
+            finish_reason,
+        })
     }
 }
 

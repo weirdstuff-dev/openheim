@@ -18,6 +18,31 @@ Server mode is the primary deployment target for hosted and enterprise use.
 
 ---
 
+## Interactive TUI
+
+Running `openheim` with no subcommand opens the interactive terminal UI. Type a message and press Enter to chat. Type `:help` to see all commands.
+
+| Command | Description |
+|---|---|
+| `:help` | Show all commands |
+| `:q` / `:quit` | Exit |
+| `:sessions` | Browse and restore saved sessions (interactive picker) |
+| `:config` | Show current configuration |
+| `:models` | Open model picker (arrow keys + Enter to switch mid-session) |
+| `:models <name>` | Switch to a model directly without opening the picker |
+| `:mcp` | Show MCP server statuses |
+| `:skills` | List available skills |
+| `:theme` | Open theme color picker |
+| `:theme <name>` | Apply a theme color directly and save it to `config.toml` |
+
+**Keyboard shortcuts:** `↑`/`↓` scroll · `PgUp`/`PgDn` page · `Ctrl+C` quit · `Esc` close any overlay
+
+**Theme colors:** `white`, `gray`, `blue`, `cyan`, `magenta`, `green`, `yellow`, `red`, `pink`
+
+The selected theme is persisted to `~/.openheim/config.toml` as `theme_color`.
+
+---
+
 ## Running the server
 
 ```bash

@@ -72,10 +72,10 @@ impl ToolHandler for ExecuteCommandTool {
         if output.status.success() {
             Ok(stdout)
         } else {
-            Ok(format!(
+            Err(Error::ToolExecutionError(format!(
                 "Command failed:\nStdout: {}\nStderr: {}",
                 stdout, stderr
-            ))
+            )))
         }
     }
 }
@@ -101,11 +101,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_returns_output_for_failing_command() {
+    async fn execute_errors_for_failing_command() {
         let tool = ExecuteCommandTool;
         let args = r#"{"command": "ls /nonexistent_dir_12345"}"#;
-        let result = tool.execute(args).await.unwrap();
-        assert!(result.contains("Command failed:"));
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Command failed:"));
     }
 
     #[tokio::test]

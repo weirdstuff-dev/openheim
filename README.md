@@ -13,6 +13,19 @@
 
 **A fast, multi-provider LLM agent runtime built in Rust.**
 
+<div align="center">
+<table>
+<tr>
+  <td><img src="docs/screenshots/green.png" alt="Green theme" /></td>
+  <td><img src="docs/screenshots/blue.png" alt="Blue theme" /></td>
+</tr>
+<tr>
+  <td><img src="docs/screenshots/red.png" alt="Red theme" /></td>
+  <td><img src="docs/screenshots/white.png" alt="White theme" /></td>
+</tr>
+</table>
+</div>
+
 Openheim runs an iterative agent loop — it calls your LLM, executes tools on its behalf, feeds results back, and repeats until the task is done. It works as an interactive REPL, a headless CLI, an ACP stdio agent (for Zed, Claude Code, and other ACP clients), or a self-hosted ACP-over-WebSocket server.
 
 ---

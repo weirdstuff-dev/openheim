@@ -53,6 +53,34 @@ impl AppConfig {
         })
     }
 
+    pub fn resolve_with_provider(&self, provider_name: &str, model: &str) -> Result<AgentConfig> {
+        let provider = self.providers.get(provider_name).ok_or_else(|| {
+            Error::config(format!(
+                "Provider '{}' not found in config. Available providers: {}",
+                provider_name,
+                self.provider_names()
+            ))
+        })?;
+        validate_provider(provider_name, provider)?;
+        if !provider.models.is_empty() && !provider.models.contains(&model.to_string()) {
+            return Err(Error::config(format!(
+                "Model '{}' is not allowed for provider '{}'. Allowed models: [{}]",
+                model,
+                provider_name,
+                provider.models.join(", ")
+            )));
+        }
+        Ok(AgentConfig {
+            provider_name: provider_name.to_string(),
+            api_base: provider.api_base.clone(),
+            api_key: provider.resolve_api_key(),
+            model: model.to_string(),
+            max_iterations: self.max_iterations,
+            timeout_secs: provider.timeout_secs.unwrap_or(120),
+            max_tokens: provider.max_tokens,
+        })
+    }
+
     fn resolve_model(&self, model_name: &str) -> Result<AgentConfig> {
         for (name, provider) in &self.providers {
             if provider.models.contains(&model_name.to_string()) {
@@ -118,6 +146,7 @@ mod tests {
         AppConfig {
             default_provider: "openai".into(),
             max_iterations: 5,
+            theme_color: None,
             providers,
             mcp_servers: BTreeMap::new(),
         }
@@ -157,6 +186,7 @@ mod tests {
         let config = AppConfig {
             default_provider: "nonexistent".into(),
             max_iterations: 10,
+            theme_color: None,
             providers: BTreeMap::new(),
             mcp_servers: BTreeMap::new(),
         };
@@ -202,5 +232,34 @@ mod tests {
     fn validate_accepts_valid_provider() {
         let p = provider_with_base("https://api.example.com");
         assert!(validate_provider("test", &p).is_ok());
+    }
+
+    #[test]
+    fn resolve_with_provider_rejects_unlisted_model() {
+        let config = sample_config();
+        let err = config
+            .resolve_with_provider("openai", "gpt-99")
+            .unwrap_err();
+        assert!(err.to_string().contains("gpt-99"));
+        assert!(err.to_string().contains("openai"));
+    }
+
+    #[test]
+    fn resolve_with_provider_accepts_listed_model() {
+        let config = sample_config();
+        let agent = config
+            .resolve_with_provider("openai", "gpt-3.5-turbo")
+            .unwrap();
+        assert_eq!(agent.model, "gpt-3.5-turbo");
+    }
+
+    #[test]
+    fn resolve_with_provider_allows_any_model_when_list_empty() {
+        let mut config = sample_config();
+        config.providers.get_mut("openai").unwrap().models.clear();
+        let agent = config
+            .resolve_with_provider("openai", "any-future-model")
+            .unwrap();
+        assert_eq!(agent.model, "any-future-model");
     }
 }

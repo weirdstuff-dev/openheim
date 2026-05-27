@@ -38,6 +38,7 @@ impl McpClient {
         } else if let Some(ref command) = config.command {
             let mut cmd = tokio::process::Command::new(command);
             cmd.args(&config.args);
+            cmd.kill_on_drop(true);
             for (k, v) in &config.env {
                 cmd.env(k, v);
             }

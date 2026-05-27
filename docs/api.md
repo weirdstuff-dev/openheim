@@ -935,13 +935,38 @@ If the tool execution errors:
 }
 ```
 
+##### Thinking / Reasoning Chunks
+
+For providers that support extended thinking (Anthropic, OpenAI o-series), reasoning tokens arrive as `agent_message_chunk` notifications with an extra `content._meta.kind == "thinking"` marker. They are otherwise identical to regular text chunks and should be rendered separately (e.g. collapsed or styled differently).
+
+```json
+{
+  "channel": "agent",
+  "data": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+      "sessionUpdate": "agent_message_chunk",
+      "content": {
+        "type": "text",
+        "text": "Let me think about this step by step...",
+        "_meta": { "kind": "thinking" }
+      }
+    }
+  }
+}
+```
+
+> Thinking chunks arrive interleaved with regular `agent_message_chunk` notifications. Check `content._meta?.kind === "thinking"` to distinguish them.
+
 ##### Summary of `sessionUpdate` Types
 
 | `sessionUpdate` | Direction | Description |
 |---|---|---|
-| `agent_message_chunk` | Server → Client | Streamed LLM text chunk |
+| `agent_message_chunk` | Server → Client | Streamed LLM text chunk (also used for thinking — see `content._meta.kind`) |
 | `user_message_chunk` | Server → Client | Echo of user message (not currently used) |
-| `agent_thought_chunk` | Server → Client | Internal reasoning (not currently used) |
+| `agent_thought_chunk` | Server → Client | Reserved — not currently used; thinking arrives via `agent_message_chunk` |
 | `tool_call` | Server → Client | New tool call started (`status: "in_progress"`) |
 | `tool_call_update` | Server → Client | Tool call status/result update |
 | `plan` | Server → Client | Agent execution plan (not currently used) |

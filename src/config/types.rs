@@ -33,6 +33,8 @@ pub struct AppConfig {
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
     #[serde(default)]
+    pub theme_color: Option<String>,
+    #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
     pub mcp_servers: BTreeMap<String, McpServerConfig>,

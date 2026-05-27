@@ -473,12 +473,11 @@ fn validate_path_opt(workspace: &Option<PathBuf>, path: &str) -> Option<PathBuf>
     } else {
         if let Ok(cwd) = std::env::current_dir() {
             let from_cwd = cwd.join(&requested);
-            if from_cwd.exists() {
-                if let Ok(c) = from_cwd.canonicalize() {
-                    if c.starts_with(&workspace_canonical) {
-                        return Some(c);
-                    }
-                }
+            if from_cwd.exists()
+                && let Ok(c) = from_cwd.canonicalize()
+                && c.starts_with(&workspace_canonical)
+            {
+                return Some(c);
             }
         }
         // Fallback: treat path as relative to the workspace root
