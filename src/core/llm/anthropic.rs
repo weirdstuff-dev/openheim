@@ -204,7 +204,7 @@ fn convert_tools(tools: &[Tool]) -> Vec<AnthropicTool> {
         .collect()
 }
 
-fn convert_response(resp: AnthropicResponse) -> Choice {
+fn convert_response(resp: AnthropicResponse) -> Result<Choice> {
     let mut text_parts = Vec::new();
     let mut tool_calls = Vec::new();
 
@@ -219,7 +219,7 @@ fn convert_response(resp: AnthropicResponse) -> Choice {
                     call_type: "function".to_string(),
                     function: FunctionCall {
                         name,
-                        arguments: serde_json::to_string(&input).unwrap_or_default(),
+                        arguments: serde_json::to_string(&input)?,
                     },
                 });
             }
@@ -238,7 +238,7 @@ fn convert_response(resp: AnthropicResponse) -> Choice {
         other => other.map(|s| s.to_string()),
     };
 
-    Choice {
+    Ok(Choice {
         message: Message {
             role: Role::Assistant,
             content,
@@ -252,7 +252,7 @@ fn convert_response(resp: AnthropicResponse) -> Choice {
             is_error: false,
         },
         finish_reason,
-    }
+    })
 }
 
 fn extract_system(messages: &[Message]) -> Option<String> {
@@ -331,7 +331,7 @@ impl LlmClient for AnthropicClient {
         let anthropic_response: AnthropicResponse =
             response.json().await.map_err(Error::ReqwestError)?;
 
-        Ok(convert_response(anthropic_response))
+        convert_response(anthropic_response)
     }
 
     async fn send_streaming(
@@ -638,7 +638,7 @@ mod tests {
             }],
             stop_reason: Some("end_turn".into()),
         };
-        let choice = convert_response(resp);
+        let choice = convert_response(resp).unwrap();
         assert_eq!(choice.message.content.as_deref(), Some("Hello!"));
         assert!(choice.message.tool_calls.is_none());
         assert_eq!(choice.finish_reason.as_deref(), Some("stop"));
@@ -654,7 +654,7 @@ mod tests {
             }],
             stop_reason: Some("tool_use".into()),
         };
-        let choice = convert_response(resp);
+        let choice = convert_response(resp).unwrap();
         assert!(choice.message.content.is_none());
         let tool_calls = choice.message.tool_calls.unwrap();
         assert_eq!(tool_calls.len(), 1);
@@ -678,7 +678,7 @@ mod tests {
             ],
             stop_reason: Some("tool_use".into()),
         };
-        let choice = convert_response(resp);
+        let choice = convert_response(resp).unwrap();
         assert_eq!(choice.message.content.as_deref(), Some("Let me read that."));
         assert_eq!(choice.message.tool_calls.unwrap().len(), 1);
     }
@@ -693,7 +693,7 @@ mod tests {
             stop_reason: Some("end_turn".into()),
         };
         assert_eq!(
-            convert_response(resp).finish_reason.as_deref(),
+            convert_response(resp).unwrap().finish_reason.as_deref(),
             Some("stop")
         );
 
@@ -703,7 +703,7 @@ mod tests {
             stop_reason: Some("tool_use".into()),
         };
         assert_eq!(
-            convert_response(resp).finish_reason.as_deref(),
+            convert_response(resp).unwrap().finish_reason.as_deref(),
             Some("tool_calls")
         );
 
@@ -713,7 +713,7 @@ mod tests {
             stop_reason: Some("max_tokens".into()),
         };
         assert_eq!(
-            convert_response(resp).finish_reason.as_deref(),
+            convert_response(resp).unwrap().finish_reason.as_deref(),
             Some("max_tokens")
         );
 
@@ -722,6 +722,6 @@ mod tests {
             content: vec![AnthropicResponseBlock::Text { text: "x".into() }],
             stop_reason: None,
         };
-        assert!(convert_response(resp).finish_reason.is_none());
+        assert!(convert_response(resp).unwrap().finish_reason.is_none());
     }
 }

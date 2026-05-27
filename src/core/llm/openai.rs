@@ -145,7 +145,7 @@ pub(super) async fn send_openai_style_streaming(
                 break;
             };
             let line = line_buf[..pos].trim_end_matches('\r').to_string();
-            line_buf = line_buf[pos + 1..].to_string();
+            line_buf.drain(..=pos);
 
             if line.is_empty() || line.starts_with(':') {
                 continue;

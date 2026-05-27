@@ -246,7 +246,7 @@ fn convert_response(resp: GeminiResponse) -> Result<Choice> {
                 call_type: "function".to_string(),
                 function: FunctionCall {
                     name: fc.name,
-                    arguments: serde_json::to_string(&fc.args).unwrap_or_default(),
+                    arguments: serde_json::to_string(&fc.args)?,
                 },
             });
         }
@@ -398,7 +398,7 @@ impl LlmClient for GeminiClient {
                     break;
                 };
                 let line = line_buf[..pos].trim_end_matches('\r').to_string();
-                line_buf = line_buf[pos + 1..].to_string();
+                line_buf.drain(..=pos);
 
                 if line.is_empty() || line.starts_with(':') {
                     continue;
@@ -436,7 +436,7 @@ impl LlmClient for GeminiClient {
                             call_type: "function".to_string(),
                             function: FunctionCall {
                                 name: fc.name,
-                                arguments: serde_json::to_string(&fc.args).unwrap_or_default(),
+                                arguments: serde_json::to_string(&fc.args)?,
                             },
                         });
                     }
