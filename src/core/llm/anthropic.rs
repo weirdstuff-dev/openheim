@@ -2,11 +2,12 @@ use async_trait::async_trait;
 use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::mpsc;
 
 use crate::core::models::{Choice, FunctionCall, Message, Role, Tool, ToolCall};
 use crate::error::{Error, Result};
 
-use super::LlmClient;
+use super::{LlmChunk, LlmClient};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
@@ -48,11 +49,21 @@ impl AnthropicClient {
 struct AnthropicRequest {
     model: String,
     max_tokens: u32,
+    stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<String>,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<AnthropicThinkingConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicThinkingConfig {
+    #[serde(rename = "type")]
+    thinking_type: &'static str,
+    budget_tokens: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -244,28 +255,55 @@ fn convert_response(resp: AnthropicResponse) -> Choice {
     }
 }
 
+fn extract_system(messages: &[Message]) -> Option<String> {
+    let parts: Vec<&str> = messages
+        .iter()
+        .filter(|m| m.role == Role::System)
+        .filter_map(|m| m.content.as_deref())
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
+/// Returns a thinking config if the model supports extended thinking and
+/// `max_tokens` is large enough to accommodate a reasonable budget.
+fn thinking_config(model: &str, max_tokens: u32) -> Option<AnthropicThinkingConfig> {
+    let supported =
+        model.contains("claude-3-7") || (model.starts_with("claude-") && model.contains("-4-"));
+    if !supported || max_tokens < 2048 {
+        return None;
+    }
+    // Leave at least 1024 tokens for the actual response.
+    let budget = 5000u32.min(max_tokens - 1024);
+    Some(AnthropicThinkingConfig {
+        thinking_type: "enabled",
+        budget_tokens: budget,
+    })
+}
+
+/// Returns the interleaved-thinking beta header value for models that need it.
+fn thinking_beta(model: &str) -> Option<&'static str> {
+    if model.contains("claude-3-7") {
+        Some("interleaved-thinking-2025-05-14")
+    } else {
+        None
+    }
+}
+
 #[async_trait]
 impl LlmClient for AnthropicClient {
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
-        let system: Option<String> = {
-            let parts: Vec<&str> = messages
-                .iter()
-                .filter(|m| m.role == Role::System)
-                .filter_map(|m| m.content.as_deref())
-                .collect();
-            if parts.is_empty() {
-                None
-            } else {
-                Some(parts.join("\n\n"))
-            }
-        };
-
         let request = AnthropicRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
-            system,
+            stream: false,
+            system: extract_system(messages),
             messages: convert_messages(messages)?,
             tools: convert_tools(tools),
+            thinking: None,
         };
 
         let endpoint = format!("{}/messages", self.api_base.trim_end_matches('/'));
@@ -294,6 +332,183 @@ impl LlmClient for AnthropicClient {
             response.json().await.map_err(Error::ReqwestError)?;
 
         Ok(convert_response(anthropic_response))
+    }
+
+    async fn send_streaming(
+        &self,
+        messages: &[Message],
+        tools: &[Tool],
+        chunk_tx: mpsc::UnboundedSender<LlmChunk>,
+    ) -> Result<Choice> {
+        let thinking = thinking_config(&self.model, self.max_tokens);
+
+        let request = AnthropicRequest {
+            model: self.model.clone(),
+            max_tokens: self.max_tokens,
+            stream: true,
+            system: extract_system(messages),
+            messages: convert_messages(messages)?,
+            tools: convert_tools(tools),
+            thinking,
+        };
+
+        let endpoint = format!("{}/messages", self.api_base.trim_end_matches('/'));
+
+        let mut req = self
+            .client
+            .post(&endpoint)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("Content-Type", "application/json");
+
+        if let Some(beta) = thinking_beta(&self.model) {
+            req = req.header("anthropic-beta", beta);
+        }
+
+        let response = req
+            .json(&request)
+            .send()
+            .await
+            .map_err(Error::ReqwestError)?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to read error body>".into());
+            return Err(Error::HttpError { status, body });
+        }
+
+        // Parse SSE stream.
+        let mut buf = String::new();
+        let mut current_block_type: Option<String> = None;
+        let mut current_tool_id: Option<String> = None;
+        let mut current_tool_name: Option<String> = None;
+        let mut current_tool_json = String::new();
+        let mut text_content = String::new();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut stop_reason: Option<String> = None;
+
+        let mut response = response;
+        while let Some(chunk) = response.chunk().await.map_err(Error::ReqwestError)? {
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(nl_pos) = buf.find('\n') {
+                let line = buf[..nl_pos].trim_end_matches('\r').to_string();
+                buf.drain(..=nl_pos);
+
+                let data = match line.strip_prefix("data: ") {
+                    Some(d) => d.trim(),
+                    None => continue,
+                };
+
+                if data == "[DONE]" || data.is_empty() {
+                    continue;
+                }
+
+                let event: Value = match serde_json::from_str(data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                match event["type"].as_str().unwrap_or("") {
+                    "content_block_start" => {
+                        let block_type = event["content_block"]["type"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
+                        if block_type == "tool_use" {
+                            current_tool_id =
+                                event["content_block"]["id"].as_str().map(String::from);
+                            current_tool_name =
+                                event["content_block"]["name"].as_str().map(String::from);
+                            current_tool_json.clear();
+                        }
+                        current_block_type = Some(block_type);
+                    }
+                    "content_block_delta" => {
+                        let delta = &event["delta"];
+                        match delta["type"].as_str().unwrap_or("") {
+                            "text_delta" => {
+                                if let Some(text) = delta["text"].as_str() {
+                                    text_content.push_str(text);
+                                    let _ = chunk_tx.send(LlmChunk::Text(text.to_string()));
+                                }
+                            }
+                            "thinking_delta" => {
+                                if let Some(thinking) = delta["thinking"].as_str() {
+                                    let _ = chunk_tx.send(LlmChunk::Thinking(thinking.to_string()));
+                                }
+                            }
+                            "input_json_delta" => {
+                                if let Some(partial) = delta["partial_json"].as_str() {
+                                    current_tool_json.push_str(partial);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    "content_block_stop" => {
+                        if current_block_type.as_deref() == Some("tool_use") {
+                            if let (Some(id), Some(name)) =
+                                (current_tool_id.take(), current_tool_name.take())
+                            {
+                                tool_calls.push(ToolCall {
+                                    id,
+                                    call_type: "function".to_string(),
+                                    function: FunctionCall {
+                                        name,
+                                        arguments: current_tool_json.clone(),
+                                    },
+                                });
+                            }
+                            current_tool_json.clear();
+                        }
+                        current_block_type = None;
+                    }
+                    "message_delta" => {
+                        if let Some(reason) = event["delta"]["stop_reason"].as_str() {
+                            stop_reason = Some(reason.to_string());
+                        }
+                    }
+                    "error" => {
+                        let msg = event["error"]["message"]
+                            .as_str()
+                            .unwrap_or("unknown streaming error")
+                            .to_string();
+                        return Err(Error::Other(format!("Anthropic streaming error: {msg}")));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let finish_reason = match stop_reason.as_deref() {
+            Some("tool_use") => Some("tool_calls".to_string()),
+            Some("end_turn") => Some("stop".to_string()),
+            other => other.map(|s| s.to_string()),
+        };
+
+        Ok(Choice {
+            message: Message {
+                role: Role::Assistant,
+                content: if text_content.is_empty() {
+                    None
+                } else {
+                    Some(text_content)
+                },
+                tool_calls: if tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(tool_calls)
+                },
+                tool_call_id: None,
+                tool_name: None,
+                is_error: false,
+            },
+            finish_reason,
+        })
     }
 }
 

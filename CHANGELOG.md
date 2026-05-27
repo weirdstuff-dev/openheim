@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.1] - 2026-05-21
+
+### Fixed
+
+- **Tool call history gaps** — ACP sessions were silently dropping tool calls from stored history; all tool calls are now captured correctly.
+- **Accurate status on replay** — Replayed tool calls now emit `InProgress` before resolving, matching the behaviour of live sessions.
+- **Failed tool calls now surface as `Failed`** — Previously, tool failures were stored as plain text and replayed as `Completed`. The `is_error` flag is now persisted in `Message` and propagated through `StreamEvent::ToolResult` so both live and replayed paths emit `ToolCallStatus::Failed`.
+- **Tool error logging** — Improved logging for tool call errors.
+
+### Improved
+
+- **LLM accuracy on failures** — `is_error` is forwarded to Anthropic's `tool_result` block, giving the model accurate signal when a tool has failed.
+- Added `CHANGELOG.md`.
+- Updated documentation for `is_error` and tool call history replay semantics.
+- README updates.
+
 ## [0.1.0] - 2026-05-15
 
 First public release of openheim — a fast, multi-provider LLM agent runtime written in Rust.

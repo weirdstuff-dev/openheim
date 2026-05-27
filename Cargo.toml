@@ -1,6 +1,6 @@
 [package]
 name = "openheim"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A fast, multi-provider LLM agent runtime written in Rust"
 license = "MIT"
@@ -9,7 +9,7 @@ homepage = "https://openheim.io"
 documentation = "https://docs.rs/openheim"
 keywords = ["agent", "llm", "ai", "mcp", "async"]
 categories = ["command-line-utilities", "asynchronous"]
-rust-version = "1.85"
+rust-version = "1.91"
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]
@@ -36,6 +36,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 rustyline = "14"
 colored = "2"
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
 notify = "6.1"
 walkdir = "2.5"
 once_cell = "1.19"

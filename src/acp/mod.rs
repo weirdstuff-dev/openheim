@@ -13,8 +13,8 @@ use agent_client_protocol::{
         InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
         LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
         SessionCapabilities, SessionInfo, SessionListCapabilities, SessionNotification,
-        SessionUpdate, StopReason, ToolCall as AcpToolCall, ToolCallStatus, ToolCallUpdate,
-        ToolCallUpdateFields,
+        SessionUpdate, StopReason, TextContent, ToolCall as AcpToolCall, ToolCallStatus,
+        ToolCallUpdate, ToolCallUpdateFields,
     },
     util::internal_error,
 };
@@ -87,6 +87,23 @@ impl AgentState {
         Ok(session_key)
     }
 
+    pub async fn acp_update_session_model(
+        &self,
+        session_id: &str,
+        provider: &str,
+        model: &str,
+    ) -> Result<(String, String)> {
+        let new_config = self.app_config.resolve_with_provider(provider, model)?;
+        let provider_name = new_config.provider_name.clone();
+        let model_name = new_config.model.clone();
+        let mut sessions = self.sessions.write().await;
+        let s = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| Error::Other(format!("session not found: {session_id}")))?;
+        s.config = new_config;
+        Ok((provider_name, model_name))
+    }
+
     pub async fn acp_prompt<F>(
         &self,
         session_id: &str,
@@ -101,8 +118,16 @@ impl AgentState {
             let s = sessions
                 .get(session_id)
                 .ok_or_else(|| Error::Other(format!("session not found: {session_id}")))?;
+            let llm = if s.config.provider_name != self.config.provider_name
+                || s.config.model != self.config.model
+            {
+                let http_client = crate::config::build_http_client(s.config.timeout_secs)?;
+                crate::config::create_client(&s.config, &http_client)
+            } else {
+                self.llm.clone()
+            };
             (
-                self.llm.clone(),
+                llm,
                 self.executor.clone(),
                 s.config.clone(),
                 s.chat_id,
@@ -133,6 +158,19 @@ impl AgentState {
                 StreamEvent::LlmResponse { content } => {
                     on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
                         ContentBlock::from(content),
+                    )));
+                }
+                StreamEvent::ThinkingContent { content } => {
+                    // Tunnel thinking through ContentBlock::Text using a meta tag so
+                    // it survives the ACP layer (ContentBlock has no Thinking variant).
+                    let mut meta = serde_json::Map::new();
+                    meta.insert(
+                        "kind".to_string(),
+                        serde_json::Value::String("thinking".to_string()),
+                    );
+                    let text = TextContent::new(content).meta(meta);
+                    on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                        ContentBlock::Text(text),
                     )));
                 }
                 StreamEvent::ToolCall {
@@ -220,11 +258,29 @@ impl AgentState {
             .map_err(|e| Error::Other(e.to_string()))??;
 
         let mut session_config = self.config.clone();
-        if let Some(model) = &conversation.meta.model {
+        if let Some(provider_name) = &conversation.meta.provider {
+            if let Some(provider_cfg) = self.app_config.providers.get(provider_name) {
+                session_config.provider_name = provider_name.clone();
+                session_config.api_base = provider_cfg.api_base.clone();
+                session_config.api_key = provider_cfg.resolve_api_key();
+                session_config.timeout_secs = provider_cfg.timeout_secs.unwrap_or(120);
+                session_config.max_tokens = provider_cfg.max_tokens;
+                session_config.model = conversation
+                    .meta
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| provider_cfg.default_model.clone());
+            } else {
+                let warning = format!(
+                    "[warning] Provider '{}' from this session is not configured. Falling back to the default provider '{}'.",
+                    provider_name, session_config.provider_name
+                );
+                on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                    ContentBlock::from(warning),
+                )));
+            }
+        } else if let Some(model) = &conversation.meta.model {
             session_config.model = model.clone();
-        }
-        if let Some(provider) = &conversation.meta.provider {
-            session_config.provider_name = provider.clone();
         }
 
         self.sessions.write().await.insert(

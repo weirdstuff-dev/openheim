@@ -179,6 +179,9 @@ pub enum StreamEvent {
     /// A chunk of text from the LLM.
     #[serde(rename = "llm_response")]
     LlmResponse { content: String },
+    /// A chunk of the model's internal reasoning (extended thinking).
+    #[serde(rename = "thinking_content")]
+    ThinkingContent { content: String },
     /// The agent has finished; `final_response` is the complete answer.
     #[serde(rename = "finished")]
     Finished {

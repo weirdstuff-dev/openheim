@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use reqwest::Client as ReqwestClient;
+use tokio::sync::mpsc;
 
 use crate::core::models::{Choice, Message, Tool};
 use crate::error::Result;
 
-use super::LlmClient;
-use super::openai::send_openai_style;
+use super::openai::{send_openai_style, send_openai_style_streaming};
+use super::{LlmChunk, LlmClient};
 
 #[derive(Clone)]
 pub struct OpenAiCompatibleClient {
@@ -45,6 +46,25 @@ impl LlmClient for OpenAiCompatibleClient {
             self.max_tokens,
             messages,
             tools,
+        )
+        .await
+    }
+
+    async fn send_streaming(
+        &self,
+        messages: &[Message],
+        tools: &[Tool],
+        chunk_tx: mpsc::UnboundedSender<LlmChunk>,
+    ) -> Result<Choice> {
+        send_openai_style_streaming(
+            &self.client,
+            &self.api_base,
+            &self.api_key,
+            &self.model,
+            self.max_tokens,
+            messages,
+            tools,
+            chunk_tx,
         )
         .await
     }

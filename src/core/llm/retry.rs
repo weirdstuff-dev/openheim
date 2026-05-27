@@ -2,9 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 use tokio::time::sleep;
 
-use super::LlmClient;
+use super::{LlmChunk, LlmClient};
 use crate::core::models::{Choice, Message, Tool};
 use crate::error::Result;
 
@@ -43,6 +44,15 @@ impl LlmClient for RetryClient {
             }
         }
         unreachable!("loop always returns via Ok or Err arm")
+    }
+
+    async fn send_streaming(
+        &self,
+        messages: &[Message],
+        tools: &[Tool],
+        chunk_tx: mpsc::UnboundedSender<LlmChunk>,
+    ) -> Result<Choice> {
+        self.inner.send_streaming(messages, tools, chunk_tx).await
     }
 }
 
