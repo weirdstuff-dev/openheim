@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.1] - 2026-05-28
+
+### Added
+
+- github release workflow
+
 ## [0.2.0] - 2026-05-27
 
 ### Added
