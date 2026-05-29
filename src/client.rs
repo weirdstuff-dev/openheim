@@ -336,7 +336,7 @@ impl OpenheimBuilder {
             app_config.mcp_servers.insert(name, cfg);
         }
 
-        let rag = RagContext::new()?;
+        let rag = RagContext::new(app_config.default_skills.clone())?;
         let state = Arc::new(AgentState::new(agent_config, app_config, rag).await?);
         Ok(OpenheimClient { state })
     }
@@ -378,6 +378,7 @@ fn build_programmatic(
         theme_color: None,
         providers,
         mcp_servers: BTreeMap::new(),
+        default_skills: vec![],
     };
 
     let agent_config = AgentConfig {

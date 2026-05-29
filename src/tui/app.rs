@@ -449,17 +449,19 @@ impl App {
                  ↑/↓  scroll · PgUp/PgDn  page · Ctrl+C  quit"
                     .to_string(),
             )),
-            "sessions" => match RagContext::new().and_then(|r| r.history.list_conversations()) {
-                Ok(metas) if metas.is_empty() => {
-                    self.push(ChatItem::SystemInfo("no sessions yet".to_string()));
+            "sessions" => {
+                match RagContext::new(vec![]).and_then(|r| r.history.list_conversations()) {
+                    Ok(metas) if metas.is_empty() => {
+                        self.push(ChatItem::SystemInfo("no sessions yet".to_string()));
+                    }
+                    Ok(metas) => {
+                        self.sessions = metas;
+                        self.picker_selected = 0;
+                        self.push_screen(Screen::SessionPicker);
+                    }
+                    Err(e) => self.push(ChatItem::Err(e.to_string())),
                 }
-                Ok(metas) => {
-                    self.sessions = metas;
-                    self.picker_selected = 0;
-                    self.push_screen(Screen::SessionPicker);
-                }
-                Err(e) => self.push(ChatItem::Err(e.to_string())),
-            },
+            }
             "config" => {
                 let ac = &self.agent_config;
                 let mut rows = vec![
@@ -624,7 +626,7 @@ impl App {
         let title = meta.title.as_deref().unwrap_or("(untitled)");
         self.push(ChatItem::SystemInfo(format!("─── {title}")));
 
-        match RagContext::new().and_then(|r| r.history.load_conversation(&meta.id)) {
+        match RagContext::new(vec![]).and_then(|r| r.history.load_conversation(&meta.id)) {
             Ok(conv) => {
                 for msg in &conv.messages {
                     match msg.role {

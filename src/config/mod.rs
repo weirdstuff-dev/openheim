@@ -23,20 +23,37 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.toml"))
 }
 
+const DEFAULT_SYSTEM_MD: &str = "You are Openheim, a multipurpose, multiprovider LLM agent.";
+
 /// Initialize the config file at ~/.openheim/config.toml with the default template.
-/// Returns the path written to.
+/// Also writes ~/.openheim/system.md if it does not already exist.
+/// Returns the path of the config file written.
+///
+/// Errors if `config.toml` already exists. `system.md` is written regardless —
+/// so existing users who already have a config can still run `openheim init` to
+/// get their `system.md` created.
 pub fn init_config() -> Result<PathBuf> {
     let dir = config_dir()?;
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join("config.toml");
-    if path.exists() {
+
+    // Always write system.md first so existing users who re-run `init` get it
+    // even though config.toml already exists and will cause an early return below.
+    let system_path = dir.join("system.md");
+    if !system_path.exists() {
+        std::fs::write(&system_path, DEFAULT_SYSTEM_MD)?;
+    }
+
+    let config_path = dir.join("config.toml");
+    if config_path.exists() {
         return Err(Error::config(format!(
-            "Config file already exists at {}",
-            path.display()
+            "Config file already exists at {}. system.md has been created at {}.",
+            config_path.display(),
+            system_path.display()
         )));
     }
-    std::fs::write(&path, DEFAULT_CONFIG)?;
-    Ok(path)
+    std::fs::write(&config_path, DEFAULT_CONFIG)?;
+
+    Ok(config_path)
 }
 
 /// Load AppConfig from a specific path

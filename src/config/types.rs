@@ -38,6 +38,9 @@ pub struct AppConfig {
     pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
+    /// Skills loaded automatically in every new session (merged with --skills at runtime).
+    #[serde(default)]
+    pub default_skills: Vec<String>,
 }
 
 /// Configuration for a single MCP server connection.
