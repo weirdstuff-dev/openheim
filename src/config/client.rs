@@ -121,6 +121,7 @@ mod tests {
             theme_color: None,
             providers,
             mcp_servers: BTreeMap::new(),
+            default_skills: vec![],
         }
     }
 

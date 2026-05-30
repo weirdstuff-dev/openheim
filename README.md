@@ -47,7 +47,8 @@ Openheim is built in Rust from the ground up:
 - **Tool execution** — built-in shell, file read, and file write tools. Trait-based, so you can add your own.
 - **MCP (Model Context Protocol)** — connect external MCP servers (stdio or Streamable HTTP) and their tools are automatically exposed to the LLM as `{server_name}__{tool_name}`.
 - **Conversation memory** — conversations (including full tool call history) persist to disk and resume across sessions
-- **Skills** — drop a markdown file into `~/.openheim/skills/` and it's prepended to the system prompt. ACP clients can also pass skills per-session via `_meta`.
+- **System identity** — edit `~/.openheim/system.md` to define how the agent presents itself. Required when preparing a session (created by `openheim init`).
+- **Skills** — drop a markdown file into `~/.openheim/skills/` and it's injected into the system prompt. Set `default_skills` in config to auto-load skills every session; pass `--skills` for per-session additions. ACP clients can also pass skills per-session via `_meta`.
 - **ACP transport** — implements the [Agent Client Protocol](https://github.com/block/agent-client-protocol) over stdio (for editor integrations) and WebSocket (for remote clients), with real-time streaming of message chunks and tool calls
 - **Unified WebSocket** — single multiplexed `WS /ws` connection carries both ACP agent traffic (sessions, streaming, tool calls) and filesystem operations (file CRUD, live watching) via channel envelopes
 - **Retry with backoff** — transient failures (429s, 5xx, network errors) are retried automatically with exponential backoff
@@ -79,11 +80,12 @@ cargo build --release
 ### Configure
 
 ```bash
-# Generate the default config
-cargo run -- init
+# Generate the default config and system.md
+openheim init
 
-# Edit it
+# Edit them
 vim ~/.openheim/config.toml
+vim ~/.openheim/system.md
 ```
 
 Example config:
@@ -91,6 +93,9 @@ Example config:
 ```toml
 default_provider = "anthropic"
 max_iterations = 10
+
+# Skills loaded in every new session automatically (no --skills flag needed)
+# default_skills = ["rules"]
 
 [providers.anthropic]
 api_base = "https://api.anthropic.com/v1"
@@ -129,26 +134,26 @@ models = ["llama3", "mistral", "codellama"]
 
 ```bash
 # Interactive REPL (default — no subcommand)
-cargo run
+openheim
 
 # Load skills in the REPL
-cargo run -- --skills rust,debugging
+openheim --skills rust,debugging
 
 # Single headless prompt, streams to stdout
-cargo run -- run "List the files in the current directory"
+openheim run "List the files in the current directory"
 
 # Single headless prompt with a model override
-cargo run -- run "Hello" --model gpt-4o
+openheim run "Hello" --model gpt-4o
 
 # ACP stdio agent (for Zed, Claude Code, and other ACP clients)
-cargo run -- acp
+openheim acp
 
 # ACP-over-WebSocket server
-cargo run -- serve
-cargo run -- serve --host 0.0.0.0 --port 1217
+openheim serve
+openheim serve --host 0.0.0.0 --port 1217
 
 # Initialize config
-cargo run -- init
+openheim init
 ```
 
 ---
@@ -170,15 +175,46 @@ Conversations are saved to `~/.openheim/history/` as JSON after every run.
 
 ---
 
-## Skills
+## Agent identity and skills
 
-Skills are markdown files in `~/.openheim/skills/`. When loaded, their content is injected into the system prompt before the conversation starts.
+### `~/.openheim/system.md`
 
-Use them to give the agent a persona, a set of coding standards, domain knowledge, or anything you'd otherwise paste into the system prompt every time.
+This file defines the agent's base identity. It is loaded when preparing each session (via `prepare()` / session setup) and is required — run `openheim init` to create it, then edit it freely.
+
+```markdown
+You are a senior software engineer who writes clean, idiomatic code.
+You prefer simple solutions and ask clarifying questions before making large changes.
+```
+
+### Skills
+
+Skills are markdown files in `~/.openheim/skills/`. They are injected into the system prompt after the identity block.
 
 ```bash
-# Run the REPL with specific skills loaded
-cargo run -- --skills rust,debugging
+# Run with specific skills for this session
+openheim --skills rust,debugging
+
+# Always load certain skills (set in config.toml)
+# default_skills = ["rules", "concise"]
+```
+
+The system message the LLM receives is assembled in this order:
+
+```
+You are a general purpose multiprovider LLM agent.
+
+---
+
+The user has given you the following identity:
+
+<system.md content>
+
+---
+
+These are the skills you have mastered:
+
+### rust
+<rust.md content>
 ```
 
 ACP clients (Zed, Claude Code, etc.) can pass skills per-session by including a `skills` array in the `_meta` field of the `NewSession` request — no flag needed on the server side.
@@ -187,7 +223,7 @@ ACP clients (Zed, Claude Code, etc.) can pass skills per-session by including a 
 
 ## Server mode
 
-Start with `cargo run -- serve` (defaults to `0.0.0.0:1217`).
+Start with `openheim serve` (defaults to `0.0.0.0:1217`).
 
 The server speaks the [Agent Client Protocol](https://github.com/block/agent-client-protocol) over WebSocket and exposes a multiplexed WS endpoint plus REST API routes:
 
@@ -284,7 +320,7 @@ src/
   mcp/              MCP (Model Context Protocol) client integration
     client.rs       MCP server connection (stdio + Streamable HTTP)
     tool_handler.rs  Adapts MCP tools to the ToolHandler trait
-  rag/              Conversation history, prompt builder, and skills manager
+  rag/              Conversation history, prompt builder, skills manager, and system identity
   acp/              ACP agent core — session state and protocol handling
   transport/
     stdio.rs        ACP-over-stdio transport (for editor integrations)
@@ -298,7 +334,7 @@ src/
 ## Development
 
 ```bash
-RUST_LOG=debug cargo run -- run "test"
+RUST_LOG=debug openheim run "test"
 cargo test
 cargo fmt --check
 cargo clippy

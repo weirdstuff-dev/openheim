@@ -3,7 +3,7 @@
 Openheim loads its configuration from `~/.openheim/config.toml`. Generate a default file with:
 
 ```bash
-cargo run -- init
+openheim init
 ```
 
 ---
@@ -14,11 +14,15 @@ cargo run -- init
 |---|---|---|---|
 | `default_provider` | string | — | Provider to use when no `--model` override is given (must match a key under `[providers]`) |
 | `max_iterations` | integer | `10` | Maximum number of agent loop iterations per prompt before stopping |
+| `default_skills` | string[] | `[]` | Skills loaded automatically in every new session. Merged with per-session `--skills`; defaults appear first, duplicates removed. |
 | `theme_color` | string | `"white"` | TUI accent color. Valid values: `white`, `gray`, `blue`, `cyan`, `magenta`, `green`, `yellow`, `red`, `pink`. Can also be changed at runtime with `:theme` |
 
 ```toml
 default_provider = "anthropic"
 max_iterations = 20
+
+# Always load these skills without passing --skills each time
+default_skills = ["rules", "concise"]
 ```
 
 ---
