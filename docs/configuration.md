@@ -3,7 +3,7 @@
 Openheim loads its configuration from `~/.openheim/config.toml`. Generate a default file with:
 
 ```bash
-cargo run -- init
+openheim init
 ```
 
 ---
