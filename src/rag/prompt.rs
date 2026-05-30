@@ -52,11 +52,8 @@ impl PromptBuilder {
     /// <skill content>
     /// ```
     pub fn build(&self, history: &[Message]) -> Vec<Message> {
-        let identity = self
-            .system_identity
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
+        let orig = self.system_identity.as_deref();
+        let identity = orig.filter(|s| !s.trim().is_empty());
         let has_content = identity.is_some() || !self.skills.is_empty();
 
         if !has_content {
