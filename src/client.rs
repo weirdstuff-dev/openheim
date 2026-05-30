@@ -239,6 +239,7 @@ pub struct OpenheimBuilder {
     timeout_secs: Option<u64>,
     max_tokens: Option<u32>,
     mcp_servers: BTreeMap<String, McpServerConfig>,
+    default_skills: Vec<String>,
 }
 
 impl OpenheimBuilder {
@@ -297,6 +298,12 @@ impl OpenheimBuilder {
         self
     }
 
+    /// Skills loaded automatically in every new session.
+    pub fn default_skills(mut self, skills: Vec<String>) -> Self {
+        self.default_skills = skills;
+        self
+    }
+
     /// Build the client, connecting to MCP servers and initialising the agent state.
     pub async fn build(self) -> Result<OpenheimClient> {
         let (agent_config, mut app_config) = if self.provider.is_some()
@@ -312,6 +319,7 @@ impl OpenheimBuilder {
                 self.max_iterations,
                 self.timeout_secs,
                 self.max_tokens,
+                self.default_skills.clone(),
             )
         } else {
             let app_config = match self.config_path {
@@ -336,12 +344,18 @@ impl OpenheimBuilder {
             app_config.mcp_servers.insert(name, cfg);
         }
 
+        // Apply builder default_skills for the file-based path (programmatic path sets them directly)
+        if !self.default_skills.is_empty() {
+            app_config.default_skills = self.default_skills;
+        }
+
         let rag = RagContext::new(app_config.default_skills.clone())?;
         let state = Arc::new(AgentState::new(agent_config, app_config, rag).await?);
         Ok(OpenheimClient { state })
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_programmatic(
     provider: Option<String>,
     api_key: Option<String>,
@@ -350,6 +364,7 @@ fn build_programmatic(
     max_iterations: Option<usize>,
     timeout_secs: Option<u64>,
     max_tokens: Option<u32>,
+    default_skills: Vec<String>,
 ) -> (AgentConfig, AppConfig) {
     let provider = provider.unwrap_or_else(|| "openai".to_string());
     let api_base = api_base.unwrap_or_else(|| default_api_base(&provider));
@@ -378,7 +393,7 @@ fn build_programmatic(
         theme_color: None,
         providers,
         mcp_servers: BTreeMap::new(),
-        default_skills: vec![],
+        default_skills,
     };
 
     let agent_config = AgentConfig {
