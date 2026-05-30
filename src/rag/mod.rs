@@ -86,8 +86,8 @@ impl RagContext {
 /// Merge `defaults` with `session` skills, preserving order and deduplicating.
 /// Defaults come first; session skills are appended only if not already present.
 fn merge_skills(defaults: &[String], session: &[String]) -> Vec<String> {
-    let mut merged = defaults.to_vec();
-    for s in session {
+    let mut merged = Vec::new();
+    for s in defaults.iter().chain(session.iter()) {
         if !merged.contains(s) {
             merged.push(s.clone());
         }
@@ -116,6 +116,13 @@ mod tests {
     #[test]
     fn merge_skills_empty_session() {
         let merged = merge_skills(&["rules".to_string()], &[]);
+        assert_eq!(merged, vec!["rules"]);
+    }
+
+    #[test]
+    fn merge_skills_deduplicates_within_defaults() {
+        let defaults = vec!["rules".to_string(), "rules".to_string()];
+        let merged = merge_skills(&defaults, &[]);
         assert_eq!(merged, vec!["rules"]);
     }
 }
