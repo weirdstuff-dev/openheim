@@ -39,16 +39,22 @@ pub fn init_config() -> Result<PathBuf> {
     // Always write system.md first so existing users who re-run `init` get it
     // even though config.toml already exists and will cause an early return below.
     let system_path = dir.join("system.md");
-    if !system_path.exists() {
+    let system_written = !system_path.exists();
+    if system_written {
         std::fs::write(&system_path, DEFAULT_SYSTEM_MD)?;
     }
 
     let config_path = dir.join("config.toml");
     if config_path.exists() {
+        let system_note = if system_written {
+            format!("system.md has been created at {}.", system_path.display())
+        } else {
+            format!("system.md is available at {}.", system_path.display())
+        };
         return Err(Error::config(format!(
-            "Config file already exists at {}. system.md has been created at {}.",
+            "Config file already exists at {}. {}",
             config_path.display(),
-            system_path.display()
+            system_note
         )));
     }
     std::fs::write(&config_path, DEFAULT_CONFIG)?;
