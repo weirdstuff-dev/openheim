@@ -44,7 +44,15 @@ impl SandboxedExecutor {
 #[async_trait]
 impl ToolExecutor for SandboxedExecutor {
     fn list_tools(&self) -> Vec<Tool> {
-        self.inner.list_tools()
+        let tools = self.inner.list_tools();
+        if self.allow_shell {
+            tools
+        } else {
+            tools
+                .into_iter()
+                .filter(|t| t.function.name != "execute_command")
+                .collect()
+        }
     }
 
     async fn execute(&self, name: &str, args_json: &str) -> Result<String> {

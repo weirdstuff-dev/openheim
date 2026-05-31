@@ -47,13 +47,13 @@ pub struct AppConfig {
     #[serde(default)]
     pub work_dir: Option<PathBuf>,
     /// Whether to expose the `execute_command` shell tool to the LLM.
-    /// Defaults to `true`. Set to `false` to disable shell access entirely.
+    /// Defaults to `false`. Set to `true` to explicitly opt in to shell access.
     #[serde(default = "default_allow_shell")]
     pub allow_shell: bool,
 }
 
 fn default_allow_shell() -> bool {
-    true
+    false
 }
 
 /// Configuration for a single MCP server connection.

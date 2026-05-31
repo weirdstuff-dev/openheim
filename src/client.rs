@@ -315,7 +315,7 @@ impl OpenheimBuilder {
     }
 
     /// Whether to expose the `execute_command` shell tool to the LLM.
-    /// Overrides `allow_shell` from the config file. Defaults to `true`.
+    /// Overrides `allow_shell` from the config file. Defaults to `false`.
     pub fn allow_shell(mut self, allow: bool) -> Self {
         self.allow_shell = Some(allow);
         self
@@ -367,7 +367,22 @@ impl OpenheimBuilder {
         }
 
         if let Some(wd) = self.work_dir {
-            app_config.work_dir = Some(wd);
+            let abs = if wd.is_absolute() {
+                wd.clone()
+            } else {
+                std::env::current_dir()
+                    .map_err(|e| {
+                        crate::error::Error::Other(format!("cannot resolve relative work_dir: {e}"))
+                    })?
+                    .join(&wd)
+            };
+            let canonical = abs.canonicalize().map_err(|e| {
+                crate::error::Error::Other(format!(
+                    "work_dir '{}' is inaccessible: {e}",
+                    wd.display()
+                ))
+            })?;
+            app_config.work_dir = Some(canonical);
         }
         if let Some(shell) = self.allow_shell {
             app_config.allow_shell = shell;
@@ -419,7 +434,7 @@ fn build_programmatic(
         mcp_servers: BTreeMap::new(),
         default_skills,
         work_dir: None,
-        allow_shell: true,
+        allow_shell: false,
     };
 
     let agent_config = AgentConfig {

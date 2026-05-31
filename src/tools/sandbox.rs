@@ -31,6 +31,19 @@ pub fn validate_path(requested: &str, work_dir: &Path) -> Result<PathBuf> {
     let check = if resolved.exists() {
         resolved.canonicalize().map_err(Error::IoError)?
     } else {
+        // Dangling symlinks look non-existent to exists(); detect them explicitly
+        // so write_file cannot create the symlink target outside the sandbox.
+        if resolved
+            .symlink_metadata()
+            .ok()
+            .is_some_and(|m| m.file_type().is_symlink())
+        {
+            return Err(Error::ToolExecutionError(format!(
+                "path '{}' is a dangling symlink (work directory: '{}')",
+                requested,
+                work_dir.display()
+            )));
+        }
         // Walk up the tree until we find an existing ancestor, canonicalize
         // that, and verify it is within the work directory.
         let mut ancestor: &Path = &resolved;
@@ -109,5 +122,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = validate_path("../../etc/passwd", dir.path()).unwrap_err();
         assert!(err.to_string().contains("outside the work directory"));
+    }
+
+    #[test]
+    fn rejects_dangling_symlink_inside_work_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("dangling_link");
+        // Point the symlink at a path that does not exist so it is dangling.
+        std::os::unix::fs::symlink("/nonexistent_target_path_12345", &link).unwrap();
+        let err = validate_path(link.to_str().unwrap(), dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("dangling symlink"),
+            "unexpected error: {err}"
+        );
     }
 }

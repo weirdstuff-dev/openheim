@@ -60,10 +60,14 @@ impl AgentState {
         let (sys_executor, mcp_statuses) =
             SystemToolExecutor::build(&app_config.mcp_servers, allow_shell).await;
         let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
-        let work_dir = app_config
-            .work_dir
-            .clone()
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let work_dir = match app_config.work_dir.clone() {
+            Some(wd) => wd,
+            None => std::env::current_dir().map_err(|e| {
+                crate::error::Error::Other(format!(
+                    "failed to determine current directory for work_dir: {e}"
+                ))
+            })?,
+        };
         Ok(Self {
             llm,
             executor,

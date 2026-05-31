@@ -175,6 +175,8 @@ impl ToolExecutor for SystemToolExecutor {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     #[test]
@@ -199,5 +201,13 @@ mod tests {
         let result = executor.execute("nonexistent_tool", "{}").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn build_without_shell_omits_execute_command() {
+        let (executor, _) = SystemToolExecutor::build(&BTreeMap::new(), false).await;
+        assert!(!executor.handlers.contains_key("execute_command"));
+        assert!(executor.handlers.contains_key("read_file"));
+        assert!(executor.handlers.contains_key("write_file"));
     }
 }
