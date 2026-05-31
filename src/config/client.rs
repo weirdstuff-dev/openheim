@@ -122,6 +122,8 @@ mod tests {
             providers,
             mcp_servers: BTreeMap::new(),
             default_skills: vec![],
+            work_dir: None,
+            allow_shell: true,
         }
     }
 

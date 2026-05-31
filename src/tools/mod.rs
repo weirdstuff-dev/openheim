@@ -52,6 +52,8 @@
 
 mod execute_command;
 mod read_file;
+pub mod sandbox;
+mod sandboxed_executor;
 mod write_file;
 
 use std::collections::{BTreeMap, HashMap};
@@ -61,6 +63,8 @@ use async_trait::async_trait;
 use crate::config::McpServerConfig;
 use crate::core::models::Tool;
 use crate::error::{Error, Result};
+
+pub use sandboxed_executor::SandboxedExecutor;
 
 #[async_trait]
 pub trait ToolHandler: Send + Sync {
@@ -107,13 +111,20 @@ impl SystemToolExecutor {
     /// Builds a fully-configured executor: registers built-in tools then connects
     /// to all configured MCP servers and registers their tools.
     ///
+    /// When `allow_shell` is `false` the `execute_command` tool is omitted so
+    /// the LLM never sees it in its tool list.
+    ///
     /// Returns the executor alongside [`McpServerStatus`] entries for each server
     /// so callers can inspect which connections succeeded.
     pub async fn build(
         mcp_configs: &BTreeMap<String, McpServerConfig>,
+        allow_shell: bool,
     ) -> (Self, Vec<crate::mcp::McpServerStatus>) {
         let mut executor = Self::new();
         executor.register_builtins();
+        if !allow_shell {
+            executor.handlers.remove("execute_command");
+        }
         let (handlers, statuses) = crate::mcp::load_mcp_tools(mcp_configs).await;
         for handler in handlers {
             executor.register(handler);
