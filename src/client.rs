@@ -240,6 +240,8 @@ pub struct OpenheimBuilder {
     max_tokens: Option<u32>,
     mcp_servers: BTreeMap<String, McpServerConfig>,
     default_skills: Vec<String>,
+    work_dir: Option<PathBuf>,
+    allow_shell: Option<bool>,
 }
 
 impl OpenheimBuilder {
@@ -304,6 +306,21 @@ impl OpenheimBuilder {
         self
     }
 
+    /// Root directory the agent is allowed to read/write.
+    /// Overrides `work_dir` from the config file. When not set, defaults to the
+    /// directory from which the process was invoked.
+    pub fn work_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.work_dir = Some(path.into());
+        self
+    }
+
+    /// Whether to expose the `execute_command` shell tool to the LLM.
+    /// Overrides `allow_shell` from the config file. Defaults to `false`.
+    pub fn allow_shell(mut self, allow: bool) -> Self {
+        self.allow_shell = Some(allow);
+        self
+    }
+
     /// Build the client, connecting to MCP servers and initialising the agent state.
     pub async fn build(self) -> Result<OpenheimClient> {
         let (agent_config, mut app_config) = if self.provider.is_some()
@@ -347,6 +364,28 @@ impl OpenheimBuilder {
         // Apply builder default_skills for the file-based path (programmatic path sets them directly)
         if !self.default_skills.is_empty() {
             app_config.default_skills = self.default_skills;
+        }
+
+        if let Some(wd) = self.work_dir {
+            let abs = if wd.is_absolute() {
+                wd.clone()
+            } else {
+                std::env::current_dir()
+                    .map_err(|e| {
+                        crate::error::Error::Other(format!("cannot resolve relative work_dir: {e}"))
+                    })?
+                    .join(&wd)
+            };
+            let canonical = abs.canonicalize().map_err(|e| {
+                crate::error::Error::Other(format!(
+                    "work_dir '{}' is inaccessible: {e}",
+                    wd.display()
+                ))
+            })?;
+            app_config.work_dir = Some(canonical);
+        }
+        if let Some(shell) = self.allow_shell {
+            app_config.allow_shell = shell;
         }
 
         let rag = RagContext::new(app_config.default_skills.clone())?;
@@ -394,6 +433,8 @@ fn build_programmatic(
         providers,
         mcp_servers: BTreeMap::new(),
         default_skills,
+        work_dir: None,
+        allow_shell: false,
     };
 
     let agent_config = AgentConfig {

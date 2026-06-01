@@ -84,6 +84,26 @@ Default models when `.model()` is omitted:
 - `"gemini"` → `gemini-2.0-flash`
 - everything else → `gpt-4o`
 
+### Security controls
+
+Two builder methods control the agent's access boundary. Both override the corresponding `config.toml` fields when set.
+
+```rust
+let client = OpenheimClient::builder()
+    .provider("openai")
+    .api_key("sk-...")
+    // Restrict file access to this directory tree
+    .work_dir("/home/user/projects/myproject")
+    // Remove the execute_command tool from the LLM's tool list entirely
+    .allow_shell(false)
+    .build()
+    .await?;
+```
+
+**`.work_dir(path)`** — sets the root directory the agent may read and write. The agent cannot access files outside this tree. Relative paths in tool arguments are resolved against this directory. Defaults to the directory from which the process was invoked when not set in the builder or config file.
+
+**`.allow_shell(bool)`** — controls whether the `execute_command` tool is exposed to the LLM. When `false` the tool is removed from the tool list entirely; the LLM never sees it and cannot request it. Defaults to `true`.
+
 ### With MCP servers
 
 MCP servers can be added in either mode. Their tools become available to the agent automatically as `{server_name}__{tool_name}`.

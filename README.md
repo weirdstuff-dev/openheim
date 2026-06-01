@@ -45,6 +45,7 @@ Openheim is built in Rust from the ground up:
 
 - **Multi-provider** — OpenAI, Anthropic Claude, Google Gemini, and any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.)
 - **Tool execution** — built-in shell, file read, and file write tools. Trait-based, so you can add your own.
+- **Agent sandboxing** — configurable work-directory boundary restricts file access to a directory tree. Shell execution can be disabled entirely via `allow_shell = false` in config or `.allow_shell(false)` in the builder.
 - **MCP (Model Context Protocol)** — connect external MCP servers (stdio or Streamable HTTP) and their tools are automatically exposed to the LLM as `{server_name}__{tool_name}`.
 - **Conversation memory** — conversations (including full tool call history) persist to disk and resume across sessions
 - **System identity** — edit `~/.openheim/system.md` to define how the agent presents itself. Required when preparing a session (created by `openheim init`).
@@ -96,6 +97,12 @@ max_iterations = 10
 
 # Skills loaded in every new session automatically (no --skills flag needed)
 # default_skills = ["rules"]
+
+# Restrict the agent to a specific directory tree (defaults to invocation directory)
+# work_dir = "/home/user/projects/myproject"
+
+# Set to false to remove the shell tool from the LLM's tool list entirely
+# allow_shell = true
 
 [providers.anthropic]
 api_base = "https://api.anthropic.com/v1"
@@ -317,6 +324,8 @@ src/
       retry.rs        Automatic retry with exponential backoff
   tools/            Tool trait, registry, and built-in tools
     execute_command.rs / read_file.rs / write_file.rs
+    sandbox.rs        Work-directory path validation
+    sandboxed_executor.rs  Per-session executor wrapper enforcing work_dir and allow_shell
   mcp/              MCP (Model Context Protocol) client integration
     client.rs       MCP server connection (stdio + Streamable HTTP)
     tool_handler.rs  Adapts MCP tools to the ToolHandler trait

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Public model info for a single provider (no credentials).
@@ -41,6 +42,18 @@ pub struct AppConfig {
     /// Skills loaded automatically in every new session (merged with --skills at runtime).
     #[serde(default)]
     pub default_skills: Vec<String>,
+    /// Root directory the agent is allowed to read/write. Defaults to the
+    /// directory from which openheim was invoked when not set.
+    #[serde(default)]
+    pub work_dir: Option<PathBuf>,
+    /// Whether to expose the `execute_command` shell tool to the LLM.
+    /// Defaults to `false`. Set to `true` to explicitly opt in to shell access.
+    #[serde(default = "default_allow_shell")]
+    pub allow_shell: bool,
+}
+
+fn default_allow_shell() -> bool {
+    false
 }
 
 /// Configuration for a single MCP server connection.
