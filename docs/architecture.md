@@ -44,10 +44,11 @@ src/
 ├── error.rs            Unified Error / Result types
 │
 ├── rag/                Retrieval-Augmented Generation utilities
-│   ├── mod.rs          RagContext — history + skills bundled together
+│   ├── mod.rs          RagContext — history + skills + system identity
 │   ├── history.rs      HistoryManager — conversation persistence
 │   ├── skills.rs       SkillsManager — Markdown skill files
-│   └── prompt.rs       PromptBuilder — injects skills as a system message
+│   ├── system.rs       SystemLoader — reads ~/.openheim/system.md
+│   └── prompt.rs       PromptBuilder — assembles structured system message
 │
 ├── tools/              Tool abstraction and built-in implementations
 │   ├── mod.rs          ToolHandler / ToolExecutor traits, SystemToolExecutor
@@ -108,8 +109,10 @@ User / Client
 │            rag::RagContext::prepare         │
 │                                             │
 │  1. Load conversation from disk (history)   │
-│  2. Load skill files by name                │
-│  3. Build PromptBuilder (system message)    │
+│  2. Load ~/.openheim/system.md (identity)   │
+│  3. Merge default_skills + session skills   │
+│  4. Load skill files by name                │
+│  5. Build PromptBuilder (system message)    │
 │                                             │
 │  Returns: (Conversation, PromptBuilder)     │
 └────────────────────┬────────────────────────┘
@@ -160,7 +163,8 @@ All persistence lives under `~/.openheim/` by default.
 
 ```
 ~/.openheim/
-├── config.toml              Agent configuration (providers, MCP servers, …)
+├── config.toml              Agent configuration (providers, MCP servers, default_skills, …)
+├── system.md                Agent identity — loaded on every session (required)
 ├── history/
 │   ├── {uuid}.json          One file per conversation
 │   └── …
@@ -169,7 +173,7 @@ All persistence lives under `~/.openheim/` by default.
     └── …
 ```
 
-`HistoryManager` reads and writes conversation JSON files. `SkillsManager` reads `.md` files from the skills directory. Both paths are configurable at construction time, which is how the test suite uses temporary directories.
+`SystemLoader` reads `system.md` on every `prepare()` call — missing file is a hard error (run `openheim init` to create it). `HistoryManager` reads and writes conversation JSON files. `SkillsManager` reads `.md` files from the skills directory. Both history and skills paths are configurable at construction time, which is how the test suite uses temporary directories.
 
 ---
 

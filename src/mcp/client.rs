@@ -42,7 +42,9 @@ impl McpClient {
             for (k, v) in &config.env {
                 cmd.env(k, v);
             }
-            let transport = TokioChildProcess::new(cmd)
+            let (transport, _) = TokioChildProcess::builder(cmd)
+                .stderr(std::process::Stdio::null())
+                .spawn()
                 .map_err(|e| Error::Other(format!("MCP spawn '{}' failed: {}", name, e)))?;
             let service = ().serve(transport).await.map_err(|e| {
                 Error::Other(format!("MCP stdio connect to '{}' failed: {}", name, e))

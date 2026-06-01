@@ -149,6 +149,9 @@ mod tests {
             theme_color: None,
             providers,
             mcp_servers: BTreeMap::new(),
+            default_skills: vec![],
+            work_dir: None,
+            allow_shell: true,
         }
     }
 
@@ -189,6 +192,9 @@ mod tests {
             theme_color: None,
             providers: BTreeMap::new(),
             mcp_servers: BTreeMap::new(),
+            default_skills: vec![],
+            work_dir: None,
+            allow_shell: true,
         };
         let err = config.resolve(None).unwrap_err();
         assert!(err.to_string().contains("nonexistent"));

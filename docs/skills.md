@@ -1,10 +1,33 @@
-# Skills
+# Skills & Agent Identity
 
-Skills are Markdown files that inject system-level instructions into every LLM request in a session. They let you shape the agent's behaviour — tone, domain expertise, constraints, output format — without touching code or configuration.
+This document covers two related concepts:
+
+- **System identity** (`~/.openheim/system.md`) — the agent's base character, loaded on every session.
+- **Skills** (`~/.openheim/skills/*.md`) — domain-specific instructions injected on demand.
 
 ---
 
-## Where skills live
+## Agent Identity (`system.md`)
+
+`~/.openheim/system.md` defines who the agent is. It is loaded at the start of every session and is **required** — openheim will error on startup if the file is missing.
+
+Run `openheim init` to create it with a default starting point, then edit it to match how you want the agent to behave:
+
+```markdown
+You are a senior software engineer specialising in Rust and distributed systems.
+You write clean, idiomatic code and prefer simple solutions over clever ones.
+Ask clarifying questions before making large changes.
+```
+
+The identity is placed at the top of the system message, before any skills.
+
+---
+
+## Skills
+
+Skills are Markdown files that inject domain-specific instructions into the system prompt. They let you shape the agent's behaviour — tone, domain expertise, constraints, output format — without touching code or configuration.
+
+### Where skills live
 
 Skills are stored as `.md` files in `~/.openheim/skills/`:
 
@@ -19,23 +42,32 @@ The filename (without extension) is the skill name. Names are case-sensitive and
 
 ---
 
-## How they work
+## How the system message is assembled
 
-When a session starts with one or more skills, `SkillsManager` reads each file and passes the content to `PromptBuilder`. Before each LLM call, the builder prepends a single system message containing all active skills, joined by `---` separators:
+When a session has an identity and skills, the LLM receives a single system message structured like this:
 
 ```
-[System message]
-## Skill: rust
-
-You are an expert Rust programmer. Always prefer idiomatic Rust…
+You are a general purpose multiprovider LLM agent.
 
 ---
 
-## Skill: tdd
+The user has given you the following identity:
 
-Write tests first. Every function should have at least one test…
+<system.md content>
 
-[Conversation history follows]
+---
+
+These are the skills you have mastered:
+
+### rust
+
+<rust.md content>
+
+---
+
+### tdd
+
+<tdd.md content>
 ```
 
 The system message is reconstructed on every LLM call in the session, so it is always present regardless of how long the conversation runs.
@@ -72,21 +104,23 @@ This skill is about systems programming. The assistant knows Rust and C.
 
 ## Enabling skills
 
-### Via CLI
+### Default skills (loaded every session)
+
+Set `default_skills` in `~/.openheim/config.toml` to load skills automatically in every new session — no `--skills` flag needed:
+
+```toml
+default_skills = ["rules", "concise"]
+```
+
+Default skills are merged with any per-session skills. Duplicates are deduplicated; defaults always appear first.
+
+### Per-session via CLI
 
 Pass `--skills` as a comma-separated list of skill names:
 
 ```bash
 openheim --skills rust,tdd
 openheim run --skills concise "Summarise the project structure"
-```
-
-### Via configuration
-
-Set skills globally in `~/.openheim/config.toml` so they apply to every session:
-
-```toml
-skills = ["rust", "concise"]
 ```
 
 ### Via the Rust library
@@ -108,9 +142,6 @@ Skills are persisted in the conversation metadata (`ConversationMeta.skills`), s
 ## Listing available skills
 
 ```bash
-# CLI
-openheim --skills ""   # lists available skills on startup (TUI)
-
 # API (REST when running openheim serve)
 curl http://localhost:1217/api/skills
 # → ["concise","rust","tdd"]
@@ -125,7 +156,15 @@ let skills = client.rag().skills.list_skills()?;
 
 ---
 
-## Example skills
+## Example files
+
+### `~/.openheim/system.md`
+
+```markdown
+You are a pragmatic software engineer who writes clean, well-tested code.
+You prefer simple solutions and always consider the maintenance burden of your suggestions.
+When you are uncertain, say so rather than guessing.
+```
 
 ### `~/.openheim/skills/concise.md`
 

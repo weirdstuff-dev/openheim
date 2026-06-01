@@ -3,7 +3,7 @@
 Openheim loads its configuration from `~/.openheim/config.toml`. Generate a default file with:
 
 ```bash
-cargo run -- init
+openheim init
 ```
 
 ---
@@ -14,12 +14,30 @@ cargo run -- init
 |---|---|---|---|
 | `default_provider` | string | — | Provider to use when no `--model` override is given (must match a key under `[providers]`) |
 | `max_iterations` | integer | `10` | Maximum number of agent loop iterations per prompt before stopping |
+| `default_skills` | string[] | `[]` | Skills loaded automatically in every new session. Merged with per-session `--skills`; defaults appear first, duplicates removed. |
 | `theme_color` | string | `"white"` | TUI accent color. Valid values: `white`, `gray`, `blue`, `cyan`, `magenta`, `green`, `yellow`, `red`, `pink`. Can also be changed at runtime with `:theme` |
+| `work_dir` | path | cwd at invocation | Root directory the agent is allowed to read and write. The agent cannot access files outside this tree. When unset, defaults to the directory from which openheim was invoked. |
+| `allow_shell` | boolean | `true` | Whether to expose the `execute_command` shell tool to the LLM. Set to `false` to remove the tool entirely — the LLM will not see it in its tool list. |
 
 ```toml
 default_provider = "anthropic"
 max_iterations = 20
+
+# Always load these skills without passing --skills each time
+default_skills = ["rules", "concise"]
+
+# Restrict the agent to a specific directory tree
+work_dir = "/home/user/projects/myproject"
+
+# Disable shell command execution
+allow_shell = false
 ```
+
+### Security notes
+
+**`work_dir`** is enforced at the application layer for `read_file` and `write_file`. Symlinks are followed and canonicalized so they cannot be used to escape the boundary. Shell commands (`execute_command`) are launched with `work_dir` as their working directory so relative paths resolve correctly, but absolute paths inside a shell command are not blocked — OS-level sandboxing (chroot, containers) is required for full shell isolation.
+
+**`allow_shell`** removes `execute_command` from the tool list sent to the LLM. When `false`, the LLM never sees the tool and cannot request it.
 
 ---
 
@@ -110,6 +128,12 @@ The `name` key is sanitized when building tool names: hyphens and spaces become 
 ```toml
 default_provider = "anthropic"
 max_iterations = 15
+
+# Restrict the agent to this directory tree
+work_dir = "/home/user/projects/myproject"
+
+# Disable shell command access
+allow_shell = false
 
 [providers.anthropic]
 api_base = "https://api.anthropic.com/v1"

@@ -76,7 +76,7 @@ enum WsOutbound {
 pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
     let app_config = load_config()?;
     let agent_config = app_config.resolve(None)?;
-    let rag = RagContext::new()?;
+    let rag = RagContext::new(app_config.default_skills.clone())?;
     let state = Arc::new(AgentState::new(agent_config, app_config, rag).await?);
 
     let cors = CorsLayer::new()

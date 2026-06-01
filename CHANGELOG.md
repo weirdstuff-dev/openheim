@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.3.0] - 2026-06-01
+
+### Added
+
+- **System identity (`system.md`)** — `~/.openheim/system.md` defines the agent's base identity and is injected into the system prompt on every session. `openheim init` creates a default file. The prompt is now structured: identity block first, then skills, separated by clear section headers.
+- **`default_skills` in config** — new `default_skills` array in `config.toml` auto-loads a set of skills into every session without passing `--skills` each time. Per-session skills are merged on top; duplicates are removed with defaults appearing first.
+- **`default_skills` in `OpenheimBuilder`** — `.default_skills(vec![...])` builder method brings the same control to programmatic embeddings.
+- **Work-directory sandbox** — new `work_dir` field in `config.toml` restricts `read_file` and `write_file` to a directory tree. When unset, the directory from which openheim is invoked is used. Symlinks are followed and canonicalized so they cannot be used to escape the boundary.
+- **Shell access control** — new `allow_shell` boolean in `config.toml` (default `true`). When `false`, the `execute_command` tool is removed from the tool list entirely — the LLM never sees it and cannot request it.
+- **Builder methods for security controls** — `OpenheimClient::builder()` gains `.work_dir(path)` and `.allow_shell(bool)`. Both override the corresponding config-file values.
+- **Cross-compilation config** — `Cross.toml` added for building Linux targets from macOS.
+
+### Fixed
+
+- **MCP subprocess stderr suppression** — stderr from spawned MCP server processes no longer leaks into the terminal.
+- **`run` command exits cleanly** — the process now exits after a headless `openheim run` prompt completes instead of hanging.
+- **`merge_skills` deduplication** — skills within the `default_skills` list itself are now deduplicated, not just across the default/session boundary.
+- **Whitespace preserved in system identity** — leading and trailing whitespace in `system.md` content is preserved when building the system prompt.
+- **Accurate `init` error message** — `openheim init` now correctly reports whether `system.md` was created when the config already exists.
+
+### Breaking changes (library)
+
+- `AppConfig` gained two new public fields: `work_dir: Option<PathBuf>` and `allow_shell: bool`. Code constructing `AppConfig` via struct literal (rather than TOML or the builder) must now supply these fields. Both have serde defaults so TOML loading is unaffected.
+- `SystemToolExecutor::build` takes an additional `allow_shell: bool` argument.
+
 ## [0.2.1] - 2026-05-28
 
 ### Added

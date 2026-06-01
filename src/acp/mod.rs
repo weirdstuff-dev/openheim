@@ -31,7 +31,7 @@ use crate::{
     error::{Error, Result},
     llm::LlmClient,
     rag::RagContext,
-    tools::{SystemToolExecutor, ToolExecutor},
+    tools::{SandboxedExecutor, SystemToolExecutor, ToolExecutor},
 };
 
 use session::SessionState;
@@ -45,6 +45,10 @@ pub struct AgentState {
     pub app_config: AppConfig,
     pub rag: RagContext,
     pub mcp_statuses: Vec<crate::mcp::McpServerStatus>,
+    /// Resolved work directory used as the sandbox boundary for every session.
+    pub work_dir: PathBuf,
+    /// Whether shell command execution is enabled for the LLM.
+    pub allow_shell: bool,
     sessions: Sessions,
 }
 
@@ -52,8 +56,18 @@ impl AgentState {
     pub async fn new(config: AgentConfig, app_config: AppConfig, rag: RagContext) -> Result<Self> {
         let http_client = build_http_client(config.timeout_secs)?;
         let llm = create_client(&config, &http_client);
-        let (sys_executor, mcp_statuses) = SystemToolExecutor::build(&app_config.mcp_servers).await;
+        let allow_shell = app_config.allow_shell;
+        let (sys_executor, mcp_statuses) =
+            SystemToolExecutor::build(&app_config.mcp_servers, allow_shell).await;
         let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
+        let work_dir = match app_config.work_dir.clone() {
+            Some(wd) => wd,
+            None => std::env::current_dir().map_err(|e| {
+                crate::error::Error::Other(format!(
+                    "failed to determine current directory for work_dir: {e}"
+                ))
+            })?,
+        };
         Ok(Self {
             llm,
             executor,
@@ -61,6 +75,8 @@ impl AgentState {
             app_config,
             rag,
             mcp_statuses,
+            work_dir,
+            allow_shell,
             sessions: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -162,9 +178,14 @@ impl AgentState {
             } else {
                 self.llm.clone()
             };
+            let sandboxed = Arc::new(SandboxedExecutor::new(
+                self.executor.clone(),
+                self.work_dir.clone(),
+                self.allow_shell,
+            )) as Arc<dyn ToolExecutor>;
             (
                 llm,
-                self.executor.clone(),
+                sandboxed,
                 s.config.clone(),
                 s.chat_id,
                 s.skills.clone(),

@@ -7,6 +7,18 @@ default_provider = "openai"
 # Maximum number of agent iterations (can be overridden with --max-iterations)
 max_iterations = 10
 
+# Skills loaded automatically in every new session (no --skills flag needed).
+# Add skill names matching files in ~/.openheim/skills/{name}.md
+# default_skills = ["rules"]
+
+# Root directory the agent is allowed to read/write.
+# When unset the directory from which openheim is invoked is used.
+# work_dir = "/home/user/projects/myproject"
+
+# Whether to allow the LLM to execute shell commands via the execute_command tool.
+# Set to false to remove the tool from the LLM's view entirely.
+# allow_shell = true
+
 # --- Provider Configuration ---
 #
 # The provider name determines which API client is used:
