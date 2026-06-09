@@ -31,7 +31,8 @@ use crate::{
     error::{Error, Result},
     llm::LlmClient,
     rag::RagContext,
-    tools::{SandboxedExecutor, SystemToolExecutor, ToolExecutor},
+    subagents::SubagentLoader,
+    tools::{SandboxedExecutor, SystemToolExecutor, ToolExecutor, with_delegation},
 };
 
 use session::SessionState;
@@ -57,9 +58,6 @@ impl AgentState {
         let http_client = build_http_client(config.timeout_secs)?;
         let llm = create_client(&config, &http_client);
         let allow_shell = app_config.allow_shell;
-        let (sys_executor, mcp_statuses) =
-            SystemToolExecutor::build(&app_config.mcp_servers, allow_shell).await;
-        let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
         let work_dir = match app_config.work_dir.clone() {
             Some(wd) => wd,
             None => std::env::current_dir().map_err(|e| {
@@ -68,6 +66,21 @@ impl AgentState {
                 ))
             })?,
         };
+        let (sys_executor, mcp_statuses) =
+            SystemToolExecutor::build(&app_config.mcp_servers, allow_shell).await;
+        let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
+
+        let profiles = SubagentLoader::new()?.load()?;
+        let executor = with_delegation(
+            executor,
+            work_dir.clone(),
+            allow_shell,
+            profiles,
+            llm.clone(),
+            app_config.clone(),
+            config.clone(),
+        );
+
         Ok(Self {
             llm,
             executor,
