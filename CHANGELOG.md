@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Subagents** — drop a Markdown profile in `~/.openheim/agents/{name}.md` (optional `+++`-delimited TOML frontmatter for `description`, `model`, `provider`, `tools`, `max_iterations`, mirroring how skills work) and the agent gains a `delegate_task` tool for handing off self-contained work to it. Each delegation runs an isolated agent loop — its own message history, persona, and optionally its own model/provider and restricted tool set — sandboxed identically to the parent, and returns only the subagent's final answer. See `docs/subagents.md`.
+
 ## [0.3.0] - 2026-06-01
 
 ### Added

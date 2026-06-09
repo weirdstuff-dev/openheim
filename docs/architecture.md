@@ -50,11 +50,17 @@ src/
 │   ├── system.rs       SystemLoader — reads ~/.openheim/system.md
 │   └── prompt.rs       PromptBuilder — assembles structured system message
 │
+├── subagents/          Subagent profiles — delegated, isolated agent personas
+│   └── mod.rs          AgentProfile, SubagentLoader — Markdown files in ~/.openheim/agents/
+│
 ├── tools/              Tool abstraction and built-in implementations
 │   ├── mod.rs          ToolHandler / ToolExecutor traits, SystemToolExecutor
 │   ├── execute_command.rs
 │   ├── read_file.rs
-│   └── write_file.rs
+│   ├── write_file.rs
+│   ├── sandboxed_executor.rs  SandboxedExecutor — work_dir / allow_shell boundary
+│   ├── scoped_executor.rs     ScopedExecutor — tool-name allowlist wrapper
+│   └── delegate.rs            DelegateTool, with_delegation — delegate_task tool
 │
 ├── mcp/                Model Context Protocol client
 │   ├── mod.rs          load_mcp_tools(), McpServerStatus
