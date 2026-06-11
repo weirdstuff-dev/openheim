@@ -117,13 +117,13 @@ impl AgentState {
         Ok(session_key)
     }
 
-    pub async fn acp_update_session_model(
+    /// Swaps a live session's [`AgentConfig`], returning its `(provider, model)`.
+    /// Shared by the two public model-switch entry points below.
+    async fn apply_session_config(
         &self,
         session_id: &str,
-        provider: &str,
-        model: &str,
+        new_config: AgentConfig,
     ) -> Result<(String, String)> {
-        let new_config = self.app_config.resolve_with_provider(provider, model)?;
         let provider_name = new_config.provider_name.clone();
         let model_name = new_config.model.clone();
         let mut sessions = self.sessions.write().await;
@@ -134,20 +134,23 @@ impl AgentState {
         Ok((provider_name, model_name))
     }
 
+    pub async fn acp_update_session_model(
+        &self,
+        session_id: &str,
+        provider: &str,
+        model: &str,
+    ) -> Result<(String, String)> {
+        let new_config = self.app_config.resolve_with_provider(provider, model)?;
+        self.apply_session_config(session_id, new_config).await
+    }
+
     pub async fn acp_set_session_model(
         &self,
         session_id: &str,
         model_id: &str,
     ) -> Result<(String, String)> {
         let new_config = self.app_config.resolve(Some(model_id))?;
-        let provider_name = new_config.provider_name.clone();
-        let model_name = new_config.model.clone();
-        let mut sessions = self.sessions.write().await;
-        let s = sessions
-            .get_mut(session_id)
-            .ok_or_else(|| Error::Other(format!("session not found: {session_id}")))?;
-        s.config = new_config;
-        Ok((provider_name, model_name))
+        self.apply_session_config(session_id, new_config).await
     }
 
     pub fn session_model_state(&self, current_model: &str) -> SessionModelState {
@@ -183,14 +186,7 @@ impl AgentState {
             let s = sessions
                 .get(session_id)
                 .ok_or_else(|| Error::Other(format!("session not found: {session_id}")))?;
-            let llm = if s.config.provider_name != self.config.provider_name
-                || s.config.model != self.config.model
-            {
-                let http_client = crate::config::build_http_client(s.config.timeout_secs)?;
-                crate::config::create_client(&s.config, &http_client)
-            } else {
-                self.llm.clone()
-            };
+            let llm = crate::config::client_for_config(&s.config, &self.config, &self.llm)?;
             let sandboxed = Arc::new(SandboxedExecutor::new(
                 self.executor.clone(),
                 self.work_dir.clone(),

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::config::{AgentConfig, AppConfig, build_http_client, create_client};
+use crate::config::{AgentConfig, AppConfig, client_for_config};
 use crate::core::agent::run_agent_with_history;
 use crate::core::llm::LlmClient;
 use crate::core::models::{FunctionDefinition, Message, Tool};
@@ -89,14 +89,7 @@ impl DelegateTool {
             None => config,
         };
 
-        let llm = if config.provider_name == self.base_config.provider_name
-            && config.model == self.base_config.model
-        {
-            self.llm.clone()
-        } else {
-            let http_client = build_http_client(config.timeout_secs)?;
-            create_client(&config, &http_client)
-        };
+        let llm = client_for_config(&config, &self.base_config, &self.llm)?;
 
         Ok((config, llm))
     }
