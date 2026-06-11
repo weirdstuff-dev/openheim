@@ -94,7 +94,17 @@ impl SubagentLoader {
             let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            let content = std::fs::read_to_string(&path)?;
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(
+                        file = %path.display(),
+                        error = %e,
+                        "Skipping unreadable subagent profile"
+                    );
+                    continue;
+                }
+            };
             match parse_profile(name, &content) {
                 Ok(profile) => profiles.push(profile),
                 Err(e) => tracing::warn!(
