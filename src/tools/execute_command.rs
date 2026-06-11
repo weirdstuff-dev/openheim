@@ -1,5 +1,7 @@
 //! Built-in tool: `execute_command` — runs a shell command and returns its output.
 
+use std::path::Path;
+
 use async_trait::async_trait;
 use serde_json::json;
 use tokio::process::Command;
@@ -8,6 +10,49 @@ use crate::core::models::{FunctionDefinition, Tool};
 use crate::error::{Error, Result};
 
 use super::ToolHandler;
+
+/// Runs `command` via the platform shell (`sh -c` on Unix, `cmd /C` on Windows),
+/// optionally pinned to `cwd`. Returns stdout on success, or an error carrying
+/// the combined stdout+stderr diagnostic on a non-zero exit.
+///
+/// Single source of truth for the `execute_command` behaviour, shared by
+/// [`ExecuteCommandTool`] and [`crate::tools::SandboxedExecutor`] (which passes
+/// the work directory as `cwd` so relative paths resolve inside the sandbox).
+pub(crate) async fn run_command(command: &str, cwd: Option<&Path>) -> Result<String> {
+    #[cfg(target_family = "unix")]
+    let mut cmd = {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(command);
+        c
+    };
+    #[cfg(target_family = "windows")]
+    let mut cmd = {
+        let mut c = Command::new("cmd");
+        c.arg("/C").arg(command);
+        c
+    };
+
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| Error::ToolExecutionError(format!("Failed to execute command: {}", e)))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if output.status.success() {
+        Ok(stdout)
+    } else {
+        Err(Error::ToolExecutionError(format!(
+            "Command failed:\nStdout: {}\nStderr: {}",
+            stdout, stderr
+        )))
+    }
+}
 
 /// Executes an arbitrary shell command and returns stdout on success, or a
 /// combined stdout+stderr diagnostic string on failure.
@@ -47,36 +92,7 @@ impl ToolHandler for ExecuteCommandTool {
             .as_str()
             .ok_or_else(|| Error::ParseError("Missing 'command' argument".to_string()))?;
 
-        #[cfg(target_family = "unix")]
-        let mut cmd = {
-            let mut c = Command::new("sh");
-            c.arg("-c").arg(command);
-            c
-        };
-
-        #[cfg(target_family = "windows")]
-        let mut cmd = {
-            let mut c = Command::new("cmd");
-            c.arg("/C").arg(command);
-            c
-        };
-
-        let output = cmd
-            .output()
-            .await
-            .map_err(|e| Error::ToolExecutionError(format!("Failed to execute command: {}", e)))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if output.status.success() {
-            Ok(stdout)
-        } else {
-            Err(Error::ToolExecutionError(format!(
-                "Command failed:\nStdout: {}\nStderr: {}",
-                stdout, stderr
-            )))
-        }
+        run_command(command, None).await
     }
 }
 

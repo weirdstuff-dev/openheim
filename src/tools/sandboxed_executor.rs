@@ -3,13 +3,15 @@
 use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
-use tokio::{fs, process::Command};
 
 use crate::{
     core::models::Tool,
     error::{Error, Result},
 };
 
+use super::execute_command::run_command;
+use super::read_file::read_file;
+use super::write_file::write_file;
 use super::{ToolExecutor, sandbox::validate_path};
 
 /// Wraps an inner [`ToolExecutor`] and enforces a work-directory boundary.
@@ -64,10 +66,7 @@ impl ToolExecutor for SandboxedExecutor {
                     .as_str()
                     .ok_or_else(|| Error::ParseError("missing 'path' argument".to_string()))?;
                 let validated = validate_path(path, &self.work_dir)?;
-                let content = fs::read_to_string(&validated)
-                    .await
-                    .map_err(Error::IoError)?;
-                Ok(content)
+                read_file(&validated).await
             }
 
             "write_file" => {
@@ -80,15 +79,7 @@ impl ToolExecutor for SandboxedExecutor {
                     .as_str()
                     .ok_or_else(|| Error::ParseError("missing 'content' argument".to_string()))?;
                 let validated = validate_path(path, &self.work_dir)?;
-                if let Some(parent) = validated.parent()
-                    && !parent.as_os_str().is_empty()
-                {
-                    fs::create_dir_all(parent).await.map_err(Error::IoError)?;
-                }
-                fs::write(&validated, content)
-                    .await
-                    .map_err(Error::IoError)?;
-                Ok(format!("Successfully wrote to {}", validated.display()))
+                write_file(&validated, content).await
             }
 
             "execute_command" => {
@@ -103,36 +94,7 @@ impl ToolExecutor for SandboxedExecutor {
                     .as_str()
                     .ok_or_else(|| Error::ParseError("missing 'command' argument".to_string()))?;
 
-                #[cfg(target_family = "unix")]
-                let mut cmd = {
-                    let mut c = Command::new("sh");
-                    c.arg("-c").arg(command);
-                    c
-                };
-                #[cfg(target_family = "windows")]
-                let mut cmd = {
-                    let mut c = Command::new("cmd");
-                    c.arg("/C").arg(command);
-                    c
-                };
-
-                cmd.current_dir(&*self.work_dir);
-
-                let output = cmd.output().await.map_err(|e| {
-                    Error::ToolExecutionError(format!("failed to execute command: {}", e))
-                })?;
-
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-                if output.status.success() {
-                    Ok(stdout)
-                } else {
-                    Err(Error::ToolExecutionError(format!(
-                        "Command failed:\nStdout: {}\nStderr: {}",
-                        stdout, stderr
-                    )))
-                }
+                run_command(command, Some(&self.work_dir)).await
             }
 
             _ => self.inner.execute(name, args_json).await,
