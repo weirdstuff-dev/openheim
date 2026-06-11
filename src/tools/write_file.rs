@@ -10,6 +10,22 @@ use crate::error::{Error, Result};
 
 use super::ToolHandler;
 
+/// Writes `content` to `path`, creating any missing parent directories, and
+/// returns a success message naming the file.
+///
+/// Single source of truth for the `write_file` behaviour, shared by
+/// [`WriteFileTool`] and [`crate::tools::SandboxedExecutor`] (which calls this
+/// after validating the path against the work-directory boundary).
+pub(crate) async fn write_file(path: &Path, content: &str) -> Result<String> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).await.map_err(Error::IoError)?;
+    }
+    fs::write(path, content).await.map_err(Error::IoError)?;
+    Ok(format!("Successfully wrote to {}", path.display()))
+}
+
 /// Writes content to a file at the given path, creating any missing parent directories.
 ///
 /// Creates the file if it does not exist; overwrites it if it does.
@@ -52,14 +68,7 @@ impl ToolHandler for WriteFileTool {
             .as_str()
             .ok_or_else(|| Error::ParseError("Missing 'content' argument".to_string()))?;
 
-        if let Some(parent) = Path::new(path).parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent).await.map_err(Error::IoError)?;
-        }
-
-        fs::write(path, content).await.map_err(Error::IoError)?;
-        Ok(format!("Successfully wrote to {}", path))
+        write_file(Path::new(path), content).await
     }
 }
 

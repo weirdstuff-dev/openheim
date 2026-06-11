@@ -3,6 +3,7 @@ mod gemini;
 mod openai;
 mod openai_compatible;
 mod retry;
+mod sse;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;

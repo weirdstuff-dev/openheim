@@ -59,6 +59,7 @@ pub mod core;
 pub mod error;
 pub mod mcp;
 pub mod rag;
+pub mod subagents;
 pub mod tools;
 pub mod transport;
 pub mod tui;

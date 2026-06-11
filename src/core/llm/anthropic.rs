@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use crate::core::models::{Choice, FunctionCall, Message, Role, Tool, ToolCall};
 use crate::error::{Error, Result};
 
+use super::sse::SseDecoder;
 use super::{LlmChunk, LlmClient};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -381,7 +382,7 @@ impl LlmClient for AnthropicClient {
         }
 
         // Parse SSE stream.
-        let mut buf = String::new();
+        let mut decoder = SseDecoder::new();
         let mut current_block_type: Option<String> = None;
         let mut current_tool_id: Option<String> = None;
         let mut current_tool_name: Option<String> = None;
@@ -392,22 +393,14 @@ impl LlmClient for AnthropicClient {
 
         let mut response = response;
         while let Some(chunk) = response.chunk().await.map_err(Error::ReqwestError)? {
-            buf.push_str(&String::from_utf8_lossy(&chunk));
+            decoder.feed(&chunk);
 
-            while let Some(nl_pos) = buf.find('\n') {
-                let line = buf[..nl_pos].trim_end_matches('\r').to_string();
-                buf.drain(..=nl_pos);
-
-                let data = match line.strip_prefix("data: ") {
-                    Some(d) => d.trim(),
-                    None => continue,
-                };
-
+            while let Some(data) = decoder.next_payload() {
                 if data == "[DONE]" || data.is_empty() {
                     continue;
                 }
 
-                let event: Value = match serde_json::from_str(data) {
+                let event: Value = match serde_json::from_str(&data) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
