@@ -50,10 +50,12 @@
 //! }
 //! ```
 
+pub mod delegate;
 mod execute_command;
 mod read_file;
 pub mod sandbox;
 mod sandboxed_executor;
+mod scoped_executor;
 mod write_file;
 
 use std::collections::{BTreeMap, HashMap};
@@ -64,7 +66,9 @@ use crate::config::McpServerConfig;
 use crate::core::models::Tool;
 use crate::error::{Error, Result};
 
+pub use delegate::{DELEGATE_TOOL_NAME, DelegateTool, with_delegation};
 pub use sandboxed_executor::SandboxedExecutor;
+pub use scoped_executor::ScopedExecutor;
 
 #[async_trait]
 pub trait ToolHandler: Send + Sync {

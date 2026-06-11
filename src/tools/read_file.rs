@@ -1,5 +1,7 @@
 //! Built-in tool: `read_file` — reads a file from disk and returns its contents.
 
+use std::path::Path;
+
 use async_trait::async_trait;
 use serde_json::json;
 use tokio::fs;
@@ -8,6 +10,15 @@ use crate::core::models::{FunctionDefinition, Tool};
 use crate::error::{Error, Result};
 
 use super::ToolHandler;
+
+/// Reads `path` and returns its UTF-8 contents.
+///
+/// Single source of truth for the `read_file` behaviour, shared by
+/// [`ReadFileTool`] and [`crate::tools::SandboxedExecutor`] (which calls this
+/// after validating the path against the work-directory boundary).
+pub(crate) async fn read_file(path: &Path) -> Result<String> {
+    fs::read_to_string(path).await.map_err(Error::IoError)
+}
 
 /// Reads a file at the given path and returns its UTF-8 contents.
 ///
@@ -45,8 +56,7 @@ impl ToolHandler for ReadFileTool {
             .as_str()
             .ok_or_else(|| Error::ParseError("Missing 'path' argument".to_string()))?;
 
-        let content = fs::read_to_string(path).await.map_err(Error::IoError)?;
-        Ok(content)
+        read_file(Path::new(path)).await
     }
 }
 

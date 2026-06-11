@@ -7,6 +7,7 @@ use crate::core::models::{
 };
 use crate::error::{Error, Result};
 
+use super::sse::SseDecoder;
 use super::{LlmChunk, LlmClient};
 
 #[derive(Clone)]
@@ -131,35 +132,22 @@ pub(super) async fn send_openai_style_streaming(
     let mut text_buf = String::new();
     let mut tool_acc: Vec<ToolCallAcc> = Vec::new();
     let mut finish_reason: Option<String> = None;
-    let mut line_buf = String::new();
+    let mut decoder = SseDecoder::new();
     let mut done = false;
 
     while !done {
         let Some(bytes) = response.chunk().await.map_err(Error::ReqwestError)? else {
             break;
         };
-        line_buf.push_str(&String::from_utf8_lossy(&bytes));
+        decoder.feed(&bytes);
 
-        loop {
-            let Some(pos) = line_buf.find('\n') else {
-                break;
-            };
-            let line = line_buf[..pos].trim_end_matches('\r').to_string();
-            line_buf.drain(..=pos);
-
-            if line.is_empty() || line.starts_with(':') {
-                continue;
-            }
-            let Some(data) = line.strip_prefix("data: ") else {
-                continue;
-            };
-
+        while let Some(data) = decoder.next_payload() {
             if data == "[DONE]" {
                 done = true;
                 break;
             }
 
-            let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(&data) else {
                 continue;
             };
 

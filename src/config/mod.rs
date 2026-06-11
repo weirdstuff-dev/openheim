@@ -2,7 +2,7 @@ mod client;
 mod resolve;
 mod types;
 
-pub use client::{build_http_client, create_client, resolve_client_and_config};
+pub use client::{build_http_client, client_for_config, create_client};
 pub use types::{
     AgentConfig, AppConfig, McpServerConfig, ModelsInfo, ProviderConfig, ProviderModels,
 };

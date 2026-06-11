@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.0] - 2026-06-11
+
+### Added
+
+- **Subagents** — drop a Markdown profile in `~/.openheim/agents/{name}.md` (optional `+++`-delimited TOML frontmatter for `description`, `model`, `provider`, `tools`, `max_iterations`, mirroring how skills work) and the agent gains a `delegate_task` tool for handing off self-contained work to it. Each delegation runs an isolated agent loop — its own message history, persona, and optionally its own model/provider and restricted tool set — sandboxed identically to the parent, and returns only the subagent's final answer. See `docs/subagents.md`.
+
+### Fixed
+
+- **Streaming requests are now retried** — `RetryClient` previously only retried non-streaming `send` calls, so the interactive (streaming) path got no retry on transient failures. Streaming calls are now retried with the same exponential backoff, but only while it is still safe — before the first chunk reaches the caller. Once tokens have been forwarded, a mid-stream failure is returned as-is rather than replayed.
+
+### Breaking changes (library)
+
+- Removed `config::resolve_client_and_config` (unused outside its own tests). Its "reuse the client unless the provider/model changed" logic is now exposed as `config::client_for_config(target, baseline, baseline_llm)`.
+
 ## [0.3.0] - 2026-06-01
 
 ### Added

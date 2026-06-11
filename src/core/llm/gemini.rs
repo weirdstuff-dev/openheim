@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use crate::core::models::{Choice, FunctionCall, Message, Role, Tool, ToolCall};
 use crate::error::{Error, Result};
 
+use super::sse::SseDecoder;
 use super::{LlmChunk, LlmClient};
 
 #[derive(Clone)]
@@ -388,26 +389,13 @@ impl LlmClient for GeminiClient {
         let mut text_buf = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut finish_reason: Option<String> = None;
-        let mut line_buf = String::new();
+        let mut decoder = SseDecoder::new();
 
         while let Some(bytes) = response.chunk().await.map_err(Error::ReqwestError)? {
-            line_buf.push_str(&String::from_utf8_lossy(&bytes));
+            decoder.feed(&bytes);
 
-            loop {
-                let Some(pos) = line_buf.find('\n') else {
-                    break;
-                };
-                let line = line_buf[..pos].trim_end_matches('\r').to_string();
-                line_buf.drain(..=pos);
-
-                if line.is_empty() || line.starts_with(':') {
-                    continue;
-                }
-                let Some(data) = line.strip_prefix("data: ") else {
-                    continue;
-                };
-
-                let Ok(event) = serde_json::from_str::<GeminiResponse>(data) else {
+            while let Some(data) = decoder.next_payload() {
+                let Ok(event) = serde_json::from_str::<GeminiResponse>(&data) else {
                     continue;
                 };
 

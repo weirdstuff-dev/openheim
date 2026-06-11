@@ -11,6 +11,7 @@
 
 - [Library Usage](library.md)
 - [Skills](skills.md)
+- [Subagents](subagents.md)
 - [Deployment](deployment.md)
 
 ---
