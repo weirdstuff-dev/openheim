@@ -200,7 +200,7 @@ impl LlmClient for MyCustomProvider {
 
 ### 4. Wrap with `RetryClient` (optional but recommended)
 
-`RetryClient` wraps any `LlmClient` and retries on transient errors (rate limits, 5xx, network timeouts) with exponential backoff:
+`RetryClient` wraps any `LlmClient` and retries on transient errors (rate limits, 5xx, network timeouts) with exponential backoff. Non-streaming `send` calls are retried up to three times; streaming `send_streaming` calls are retried only while it is still safe — i.e. before your provider has emitted the first chunk to the caller. Once the first token has been forwarded, a mid-stream failure is returned as-is rather than replayed (which would duplicate output):
 
 ```rust
 use openheim::llm::RetryClient;
