@@ -297,6 +297,14 @@ pub enum StreamEvent {
         final_response: String,
         iterations: usize,
     },
+    /// `message` was just appended to the turn's message history (mirrors
+    /// exactly what `run_agent_loop` pushed onto its `messages` argument).
+    /// Fired for every assistant and tool-result message, not just the final
+    /// response — a caller that wants to persist history incrementally
+    /// (rather than only once the whole turn completes) can checkpoint here
+    /// instead of reconstructing message content from the other event types.
+    #[serde(rename = "message_appended")]
+    MessageAppended { message: Message },
 }
 
 #[cfg(test)]

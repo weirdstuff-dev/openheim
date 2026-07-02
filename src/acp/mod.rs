@@ -40,7 +40,7 @@ use crate::{
     },
     error::{Error, Result},
     llm::LlmClient,
-    rag::RagContext,
+    rag::{Conversation, RagContext},
     subagents::SubagentLoader,
     tools::{
         SandboxedExecutor, ScopedExecutor, SystemToolExecutor, ToolExecutor, ToolHandler,
@@ -262,6 +262,22 @@ impl AgentState {
         SessionModelState::new(current_model.to_string(), available_models)
     }
 
+    /// Persists `conv`'s full current state off the async runtime thread,
+    /// logging (not propagating) any failure — history durability is
+    /// best-effort and must never fail a turn that otherwise succeeded.
+    /// `context` is folded into the warning log line to identify which of
+    /// this method's call sites failed.
+    async fn persist_conversation(&self, conv: &Conversation, context: &str) {
+        let history = self.rag.history.clone();
+        let conv = conv.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || history.save_conversation(&conv))
+            .await
+            .unwrap_or_else(|e| Err(Error::from(e)))
+        {
+            tracing::warn!("failed to {context}: {e}");
+        }
+    }
+
     /// Runs one prompt turn to completion and returns why it stopped, so the
     /// caller can map it to an ACP [`StopReason`] directly instead of having
     /// to reverse-engineer it (e.g. by polling session state for cancellation
@@ -330,6 +346,17 @@ impl AgentState {
             content: convert_prompt_blocks(&prompt)?,
         });
 
+        // Full checkpoint before the turn starts: durably records this
+        // turn's new user message even if the turn crashes before producing
+        // anything else, and — since `save_conversation` always rewrites the
+        // message log from scratch — transparently upgrades a pre-split-
+        // format conversation (see `rag::history::HistoryManager`'s doc
+        // comment) so the `append_message` calls below have a `.jsonl` log
+        // that already reflects everything up to this point to append onto.
+        self.persist_conversation(&conversation, "persist conversation before turn start")
+            .await;
+
+        let history_for_append = self.rag.history.clone();
         let turn = TurnContext {
             cancel: &cancel,
             permission_gate: &permission_gate,
@@ -342,6 +369,18 @@ impl AgentState {
             Some(&prompt_builder),
             &turn,
             move |event| match event {
+                // Blocking I/O called synchronously (not via `spawn_blocking`)
+                // deliberately: appends must land in the log in the same
+                // order messages are produced, and this closure already runs
+                // strictly sequentially with the rest of the turn, so a
+                // small, fast local-disk append here doesn't race anything —
+                // spawning it would only risk two concurrent appends landing
+                // out of order.
+                StreamEvent::MessageAppended { message } => {
+                    if let Err(e) = history_for_append.append_message(&chat_id, &message) {
+                        tracing::warn!("failed to append message to history: {e}");
+                    }
+                }
                 StreamEvent::LlmResponse { content } => {
                     on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
                         AcpContentBlock::from(content),
@@ -399,15 +438,12 @@ impl AgentState {
         )
         .await;
 
-        let history = self.rag.history.clone();
-        let conv_to_save = conversation.clone();
-        if let Err(e) =
-            tokio::task::spawn_blocking(move || history.save_conversation(&conv_to_save))
-                .await
-                .unwrap_or_else(|e| Err(Error::from(e)))
-        {
-            tracing::warn!("failed to save conversation: {e}");
-        }
+        // Final full checkpoint: reconciles whatever `append_message` calls
+        // landed above into one consistent, complete log, and is the only
+        // save at all for a turn that produced no messages (cancelled or
+        // errored before the first LLM response).
+        self.persist_conversation(&conversation, "save conversation")
+            .await;
 
         run_result.map(|r| r.stop_reason)
     }

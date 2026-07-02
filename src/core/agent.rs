@@ -146,6 +146,11 @@ where
             result?
         };
         messages.push(choice.message.clone());
+        if let Some(cb) = callback.as_mut() {
+            cb(StreamEvent::MessageAppended {
+                message: choice.message.clone(),
+            });
+        }
 
         let tool_calls = choice.message.tool_calls();
         if !tool_calls.is_empty() {
@@ -194,12 +199,14 @@ where
                     result: result.clone(),
                 });
 
-                messages.push(Message::tool_result(
-                    tool_call.id.clone(),
-                    tool_name.clone(),
-                    result,
-                    is_error,
-                ));
+                let tool_result_message =
+                    Message::tool_result(tool_call.id.clone(), tool_name.clone(), result, is_error);
+                if let Some(cb) = callback.as_mut() {
+                    cb(StreamEvent::MessageAppended {
+                        message: tool_result_message.clone(),
+                    });
+                }
+                messages.push(tool_result_message);
             }
 
             steps.push(AgentStep {
@@ -587,16 +594,25 @@ mod tests {
             )
             .unwrap();
 
+        let finished_idx = events
+            .iter()
+            .position(|e| matches!(e, StreamEvent::Finished { .. }))
+            .unwrap();
+        let message_appended_count = events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::MessageAppended { .. }))
+            .count();
+
         assert!(matches!(
             events[0],
             StreamEvent::IterationStart { iteration: 1 }
         ));
         assert!(tool_call_idx < tool_result_idx);
         assert!(tool_result_idx < llm_response_idx);
-        assert!(matches!(
-            &events[llm_response_idx + 1],
-            StreamEvent::Finished { .. }
-        ));
+        assert!(llm_response_idx < finished_idx);
+        // One MessageAppended per pushed message: the tool-call assistant
+        // message, the tool-result message, and the final text response.
+        assert_eq!(message_appended_count, 3);
     }
 
     #[tokio::test]
