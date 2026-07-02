@@ -33,7 +33,7 @@ pub async fn run_headless(prompt: String, model: Option<String>) -> crate::error
     let app_config = load_config()?;
     let agent_config = app_config.resolve(model.as_deref())?;
     let rag = RagContext::new(app_config.default_skills.clone())?;
-    let state = Arc::new(AgentState::new(agent_config, app_config, rag).await?);
+    let state = Arc::new(AgentState::new(agent_config, app_config, rag, vec![]).await?);
 
     let (server_half, client_half) = tokio::io::duplex(65536);
     let (server_read, server_write) = tokio::io::split(server_half);

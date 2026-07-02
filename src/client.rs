@@ -12,10 +12,14 @@ use crate::{
     config::{
         AgentConfig, AppConfig, McpServerConfig, ProviderConfig, load_config, load_config_from,
     },
-    core::{client_io::NoClientIo, permission::AllowAll},
+    core::{
+        client_io::{ClientIo, NoClientIo},
+        permission::{AllowAll, PermissionGate},
+    },
     error::Result,
     mcp::McpServerStatus,
     rag::{Conversation, ConversationMeta, RagContext},
+    tools::ToolHandler,
 };
 
 /// The main entry point for embedding openheim in your application.
@@ -71,10 +75,10 @@ impl OpenheimClient {
         self.state
             .acp_load_session(session_id, cwd, on_history)
             .await?;
-        Ok(SessionHandle {
-            id: session_id.to_string(),
-            state: self.state.clone(),
-        })
+        Ok(SessionHandle::new(
+            session_id.to_string(),
+            self.state.clone(),
+        ))
     }
 
     /// Fetch the full `Conversation` (messages + metadata) for a session id.
@@ -156,10 +160,7 @@ impl<'a> SessionBuilder<'a> {
             .state
             .acp_new_session(self.model.as_deref(), self.skills, self.cwd)
             .await?;
-        Ok(SessionHandle {
-            id,
-            state: self.state.clone(),
-        })
+        Ok(SessionHandle::new(id, self.state.clone()))
     }
 }
 
@@ -169,9 +170,38 @@ impl<'a> SessionBuilder<'a> {
 pub struct SessionHandle {
     pub id: String,
     state: Arc<AgentState>,
+    permission_gate: Arc<dyn PermissionGate>,
+    client_io: Arc<dyn ClientIo>,
 }
 
 impl SessionHandle {
+    fn new(id: String, state: Arc<AgentState>) -> Self {
+        Self {
+            id,
+            state,
+            permission_gate: Arc::new(AllowAll),
+            client_io: Arc::new(NoClientIo),
+        }
+    }
+
+    /// Supply a permission gate consulted before every tool call this session
+    /// makes (see [`PermissionGate`]). Defaults to [`AllowAll`] — the caller
+    /// is trusted to have already consented to the run (e.g. `openheim run`,
+    /// a one-shot library embedding). An interactive embedder (like the TUI)
+    /// should set a real gate here instead of relying on the default.
+    pub fn permission_gate(mut self, gate: Arc<dyn PermissionGate>) -> Self {
+        self.permission_gate = gate;
+        self
+    }
+
+    /// Delegate `read_file`/`write_file` to the embedder's own I/O (e.g. an
+    /// editor's unsaved buffers) before falling back to local disk. Defaults
+    /// to [`NoClientIo`], which always uses local disk.
+    pub fn client_io(mut self, io: Arc<dyn ClientIo>) -> Self {
+        self.client_io = io;
+        self
+    }
+
     /// Send a prompt and stream ACP `SessionUpdate` events to `on_update`.
     ///
     /// The callback receives:
@@ -187,11 +217,17 @@ impl SessionHandle {
             .acp_prompt(
                 &self.id,
                 vec![ContentBlock::from(text)],
-                Arc::new(AllowAll),
-                Arc::new(NoClientIo),
+                self.permission_gate.clone(),
+                self.client_io.clone(),
                 on_update,
             )
             .await
+    }
+
+    /// Cancels the turn currently in flight for this session, if any.
+    /// No-op if no prompt is running.
+    pub async fn cancel(&self) {
+        self.state.cancel_session(&self.id).await;
     }
 
     /// Switch the model for this session mid-conversation.
@@ -209,7 +245,8 @@ impl SessionHandle {
     ///
     /// Registers the conversation in the agent state so subsequent `prompt`
     /// calls continue from its history. Pass a no-op callback — the TUI
-    /// already replays history visually before calling this.
+    /// already replays history visually before calling this. The returned
+    /// handle inherits this handle's permission gate and client I/O.
     pub async fn restore(
         &self,
         session_id: &str,
@@ -219,6 +256,8 @@ impl SessionHandle {
         Ok(SessionHandle {
             id: session_id.to_string(),
             state: Arc::clone(&self.state),
+            permission_gate: self.permission_gate.clone(),
+            client_io: self.client_io.clone(),
         })
     }
 }
@@ -249,6 +288,7 @@ pub struct OpenheimBuilder {
     default_skills: Vec<String>,
     work_dir: Option<PathBuf>,
     allow_shell: Option<bool>,
+    tools: Vec<Box<dyn ToolHandler>>,
 }
 
 impl OpenheimBuilder {
@@ -328,6 +368,15 @@ impl OpenheimBuilder {
         self
     }
 
+    /// Register a custom tool (see [`crate::tools::ToolHandler`]). Registered
+    /// alongside the built-ins and any MCP-sourced tools, and subject to the
+    /// same `work_dir`/`allow_shell` sandbox boundary. Call multiple times to
+    /// register more than one.
+    pub fn tool(mut self, handler: Box<dyn ToolHandler>) -> Self {
+        self.tools.push(handler);
+        self
+    }
+
     /// Build the client, connecting to MCP servers and initialising the agent state.
     pub async fn build(self) -> Result<OpenheimClient> {
         let (agent_config, mut app_config) = if self.provider.is_some()
@@ -396,7 +445,7 @@ impl OpenheimBuilder {
         }
 
         let rag = RagContext::new(app_config.default_skills.clone())?;
-        let state = Arc::new(AgentState::new(agent_config, app_config, rag).await?);
+        let state = Arc::new(AgentState::new(agent_config, app_config, rag, self.tools).await?);
         Ok(OpenheimClient { state })
     }
 }

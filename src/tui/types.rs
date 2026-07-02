@@ -37,6 +37,7 @@ pub(crate) enum Screen {
     SkillsViewer,
     McpViewer,
     ThemePicker,
+    PermissionPrompt,
 }
 
 impl Screen {
@@ -49,6 +50,7 @@ impl Screen {
                 | Screen::SkillsViewer
                 | Screen::McpViewer
                 | Screen::ThemePicker
+                | Screen::PermissionPrompt
         )
     }
 }

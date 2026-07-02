@@ -42,7 +42,10 @@ use crate::{
     llm::LlmClient,
     rag::RagContext,
     subagents::SubagentLoader,
-    tools::{SandboxedExecutor, ScopedExecutor, SystemToolExecutor, ToolExecutor, with_delegation},
+    tools::{
+        SandboxedExecutor, ScopedExecutor, SystemToolExecutor, ToolExecutor, ToolHandler,
+        with_delegation,
+    },
 };
 
 use session::SessionState;
@@ -83,7 +86,16 @@ pub struct AgentState {
 }
 
 impl AgentState {
-    pub async fn new(config: AgentConfig, app_config: AppConfig, rag: RagContext) -> Result<Self> {
+    /// `custom_tools` are registered alongside the built-ins (`execute_command`,
+    /// `read_file`, `write_file`) and any MCP-sourced tools, before the
+    /// sandbox/delegation wrappers are applied — so custom tools are subject
+    /// to the same `work_dir`/`allow_shell` boundary as everything else.
+    pub async fn new(
+        config: AgentConfig,
+        app_config: AppConfig,
+        rag: RagContext,
+        custom_tools: Vec<Box<dyn ToolHandler>>,
+    ) -> Result<Self> {
         let http_client = build_http_client(config.timeout_secs)?;
         let llm = create_client(&config, &http_client);
         let allow_shell = app_config.allow_shell;
@@ -95,8 +107,11 @@ impl AgentState {
                 ))
             })?,
         };
-        let (sys_executor, mcp_statuses) =
+        let (mut sys_executor, mcp_statuses) =
             SystemToolExecutor::build(&app_config.mcp_servers, allow_shell).await;
+        for tool in custom_tools {
+            sys_executor.register(tool);
+        }
         let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
 
         let profiles = SubagentLoader::new()?.load()?;

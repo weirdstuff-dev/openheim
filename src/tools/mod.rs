@@ -49,6 +49,32 @@
 //!     }
 //! }
 //! ```
+//!
+//! Register it with [`crate::client::OpenheimBuilder::tool`] when embedding
+//! openheim as a library:
+//!
+//! ```rust,no_run
+//! # use openheim::OpenheimClient;
+//! # use openheim::tools::ToolHandler;
+//! # struct GreetTool;
+//! # #[async_trait::async_trait]
+//! # impl ToolHandler for GreetTool {
+//! #     fn definition(&self) -> openheim::core::models::Tool { unimplemented!() }
+//! #     async fn execute(&self, _args: &str) -> openheim::error::Result<String> { unimplemented!() }
+//! # }
+//! # async fn wiring() -> openheim::error::Result<()> {
+//! let client = OpenheimClient::builder()
+//!     .tool(Box::new(GreetTool))
+//!     .build()
+//!     .await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! `SystemToolExecutor::register` (shown below) is the lower-level entry
+//! point `OpenheimBuilder::tool` uses internally — reach for it directly only
+//! if you're constructing an [`crate::acp::AgentState`] yourself instead of
+//! going through the builder.
 
 pub mod delegate;
 mod execute_command;
