@@ -78,7 +78,7 @@ impl AgentMode {
         match mode_id {
             "code" => Ok(AgentMode::Code),
             "architect" => Ok(AgentMode::Architect),
-            other => Err(Error::Other(format!("unknown session mode: {other}"))),
+            other => Err(Error::ParseError(format!("unknown session mode: {other}"))),
         }
     }
 }
@@ -126,7 +126,7 @@ impl AgentState {
         let work_dir = match app_config.work_dir.clone() {
             Some(wd) => wd,
             None => std::env::current_dir().map_err(|e| {
-                crate::error::Error::Other(format!(
+                crate::error::Error::ConfigError(format!(
                     "failed to determine current directory for work_dir: {e}"
                 ))
             })?,
@@ -209,7 +209,7 @@ impl AgentState {
         let mut sessions = self.sessions.write().await;
         let s = sessions
             .get_mut(session_id)
-            .ok_or_else(|| Error::Other(format!("session not found: {session_id}")))?;
+            .ok_or_else(|| Error::NotFound(format!("session not found: {session_id}")))?;
         s.config = new_config;
         Ok((provider_name, model_name))
     }
@@ -238,7 +238,7 @@ impl AgentState {
         let mut sessions = self.sessions.write().await;
         let s = sessions
             .get_mut(session_id)
-            .ok_or_else(|| Error::Other(format!("session not found: {session_id}")))?;
+            .ok_or_else(|| Error::NotFound(format!("session not found: {session_id}")))?;
         s.mode = mode;
         Ok(())
     }
@@ -284,7 +284,7 @@ impl AgentState {
             let mut sessions = self.sessions.write().await;
             let s = sessions
                 .get_mut(session_id)
-                .ok_or_else(|| Error::Other(format!("session not found: {session_id}")))?;
+                .ok_or_else(|| Error::NotFound(format!("session not found: {session_id}")))?;
             // Held until this function returns (success, error, or cancellation);
             // a second overlapping `session/prompt` on the same session would
             // otherwise race this one to reset `cancel` and to save history.
@@ -404,7 +404,7 @@ impl AgentState {
         if let Err(e) =
             tokio::task::spawn_blocking(move || history.save_conversation(&conv_to_save))
                 .await
-                .unwrap_or_else(|e| Err(Error::Other(e.to_string())))
+                .unwrap_or_else(|e| Err(Error::from(e)))
         {
             tracing::warn!("failed to save conversation: {e}");
         }
@@ -416,7 +416,7 @@ impl AgentState {
         let history = self.rag.history.clone();
         let metas = tokio::task::spawn_blocking(move || history.list_conversations())
             .await
-            .map_err(|e| Error::Other(e.to_string()))??;
+            .map_err(Error::from)??;
         Ok(metas
             .iter()
             .filter(|m| cwd.is_none_or(|filter| m.cwd.as_deref() == Some(filter)))
@@ -441,12 +441,12 @@ impl AgentState {
         F: FnMut(SessionUpdate) + Send,
     {
         let uuid = Uuid::parse_str(session_id)
-            .map_err(|_| Error::Other("invalid session id format".to_string()))?;
+            .map_err(|_| Error::ParseError("invalid session id format".to_string()))?;
 
         let history = self.rag.history.clone();
         let conversation = tokio::task::spawn_blocking(move || history.load_conversation(&uuid))
             .await
-            .map_err(|e| Error::Other(e.to_string()))??;
+            .map_err(Error::from)??;
 
         let mut session_config = self.config.clone();
         if let Some(provider_name) = &conversation.meta.provider {

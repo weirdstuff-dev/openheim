@@ -84,7 +84,7 @@ impl OpenheimClient {
     /// Fetch the full `Conversation` (messages + metadata) for a session id.
     pub fn get_session(&self, session_id: &str) -> Result<Conversation> {
         let uuid = Uuid::parse_str(session_id)
-            .map_err(|_| crate::error::Error::Other("invalid session id".to_string()))?;
+            .map_err(|_| crate::error::Error::ParseError("invalid session id".to_string()))?;
         self.state.rag.history.load_conversation(&uuid)
     }
 
@@ -96,7 +96,7 @@ impl OpenheimClient {
     /// Permanently delete a persisted session.
     pub fn delete_session(&self, session_id: &str) -> Result<()> {
         let uuid = Uuid::parse_str(session_id)
-            .map_err(|_| crate::error::Error::Other("invalid session id".to_string()))?;
+            .map_err(|_| crate::error::Error::ParseError("invalid session id".to_string()))?;
         self.state.rag.history.delete_conversation(&uuid)
     }
 
@@ -429,12 +429,14 @@ impl OpenheimBuilder {
             } else {
                 std::env::current_dir()
                     .map_err(|e| {
-                        crate::error::Error::Other(format!("cannot resolve relative work_dir: {e}"))
+                        crate::error::Error::ConfigError(format!(
+                            "cannot resolve relative work_dir: {e}"
+                        ))
                     })?
                     .join(&wd)
             };
             let canonical = abs.canonicalize().map_err(|e| {
-                crate::error::Error::Other(format!(
+                crate::error::Error::ConfigError(format!(
                     "work_dir '{}' is inaccessible: {e}",
                     wd.display()
                 ))

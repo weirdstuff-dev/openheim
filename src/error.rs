@@ -20,6 +20,13 @@ pub enum Error {
     #[error("Config error: {0}")]
     ConfigError(String),
 
+    /// A requested resource (session, conversation, skill, …) doesn't exist.
+    /// No fixed prefix (unlike the other typed variants) so existing
+    /// call-site messages keep their exact wording — some are echoed
+    /// verbatim in documented API responses (see `docs/api.md`).
+    #[error("{0}")]
+    NotFound(String),
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
@@ -31,6 +38,9 @@ pub enum Error {
 
     #[error("TOML parse error: {0}")]
     TomlError(#[from] toml::de::Error),
+
+    #[error("Task join error: {0}")]
+    JoinError(#[from] tokio::task::JoinError),
 
     #[error("{0}")]
     Other(String),
@@ -101,6 +111,7 @@ mod tests {
         assert!(!Error::ParseError("bad json".into()).is_retryable());
         assert!(!Error::ConfigError("missing".into()).is_retryable());
         assert!(!Error::ToolExecutionError("failed".into()).is_retryable());
+        assert!(!Error::NotFound("missing".into()).is_retryable());
         assert!(!Error::Other("something".into()).is_retryable());
     }
 

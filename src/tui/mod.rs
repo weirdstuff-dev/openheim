@@ -46,10 +46,7 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
     let app_config = load_config()?;
     let agent_config = app_config.resolve(None)?;
 
-    let client = OpenheimClient::builder()
-        .build()
-        .await
-        .map_err(|e| crate::error::Error::Other(e.to_string()))?;
+    let client = OpenheimClient::builder().build().await?;
 
     let (permission_tx, mut permission_rx) =
         mpsc::unbounded_channel::<permission::PermissionRequest>();
@@ -60,8 +57,7 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
         .new_session()
         .skills(skills.clone())
         .start()
-        .await
-        .map_err(|e| crate::error::Error::Other(e.to_string()))?
+        .await?
         .permission_gate(permission_gate);
 
     let (update_tx, mut update_rx) = mpsc::unbounded_channel::<AgentUpdate>();

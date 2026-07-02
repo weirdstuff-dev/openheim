@@ -452,7 +452,7 @@ impl LlmClient for AnthropicClient {
                             .as_str()
                             .unwrap_or("unknown streaming error")
                             .to_string();
-                        return Err(Error::Other(format!("Anthropic streaming error: {msg}")));
+                        return Err(Error::ApiError(format!("Anthropic streaming error: {msg}")));
                     }
                     _ => {}
                 }

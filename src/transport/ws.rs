@@ -272,7 +272,7 @@ async fn session_handler(
     };
     match state.rag.history.load_conversation(&uuid) {
         Ok(conv) => Json(conv).into_response(),
-        Err(AppError::Other(_)) => (
+        Err(AppError::NotFound(_)) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "session not found" })),
         )

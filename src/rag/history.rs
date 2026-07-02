@@ -36,6 +36,7 @@ mod tests {
         let (mgr, _dir) = make_manager();
         let id = Uuid::new_v4();
         let err = mgr.load_conversation(&id).unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)));
         assert!(err.to_string().contains(&id.to_string()));
     }
 
@@ -238,7 +239,7 @@ impl HistoryManager {
     pub fn load_conversation(&self, id: &Uuid) -> Result<Conversation> {
         let path = self.conversation_path(id);
         if !path.exists() {
-            return Err(Error::Other(format!(
+            return Err(Error::NotFound(format!(
                 "Conversation {} not found at {}",
                 id,
                 path.display()
@@ -277,7 +278,7 @@ impl HistoryManager {
     pub fn delete_conversation(&self, id: &Uuid) -> Result<()> {
         let path = self.conversation_path(id);
         if !path.exists() {
-            return Err(Error::Other(format!("Conversation {id} not found")));
+            return Err(Error::NotFound(format!("Conversation {id} not found")));
         }
         std::fs::remove_file(&path)?;
         Ok(())
