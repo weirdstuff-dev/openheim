@@ -1,23 +1,14 @@
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use crate::config::AgentConfig;
 use crate::core::llm::{LlmChunk, LlmClient};
 use crate::core::models::*;
-use crate::core::permission::PermissionGate;
+use crate::core::turn::TurnContext;
 use crate::error::Result;
 use crate::rag::PromptBuilder;
 use crate::tools::ToolExecutor;
-
-/// Cross-cutting turn controls threaded through the agent loop. Grouped into
-/// one struct so `run_agent_loop`'s parameter list doesn't grow with every
-/// new hook (cancellation, permission checks, and more to come).
-pub struct TurnContext<'a> {
-    pub cancel: &'a CancellationToken,
-    pub permission_gate: &'a Arc<dyn PermissionGate>,
-}
 
 async fn call_llm(
     llm: &Arc<dyn LlmClient>,
@@ -167,7 +158,7 @@ where
 
                 let decision = turn.permission_gate.check(id, tool_name, arguments).await;
                 let (result, is_error) = if decision.is_allowed() {
-                    match tool_executor.execute(tool_name, arguments).await {
+                    match tool_executor.execute(tool_name, arguments, turn).await {
                         Ok(r) => (r, false),
                         Err(e) => (format!("Error: {e}"), true),
                     }
@@ -323,11 +314,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::permission::{AllowAll, PermissionDecision};
+    use crate::core::permission::{AllowAll, PermissionDecision, PermissionGate};
     use crate::error::Error;
     use async_trait::async_trait;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio_util::sync::CancellationToken;
 
     fn make_config(max_iterations: usize) -> AgentConfig {
         AgentConfig {
@@ -410,7 +402,12 @@ mod tests {
             vec![]
         }
 
-        async fn execute(&self, name: &str, args_json: &str) -> Result<String> {
+        async fn execute(
+            &self,
+            name: &str,
+            args_json: &str,
+            _turn: &TurnContext<'_>,
+        ) -> Result<String> {
             self.calls
                 .lock()
                 .unwrap()
@@ -426,7 +423,12 @@ mod tests {
         fn list_tools(&self) -> Vec<Tool> {
             vec![]
         }
-        async fn execute(&self, _name: &str, _args: &str) -> Result<String> {
+        async fn execute(
+            &self,
+            _name: &str,
+            _args: &str,
+            _turn: &TurnContext<'_>,
+        ) -> Result<String> {
             Err(Error::ApiError("tool failed".into()))
         }
     }

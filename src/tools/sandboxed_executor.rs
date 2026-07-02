@@ -5,7 +5,7 @@ use std::{path::PathBuf, sync::Arc};
 use async_trait::async_trait;
 
 use crate::{
-    core::{client_io::ClientIo, models::Tool},
+    core::{client_io::ClientIo, models::Tool, turn::TurnContext},
     error::{Error, Result},
 };
 
@@ -66,7 +66,7 @@ impl ToolExecutor for SandboxedExecutor {
         }
     }
 
-    async fn execute(&self, name: &str, args_json: &str) -> Result<String> {
+    async fn execute(&self, name: &str, args_json: &str, turn: &TurnContext<'_>) -> Result<String> {
         match name {
             "read_file" => {
                 let args: serde_json::Value = serde_json::from_str(args_json)
@@ -113,7 +113,7 @@ impl ToolExecutor for SandboxedExecutor {
                 run_command(command, Some(&self.work_dir)).await
             }
 
-            _ => self.inner.execute(name, args_json).await,
+            _ => self.inner.execute(name, args_json, turn).await,
         }
     }
 }
@@ -123,6 +123,7 @@ mod tests {
     use super::*;
     use crate::core::client_io::NoClientIo;
     use crate::core::models::FunctionDefinition;
+    use crate::tools::test_support::TurnHarness;
 
     struct EmptyExecutor;
 
@@ -139,7 +140,12 @@ mod tests {
             }]
         }
 
-        async fn execute(&self, name: &str, _args_json: &str) -> Result<String> {
+        async fn execute(
+            &self,
+            name: &str,
+            _args_json: &str,
+            _turn: &TurnContext<'_>,
+        ) -> Result<String> {
             Err(Error::ToolExecutionError(format!(
                 "unexpected call: {name}"
             )))
@@ -173,7 +179,11 @@ mod tests {
             Arc::new(FixedClientIo("client content")),
         );
         let args = serde_json::json!({"path": path.to_str().unwrap()}).to_string();
-        let result = executor.execute("read_file", &args).await.unwrap();
+        let harness = TurnHarness::new();
+        let result = executor
+            .execute("read_file", &args, &harness.turn())
+            .await
+            .unwrap();
         assert_eq!(result, "client content");
     }
 
@@ -190,7 +200,11 @@ mod tests {
             Arc::new(NoClientIo),
         );
         let args = serde_json::json!({"path": path.to_str().unwrap()}).to_string();
-        let result = executor.execute("read_file", &args).await.unwrap();
+        let harness = TurnHarness::new();
+        let result = executor
+            .execute("read_file", &args, &harness.turn())
+            .await
+            .unwrap();
         assert_eq!(result, "local content");
     }
 
@@ -207,7 +221,11 @@ mod tests {
         );
         let args =
             serde_json::json!({"path": path.to_str().unwrap(), "content": "hello"}).to_string();
-        let result = executor.execute("write_file", &args).await.unwrap();
+        let harness = TurnHarness::new();
+        let result = executor
+            .execute("write_file", &args, &harness.turn())
+            .await
+            .unwrap();
         assert!(result.contains("Successfully wrote"));
         assert!(!path.exists());
     }
@@ -225,7 +243,11 @@ mod tests {
         );
         let args =
             serde_json::json!({"path": path.to_str().unwrap(), "content": "hello"}).to_string();
-        executor.execute("write_file", &args).await.unwrap();
+        let harness = TurnHarness::new();
+        executor
+            .execute("write_file", &args, &harness.turn())
+            .await
+            .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
     }
 }

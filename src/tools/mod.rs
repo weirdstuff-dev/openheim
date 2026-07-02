@@ -64,6 +64,7 @@ use async_trait::async_trait;
 
 use crate::config::McpServerConfig;
 use crate::core::models::Tool;
+use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
 pub use delegate::{DELEGATE_TOOL_NAME, DelegateTool, with_delegation};
@@ -90,9 +91,14 @@ pub trait ToolExecutor: Send + Sync {
 
     /// Dispatches a tool call by name with JSON-encoded arguments.
     ///
+    /// `turn` carries the calling turn's cancellation token and permission
+    /// gate through to wrappers/tools that need them — currently only
+    /// [`DelegateTool`], which reuses both for the subagent turn it spawns
+    /// rather than manufacturing its own.
+    ///
     /// Returns the tool output as a string, or an error if the tool is unknown
     /// or its execution fails.
-    async fn execute(&self, name: &str, args_json: &str) -> Result<String>;
+    async fn execute(&self, name: &str, args_json: &str, turn: &TurnContext<'_>) -> Result<String>;
 }
 
 /// The default tool executor used by the agent runtime.
@@ -168,7 +174,12 @@ impl ToolExecutor for SystemToolExecutor {
         self.handlers.values().map(|h| h.definition()).collect()
     }
 
-    async fn execute(&self, name: &str, args_json: &str) -> Result<String> {
+    async fn execute(
+        &self,
+        name: &str,
+        args_json: &str,
+        _turn: &TurnContext<'_>,
+    ) -> Result<String> {
         let handler = self
             .handlers
             .get(name)
@@ -178,9 +189,43 @@ impl ToolExecutor for SystemToolExecutor {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Arc;
+
+    use tokio_util::sync::CancellationToken;
+
+    use crate::core::permission::{AllowAll, PermissionGate};
+    use crate::core::turn::TurnContext;
+
+    /// Owns the pieces a test [`TurnContext`] borrows from, so callers can do
+    /// `let turn = harness.turn();` without fighting temporary lifetimes.
+    pub(crate) struct TurnHarness {
+        cancel: CancellationToken,
+        permission_gate: Arc<dyn PermissionGate>,
+    }
+
+    impl TurnHarness {
+        pub(crate) fn new() -> Self {
+            Self {
+                cancel: CancellationToken::new(),
+                permission_gate: Arc::new(AllowAll),
+            }
+        }
+
+        pub(crate) fn turn(&self) -> TurnContext<'_> {
+            TurnContext {
+                cancel: &self.cancel,
+                permission_gate: &self.permission_gate,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
+    use super::test_support::TurnHarness;
     use super::*;
 
     #[test]
@@ -202,7 +247,10 @@ mod tests {
     #[tokio::test]
     async fn executor_returns_error_for_unknown_tool() {
         let executor = SystemToolExecutor::new();
-        let result = executor.execute("nonexistent_tool", "{}").await;
+        let harness = TurnHarness::new();
+        let result = executor
+            .execute("nonexistent_tool", "{}", &harness.turn())
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unknown tool"));
     }

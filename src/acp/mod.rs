@@ -32,10 +32,11 @@ use uuid::Uuid;
 use crate::{
     config::{AgentConfig, AppConfig, build_http_client, create_client},
     core::{
-        agent::{TurnContext, run_agent_streaming_with_history},
+        agent::run_agent_streaming_with_history,
         client_io::ClientIo,
         models::{ContentBlock, Message, PlanStepStatus, Role, StreamEvent},
         permission::{PermissionDecision, PermissionGate},
+        turn::TurnContext,
     },
     error::{Error, Result},
     llm::LlmClient,
