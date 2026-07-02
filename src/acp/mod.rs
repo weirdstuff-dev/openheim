@@ -7,8 +7,8 @@ use std::{
 };
 
 use agent_client_protocol::{
-    Agent, Client, ConnectTo, ConnectionTo, Dispatch, on_receive_dispatch, on_receive_notification,
-    on_receive_request,
+    Agent, Client, ConnectTo, ConnectionTo, Dispatch, Handled, on_receive_dispatch,
+    on_receive_notification, on_receive_request,
     schema::{
         AgentCapabilities, CancelNotification, ClientCapabilities, ContentBlock, ContentChunk,
         Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
@@ -926,8 +926,24 @@ pub async fn serve(
             on_receive_notification!(),
         )
         .on_receive_dispatch(
-            async move |message: Dispatch, cx: ConnectionTo<Client>| {
-                message.respond_with_error(internal_error("unsupported method"), cx)
+            async move |message: Dispatch,
+                        cx: ConnectionTo<Client>|
+                        -> agent_client_protocol::Result<Handled<Dispatch>> {
+                // Responses to requests *this agent* sent (e.g.
+                // session/request_permission, fs/read_text_file) are also
+                // routed through here if nothing else claims them first.
+                // `respond_with_error` would convert a legitimate success
+                // response into an error delivered to whatever is awaiting
+                // it — so those must be declined, not rejected, letting the
+                // crate's own default handling forward the real result.
+                if matches!(message, Dispatch::Response(..)) {
+                    return Ok(Handled::No {
+                        message,
+                        retry: false,
+                    });
+                }
+                message.respond_with_error(internal_error("unsupported method"), cx)?;
+                Ok(Handled::Yes)
             },
             on_receive_dispatch!(),
         )

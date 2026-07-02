@@ -8,9 +8,11 @@ use std::io::Write as _;
 use std::sync::Arc;
 
 use agent_client_protocol::{
-    ByteStreams, Client, SessionMessage,
+    Agent, ByteStreams, Client, ConnectionTo, SessionMessage, on_receive_request,
     schema::{
-        ContentBlock, InitializeRequest, ProtocolVersion, SessionNotification, SessionUpdate,
+        ContentBlock, InitializeRequest, PermissionOptionKind, ProtocolVersion,
+        RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+        SelectedPermissionOutcome, SessionNotification, SessionUpdate,
     },
     util::MatchDispatch,
 };
@@ -44,6 +46,29 @@ pub async fn run_headless(prompt: String, model: Option<String>) -> crate::error
 
     Client
         .builder()
+        // `openheim run` is a one-shot, non-interactive CLI invocation with no
+        // human to prompt — the user already consented to this run by invoking
+        // it. Auto-allow every tool call so a headless run behaves like it did
+        // before `session/request_permission` existed, instead of hanging
+        // forever (unhandled requests for a not-yet-existing session-scoped
+        // handler are queued for retry, not rejected).
+        .on_receive_request(
+            async |req: RequestPermissionRequest, responder, _cx: ConnectionTo<Agent>| {
+                let option_id = req
+                    .options
+                    .iter()
+                    .find(|o| o.kind == PermissionOptionKind::AllowOnce)
+                    .map(|o| o.option_id.clone());
+                let outcome = match option_id {
+                    Some(id) => {
+                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id))
+                    }
+                    None => RequestPermissionOutcome::Cancelled,
+                };
+                responder.respond(RequestPermissionResponse::new(outcome))
+            },
+            on_receive_request!(),
+        )
         .connect_with(client_transport, async |cx| {
             cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                 .block_task()

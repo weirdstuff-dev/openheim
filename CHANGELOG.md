@@ -11,6 +11,10 @@
 - **Client-side filesystem delegation** — when the ACP client advertises `fs.readTextFile` / `fs.writeTextFile` support at `initialize`, `read_file`/`write_file` are delegated to `fs/read_text_file` / `fs/write_text_file` instead of local disk I/O, falling back to local I/O otherwise.
 - **`GET /acp` WebSocket endpoint** — a second, minimal WebSocket endpoint alongside `/ws` that speaks bare ACP JSON-RPC with no envelope and no filesystem sidecar, for generic ACP-only clients. `/ws` is unchanged. See `docs/api.md` §3.4.
 
+### Fixed
+
+- **`openheim run` could hang or falsely deny every tool call** — the ACP server's fallback dispatch handler (`on_receive_dispatch`, used to reply "unsupported method" to unrecognized incoming requests) also intercepted *responses* to requests the agent itself sent, since both share the same generic `Dispatch` type. Once the agent started sending real requests to the client — `session/request_permission` (this release) and `fs/read_text_file`/`fs/write_text_file` — their responses were being converted into spurious errors instead of reaching the code awaiting them. This is now fixed: the fallback only handles genuinely unclaimed requests/notifications and explicitly declines responses, letting them route normally. Also added a `session/request_permission` handler to `openheim run`'s in-process ACP client (auto-allow, since it's a non-interactive one-shot CLI invocation) so headless runs behave as before.
+
 ### Breaking changes (library)
 
 - `SandboxedExecutor::new` takes an additional `client_io: Arc<dyn ClientIo>` argument (use `Arc::new(NoClientIo)` for the previous local-disk-only behavior).
