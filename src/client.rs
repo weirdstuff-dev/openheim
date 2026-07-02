@@ -465,8 +465,9 @@ fn build_programmatic(
     default_skills: Vec<String>,
 ) -> (AgentConfig, AppConfig) {
     let provider = provider.unwrap_or_else(|| "openai".to_string());
-    let api_base = api_base.unwrap_or_else(|| default_api_base(&provider));
-    let model = model.unwrap_or_else(|| default_model(&provider));
+    let (default_api_base, default_model) = crate::config::builtin_provider_defaults(&provider);
+    let api_base = api_base.unwrap_or_else(|| default_api_base.to_string());
+    let model = model.unwrap_or_else(|| default_model.to_string());
     let api_key = api_key.unwrap_or_default();
     let max_iter = max_iterations.unwrap_or(10);
     let timeout = timeout_secs.unwrap_or(120);
@@ -507,20 +508,4 @@ fn build_programmatic(
     };
 
     (agent_config, app_config)
-}
-
-fn default_api_base(provider: &str) -> String {
-    match provider {
-        "anthropic" => "https://api.anthropic.com/v1".to_string(),
-        "gemini" => "https://generativelanguage.googleapis.com/v1beta".to_string(),
-        _ => "https://api.openai.com/v1".to_string(),
-    }
-}
-
-fn default_model(provider: &str) -> String {
-    match provider {
-        "anthropic" => "claude-sonnet-4-6".to_string(),
-        "gemini" => "gemini-2.0-flash".to_string(),
-        _ => "gpt-4o".to_string(),
-    }
 }
