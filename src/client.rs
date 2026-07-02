@@ -222,6 +222,7 @@ impl SessionHandle {
                 on_update,
             )
             .await
+            .map(|_| ())
     }
 
     /// Cancels the turn currently in flight for this session, if any.

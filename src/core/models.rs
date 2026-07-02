@@ -219,12 +219,28 @@ pub struct ToolExecutionResult {
     pub result: String,
 }
 
+/// Why an agent run stopped. Distinct from ACP's own `StopReason` (which this
+/// maps onto at the ACP boundary) so `core` doesn't depend on the `acp` crate.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    /// The LLM produced a final response with `finish_reason == "stop"`.
+    EndTurn,
+    /// `config.max_iterations` was reached without the LLM stopping on its own.
+    MaxIterations,
+    /// The turn was cancelled via `TurnContext::cancel`.
+    Cancelled,
+    /// The LLM returned a response with neither text content nor tool calls.
+    NoContent,
+}
+
 /// Final output of a completed agent run.
 #[derive(Debug, Serialize)]
 pub struct AgentResult {
     pub final_response: String,
     pub steps: Vec<AgentStep>,
     pub iterations_used: usize,
+    pub stop_reason: StopReason,
 }
 
 /// Streaming event emitted during an agent run over a WebSocket connection.

@@ -56,9 +56,9 @@ async fn call_llm_streaming(
 /// also raced against the in-flight LLM call itself (both streaming and
 /// non-streaming) so a caller (e.g. the ACP layer reacting to
 /// `session/cancel`) can abort a slow or hanging request rather than waiting
-/// for it to finish. The loop always returns a normal [`AgentResult`];
-/// callers that care whether cancellation actually happened should check
-/// `cancel.is_cancelled()` themselves after this returns.
+/// for it to finish. The loop always returns `Ok`; [`AgentResult::stop_reason`]
+/// reports why it stopped (`EndTurn` / `MaxIterations` / `Cancelled` /
+/// `NoContent`) instead of callers having to reverse-engineer it.
 async fn run_agent_loop<F>(
     llm: &Arc<dyn LlmClient>,
     tool_executor: &Arc<dyn ToolExecutor>,
@@ -76,9 +76,13 @@ where
     let mut final_response = String::new();
     let mut iterations_used = 0;
     let mut plan_steps: Vec<PlanStep> = Vec::new();
+    // Overwritten on every early exit; stays `MaxIterations` only if the
+    // `for` loop below runs to completion without the LLM ever stopping.
+    let mut stop_reason = StopReason::MaxIterations;
 
     'turn: for iteration in 0..config.max_iterations {
         if turn.cancel.is_cancelled() {
+            stop_reason = StopReason::Cancelled;
             break;
         }
 
@@ -102,6 +106,7 @@ where
                     _ = turn.cancel.cancelled() => {
                         // Dropping `choice_fut` here aborts the in-flight
                         // LLM request rather than waiting for it to finish.
+                        stop_reason = StopReason::Cancelled;
                         break 'turn;
                     }
                     result = &mut choice_fut, if maybe_choice.is_none() => {
@@ -134,6 +139,7 @@ where
                 _ = turn.cancel.cancelled() => {
                     // Dropping the `call_llm` future here aborts the
                     // in-flight LLM request rather than waiting for it.
+                    stop_reason = StopReason::Cancelled;
                     break 'turn;
                 }
                 result = call_llm(llm, messages, &tools, prompt_builder) => result,
@@ -148,6 +154,7 @@ where
 
             for tool_call in &tool_calls {
                 if turn.cancel.is_cancelled() {
+                    stop_reason = StopReason::Cancelled;
                     break;
                 }
 
@@ -216,6 +223,14 @@ where
                 message: "Tool calls executed".to_string(),
                 tool_calls: Some(tool_results),
             });
+
+            // Exit immediately rather than relying on next iteration's
+            // top-of-loop check, which would never run if this was the
+            // last allowed iteration and would misreport `MaxIterations`.
+            if turn.cancel.is_cancelled() {
+                stop_reason = StopReason::Cancelled;
+                break 'turn;
+            }
         } else if let Some(content) = choice.message.text() {
             // LlmResponse chunks already fired per-token from the streaming select
             // loop above; just record the final text here.
@@ -239,6 +254,7 @@ where
                     final_response,
                     steps,
                     iterations_used: iter_num,
+                    stop_reason: StopReason::EndTurn,
                 });
             }
         } else {
@@ -246,6 +262,7 @@ where
                 "Unexpected LLM response at iteration {}: no content or tool_calls",
                 iter_num
             );
+            stop_reason = StopReason::NoContent;
             break;
         }
     }
@@ -261,6 +278,7 @@ where
         final_response,
         steps,
         iterations_used,
+        stop_reason,
     })
 }
 
@@ -472,6 +490,7 @@ mod tests {
         assert_eq!(result.final_response, "done");
         assert_eq!(result.iterations_used, 1);
         assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
     }
 
     #[tokio::test]
@@ -533,6 +552,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.iterations_used, 3);
+        assert_eq!(result.stop_reason, StopReason::MaxIterations);
     }
 
     #[tokio::test]
@@ -695,6 +715,7 @@ mod tests {
         assert_eq!(result.iterations_used, 1);
         let calls = executor.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
+        assert_eq!(result.stop_reason, StopReason::Cancelled);
     }
 
     /// LLM that never resolves on its own; used to prove cancellation aborts
@@ -746,6 +767,7 @@ mod tests {
         assert_eq!(result.final_response, "");
         assert_eq!(result.iterations_used, 1);
         assert_eq!(messages.len(), 1);
+        assert_eq!(result.stop_reason, StopReason::Cancelled);
     }
 
     #[tokio::test]
@@ -783,6 +805,42 @@ mod tests {
         assert_eq!(result.final_response, "");
         assert_eq!(result.iterations_used, 1);
         assert_eq!(messages.len(), 1);
+        assert_eq!(result.stop_reason, StopReason::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn agent_reports_no_content_stop_reason() {
+        // An LLM response with neither text nor tool calls is an anomaly
+        // that should stop the loop, not be treated as a normal completion.
+        let empty_choice = Choice {
+            message: Message {
+                role: Role::Assistant,
+                content: vec![],
+            },
+            finish_reason: Some("stop".into()),
+        };
+        let llm = Arc::new(MockLlm::new(vec![empty_choice]));
+        let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));
+        let config = make_config(10);
+        let mut messages = vec![Message::user("hi")];
+
+        let result = run_agent_with_history(
+            llm,
+            executor,
+            &config,
+            &mut messages,
+            None,
+            &TurnContext {
+                cancel: &CancellationToken::new(),
+                permission_gate: &allow_all(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.final_response, "");
+        assert_eq!(result.iterations_used, 1);
+        assert_eq!(result.stop_reason, StopReason::NoContent);
     }
 
     struct RejectPermissionGate;

@@ -18,7 +18,7 @@ use crate::config::{AgentConfig, AppConfig, client_for_config};
 use crate::core::agent::run_agent_with_history;
 use crate::core::client_io::NoClientIo;
 use crate::core::llm::LlmClient;
-use crate::core::models::{FunctionDefinition, Message, Tool};
+use crate::core::models::{FunctionDefinition, Message, StopReason, Tool};
 use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 use crate::rag::PromptBuilder;
@@ -220,7 +220,7 @@ impl DelegateTool {
         )
         .await?;
 
-        if result.iterations_used >= config.max_iterations {
+        if result.stop_reason == StopReason::MaxIterations {
             Ok(format!(
                 "{}\n\n[Note: subagent '{agent_name}' reached its iteration limit \
                  ({}) before finishing — this answer may be incomplete.]",

@@ -34,7 +34,9 @@ use crate::{
     core::{
         agent::run_agent_streaming_with_history,
         client_io::ClientIo,
-        models::{ContentBlock, Message, PlanStepStatus, Role, StreamEvent},
+        models::{
+            ContentBlock, Message, PlanStepStatus, Role, StopReason as CoreStopReason, StreamEvent,
+        },
         permission::{PermissionDecision, PermissionGate},
         turn::TurnContext,
     },
@@ -172,17 +174,6 @@ impl AgentState {
         }
     }
 
-    /// Whether the most recent (or currently running) prompt turn for
-    /// `session_id` was cancelled via [`Self::cancel_session`].
-    pub async fn is_session_cancelled(&self, session_id: &str) -> bool {
-        self.sessions
-            .read()
-            .await
-            .get(session_id)
-            .map(|s| s.cancel.is_cancelled())
-            .unwrap_or(false)
-    }
-
     /// Swaps a live session's [`AgentConfig`], returning its `(provider, model)`.
     /// Shared by the two public model-switch entry points below.
     async fn apply_session_config(
@@ -250,6 +241,10 @@ impl AgentState {
         SessionModelState::new(current_model.to_string(), available_models)
     }
 
+    /// Runs one prompt turn to completion and returns why it stopped, so the
+    /// caller can map it to an ACP [`StopReason`] directly instead of having
+    /// to reverse-engineer it (e.g. by polling session state for cancellation
+    /// after the fact).
     pub async fn acp_prompt<F>(
         &self,
         session_id: &str,
@@ -257,7 +252,7 @@ impl AgentState {
         permission_gate: Arc<dyn PermissionGate>,
         client_io: Arc<dyn ClientIo>,
         mut on_update: F,
-    ) -> Result<()>
+    ) -> Result<CoreStopReason>
     where
         F: FnMut(SessionUpdate) + Send,
     {
@@ -403,7 +398,7 @@ impl AgentState {
             tracing::warn!("failed to save conversation: {e}");
         }
 
-        run_result.map(|_| ())
+        run_result.map(|r| r.stop_reason)
     }
 
     pub async fn acp_list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<SessionInfo>> {
@@ -546,6 +541,18 @@ fn tool_kind_for(tool_name: &str) -> ToolKind {
         "read_file" => ToolKind::Read,
         "write_file" => ToolKind::Edit,
         _ => ToolKind::Other,
+    }
+}
+
+/// Maps core's own [`CoreStopReason`] onto ACP's `StopReason`.
+fn map_stop_reason(reason: CoreStopReason) -> StopReason {
+    match reason {
+        CoreStopReason::EndTurn => StopReason::EndTurn,
+        CoreStopReason::MaxIterations => StopReason::MaxTurnRequests,
+        CoreStopReason::Cancelled => StopReason::Cancelled,
+        // ACP has no "the model returned nothing usable" variant; `EndTurn`
+        // is the least misleading fit (it's not cancellation or exhaustion).
+        CoreStopReason::NoContent => StopReason::EndTurn,
     }
 }
 
@@ -890,13 +897,8 @@ pub async fn serve(
                     // connection, so per-turn failures must never propagate past
                     // here — they're reported via the response instead.
                     let respond_result = match result {
-                        Ok(()) => {
-                            let stop_reason = if state.is_session_cancelled(&session_key).await {
-                                StopReason::Cancelled
-                            } else {
-                                StopReason::EndTurn
-                            };
-                            responder.respond(PromptResponse::new(stop_reason))
+                        Ok(stop_reason) => {
+                            responder.respond(PromptResponse::new(map_stop_reason(stop_reason)))
                         }
                         Err(e) => {
                             tracing::error!("agent loop error: {e}");
