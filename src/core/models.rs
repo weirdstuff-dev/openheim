@@ -166,12 +166,16 @@ pub enum StreamEvent {
     /// The agent is about to invoke a tool.
     #[serde(rename = "tool_call")]
     ToolCall {
+        /// Provider-assigned tool-call ID; stable across the matching
+        /// [`StreamEvent::ToolResult`] and any permission check in between.
+        id: String,
         tool_name: String,
         arguments: String,
     },
     /// A tool has finished executing.
     #[serde(rename = "tool_result")]
     ToolResult {
+        id: String,
         tool_name: String,
         result: String,
         is_error: bool,
@@ -444,6 +448,7 @@ mod tests {
     #[test]
     fn stream_event_tool_call_serializes() {
         let event = StreamEvent::ToolCall {
+            id: "call_1".into(),
             tool_name: "read_file".into(),
             arguments: r#"{"path":"a.txt"}"#.into(),
         };

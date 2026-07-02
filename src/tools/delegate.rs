@@ -13,11 +13,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::{AgentConfig, AppConfig, client_for_config};
-use crate::core::agent::run_agent_with_history;
+use crate::core::agent::{TurnContext, run_agent_with_history};
 use crate::core::llm::LlmClient;
 use crate::core::models::{FunctionDefinition, Message, Tool};
+use crate::core::permission::{AllowAll, PermissionGate};
 use crate::error::{Error, Result};
 use crate::rag::PromptBuilder;
 use crate::subagents::AgentProfile;
@@ -197,9 +199,18 @@ impl ToolHandler for DelegateTool {
         // Fresh, isolated history — the subagent only ever sees its own task.
         let mut messages = vec![Message::user(task.to_string())];
 
-        let result =
-            run_agent_with_history(llm, executor, &config, &mut messages, Some(&prompt_builder))
-                .await?;
+        let result = run_agent_with_history(
+            llm,
+            executor,
+            &config,
+            &mut messages,
+            Some(&prompt_builder),
+            &TurnContext {
+                cancel: &CancellationToken::new(),
+                permission_gate: &(Arc::new(AllowAll) as Arc<dyn PermissionGate>),
+            },
+        )
+        .await?;
 
         if result.iterations_used >= config.max_iterations {
             Ok(format!(

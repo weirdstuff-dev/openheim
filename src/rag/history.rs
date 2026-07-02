@@ -298,7 +298,7 @@ impl HistoryManager {
                 }
             }
         }
-        metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        metas.sort_by_key(|m| std::cmp::Reverse(m.updated_at));
         Ok(metas)
     }
 

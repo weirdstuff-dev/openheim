@@ -1,13 +1,23 @@
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::AgentConfig;
 use crate::core::llm::{LlmChunk, LlmClient};
 use crate::core::models::*;
+use crate::core::permission::PermissionGate;
 use crate::error::Result;
 use crate::rag::PromptBuilder;
 use crate::tools::ToolExecutor;
+
+/// Cross-cutting turn controls threaded through the agent loop. Grouped into
+/// one struct so `run_agent_loop`'s parameter list doesn't grow with every
+/// new hook (cancellation, permission checks, and more to come).
+pub struct TurnContext<'a> {
+    pub cancel: &'a CancellationToken,
+    pub permission_gate: &'a Arc<dyn PermissionGate>,
+}
 
 async fn call_llm(
     llm: &Arc<dyn LlmClient>,
@@ -50,12 +60,19 @@ async fn call_llm_streaming(
 /// If `callback` is `Some`, a [`StreamEvent`] is emitted for each significant
 /// step: iteration start, tool calls, tool results, LLM text responses, and
 /// the final completion.
+///
+/// `cancel` is checked between iterations and before each tool call so a
+/// caller (e.g. the ACP layer reacting to `session/cancel`) can stop an
+/// in-flight turn early. The loop always returns a normal [`AgentResult`];
+/// callers that care whether cancellation actually happened should check
+/// `cancel.is_cancelled()` themselves after this returns.
 async fn run_agent_loop<F>(
     llm: &Arc<dyn LlmClient>,
     tool_executor: &Arc<dyn ToolExecutor>,
     config: &AgentConfig,
     messages: &mut Vec<Message>,
     prompt_builder: Option<&PromptBuilder>,
+    turn: &TurnContext<'_>,
     mut callback: Option<F>,
 ) -> Result<AgentResult>
 where
@@ -64,9 +81,15 @@ where
     let tools = tool_executor.list_tools();
     let mut steps = Vec::new();
     let mut final_response = String::new();
+    let mut iterations_used = 0;
 
     for iteration in 0..config.max_iterations {
+        if turn.cancel.is_cancelled() {
+            break;
+        }
+
         let iter_num = iteration + 1;
+        iterations_used = iter_num;
 
         if let Some(cb) = callback.as_mut() {
             cb(StreamEvent::IterationStart {
@@ -116,23 +139,35 @@ where
             let mut tool_results = Vec::new();
 
             for tool_call in tool_calls {
+                if turn.cancel.is_cancelled() {
+                    break;
+                }
+
+                let id = &tool_call.id;
                 let tool_name = &tool_call.function.name;
                 let arguments = &tool_call.function.arguments;
 
                 if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::ToolCall {
+                        id: id.clone(),
                         tool_name: tool_name.clone(),
                         arguments: arguments.clone(),
                     });
                 }
 
-                let (result, is_error) = match tool_executor.execute(tool_name, arguments).await {
-                    Ok(r) => (r, false),
-                    Err(e) => (format!("Error: {e}"), true),
+                let decision = turn.permission_gate.check(id, tool_name, arguments).await;
+                let (result, is_error) = if decision.is_allowed() {
+                    match tool_executor.execute(tool_name, arguments).await {
+                        Ok(r) => (r, false),
+                        Err(e) => (format!("Error: {e}"), true),
+                    }
+                } else {
+                    ("Permission denied by user.".to_string(), true)
                 };
 
                 if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::ToolResult {
+                        id: id.clone(),
                         tool_name: tool_name.clone(),
                         result: result.clone(),
                         is_error,
@@ -195,14 +230,14 @@ where
     if let Some(cb) = callback.as_mut() {
         cb(StreamEvent::Finished {
             final_response: final_response.clone(),
-            iterations: config.max_iterations,
+            iterations: iterations_used,
         });
     }
 
     Ok(AgentResult {
         final_response,
         steps,
-        iterations_used: config.max_iterations,
+        iterations_used,
     })
 }
 
@@ -225,9 +260,18 @@ pub async fn run_agent_with_history(
     config: &AgentConfig,
     messages: &mut Vec<Message>,
     prompt_builder: Option<&PromptBuilder>,
+    turn: &TurnContext<'_>,
 ) -> Result<AgentResult> {
-    run_agent_loop::<fn(StreamEvent)>(&llm, &tool_executor, config, messages, prompt_builder, None)
-        .await
+    run_agent_loop::<fn(StreamEvent)>(
+        &llm,
+        &tool_executor,
+        config,
+        messages,
+        prompt_builder,
+        turn,
+        None,
+    )
+    .await
 }
 
 /// Streaming variant of [`run_agent_with_history`].
@@ -241,6 +285,7 @@ pub async fn run_agent_streaming_with_history<F>(
     config: &AgentConfig,
     messages: &mut Vec<Message>,
     prompt_builder: Option<&PromptBuilder>,
+    turn: &TurnContext<'_>,
     callback: F,
 ) -> Result<AgentResult>
 where
@@ -252,6 +297,7 @@ where
         config,
         messages,
         prompt_builder,
+        turn,
         Some(callback),
     )
     .await
@@ -260,6 +306,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::permission::{AllowAll, PermissionDecision};
     use crate::error::Error;
     use async_trait::async_trait;
     use std::sync::Mutex;
@@ -270,6 +317,10 @@ mod tests {
             max_iterations,
             ..AgentConfig::default()
         }
+    }
+
+    fn allow_all() -> Arc<dyn PermissionGate> {
+        Arc::new(AllowAll)
     }
 
     fn text_choice(content: &str, finish: &str) -> Choice {
@@ -377,9 +428,19 @@ mod tests {
         let config = make_config(10);
         let mut messages = vec![Message::user("hi".into())];
 
-        let result = run_agent_with_history(llm.clone(), executor, &config, &mut messages, None)
-            .await
-            .unwrap();
+        let result = run_agent_with_history(
+            llm.clone(),
+            executor,
+            &config,
+            &mut messages,
+            None,
+            &TurnContext {
+                cancel: &CancellationToken::new(),
+                permission_gate: &allow_all(),
+            },
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.final_response, "done");
         assert_eq!(result.iterations_used, 1);
@@ -396,10 +457,19 @@ mod tests {
         let config = make_config(10);
         let mut messages = vec![Message::user("read a.txt".into())];
 
-        let result =
-            run_agent_with_history(llm.clone(), executor.clone(), &config, &mut messages, None)
-                .await
-                .unwrap();
+        let result = run_agent_with_history(
+            llm.clone(),
+            executor.clone(),
+            &config,
+            &mut messages,
+            None,
+            &TurnContext {
+                cancel: &CancellationToken::new(),
+                permission_gate: &allow_all(),
+            },
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.final_response, "here is the file content");
         assert_eq!(result.iterations_used, 2);
@@ -421,9 +491,19 @@ mod tests {
         let config = make_config(3);
         let mut messages = vec![Message::user("loop".into())];
 
-        let result = run_agent_with_history(llm, executor, &config, &mut messages, None)
-            .await
-            .unwrap();
+        let result = run_agent_with_history(
+            llm,
+            executor,
+            &config,
+            &mut messages,
+            None,
+            &TurnContext {
+                cancel: &CancellationToken::new(),
+                permission_gate: &allow_all(),
+            },
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.iterations_used, 3);
     }
@@ -445,6 +525,10 @@ mod tests {
             &config,
             &mut messages,
             None,
+            &TurnContext {
+                cancel: &CancellationToken::new(),
+                permission_gate: &allow_all(),
+            },
             |event| events.push(event),
         )
         .await
@@ -484,9 +568,19 @@ mod tests {
         let mut messages = vec![Message::user("do something".into())];
 
         // Should not propagate the error; LLM should receive it as a tool result
-        let result = run_agent_with_history(llm, executor, &config, &mut messages, None)
-            .await
-            .unwrap();
+        let result = run_agent_with_history(
+            llm,
+            executor,
+            &config,
+            &mut messages,
+            None,
+            &TurnContext {
+                cancel: &CancellationToken::new(),
+                permission_gate: &allow_all(),
+            },
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.final_response, "I got an error");
         // The tool result message should contain the error text
@@ -498,5 +592,94 @@ mod tests {
                 .unwrap_or("")
                 .contains("Error:")
         );
+    }
+
+    #[tokio::test]
+    async fn agent_stops_early_when_cancelled() {
+        // LLM always returns tool calls, never stops on its own.
+        let llm = Arc::new(MockLlm::new(vec![
+            tool_call_choice("read_file", "{}"),
+            tool_call_choice("read_file", "{}"),
+            tool_call_choice("read_file", "{}"),
+        ]));
+        let executor = Arc::new(MockToolExecutor::new("data"));
+        let config = make_config(10);
+        let mut messages = vec![Message::user("loop".into())];
+        let cancel = CancellationToken::new();
+        let cancel_signal = cancel.clone();
+
+        let result = run_agent_streaming_with_history(
+            llm,
+            executor.clone(),
+            &config,
+            &mut messages,
+            None,
+            &TurnContext {
+                cancel: &cancel,
+                permission_gate: &allow_all(),
+            },
+            move |event| {
+                if matches!(event, StreamEvent::ToolResult { .. }) {
+                    cancel_signal.cancel();
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        // Only the first iteration's tool call should have run before the
+        // second iteration's cancellation check stopped the loop.
+        assert_eq!(result.iterations_used, 1);
+        let calls = executor.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+    }
+
+    struct RejectPermissionGate;
+
+    #[async_trait]
+    impl PermissionGate for RejectPermissionGate {
+        async fn check(
+            &self,
+            _tool_call_id: &str,
+            _tool_name: &str,
+            _arguments: &str,
+        ) -> PermissionDecision {
+            PermissionDecision::RejectOnce
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_skips_execution_when_permission_denied() {
+        let llm = Arc::new(MockLlm::new(vec![
+            tool_call_choice("execute_command", r#"{"command":"rm -rf /"}"#),
+            text_choice("I was denied", "stop"),
+        ]));
+        let executor = Arc::new(MockToolExecutor::new("should not run"));
+        let config = make_config(10);
+        let mut messages = vec![Message::user("do something dangerous".into())];
+
+        let result = run_agent_with_history(
+            llm,
+            executor.clone(),
+            &config,
+            &mut messages,
+            None,
+            &TurnContext {
+                cancel: &CancellationToken::new(),
+                permission_gate: &(Arc::new(RejectPermissionGate) as Arc<dyn PermissionGate>),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.final_response, "I was denied");
+        // The tool must never actually execute once permission is denied.
+        assert!(executor.calls.lock().unwrap().is_empty());
+        let tool_result_msg = messages.iter().find(|m| m.tool_call_id.is_some()).unwrap();
+        assert_eq!(
+            tool_result_msg.content.as_deref(),
+            Some("Permission denied by user.")
+        );
+        assert!(tool_result_msg.is_error);
     }
 }

@@ -7,26 +7,31 @@ use std::{
 };
 
 use agent_client_protocol::{
-    Agent, Client, ConnectTo, ConnectionTo, Dispatch, on_receive_dispatch, on_receive_request,
+    Agent, Client, ConnectTo, ConnectionTo, Dispatch, on_receive_dispatch, on_receive_notification,
+    on_receive_request,
     schema::{
-        AgentCapabilities, ContentBlock, ContentChunk, Implementation, InitializeRequest,
-        InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-        LoadSessionResponse, ModelInfo, NewSessionRequest, NewSessionResponse, PromptRequest,
-        PromptResponse, SessionCapabilities, SessionInfo, SessionListCapabilities,
-        SessionModelState, SessionNotification, SessionUpdate, SetSessionModelRequest,
-        SetSessionModelResponse, StopReason, TextContent, ToolCall as AcpToolCall, ToolCallStatus,
-        ToolCallUpdate, ToolCallUpdateFields,
+        AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Implementation,
+        InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
+        LoadSessionRequest, LoadSessionResponse, ModelInfo, NewSessionRequest, NewSessionResponse,
+        PermissionOption, PermissionOptionKind, PromptRequest, PromptResponse,
+        RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+        SessionCapabilities, SessionInfo, SessionListCapabilities, SessionModelState,
+        SessionNotification, SessionUpdate, SetSessionModelRequest, SetSessionModelResponse,
+        StopReason, TextContent, ToolCall as AcpToolCall, ToolCallStatus, ToolCallUpdate,
+        ToolCallUpdateFields, ToolKind,
     },
     util::internal_error,
 };
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
     config::{AgentConfig, AppConfig, build_http_client, create_client},
     core::{
-        agent::run_agent_streaming_with_history,
+        agent::{TurnContext, run_agent_streaming_with_history},
         models::{Message, Role, StreamEvent},
+        permission::{PermissionDecision, PermissionGate},
     },
     error::{Error, Result},
     llm::LlmClient,
@@ -112,9 +117,30 @@ impl AgentState {
                 config,
                 cwd,
                 skills,
+                cancel: CancellationToken::new(),
+                approved_tools: HashMap::new(),
             },
         );
         Ok(session_key)
+    }
+
+    /// Cancels the currently active prompt turn for `session_id`, if any.
+    /// No-op if the session doesn't exist or has no turn in flight.
+    pub async fn cancel_session(&self, session_id: &str) {
+        if let Some(s) = self.sessions.read().await.get(session_id) {
+            s.cancel.cancel();
+        }
+    }
+
+    /// Whether the most recent (or currently running) prompt turn for
+    /// `session_id` was cancelled via [`Self::cancel_session`].
+    pub async fn is_session_cancelled(&self, session_id: &str) -> bool {
+        self.sessions
+            .read()
+            .await
+            .get(session_id)
+            .map(|s| s.cancel.is_cancelled())
+            .unwrap_or(false)
     }
 
     /// Swaps a live session's [`AgentConfig`], returning its `(provider, model)`.
@@ -176,16 +202,21 @@ impl AgentState {
         &self,
         session_id: &str,
         text: String,
+        permission_gate: Arc<dyn PermissionGate>,
         mut on_update: F,
     ) -> Result<()>
     where
         F: FnMut(SessionUpdate) + Send,
     {
-        let (llm, executor, config, chat_id, skills, cwd) = {
-            let sessions = self.sessions.read().await;
+        let (llm, executor, config, chat_id, skills, cwd, cancel) = {
+            // Write lock: each new prompt turn gets a fresh cancellation token,
+            // since a token can only ever transition uncancelled -> cancelled
+            // and must not leak a previous turn's cancellation into this one.
+            let mut sessions = self.sessions.write().await;
             let s = sessions
-                .get(session_id)
+                .get_mut(session_id)
                 .ok_or_else(|| Error::Other(format!("session not found: {session_id}")))?;
+            s.cancel = CancellationToken::new();
             let llm = crate::config::client_for_config(&s.config, &self.config, &self.llm)?;
             let sandboxed = Arc::new(SandboxedExecutor::new(
                 self.executor.clone(),
@@ -199,6 +230,7 @@ impl AgentState {
                 s.chat_id,
                 s.skills.clone(),
                 s.cwd.clone(),
+                s.cancel.clone(),
             )
         };
 
@@ -212,14 +244,17 @@ impl AgentState {
         conversation.meta.cwd = Some(cwd);
         conversation.messages.push(Message::user(text));
 
-        let mut last_tool_call_id: Option<String> = None;
-
+        let turn = TurnContext {
+            cancel: &cancel,
+            permission_gate: &permission_gate,
+        };
         let run_result = run_agent_streaming_with_history(
             llm,
             executor,
             &config,
             &mut conversation.messages,
             Some(&prompt_builder),
+            &turn,
             move |event| match event {
                 StreamEvent::LlmResponse { content } => {
                     on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
@@ -240,34 +275,38 @@ impl AgentState {
                     )));
                 }
                 StreamEvent::ToolCall {
+                    id,
                     tool_name,
                     arguments,
                 } => {
-                    let id = Uuid::new_v4().to_string();
-                    last_tool_call_id = Some(id.clone());
+                    // Pending, not InProgress: the permission gate (invoked by the
+                    // agent loop right after this event) hasn't authorized
+                    // execution yet at this point.
                     let raw_input = serde_json::from_str(&arguments).ok();
                     on_update(SessionUpdate::ToolCall(
                         AcpToolCall::new(id, &*tool_name)
-                            .status(ToolCallStatus::InProgress)
+                            .kind(tool_kind_for(&tool_name))
+                            .status(ToolCallStatus::Pending)
                             .raw_input(raw_input),
                     ));
                 }
                 StreamEvent::ToolResult {
-                    result, is_error, ..
+                    id,
+                    result,
+                    is_error,
+                    ..
                 } => {
-                    if let Some(id) = last_tool_call_id.take() {
-                        let status = if is_error {
-                            ToolCallStatus::Failed
-                        } else {
-                            ToolCallStatus::Completed
-                        };
-                        on_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                            id,
-                            ToolCallUpdateFields::new()
-                                .status(status)
-                                .raw_output(serde_json::Value::String(result)),
-                        )));
-                    }
+                    let status = if is_error {
+                        ToolCallStatus::Failed
+                    } else {
+                        ToolCallStatus::Completed
+                    };
+                    on_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                        id,
+                        ToolCallUpdateFields::new()
+                            .status(status)
+                            .raw_output(serde_json::Value::String(result)),
+                    )));
                 }
                 _ => {}
             },
@@ -356,6 +395,8 @@ impl AgentState {
                 config: session_config,
                 cwd,
                 skills: conversation.meta.skills.clone(),
+                cancel: CancellationToken::new(),
+                approved_tools: HashMap::new(),
             },
         );
 
@@ -420,6 +461,117 @@ impl AgentState {
     }
 }
 
+/// Maps a builtin/MCP tool name to the closest ACP [`ToolKind`], purely for
+/// client UI treatment (icons etc.) — has no bearing on execution.
+fn tool_kind_for(tool_name: &str) -> ToolKind {
+    match tool_name {
+        "execute_command" => ToolKind::Execute,
+        "read_file" => ToolKind::Read,
+        "write_file" => ToolKind::Edit,
+        _ => ToolKind::Other,
+    }
+}
+
+/// [`PermissionGate`] backed by ACP's `session/request_permission`. Lives here
+/// (not in `core`) because it depends on the live client connection.
+struct AcpPermissionGate {
+    cx: ConnectionTo<Client>,
+    session_id: String,
+    state: Arc<AgentState>,
+}
+
+#[async_trait::async_trait]
+impl PermissionGate for AcpPermissionGate {
+    async fn check(
+        &self,
+        tool_call_id: &str,
+        tool_name: &str,
+        arguments: &str,
+    ) -> PermissionDecision {
+        if let Some(remembered) = self
+            .state
+            .sessions
+            .read()
+            .await
+            .get(&self.session_id)
+            .and_then(|s| s.approved_tools.get(tool_name).copied())
+        {
+            return remembered;
+        }
+
+        let raw_input = serde_json::from_str(arguments).ok();
+        let tool_call = ToolCallUpdate::new(
+            tool_call_id.to_string(),
+            ToolCallUpdateFields::new()
+                .title(tool_name)
+                .kind(tool_kind_for(tool_name))
+                .status(ToolCallStatus::Pending)
+                .raw_input(raw_input),
+        );
+        let options = vec![
+            PermissionOption::new("allow_once", "Allow Once", PermissionOptionKind::AllowOnce),
+            PermissionOption::new(
+                "allow_always",
+                "Allow Always",
+                PermissionOptionKind::AllowAlways,
+            ),
+            PermissionOption::new(
+                "reject_once",
+                "Reject Once",
+                PermissionOptionKind::RejectOnce,
+            ),
+            PermissionOption::new(
+                "reject_always",
+                "Reject Always",
+                PermissionOptionKind::RejectAlways,
+            ),
+        ];
+
+        let response = self
+            .cx
+            .send_request(RequestPermissionRequest::new(
+                self.session_id.clone(),
+                tool_call,
+                options,
+            ))
+            .block_task()
+            .await;
+
+        let decision = match response {
+            Ok(RequestPermissionResponse {
+                outcome: RequestPermissionOutcome::Selected(selected),
+                ..
+            }) => match selected.option_id.0.as_ref() {
+                "allow_once" => PermissionDecision::AllowOnce,
+                "allow_always" => PermissionDecision::AllowAlways,
+                "reject_always" => PermissionDecision::RejectAlways,
+                _ => PermissionDecision::RejectOnce,
+            },
+            Ok(RequestPermissionResponse {
+                outcome: RequestPermissionOutcome::Cancelled,
+                ..
+            }) => PermissionDecision::RejectOnce,
+            // `RequestPermissionOutcome` is #[non_exhaustive]; treat any future
+            // variant conservatively, same as an explicit rejection.
+            Ok(_) => PermissionDecision::RejectOnce,
+            Err(e) => {
+                tracing::warn!("session/request_permission failed: {e}");
+                PermissionDecision::RejectOnce
+            }
+        };
+
+        if matches!(
+            decision,
+            PermissionDecision::AllowAlways | PermissionDecision::RejectAlways
+        ) && let Some(s) = self.state.sessions.write().await.get_mut(&self.session_id)
+        {
+            s.approved_tools.insert(tool_name.to_string(), decision);
+        }
+
+        decision
+    }
+}
+
 fn extract_prompt_text(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
@@ -441,6 +593,7 @@ pub async fn serve(
     let state_list = state.clone();
     let state_load = state.clone();
     let state_set_model = state.clone();
+    let state_cancel = state.clone();
 
     Agent
         .builder()
@@ -522,23 +675,52 @@ pub async fn serve(
                 let text = extract_prompt_text(&req.prompt);
                 let cx_cb = cx.clone();
                 let session_id_cb = req.session_id.clone();
+                let state = state_prompt.clone();
+                let permission_gate = Arc::new(AcpPermissionGate {
+                    cx: cx.clone(),
+                    session_id: session_key.clone(),
+                    state: state.clone(),
+                }) as Arc<dyn PermissionGate>;
 
-                let result = state_prompt
-                    .acp_prompt(&session_key, text, move |update| {
-                        let _ = cx_cb.send_notification(SessionNotification::new(
-                            session_id_cb.clone(),
-                            update,
-                        ));
-                    })
-                    .await;
+                // The prompt turn can run for a long time (many LLM/tool round-trips)
+                // and, once permission requests land, will itself await replies from
+                // the client. Handlers run on the single-task event loop, which can't
+                // read new messages (including those replies, or a session/cancel
+                // notification) while a handler is executing — so this must be moved
+                // off the event loop via `cx.spawn`, with the response sent from
+                // inside the spawned task once the turn actually finishes.
+                cx.spawn(async move {
+                    let result = state
+                        .acp_prompt(&session_key, text, permission_gate, move |update| {
+                            let _ = cx_cb.send_notification(SessionNotification::new(
+                                session_id_cb.clone(),
+                                update,
+                            ));
+                        })
+                        .await;
 
-                match result {
-                    Ok(()) => responder.respond(PromptResponse::new(StopReason::EndTurn)),
-                    Err(e) => {
-                        tracing::error!("agent loop error: {e}");
-                        responder.respond_with_internal_error(e.to_string())
+                    // A spawned task returning an error shuts down the whole
+                    // connection, so per-turn failures must never propagate past
+                    // here — they're reported via the response instead.
+                    let respond_result = match result {
+                        Ok(()) => {
+                            let stop_reason = if state.is_session_cancelled(&session_key).await {
+                                StopReason::Cancelled
+                            } else {
+                                StopReason::EndTurn
+                            };
+                            responder.respond(PromptResponse::new(stop_reason))
+                        }
+                        Err(e) => {
+                            tracing::error!("agent loop error: {e}");
+                            responder.respond_with_internal_error(e.to_string())
+                        }
+                    };
+                    if let Err(e) = respond_result {
+                        tracing::warn!("failed to send prompt response: {e}");
                     }
-                }
+                    Ok(())
+                })
             },
             on_receive_request!(),
         )
@@ -586,6 +768,14 @@ pub async fn serve(
                 }
             },
             on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |notif: CancelNotification, _cx: ConnectionTo<Client>| {
+                let session_id = notif.session_id.0.as_ref().to_string();
+                state_cancel.cancel_session(&session_id).await;
+                Ok(())
+            },
+            on_receive_notification!(),
         )
         .on_receive_dispatch(
             async move |message: Dispatch, cx: ConnectionTo<Client>| {
