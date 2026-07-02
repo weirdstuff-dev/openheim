@@ -59,7 +59,6 @@ use agent_client_protocol::Lines;
 use crate::{
     acp::{self, AgentState},
     config::load_config,
-    core::models::{FileEntry, FsRequest, FsResponse},
     error::Error as AppError,
     rag::RagContext,
     tools::sandbox::validate_path,
@@ -81,6 +80,103 @@ enum WsOutbound {
     Agent(Value),
     #[serde(rename = "fs")]
     Fs(FsResponse),
+}
+
+/// Entry in the file tree
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FileEntry {
+    pub path: String,
+    pub name: String,
+    pub is_dir: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified: Option<u64>,
+}
+
+/// Requests from the frontend to the filesystem WebSocket
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action")]
+pub enum FsRequest {
+    /// Initialize watching on a workspace directory
+    #[serde(rename = "watch")]
+    Watch { path: String },
+
+    /// Stop watching
+    #[serde(rename = "unwatch")]
+    Unwatch,
+
+    /// List directory contents
+    #[serde(rename = "list")]
+    List {
+        path: String,
+        recursive: Option<bool>,
+    },
+
+    /// Read file contents
+    #[serde(rename = "read")]
+    Read { path: String },
+
+    /// Write file contents
+    #[serde(rename = "write")]
+    Write { path: String, content: String },
+
+    /// Create a directory
+    #[serde(rename = "mkdir")]
+    Mkdir { path: String },
+
+    /// Delete a file or directory
+    #[serde(rename = "delete")]
+    Delete { path: String },
+
+    /// Rename/move a file or directory
+    #[serde(rename = "rename")]
+    Rename { from: String, to: String },
+}
+
+/// Responses/events from the filesystem WebSocket to the frontend
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "type")]
+pub enum FsResponse {
+    #[serde(rename = "connected")]
+    Connected { message: String },
+
+    #[serde(rename = "watching")]
+    Watching { path: String },
+
+    #[serde(rename = "unwatched")]
+    Unwatched,
+
+    #[serde(rename = "file_list")]
+    FileList {
+        path: String,
+        entries: Vec<FileEntry>,
+    },
+
+    #[serde(rename = "file_content")]
+    FileContent { path: String, content: String },
+
+    #[serde(rename = "write_success")]
+    WriteSuccess { path: String },
+
+    #[serde(rename = "mkdir_success")]
+    MkdirSuccess { path: String },
+
+    #[serde(rename = "delete_success")]
+    DeleteSuccess { path: String },
+
+    #[serde(rename = "rename_success")]
+    RenameSuccess { from: String, to: String },
+
+    /// File system change event (from watcher)
+    #[serde(rename = "fs_event")]
+    FsEvent {
+        event_kind: String,
+        paths: Vec<String>,
+    },
+
+    #[serde(rename = "error")]
+    Error { message: String },
 }
 
 /// Loads configuration, initialises the agent runtime, and starts the HTTP/WebSocket server.
@@ -703,5 +799,48 @@ mod tests {
             "unexpected response: {resp:?}"
         );
         assert!(state._watcher.is_some());
+    }
+
+    #[test]
+    fn fs_request_deserializes_watch() {
+        let json = r#"{"action": "watch", "path": "/tmp"}"#;
+        let req: FsRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(req, FsRequest::Watch { path } if path == "/tmp"));
+    }
+
+    #[test]
+    fn fs_request_deserializes_write() {
+        let json = r#"{"action": "write", "path": "a.txt", "content": "hello"}"#;
+        let req: FsRequest = serde_json::from_str(json).unwrap();
+        assert!(
+            matches!(req, FsRequest::Write { path, content } if path == "a.txt" && content == "hello")
+        );
+    }
+
+    #[test]
+    fn fs_request_deserializes_rename() {
+        let json = r#"{"action": "rename", "from": "a.txt", "to": "b.txt"}"#;
+        let req: FsRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(req, FsRequest::Rename { from, to } if from == "a.txt" && to == "b.txt"));
+    }
+
+    #[test]
+    fn fs_response_serializes_with_type_tag() {
+        let resp = FsResponse::Connected {
+            message: "ok".into(),
+        };
+        let json: Value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["type"], "connected");
+        assert_eq!(json["message"], "ok");
+    }
+
+    #[test]
+    fn fs_response_error_serializes() {
+        let resp = FsResponse::Error {
+            message: "not found".into(),
+        };
+        let json: Value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["type"], "error");
+        assert_eq!(json["message"], "not found");
     }
 }
