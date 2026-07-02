@@ -75,7 +75,6 @@ where
     let mut steps = Vec::new();
     let mut final_response = String::new();
     let mut iterations_used = 0;
-    let mut plan_steps: Vec<PlanStep> = Vec::new();
     // Overwritten on every early exit; stays `MaxIterations` only if the
     // `for` loop below runs to completion without the LLM ever stopping.
     let mut stop_reason = StopReason::MaxIterations;
@@ -168,14 +167,6 @@ where
                         tool_name: tool_name.clone(),
                         arguments: arguments.clone(),
                     });
-
-                    plan_steps.push(PlanStep {
-                        content: tool_name.clone(),
-                        status: PlanStepStatus::InProgress,
-                    });
-                    cb(StreamEvent::PlanUpdate {
-                        entries: plan_steps.clone(),
-                    });
                 }
 
                 let decision = turn.permission_gate.check(id, tool_name, arguments).await;
@@ -194,13 +185,6 @@ where
                         tool_name: tool_name.clone(),
                         result: result.clone(),
                         is_error,
-                    });
-
-                    if let Some(last) = plan_steps.last_mut() {
-                        last.status = PlanStepStatus::Completed;
-                    }
-                    cb(StreamEvent::PlanUpdate {
-                        entries: plan_steps.clone(),
                     });
                 }
 
@@ -583,8 +567,7 @@ mod tests {
 
         assert_eq!(result.final_response, "all done");
 
-        // Check relative event ordering (not raw indices, since plan_update
-        // events are interleaved around the tool call/result pair).
+        // Check relative event ordering.
         let tool_call_idx = events
             .iter()
             .position(
@@ -613,27 +596,6 @@ mod tests {
         assert!(matches!(
             &events[llm_response_idx + 1],
             StreamEvent::Finished { .. }
-        ));
-
-        // Two plan_update events: one after the tool call starts, one after it completes.
-        let plan_updates: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, StreamEvent::PlanUpdate { .. }))
-            .collect();
-        assert_eq!(plan_updates.len(), 2);
-        assert!(matches!(
-            plan_updates[0],
-            StreamEvent::PlanUpdate { entries } if entries == &[PlanStep {
-                content: "echo".to_string(),
-                status: PlanStepStatus::InProgress,
-            }]
-        ));
-        assert!(matches!(
-            plan_updates[1],
-            StreamEvent::PlanUpdate { entries } if entries == &[PlanStep {
-                content: "echo".to_string(),
-                status: PlanStepStatus::Completed,
-            }]
         ));
     }
 

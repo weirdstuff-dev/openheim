@@ -13,15 +13,15 @@ use agent_client_protocol::{
         AgentCapabilities, CancelNotification, ClientCapabilities, ContentBlock as AcpContentBlock,
         ContentChunk, Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
         ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, ModelInfo,
-        NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, Plan,
-        PlanEntry, PlanEntryPriority, PlanEntryStatus, PromptCapabilities, PromptRequest,
-        PromptResponse, ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome,
-        RequestPermissionRequest, RequestPermissionResponse, SessionCapabilities, SessionInfo,
-        SessionListCapabilities, SessionMode, SessionModeState, SessionModelState,
-        SessionNotification, SessionUpdate, SetSessionModeRequest, SetSessionModeResponse,
-        SetSessionModelRequest, SetSessionModelResponse, StopReason, TextContent,
-        ToolCall as AcpToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
-        WriteTextFileRequest, WriteTextFileResponse,
+        NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind,
+        PromptCapabilities, PromptRequest, PromptResponse, ReadTextFileRequest,
+        ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
+        RequestPermissionResponse, SessionCapabilities, SessionInfo, SessionListCapabilities,
+        SessionMode, SessionModeState, SessionModelState, SessionNotification, SessionUpdate,
+        SetSessionModeRequest, SetSessionModeResponse, SetSessionModelRequest,
+        SetSessionModelResponse, StopReason, TextContent, ToolCall as AcpToolCall, ToolCallStatus,
+        ToolCallUpdate, ToolCallUpdateFields, ToolKind, WriteTextFileRequest,
+        WriteTextFileResponse,
     },
     util::internal_error,
 };
@@ -34,9 +34,7 @@ use crate::{
     core::{
         agent::run_agent_streaming_with_history,
         client_io::ClientIo,
-        models::{
-            ContentBlock, Message, PlanStepStatus, Role, StopReason as CoreStopReason, StreamEvent,
-        },
+        models::{ContentBlock, Message, Role, StopReason as CoreStopReason, StreamEvent},
         permission::{PermissionDecision, PermissionGate},
         turn::TurnContext,
     },
@@ -372,21 +370,6 @@ impl AgentState {
                         ToolCallUpdateFields::new()
                             .status(status)
                             .raw_output(serde_json::Value::String(result)),
-                    )));
-                }
-                StreamEvent::PlanUpdate { entries } => {
-                    on_update(SessionUpdate::Plan(Plan::new(
-                        entries
-                            .into_iter()
-                            .map(|step| {
-                                let status = match step.status {
-                                    PlanStepStatus::Pending => PlanEntryStatus::Pending,
-                                    PlanStepStatus::InProgress => PlanEntryStatus::InProgress,
-                                    PlanStepStatus::Completed => PlanEntryStatus::Completed,
-                                };
-                                PlanEntry::new(step.content, PlanEntryPriority::Medium, status)
-                            })
-                            .collect(),
                     )));
                 }
                 _ => {}
