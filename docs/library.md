@@ -139,6 +139,19 @@ let client = OpenheimClient::builder()
 
 MCP servers defined in a config file are always loaded; builder `.mcp_server()` calls are merged in on top.
 
+### With custom tools
+
+`.tool()` registers an in-process `ToolHandler` alongside the built-ins and any MCP-sourced tools, subject to the same `work_dir`/`allow_shell` sandbox boundary. See [custom-tools.md](./custom-tools.md) for how to implement `ToolHandler`.
+
+```rust
+let client = OpenheimClient::builder()
+    .provider("openai")
+    .api_key(std::env::var("OPENAI_API_KEY").unwrap())
+    .tool(Box::new(FetchUrlTool::new()))
+    .build()
+    .await?;
+```
+
 ---
 
 ## Sessions
@@ -196,6 +209,43 @@ Call `prompt` multiple times on the same handle. The agent accumulates history o
 session.prompt("My name is Alice", |_| {}).await?;
 session.prompt("What's my name?", |update| { /* prints "Alice" */ }).await?;
 ```
+
+### Permission gate, cancellation, and client I/O
+
+By default a `SessionHandle` allows every tool call unconditionally (`AllowAll`) — the embedder is trusted to have already consented to the run. For an interactive embedder, supply your own [`PermissionGate`](../src/core/permission.rs) so the agent asks before running a tool call:
+
+```rust
+use openheim::core::permission::{PermissionDecision, PermissionGate};
+use std::sync::Arc;
+
+struct CliConfirmGate;
+
+#[async_trait::async_trait]
+impl PermissionGate for CliConfirmGate {
+    async fn check(&self, _id: &str, tool_name: &str, arguments: &str) -> PermissionDecision {
+        eprintln!("allow {tool_name}({arguments})? [y/N]");
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).ok();
+        if line.trim().eq_ignore_ascii_case("y") {
+            PermissionDecision::AllowOnce
+        } else {
+            PermissionDecision::RejectOnce
+        }
+    }
+}
+
+let session = client
+    .new_session()
+    .start()
+    .await?
+    .permission_gate(Arc::new(CliConfirmGate));
+```
+
+`PermissionGate::check` is called once per tool call, before it executes — including tool calls made by a `delegate_task` subagent, which inherits the parent turn's gate rather than always-allowing.
+
+`.client_io(Arc<dyn ClientIo>)` similarly lets `read_file`/`write_file` be delegated to the embedder's own I/O (e.g. an editor's unsaved buffers) instead of local disk — see [`ClientIo`](../src/core/client_io.rs). Both `.permission_gate()` and `.client_io()` carry over automatically when a handle is reused via `.restore()`.
+
+`session.cancel().await` cancels the turn currently in flight for that session (no-op if none is running) — call it from another task while `prompt()` is awaiting.
 
 ---
 

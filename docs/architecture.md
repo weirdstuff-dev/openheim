@@ -203,7 +203,9 @@ This means the library API and the server transports share the exact same agent 
 |----------------|-------|-----|
 | Add a new LLM provider | `src/core/llm/` | Implement `LlmClient` |
 | Add a built-in tool | `src/tools/` | Implement `ToolHandler`, register in `register_builtins` |
+| Add a tool without touching source | any embedder | Implement `ToolHandler`, register via `OpenheimBuilder::tool()` |
 | Add an external tool source | `src/mcp/` | MCP servers via configuration or `McpClient` |
 | Add a new transport | `src/transport/` | Call `acp::serve(your_transport, state)` |
+| Gate tool calls on user approval | any embedder | Implement `PermissionGate`, set via `SessionHandle::permission_gate()` |
 
 See [custom-tools.md](./custom-tools.md) and [custom-llm-provider.md](./custom-llm-provider.md) for step-by-step guides.
