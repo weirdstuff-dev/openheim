@@ -115,9 +115,10 @@ Use `SystemToolExecutor::register` before running the agent:
 
 ```rust
 use openheim::tools::SystemToolExecutor;
-use openheim::core::agent::{TurnContext, run_agent_with_history};
+use openheim::core::agent::run_agent_with_history;
 use openheim::core::models::Message;
 use openheim::core::permission::{AllowAll, PermissionGate};
+use openheim::core::turn::TurnContext;
 use openheim::config::{AgentConfig, load_config};
 use openheim::rag::RagContext;
 use std::sync::Arc;

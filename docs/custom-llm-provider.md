@@ -243,9 +243,10 @@ let llm: Arc<dyn LlmClient> = Arc::new(RetryClient::new(Arc::new(base_provider))
 Pass the custom client directly to `run_agent_with_history`. It also needs a `TurnContext` (cancellation token + permission gate) — use `permission::AllowAll` and a fresh `CancellationToken` for a one-shot, non-interactive run:
 
 ```rust
-use openheim::core::agent::{TurnContext, run_agent_with_history};
+use openheim::core::agent::run_agent_with_history;
 use openheim::core::models::Message;
 use openheim::core::permission::{AllowAll, PermissionGate};
+use openheim::core::turn::TurnContext;
 use openheim::config::load_config;
 use openheim::tools::SystemToolExecutor;
 use std::sync::Arc;
