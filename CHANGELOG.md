@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Tool-call permission requests** — before executing a tool call, the ACP layer now sends `session/request_permission` and waits for the client's decision (allow/reject, once or always) instead of executing immediately. `AllowAlways`/`RejectAlways` decisions are remembered for the rest of the session. Non-ACP callers (TUI, library embedding, subagents) are unaffected — they use an always-allow gate.
+- **`session/cancel` actually cancels a running turn** — previously a `session/prompt` handler ran to completion on the single-task ACP event loop, so `session/cancel` sent mid-turn had no effect until the turn finished (and any client round-trip mid-turn, like a permission request, would have deadlocked). Prompt turns now run in a spawned task; cancellation is checked between LLM iterations and before each tool call, and any pending permission request resolves to "cancelled" immediately.
+- **Session modes** — `session/set_mode` now works, with two modes: `code` (full tool access, default) and `architect` (read-only — only `read_file` is offered to the LLM). Advertised via `session/new` and `session/load` responses.
+- **Tool-call plan reporting** — the agent now emits `SessionUpdate::Plan` as tool calls are issued and complete, giving ACP clients a running view of in-progress/completed steps for the current turn.
+- **Client-side filesystem delegation** — when the ACP client advertises `fs.readTextFile` / `fs.writeTextFile` support at `initialize`, `read_file`/`write_file` are delegated to `fs/read_text_file` / `fs/write_text_file` instead of local disk I/O, falling back to local I/O otherwise.
+- **`GET /acp` WebSocket endpoint** — a second, minimal WebSocket endpoint alongside `/ws` that speaks bare ACP JSON-RPC with no envelope and no filesystem sidecar, for generic ACP-only clients. `/ws` is unchanged. See `docs/api.md` §3.4.
+
+### Breaking changes (library)
+
+- `SandboxedExecutor::new` takes an additional `client_io: Arc<dyn ClientIo>` argument (use `Arc::new(NoClientIo)` for the previous local-disk-only behavior).
+- `core::agent::run_agent_with_history` and `run_agent_streaming_with_history` take a `&TurnContext` in place of no equivalent parameter previously — bundles cancellation and permission-gate hooks (see `core::agent::TurnContext`, `core::permission`).
+- `StreamEvent::ToolCall` and `StreamEvent::ToolResult` gained an `id` field; `StreamEvent` gained a `PlanUpdate` variant.
+
 ## [0.4.0] - 2026-06-11
 
 ### Added

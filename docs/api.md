@@ -37,6 +37,7 @@ This document describes every HTTP and WebSocket endpoint that openheim server e
      - [Delete](#336-delete)
      - [Rename / Move](#337-rename--move)
      - [Filesystem Events (Server → Client)](#338-filesystem-events-server--client)
+   - [Bare ACP Endpoint (/acp)](#34-bare-acp-endpoint-acp)
 4. [TypeScript Interfaces](#4-typescript-interfaces)
 5. [Sequence Diagrams](#5-sequence-diagrams)
 6. [Error Handling](#6-error-handling)
@@ -45,16 +46,16 @@ This document describes every HTTP and WebSocket endpoint that openheim server e
 
 ## 1. Overview
 
-Openheim exposes a single multiplexed WebSocket at `/ws` and a small set of REST endpoints at `/api/*`.
+Openheim exposes a multiplexed WebSocket at `/ws`, a second bare-ACP WebSocket at `/acp`, and a small set of REST endpoints at `/api/*`.
 
-The WebSocket carries two logical channels over one physical connection:
+`/ws` carries two logical channels over one physical connection:
 
 | Channel | Purpose |
 |---|---|
 | **agent** | ACP (Agent Client Protocol) — initialize, create sessions, send prompts, receive streamed LLM responses + tool call updates |
 | **fs** | Filesystem operations — CRUD, directory listing, live file watching |
 
-All WS messages are JSON envelopes tagged with a `channel` field so the client can route them without opening multiple connections.
+All `/ws` messages are JSON envelopes tagged with a `channel` field so the client can route them without opening multiple connections. `/acp` (see [§3.4](#34-bare-acp-endpoint-acp)) carries only the `agent` channel's content, unwrapped — for generic ACP clients that don't know about the envelope or the `fs` channel.
 
 ---
 
@@ -1307,6 +1308,20 @@ Common error messages:
 
 ---
 
+## 3.4 Bare ACP Endpoint (`/acp`)
+
+`/ws` is openheim's rich, product-specific endpoint: an envelope multiplexing ACP with the filesystem sidecar above. `/acp` is a second, minimal endpoint for clients that only speak plain ACP and know nothing about that envelope or the `fs` channel.
+
+Each WebSocket text frame on `/acp` is **exactly one JSON-RPC 2.0 message** — no `{"channel": "agent", "data": {...}}` wrapper. Send the same `initialize` / `session/new` / `session/prompt` / etc. requests documented in [§3.2](#32-agent-channel-acp), just unwrapped:
+
+```json
+{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1}}
+```
+
+There is no filesystem sidecar on this endpoint — use `/ws` if you need it. Everything else (session lifecycle, streaming `session/update` notifications, tool calls, permission requests) behaves identically to the `agent` channel on `/ws`.
+
+---
+
 ## 4. TypeScript Interfaces
 
 ```typescript
@@ -1829,6 +1844,8 @@ All REST endpoints return `200` with JSON body on success. If the server is misc
 | `GET` | `/api/mcp-servers` | `McpServerStatus[]` | MCP server statuses |
 | `GET` | `/api/sessions` | `ConversationMeta[]` | All persisted sessions, newest-first |
 | `GET` | `/api/sessions/:id` | `Conversation` | Full conversation including all messages |
+| `GET` | `/ws` | WebSocket upgrade | Multiplexed `agent` + `fs` channels (§3) |
+| `GET` | `/acp` | WebSocket upgrade | Bare ACP JSON-RPC, no envelope, no `fs` (§3.4) |
 
 ### WebSocket Message Types Summary
 

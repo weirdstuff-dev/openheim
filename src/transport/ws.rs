@@ -5,6 +5,7 @@
 //! | Endpoint | Description |
 //! |----------|-------------|
 //! | `GET /ws` | WebSocket endpoint; multiplexes ACP agent messages and filesystem events |
+//! | `GET /acp` | WebSocket endpoint; bare ACP JSON-RPC, no envelope or fs sidecar |
 //! | `GET /api/config` | Resolved configuration (providers, models) |
 //! | `GET /api/models` | Available providers and their model lists |
 //! | `GET /api/skills` | Installed skill names |
@@ -13,9 +14,15 @@
 //! | `GET /api/sessions` | Conversation history listing |
 //! | `GET /api/sessions/{id}` | Single conversation by UUID |
 //!
-//! WebSocket messages are JSON-encoded with a `channel` discriminator:
+//! `/ws` messages are JSON-encoded with a `channel` discriminator:
 //! - `{"channel":"agent","data":{…}}` — ACP protocol frames
 //! - `{"channel":"fs","data":{…}}` — filesystem sidecar (watch / list / read / write / mkdir / delete / rename)
+//!
+//! `/acp` carries the same ACP protocol frames as `/ws`'s `agent` channel, but
+//! unwrapped: each WebSocket text message is exactly one JSON-RPC object, with
+//! no `channel` tag and no filesystem sidecar. Use this endpoint for generic
+//! ACP clients that only speak the spec and don't know about openheim's `/ws`
+//! envelope or `fs` channel.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -86,6 +93,7 @@ pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        .route("/acp", get(acp_ws_handler))
         .route("/api/config", get(config_handler))
         .route("/api/models", get(models_handler))
         .route("/api/skills", get(skills_handler))
@@ -101,7 +109,7 @@ pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
         .await
         .map_err(|e| crate::error::Error::Other(format!("Failed to bind {addr}: {e}")))?;
 
-    tracing::info!("WS server listening on ws://{addr}/ws");
+    tracing::info!("WS server listening on ws://{addr}/ws (bare ACP also available at /acp)");
     tracing::info!("API available at http://{addr}/api/{{config,models,skills,tools,mcp-servers}}");
 
     axum::serve(listener, app)
@@ -250,6 +258,46 @@ async fn handle_socket(socket: WebSocket, state: Arc<AgentState>) {
                     }));
                 }
             },
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    outbound.abort();
+}
+
+async fn acp_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AgentState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(|socket| handle_acp_socket(socket, state))
+}
+
+/// Bare ACP over WebSocket: each text frame is exactly one JSON-RPC message,
+/// no `{"channel":...}` envelope and no `fs` sidecar — see module docs.
+async fn handle_acp_socket(socket: WebSocket, state: Arc<AgentState>) {
+    let (mut ws_tx, mut ws_rx) = socket.split();
+
+    let (acp_out_tx, mut acp_out_rx) = mpsc::unbounded::<String>();
+    let (acp_in_tx, acp_in_rx) = mpsc::unbounded::<std::io::Result<String>>();
+
+    let acp_sink = acp_out_tx
+        .sink_map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()));
+    tokio::spawn(acp::serve(Lines::new(acp_sink, acp_in_rx), state));
+
+    let outbound = tokio::spawn(async move {
+        while let Some(line) = acp_out_rx.next().await {
+            if ws_tx.send(Message::Text(line.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    while let Some(Ok(msg)) = ws_rx.next().await {
+        match msg {
+            Message::Text(text) => {
+                let _ = acp_in_tx.unbounded_send(Ok(text.to_string()));
+            }
             Message::Close(_) => break,
             _ => {}
         }
