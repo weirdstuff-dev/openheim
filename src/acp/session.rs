@@ -20,8 +20,10 @@ pub struct SessionState {
     /// so an in-flight prompt turn (running in its own spawned task) can stop.
     pub cancel: CancellationToken,
     /// Remembered `AllowAlways`/`RejectAlways` decisions from prior
-    /// `session/request_permission` prompts, keyed by tool name, so the same
-    /// tool isn't re-prompted for the rest of the session.
+    /// `session/request_permission` prompts, so the same tool call isn't
+    /// re-prompted for the rest of the session. Keyed by tool name for most
+    /// tools; see [`crate::acp::approval_key`] for `execute_command`'s finer
+    /// per-command-prefix scoping.
     pub approved_tools: HashMap<String, PermissionDecision>,
     /// Set via `session/set_mode`. Controls which tools are offered to the LLM.
     pub mode: AgentMode,
