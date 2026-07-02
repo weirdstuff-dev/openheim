@@ -277,6 +277,8 @@ fn convert_response(resp: GeminiResponse) -> Result<Choice> {
             tool_call_id: None,
             tool_name: None,
             is_error: false,
+            thinking: None,
+            thinking_signature: None,
         },
         finish_reason,
     })
@@ -448,6 +450,8 @@ impl LlmClient for GeminiClient {
                 tool_call_id: None,
                 tool_name: None,
                 is_error: false,
+                thinking: None,
+                thinking_signature: None,
             },
             finish_reason,
         })
@@ -493,6 +497,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             is_error: false,
+            thinking: None,
+            thinking_signature: None,
         }];
         let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
@@ -520,6 +526,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             is_error: false,
+            thinking: None,
+            thinking_signature: None,
         }];
         assert!(convert_messages(&messages).is_err());
     }

@@ -95,6 +95,8 @@ impl PromptBuilder {
             tool_call_id: None,
             tool_name: None,
             is_error: false,
+            thinking: None,
+            thinking_signature: None,
         }];
 
         messages.extend_from_slice(history);

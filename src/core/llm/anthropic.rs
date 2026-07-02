@@ -64,7 +64,9 @@ struct AnthropicRequest {
 struct AnthropicThinkingConfig {
     #[serde(rename = "type")]
     thinking_type: &'static str,
-    budget_tokens: u32,
+    /// Request thinking text back instead of the empty-string default, so it can
+    /// be streamed to the user and replayed on the next turn.
+    display: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,6 +80,8 @@ struct AnthropicMessage {
 enum AnthropicContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String, signature: String },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -150,6 +154,15 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
             }
             Role::Assistant => {
                 let mut blocks = Vec::new();
+                // Thinking blocks must lead the assistant turn's content and be
+                // replayed verbatim, or the API rejects the next request.
+                if let (Some(thinking), Some(signature)) = (&msg.thinking, &msg.thinking_signature)
+                {
+                    blocks.push(AnthropicContentBlock::Thinking {
+                        thinking: thinking.clone(),
+                        signature: signature.clone(),
+                    });
+                }
                 if let Some(text) = &msg.content
                     && !text.is_empty()
                 {
@@ -251,6 +264,8 @@ fn convert_response(resp: AnthropicResponse) -> Result<Choice> {
             tool_call_id: None,
             tool_name: None,
             is_error: false,
+            thinking: None,
+            thinking_signature: None,
         },
         finish_reason,
     })
@@ -269,29 +284,35 @@ fn extract_system(messages: &[Message]) -> Option<String> {
     }
 }
 
-/// Returns a thinking config if the model supports extended thinking and
-/// `max_tokens` is large enough to accommodate a reasonable budget.
-fn thinking_config(model: &str, max_tokens: u32) -> Option<AnthropicThinkingConfig> {
-    let supported =
-        model.contains("claude-3-7") || (model.starts_with("claude-") && model.contains("-4-"));
-    if !supported || max_tokens < 2048 {
+/// Returns a thinking config for models that support adaptive thinking.
+///
+/// Adaptive thinking (`type: "adaptive"`) replaced the old fixed-budget form
+/// (`type: "enabled", budget_tokens: N`) starting with Claude 4.6; the old
+/// form now returns a 400 on Opus 4.7/4.8, Sonnet 5, and Fable 5, and is
+/// deprecated on Opus 4.6 / Sonnet 4.6. Models predating adaptive thinking
+/// (Sonnet 3.7 and earlier Claude 4 releases) only support the fixed-budget
+/// form; rather than special-case each one, thinking is left disabled for
+/// them. Adaptive thinking also enables interleaved thinking automatically,
+/// so no `anthropic-beta` header is needed here.
+fn thinking_config(model: &str) -> Option<AnthropicThinkingConfig> {
+    let supported = [
+        "claude-opus-4-6",
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-sonnet-4-6",
+        "claude-sonnet-5",
+        "claude-fable-5",
+        "claude-mythos-5",
+    ]
+    .iter()
+    .any(|m| model.contains(m));
+    if !supported {
         return None;
     }
-    // Leave at least 1024 tokens for the actual response.
-    let budget = 5000u32.min(max_tokens - 1024);
     Some(AnthropicThinkingConfig {
-        thinking_type: "enabled",
-        budget_tokens: budget,
+        thinking_type: "adaptive",
+        display: "summarized",
     })
-}
-
-/// Returns the interleaved-thinking beta header value for models that need it.
-fn thinking_beta(model: &str) -> Option<&'static str> {
-    if model.contains("claude-3-7") {
-        Some("interleaved-thinking-2025-05-14")
-    } else {
-        None
-    }
 }
 
 #[async_trait]
@@ -341,7 +362,7 @@ impl LlmClient for AnthropicClient {
         tools: &[Tool],
         chunk_tx: mpsc::UnboundedSender<LlmChunk>,
     ) -> Result<Choice> {
-        let thinking = thinking_config(&self.model, self.max_tokens);
+        let thinking = thinking_config(&self.model);
 
         let request = AnthropicRequest {
             model: self.model.clone(),
@@ -355,18 +376,12 @@ impl LlmClient for AnthropicClient {
 
         let endpoint = format!("{}/messages", self.api_base.trim_end_matches('/'));
 
-        let mut req = self
+        let response = self
             .client
             .post(&endpoint)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("Content-Type", "application/json");
-
-        if let Some(beta) = thinking_beta(&self.model) {
-            req = req.header("anthropic-beta", beta);
-        }
-
-        let response = req
+            .header("Content-Type", "application/json")
             .json(&request)
             .send()
             .await
@@ -388,6 +403,8 @@ impl LlmClient for AnthropicClient {
         let mut current_tool_name: Option<String> = None;
         let mut current_tool_json = String::new();
         let mut text_content = String::new();
+        let mut thinking_content = String::new();
+        let mut thinking_signature = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut stop_reason: Option<String> = None;
 
@@ -431,7 +448,13 @@ impl LlmClient for AnthropicClient {
                             }
                             "thinking_delta" => {
                                 if let Some(thinking) = delta["thinking"].as_str() {
+                                    thinking_content.push_str(thinking);
                                     let _ = chunk_tx.send(LlmChunk::Thinking(thinking.to_string()));
+                                }
+                            }
+                            "signature_delta" => {
+                                if let Some(signature) = delta["signature"].as_str() {
+                                    thinking_signature.push_str(signature);
                                 }
                             }
                             "input_json_delta" => {
@@ -499,6 +522,16 @@ impl LlmClient for AnthropicClient {
                 tool_call_id: None,
                 tool_name: None,
                 is_error: false,
+                thinking: if thinking_content.is_empty() {
+                    None
+                } else {
+                    Some(thinking_content)
+                },
+                thinking_signature: if thinking_signature.is_empty() {
+                    None
+                } else {
+                    Some(thinking_signature)
+                },
             },
             finish_reason,
         })
@@ -530,6 +563,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             is_error: false,
+            thinking: None,
+            thinking_signature: None,
         }];
         let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 0);
@@ -551,11 +586,42 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             is_error: false,
+            thinking: None,
+            thinking_signature: None,
         }];
         let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "assistant");
         assert_eq!(result[0].content.len(), 2); // text + tool_use
+    }
+
+    #[test]
+    fn convert_messages_replays_thinking_block_first() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: Some("here's my answer".into()),
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"a.txt"}"#.into(),
+                },
+            }]),
+            tool_call_id: None,
+            tool_name: None,
+            is_error: false,
+            thinking: Some("reasoning about the file".into()),
+            thinking_signature: Some("sig123".into()),
+        }];
+        let result = convert_messages(&messages).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content.len(), 3); // thinking + text + tool_use
+        assert!(matches!(
+            &result[0].content[0],
+            AnthropicContentBlock::Thinking { thinking, signature }
+                if thinking == "reasoning about the file" && signature == "sig123"
+        ));
     }
 
     #[test]
@@ -574,6 +640,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             is_error: false,
+            thinking: None,
+            thinking_signature: None,
         }];
         assert!(convert_messages(&messages).is_err());
     }
@@ -716,5 +784,35 @@ mod tests {
             stop_reason: None,
         };
         assert!(convert_response(resp).unwrap().finish_reason.is_none());
+    }
+
+    #[test]
+    fn thinking_config_enabled_for_adaptive_capable_models() {
+        for model in [
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-sonnet-5",
+            "claude-fable-5",
+        ] {
+            let config = thinking_config(model);
+            assert!(config.is_some(), "expected thinking enabled for {model}");
+            assert_eq!(config.unwrap().thinking_type, "adaptive");
+        }
+    }
+
+    #[test]
+    fn thinking_config_disabled_for_unsupported_models() {
+        for model in [
+            "claude-haiku-4-5",
+            "claude-3-7-sonnet-20250219",
+            "claude-opus-4-5-20251101",
+        ] {
+            assert!(
+                thinking_config(model).is_none(),
+                "expected thinking disabled for {model}"
+            );
+        }
     }
 }

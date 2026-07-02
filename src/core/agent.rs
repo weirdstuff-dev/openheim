@@ -362,6 +362,8 @@ mod tests {
                 tool_call_id: None,
                 tool_name: None,
                 is_error: false,
+                thinking: None,
+                thinking_signature: None,
             },
             finish_reason: Some("tool_calls".into()),
         }

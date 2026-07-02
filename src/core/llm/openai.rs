@@ -231,6 +231,8 @@ pub(super) async fn send_openai_style_streaming(
             tool_call_id: None,
             tool_name: None,
             is_error: false,
+            thinking: None,
+            thinking_signature: None,
         },
         finish_reason,
     })

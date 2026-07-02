@@ -43,6 +43,15 @@ pub struct Message {
     /// can surface the correct status without heuristics.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_error: bool,
+    /// Extended-thinking text for this assistant turn, if the provider returned one.
+    /// Must be replayed verbatim (with `thinking_signature`) on the next request when
+    /// the turn also contains tool calls, or Anthropic rejects the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    /// Opaque signature accompanying `thinking`; required to replay the thinking
+    /// block unmodified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_signature: Option<String>,
 }
 
 impl Message {
@@ -54,6 +63,8 @@ impl Message {
             tool_call_id: None,
             tool_name: None,
             is_error: false,
+            thinking: None,
+            thinking_signature: None,
         }
     }
 
@@ -65,6 +76,8 @@ impl Message {
             tool_call_id: None,
             tool_name: None,
             is_error: false,
+            thinking: None,
+            thinking_signature: None,
         }
     }
 
@@ -81,6 +94,8 @@ impl Message {
             tool_call_id: Some(tool_call_id),
             tool_name: Some(tool_name),
             is_error,
+            thinking: None,
+            thinking_signature: None,
         }
     }
 }
