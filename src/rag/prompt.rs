@@ -1,4 +1,4 @@
-use crate::core::models::{Message, Role};
+use crate::core::models::{ContentBlock, Message, Role};
 
 /// Builds an LLM message sequence by prepending a structured system message.
 ///
@@ -90,13 +90,9 @@ impl PromptBuilder {
 
         let mut messages = vec![Message {
             role: Role::System,
-            content: Some(system_content),
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-            is_error: false,
-            thinking: None,
-            thinking_signature: None,
+            content: vec![ContentBlock::Text {
+                text: system_content,
+            }],
         }];
 
         messages.extend_from_slice(history);
@@ -111,7 +107,7 @@ mod tests {
     #[test]
     fn build_with_nothing_returns_history_unchanged() {
         let builder = PromptBuilder::new();
-        let history = vec![Message::user("hello".into())];
+        let history = vec![Message::user("hello")];
         let result = builder.build(&history);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, Role::User);
@@ -121,7 +117,7 @@ mod tests {
     fn empty_system_identity_is_ignored() {
         let mut builder = PromptBuilder::new();
         builder.set_system("   ".into());
-        let history = vec![Message::user("hi".into())];
+        let history = vec![Message::user("hi")];
         let result = builder.build(&history);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, Role::User);
@@ -131,10 +127,10 @@ mod tests {
     fn set_system_alone_produces_structured_message() {
         let mut builder = PromptBuilder::new();
         builder.set_system("I am a helpful agent.".into());
-        let result = builder.build(&[Message::user("hi".into())]);
+        let result = builder.build(&[Message::user("hi")]);
 
         assert_eq!(result.len(), 2);
-        let content = result[0].content.as_deref().unwrap();
+        let content = result[0].text().unwrap();
         assert!(content.contains("You are a general purpose multiprovider LLM agent."));
         assert!(content.contains("The user has given you the following identity:"));
         assert!(content.contains("I am a helpful agent."));
@@ -145,10 +141,10 @@ mod tests {
     fn skill_alone_produces_structured_message() {
         let mut builder = PromptBuilder::new();
         builder.add_skill("rust", "Write idiomatic Rust.");
-        let result = builder.build(&[Message::user("hi".into())]);
+        let result = builder.build(&[Message::user("hi")]);
 
         assert_eq!(result.len(), 2);
-        let content = result[0].content.as_deref().unwrap();
+        let content = result[0].text().unwrap();
         assert!(content.contains("You are a general purpose multiprovider LLM agent."));
         assert!(content.contains("These are the skills you have mastered:"));
         assert!(content.contains("### rust"));
@@ -162,10 +158,10 @@ mod tests {
         builder.set_system("Custom identity.".into());
         builder.add_skill("rust", "Be idiomatic.");
         builder.add_skill("testing", "Write tests.");
-        let result = builder.build(&[Message::user("go".into())]);
+        let result = builder.build(&[Message::user("go")]);
 
         assert_eq!(result.len(), 2);
-        let content = result[0].content.as_deref().unwrap();
+        let content = result[0].text().unwrap();
 
         let base_pos = content.find("general purpose").unwrap();
         let identity_pos = content.find("Custom identity.").unwrap();
@@ -184,7 +180,7 @@ mod tests {
         let mut builder = PromptBuilder::new();
         builder.add_skill("a", "Content A");
         builder.add_skill("b", "Content B");
-        let content = builder.build(&[]).remove(0).content.unwrap();
+        let content = builder.build(&[]).remove(0).text().unwrap();
         assert!(content.contains("### a"));
         assert!(content.contains("### b"));
         assert!(content.contains("---"));
@@ -195,16 +191,16 @@ mod tests {
         let mut builder = PromptBuilder::new();
         builder.add_skill("test", "Test skill");
         let history = vec![
-            Message::user("first".into()),
-            Message::assistant("second".into()),
-            Message::user("third".into()),
+            Message::user("first"),
+            Message::assistant("second"),
+            Message::user("third"),
         ];
         let result = builder.build(&history);
 
         assert_eq!(result.len(), 4);
         assert_eq!(result[0].role, Role::System);
-        assert_eq!(result[1].content.as_deref(), Some("first"));
-        assert_eq!(result[2].content.as_deref(), Some("second"));
-        assert_eq!(result[3].content.as_deref(), Some("third"));
+        assert_eq!(result[1].text().as_deref(), Some("first"));
+        assert_eq!(result[2].text().as_deref(), Some("second"));
+        assert_eq!(result[3].text().as_deref(), Some("third"));
     }
 }

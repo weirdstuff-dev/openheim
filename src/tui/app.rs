@@ -632,32 +632,26 @@ impl App {
                     match msg.role {
                         Role::System => {}
                         Role::User => {
-                            if let Some(content) = &msg.content
-                                && !content.is_empty()
-                            {
-                                self.push(ChatItem::UserMessage(content.clone()));
+                            if let Some(content) = msg.text() {
+                                self.push(ChatItem::UserMessage(content));
                             }
                         }
                         Role::Assistant => {
-                            if let Some(content) = &msg.content
-                                && !content.is_empty()
-                            {
-                                self.push(ChatItem::AssistantMessage(content.clone()));
+                            if let Some(content) = msg.text() {
+                                self.push(ChatItem::AssistantMessage(content));
                             }
-                            if let Some(tool_calls) = &msg.tool_calls {
-                                for tc in tool_calls {
-                                    self.push(ChatItem::ToolCall {
-                                        name: tc.function.name.clone(),
-                                        args: tc.function.arguments.clone(),
-                                    });
-                                }
+                            for tc in msg.tool_calls() {
+                                self.push(ChatItem::ToolCall {
+                                    name: tc.name,
+                                    args: tc.arguments,
+                                });
                             }
                         }
                         Role::Tool => {
-                            if let Some(content) = &msg.content {
+                            if let Some(tr) = msg.tool_result_block() {
                                 self.push(ChatItem::ToolResult {
-                                    result: content.clone(),
-                                    is_error: msg.is_error,
+                                    result: tr.content,
+                                    is_error: tr.is_error,
                                 });
                             }
                         }

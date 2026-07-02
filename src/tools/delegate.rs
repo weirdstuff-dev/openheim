@@ -291,7 +291,7 @@ pub fn with_delegation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::models::{Choice, FunctionCall, Role, ToolCall};
+    use crate::core::models::{Choice, ContentBlock, Role};
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
@@ -332,7 +332,7 @@ mod tests {
 
     fn text_choice(content: &str, finish: &str) -> Choice {
         Choice {
-            message: Message::assistant(content.into()),
+            message: Message::assistant(content),
             finish_reason: Some(finish.into()),
         }
     }
@@ -341,20 +341,11 @@ mod tests {
         Choice {
             message: Message {
                 role: Role::Assistant,
-                content: None,
-                tool_calls: Some(vec![ToolCall {
+                content: vec![ContentBlock::ToolUse {
                     id: "call_1".into(),
-                    call_type: "function".into(),
-                    function: FunctionCall {
-                        name: "nonexistent".into(),
-                        arguments: "{}".into(),
-                    },
-                }]),
-                tool_call_id: None,
-                tool_name: None,
-                is_error: false,
-                thinking: None,
-                thinking_signature: None,
+                    name: "nonexistent".into(),
+                    arguments: "{}".into(),
+                }],
             },
             finish_reason: Some("tool_calls".into()),
         }

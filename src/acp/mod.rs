@@ -10,12 +10,12 @@ use agent_client_protocol::{
     Agent, Client, ConnectTo, ConnectionTo, Dispatch, Handled, on_receive_dispatch,
     on_receive_notification, on_receive_request,
     schema::{
-        AgentCapabilities, CancelNotification, ClientCapabilities, ContentBlock, ContentChunk,
-        Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
+        AgentCapabilities, CancelNotification, ClientCapabilities, ContentBlock as AcpContentBlock,
+        ContentChunk, Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
         ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, ModelInfo,
         NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, Plan,
-        PlanEntry, PlanEntryPriority, PlanEntryStatus, PromptRequest, PromptResponse,
-        ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome,
+        PlanEntry, PlanEntryPriority, PlanEntryStatus, PromptCapabilities, PromptRequest,
+        PromptResponse, ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome,
         RequestPermissionRequest, RequestPermissionResponse, SessionCapabilities, SessionInfo,
         SessionListCapabilities, SessionMode, SessionModeState, SessionModelState,
         SessionNotification, SessionUpdate, SetSessionModeRequest, SetSessionModeResponse,
@@ -34,7 +34,7 @@ use crate::{
     core::{
         agent::{TurnContext, run_agent_streaming_with_history},
         client_io::ClientIo,
-        models::{Message, PlanStepStatus, Role, StreamEvent},
+        models::{ContentBlock, Message, PlanStepStatus, Role, StreamEvent},
         permission::{PermissionDecision, PermissionGate},
     },
     error::{Error, Result},
@@ -237,7 +237,7 @@ impl AgentState {
     pub async fn acp_prompt<F>(
         &self,
         session_id: &str,
-        text: String,
+        prompt: Vec<AcpContentBlock>,
         permission_gate: Arc<dyn PermissionGate>,
         client_io: Arc<dyn ClientIo>,
         mut on_update: F,
@@ -288,7 +288,10 @@ impl AgentState {
         )?;
 
         conversation.meta.cwd = Some(cwd);
-        conversation.messages.push(Message::user(text));
+        conversation.messages.push(Message {
+            role: Role::User,
+            content: convert_prompt_blocks(&prompt)?,
+        });
 
         let turn = TurnContext {
             cancel: &cancel,
@@ -304,12 +307,12 @@ impl AgentState {
             move |event| match event {
                 StreamEvent::LlmResponse { content } => {
                     on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                        ContentBlock::from(content),
+                        AcpContentBlock::from(content),
                     )));
                 }
                 StreamEvent::ThinkingContent { content } => {
                     // Tunnel thinking through ContentBlock::Text using a meta tag so
-                    // it survives the ACP layer (ContentBlock has no Thinking variant).
+                    // it survives the ACP layer (ACP's ContentBlock has no Thinking variant).
                     let mut meta = serde_json::Map::new();
                     meta.insert(
                         "kind".to_string(),
@@ -317,7 +320,7 @@ impl AgentState {
                     );
                     let text = TextContent::new(content).meta(meta);
                     on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                        ContentBlock::Text(text),
+                        AcpContentBlock::Text(text),
                     )));
                 }
                 StreamEvent::ToolCall {
@@ -442,7 +445,7 @@ impl AgentState {
                     provider_name, session_config.provider_name
                 );
                 on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                    ContentBlock::from(warning),
+                    AcpContentBlock::from(warning),
                 )));
             }
         } else if let Some(model) = &conversation.meta.model {
@@ -465,53 +468,49 @@ impl AgentState {
         for msg in &conversation.messages {
             match msg.role {
                 Role::User => {
-                    let text = msg.content.clone().unwrap_or_default();
-                    if !text.is_empty() {
+                    if let Some(text) = msg.text() {
                         on_update(SessionUpdate::UserMessageChunk(ContentChunk::new(
-                            ContentBlock::from(text),
+                            AcpContentBlock::from(text),
                         )));
                     }
                 }
                 Role::Assistant => {
-                    let text = msg.content.clone().unwrap_or_default();
-                    if !text.is_empty() {
+                    if let Some(text) = msg.text() {
                         on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                            ContentBlock::from(text),
+                            AcpContentBlock::from(text),
                         )));
                     }
-                    if let Some(tool_calls) = &msg.tool_calls {
-                        for tc in tool_calls {
-                            let raw_input = match serde_json::from_str(&tc.function.arguments) {
-                                Ok(v) => Some(v),
-                                Err(e) => {
-                                    tracing::warn!(
-                                        tool_call_id = %tc.id,
-                                        tool_name = %tc.function.name,
-                                        "failed to parse tool call arguments: {e}"
-                                    );
-                                    None
-                                }
-                            };
-                            on_update(SessionUpdate::ToolCall(
-                                AcpToolCall::new(tc.id.clone(), &tc.function.name)
-                                    .status(ToolCallStatus::InProgress)
-                                    .raw_input(raw_input),
-                            ));
-                        }
+                    for tc in msg.tool_calls() {
+                        let raw_input = match serde_json::from_str(&tc.arguments) {
+                            Ok(v) => Some(v),
+                            Err(e) => {
+                                tracing::warn!(
+                                    tool_call_id = %tc.id,
+                                    tool_name = %tc.name,
+                                    "failed to parse tool call arguments: {e}"
+                                );
+                                None
+                            }
+                        };
+                        on_update(SessionUpdate::ToolCall(
+                            AcpToolCall::new(tc.id.clone(), &tc.name)
+                                .status(ToolCallStatus::InProgress)
+                                .raw_input(raw_input),
+                        ));
                     }
                 }
                 Role::Tool => {
-                    if let (Some(id), Some(content)) = (&msg.tool_call_id, &msg.content) {
-                        let status = if msg.is_error {
+                    if let Some(tr) = msg.tool_result_block() {
+                        let status = if tr.is_error {
                             ToolCallStatus::Failed
                         } else {
                             ToolCallStatus::Completed
                         };
                         on_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                            id.clone(),
+                            tr.tool_call_id,
                             ToolCallUpdateFields::new()
                                 .status(status)
-                                .raw_output(serde_json::Value::String(content.clone())),
+                                .raw_output(serde_json::Value::String(tr.content)),
                         )));
                     }
                 }
@@ -683,15 +682,53 @@ impl ClientIo for AcpClientIo {
     }
 }
 
-fn extract_prompt_text(blocks: &[ContentBlock]) -> String {
-    blocks
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Converts an ACP `session/prompt` payload into content blocks for a new
+/// user [`Message`].
+///
+/// `Text` and `Image` pass through directly (images require the `image`
+/// prompt capability, which `initialize` declares). `ResourceLink` agents
+/// must support unconditionally per the ACP spec, but embedding its content
+/// isn't implemented — it's surfaced as a text pointer instead, which the
+/// agent's own file tools can follow if needed. `Audio` and embedded
+/// `Resource` blocks (and anything the `#[non_exhaustive]` enum might add
+/// later) aren't supported at all: reject loudly instead of silently
+/// dropping part of the user's input.
+fn convert_prompt_blocks(blocks: &[AcpContentBlock]) -> Result<Vec<ContentBlock>> {
+    let mut out = Vec::new();
+    for block in blocks {
+        match block {
+            AcpContentBlock::Text(t) => {
+                out.push(ContentBlock::Text {
+                    text: t.text.clone(),
+                });
+            }
+            AcpContentBlock::Image(img) => {
+                out.push(ContentBlock::Image {
+                    data: img.data.clone(),
+                    mime_type: img.mime_type.clone(),
+                });
+            }
+            AcpContentBlock::ResourceLink(link) => {
+                out.push(ContentBlock::Text {
+                    text: format!("[referenced resource: {} ({})]", link.name, link.uri),
+                });
+            }
+            AcpContentBlock::Audio(_) => {
+                return Err(Error::Other(
+                    "audio prompt content is not supported".to_string(),
+                ));
+            }
+            AcpContentBlock::Resource(_) => {
+                return Err(Error::Other(
+                    "embedded resource prompt content is not supported".to_string(),
+                ));
+            }
+            _ => {
+                return Err(Error::Other("unsupported prompt content type".to_string()));
+            }
+        }
+    }
+    Ok(out)
 }
 
 pub async fn serve(
@@ -746,6 +783,7 @@ pub async fn serve(
                         .agent_capabilities(
                             AgentCapabilities::new()
                                 .load_session(true)
+                                .prompt_capabilities(PromptCapabilities::new().image(true))
                                 .session_capabilities(
                                     SessionCapabilities::new().list(SessionListCapabilities::new()),
                                 ),
@@ -794,7 +832,7 @@ pub async fn serve(
         .on_receive_request(
             async move |req: PromptRequest, responder, cx: ConnectionTo<Client>| {
                 let session_key = req.session_id.to_string();
-                let text = extract_prompt_text(&req.prompt);
+                let prompt_blocks = req.prompt;
                 let cx_cb = cx.clone();
                 let session_id_cb = req.session_id.clone();
                 let state = state_prompt.clone();
@@ -820,7 +858,7 @@ pub async fn serve(
                     let result = state
                         .acp_prompt(
                             &session_key,
-                            text,
+                            prompt_blocks,
                             permission_gate,
                             client_io,
                             move |update| {
@@ -949,4 +987,76 @@ pub async fn serve(
         )
         .connect_to(transport)
         .await
+}
+
+#[cfg(test)]
+mod prompt_block_tests {
+    use super::*;
+    use agent_client_protocol::schema::{
+        AudioContent, EmbeddedResource, EmbeddedResourceResource, ImageContent, ResourceLink,
+        TextResourceContents,
+    };
+
+    #[test]
+    fn text_passes_through() {
+        let blocks = vec![AcpContentBlock::Text(TextContent::new("hello"))];
+        let result = convert_prompt_blocks(&blocks).unwrap();
+        assert_eq!(
+            result,
+            vec![ContentBlock::Text {
+                text: "hello".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn image_passes_through() {
+        let blocks = vec![AcpContentBlock::Image(ImageContent::new(
+            "base64data",
+            "image/png",
+        ))];
+        let result = convert_prompt_blocks(&blocks).unwrap();
+        assert_eq!(
+            result,
+            vec![ContentBlock::Image {
+                data: "base64data".into(),
+                mime_type: "image/png".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn resource_link_becomes_text_hint() {
+        let blocks = vec![AcpContentBlock::ResourceLink(ResourceLink::new(
+            "notes.txt",
+            "file:///tmp/notes.txt",
+        ))];
+        let result = convert_prompt_blocks(&blocks).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            &result[0],
+            ContentBlock::Text { text }
+                if text.contains("notes.txt") && text.contains("file:///tmp/notes.txt")
+        ));
+    }
+
+    #[test]
+    fn audio_is_rejected() {
+        let blocks = vec![AcpContentBlock::Audio(AudioContent::new(
+            "base64data",
+            "audio/wav",
+        ))];
+        assert!(convert_prompt_blocks(&blocks).is_err());
+    }
+
+    #[test]
+    fn embedded_resource_is_rejected() {
+        let blocks = vec![AcpContentBlock::Resource(EmbeddedResource::new(
+            EmbeddedResourceResource::TextResourceContents(TextResourceContents::new(
+                "content",
+                "file:///tmp/notes.txt",
+            )),
+        ))];
+        assert!(convert_prompt_blocks(&blocks).is_err());
+    }
 }

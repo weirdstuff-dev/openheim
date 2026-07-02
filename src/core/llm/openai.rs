@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use reqwest::Client as ReqwestClient;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::core::models::{
-    ChatRequest, ChatResponse, Choice, FunctionCall, Message, Role, Tool, ToolCall,
-};
+use crate::core::models::{Choice, ContentBlock, Message, Role, Tool};
 use crate::error::{Error, Result};
 
 use super::sse::SseDecoder;
@@ -37,6 +37,225 @@ impl OpenAiClient {
     }
 }
 
+// --- OpenAI request types ---
+
+#[derive(Debug, Serialize)]
+struct OpenAiRequest {
+    model: String,
+    messages: Vec<OpenAiMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<OpenAiTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiMessage {
+    role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<OpenAiContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OpenAiRequestToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+/// OpenAI accepts `content` as either a plain string or an array of typed
+/// parts. Text-only messages stay a plain string to remain maximally
+/// compatible with picky OpenAI-compatible backends; the array form is only
+/// used once an image is actually present (see `convert_messages`).
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum OpenAiContent {
+    Text(String),
+    Parts(Vec<OpenAiContentPart>),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OpenAiContentPart {
+    Text { text: String },
+    ImageUrl { image_url: OpenAiImageUrl },
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiImageUrl {
+    url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiRequestToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    call_type: String,
+    function: OpenAiRequestFunctionCall,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiRequestFunctionCall {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiTool {
+    #[serde(rename = "type")]
+    tool_type: String,
+    function: OpenAiFunctionDef,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiFunctionDef {
+    name: String,
+    description: String,
+    parameters: Value,
+}
+
+// --- OpenAI response types ---
+
+#[derive(Debug, Deserialize)]
+struct OpenAiResponseEnvelope {
+    choices: Vec<OpenAiResponseChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiResponseChoice {
+    message: OpenAiResponseMessage,
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiResponseMessage {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<OpenAiResponseToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiResponseToolCall {
+    id: String,
+    function: OpenAiResponseFunctionCall,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiResponseFunctionCall {
+    name: String,
+    arguments: String,
+}
+
+// --- Conversions ---
+
+fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
+    let mut result = Vec::new();
+
+    for msg in messages {
+        match msg.role {
+            Role::System => {
+                if let Some(text) = msg.text() {
+                    result.push(OpenAiMessage {
+                        role: "system".to_string(),
+                        content: Some(OpenAiContent::Text(text)),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
+                }
+            }
+            Role::User => {
+                let mut parts = Vec::new();
+                let mut has_image = false;
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Text { text } => {
+                            parts.push(OpenAiContentPart::Text { text: text.clone() });
+                        }
+                        ContentBlock::Image { data, mime_type } => {
+                            has_image = true;
+                            parts.push(OpenAiContentPart::ImageUrl {
+                                image_url: OpenAiImageUrl {
+                                    url: format!("data:{mime_type};base64,{data}"),
+                                },
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                let content = if has_image {
+                    OpenAiContent::Parts(parts)
+                } else {
+                    let text: String = parts
+                        .into_iter()
+                        .map(|p| match p {
+                            OpenAiContentPart::Text { text } => text,
+                            OpenAiContentPart::ImageUrl { .. } => unreachable!(),
+                        })
+                        .collect();
+                    OpenAiContent::Text(text)
+                };
+                result.push(OpenAiMessage {
+                    role: "user".to_string(),
+                    content: Some(content),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+            Role::Assistant => {
+                let text = msg.text();
+                let calls = msg.tool_calls();
+                let tool_calls = if calls.is_empty() {
+                    None
+                } else {
+                    Some(
+                        calls
+                            .into_iter()
+                            .map(|tc| OpenAiRequestToolCall {
+                                id: tc.id,
+                                call_type: "function".to_string(),
+                                function: OpenAiRequestFunctionCall {
+                                    name: tc.name,
+                                    arguments: tc.arguments,
+                                },
+                            })
+                            .collect(),
+                    )
+                };
+                result.push(OpenAiMessage {
+                    role: "assistant".to_string(),
+                    content: text.map(OpenAiContent::Text),
+                    tool_calls,
+                    tool_call_id: None,
+                });
+            }
+            Role::Tool => {
+                if let Some(tr) = msg.tool_result_block() {
+                    result.push(OpenAiMessage {
+                        role: "tool".to_string(),
+                        content: Some(OpenAiContent::Text(tr.content)),
+                        tool_calls: None,
+                        tool_call_id: Some(tr.tool_call_id),
+                    });
+                }
+            }
+        }
+    }
+
+    result
+}
+
+fn convert_tools(tools: &[Tool]) -> Vec<OpenAiTool> {
+    tools
+        .iter()
+        .map(|t| OpenAiTool {
+            tool_type: "function".to_string(),
+            function: OpenAiFunctionDef {
+                name: t.function.name.clone(),
+                description: t.function.description.clone(),
+                parameters: t.function.parameters.clone(),
+            },
+        })
+        .collect()
+}
+
 pub(super) async fn send_openai_style(
     client: &ReqwestClient,
     api_base: &str,
@@ -46,10 +265,10 @@ pub(super) async fn send_openai_style(
     messages: &[Message],
     tools: &[Tool],
 ) -> Result<Choice> {
-    let request = ChatRequest {
+    let request = OpenAiRequest {
         model: model.to_string(),
-        messages: messages.to_vec(),
-        tools: tools.to_vec(),
+        messages: convert_messages(messages),
+        tools: convert_tools(tools),
         max_tokens,
     };
 
@@ -73,13 +292,37 @@ pub(super) async fn send_openai_style(
         return Err(Error::HttpError { status, body });
     }
 
-    let chat_response: ChatResponse = response.json().await.map_err(Error::ReqwestError)?;
+    let envelope: OpenAiResponseEnvelope = response.json().await.map_err(Error::ReqwestError)?;
 
-    chat_response
+    let choice = envelope
         .choices
         .into_iter()
         .next()
-        .ok_or_else(|| Error::ApiError("No response from LLM".to_string()))
+        .ok_or_else(|| Error::ApiError("No response from LLM".to_string()))?;
+
+    let mut content = Vec::new();
+    if let Some(text) = choice.message.content
+        && !text.is_empty()
+    {
+        content.push(ContentBlock::Text { text });
+    }
+    if let Some(tcs) = choice.message.tool_calls {
+        for tc in tcs {
+            content.push(ContentBlock::ToolUse {
+                id: tc.id,
+                name: tc.function.name,
+                arguments: tc.function.arguments,
+            });
+        }
+    }
+
+    Ok(Choice {
+        message: Message {
+            role: Role::Assistant,
+            content,
+        },
+        finish_reason: choice.finish_reason,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -93,10 +336,10 @@ pub(super) async fn send_openai_style_streaming(
     tools: &[Tool],
     chunk_tx: mpsc::UnboundedSender<LlmChunk>,
 ) -> Result<Choice> {
-    let request = ChatRequest {
+    let request = OpenAiRequest {
         model: model.to_string(),
-        messages: messages.to_vec(),
-        tools: tools.to_vec(),
+        messages: convert_messages(messages),
+        tools: convert_tools(tools),
         max_tokens,
     };
 
@@ -196,43 +439,29 @@ pub(super) async fn send_openai_style_streaming(
         }
     }
 
-    let content = if text_buf.is_empty() {
-        None
-    } else {
-        Some(text_buf)
-    };
-    let tool_calls: Vec<ToolCall> = tool_acc
-        .into_iter()
-        .enumerate()
-        .filter(|(_, tc)| !tc.name.is_empty())
-        .map(|(i, tc)| ToolCall {
+    let mut content = Vec::new();
+    if !text_buf.is_empty() {
+        content.push(ContentBlock::Text { text: text_buf });
+    }
+    for (i, tc) in tool_acc.into_iter().enumerate() {
+        if tc.name.is_empty() {
+            continue;
+        }
+        content.push(ContentBlock::ToolUse {
             id: if tc.id.is_empty() {
                 format!("call_{i}")
             } else {
                 tc.id
             },
-            call_type: "function".to_string(),
-            function: FunctionCall {
-                name: tc.name,
-                arguments: tc.args,
-            },
-        })
-        .collect();
+            name: tc.name,
+            arguments: tc.args,
+        });
+    }
 
     Ok(Choice {
         message: Message {
             role: Role::Assistant,
             content,
-            tool_calls: if tool_calls.is_empty() {
-                None
-            } else {
-                Some(tool_calls)
-            },
-            tool_call_id: None,
-            tool_name: None,
-            is_error: false,
-            thinking: None,
-            thinking_signature: None,
         },
         finish_reason,
     })
@@ -270,5 +499,93 @@ impl LlmClient for OpenAiClient {
             chunk_tx,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn convert_messages_text_only_user_stays_plain_string() {
+        let messages = vec![Message::user("hello")];
+        let result = convert_messages(&messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "user");
+        assert!(matches!(&result[0].content, Some(OpenAiContent::Text(t)) if t == "hello"));
+    }
+
+    #[test]
+    fn convert_messages_user_with_image_becomes_parts() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "what is this?".into(),
+                },
+                ContentBlock::Image {
+                    data: "base64data".into(),
+                    mime_type: "image/png".into(),
+                },
+            ],
+        }];
+        let result = convert_messages(&messages);
+        assert_eq!(result.len(), 1);
+        let Some(OpenAiContent::Parts(parts)) = &result[0].content else {
+            panic!("expected parts");
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0], OpenAiContentPart::Text { text } if text == "what is this?"));
+        assert!(matches!(
+            &parts[1],
+            OpenAiContentPart::ImageUrl { image_url }
+                if image_url.url == "data:image/png;base64,base64data"
+        ));
+    }
+
+    #[test]
+    fn convert_messages_assistant_with_tool_calls() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"a.txt"}"#.into(),
+            }],
+        }];
+        let result = convert_messages(&messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "assistant");
+        let tool_calls = result[0].tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "read_file");
+    }
+
+    #[test]
+    fn convert_messages_tool_result_uses_tool_role() {
+        let messages = vec![Message::tool_result(
+            "call_1",
+            "read_file",
+            "file content",
+            false,
+        )];
+        let result = convert_messages(&messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "tool");
+        assert_eq!(result[0].tool_call_id.as_deref(), Some("call_1"));
+        assert!(matches!(&result[0].content, Some(OpenAiContent::Text(t)) if t == "file content"));
+    }
+
+    #[test]
+    fn openai_request_skips_empty_tools_and_max_tokens() {
+        let req = OpenAiRequest {
+            model: "gpt-4".into(),
+            messages: vec![],
+            tools: vec![],
+            max_tokens: None,
+        };
+        let json: Value = serde_json::to_value(&req).unwrap();
+        assert!(json.get("tools").is_none());
+        assert!(json.get("max_tokens").is_none());
     }
 }

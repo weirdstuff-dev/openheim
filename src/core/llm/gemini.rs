@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::core::models::{Choice, FunctionCall, Message, Role, Tool, ToolCall};
+use crate::core::models::{Choice, ContentBlock, Message, Role, Tool};
 use crate::error::{Error, Result};
 
 use super::sse::SseDecoder;
@@ -63,7 +63,7 @@ struct GeminiContent {
     parts: Vec<GeminiPart>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct GeminiPart {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -72,6 +72,8 @@ struct GeminiPart {
     function_call: Option<GeminiFunctionCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     function_response: Option<GeminiFunctionResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inline_data: Option<GeminiInlineData>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -84,6 +86,13 @@ struct GeminiFunctionCall {
 struct GeminiFunctionResponse {
     name: String,
     response: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiInlineData {
+    mime_type: String,
+    data: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,32 +131,31 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<GeminiContent>> {
         match msg.role {
             Role::Assistant => {
                 let mut parts = Vec::new();
-                if let Some(text) = &msg.content
-                    && !text.is_empty()
-                {
-                    parts.push(GeminiPart {
-                        text: Some(text.clone()),
-                        function_call: None,
-                        function_response: None,
-                    });
-                }
-                if let Some(tool_calls) = &msg.tool_calls {
-                    for tc in tool_calls {
-                        let args: Value =
-                            serde_json::from_str(&tc.function.arguments).map_err(|e| {
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Text { text } if !text.is_empty() => {
+                            parts.push(GeminiPart {
+                                text: Some(text.clone()),
+                                ..Default::default()
+                            });
+                        }
+                        ContentBlock::ToolUse {
+                            name, arguments, ..
+                        } => {
+                            let args: Value = serde_json::from_str(arguments).map_err(|e| {
                                 Error::ParseError(format!(
-                                    "invalid JSON in tool call arguments for '{}': {}",
-                                    tc.function.name, e
+                                    "invalid JSON in tool call arguments for '{name}': {e}"
                                 ))
                             })?;
-                        parts.push(GeminiPart {
-                            text: None,
-                            function_call: Some(GeminiFunctionCall {
-                                name: tc.function.name.clone(),
-                                args,
-                            }),
-                            function_response: None,
-                        });
+                            parts.push(GeminiPart {
+                                function_call: Some(GeminiFunctionCall {
+                                    name: name.clone(),
+                                    args,
+                                }),
+                                ..Default::default()
+                            });
+                        }
+                        _ => {}
                     }
                 }
                 if !parts.is_empty() {
@@ -160,20 +168,15 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<GeminiContent>> {
             Role::Tool => {
                 // Tool results become functionResponse parts in a user turn.
                 // Gemini matches by function name, not by call id.
-                let name = msg
-                    .tool_name
-                    .clone()
-                    .or_else(|| msg.tool_call_id.clone())
-                    .unwrap_or_default();
+                let Some(tr) = msg.tool_result_block() else {
+                    continue;
+                };
                 let part = GeminiPart {
-                    text: None,
-                    function_call: None,
                     function_response: Some(GeminiFunctionResponse {
-                        name,
-                        response: serde_json::json!({
-                            "result": msg.content.clone().unwrap_or_default()
-                        }),
+                        name: tr.tool_name,
+                        response: serde_json::json!({ "result": tr.content }),
                     }),
+                    ..Default::default()
                 };
                 // Merge into last user/function-response content if possible
                 if let Some(last) = result.last_mut() {
@@ -189,14 +192,36 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<GeminiContent>> {
                 });
             }
             Role::User => {
-                let text = msg.content.clone().unwrap_or_default();
+                let mut parts = Vec::new();
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Text { text } => {
+                            parts.push(GeminiPart {
+                                text: Some(text.clone()),
+                                ..Default::default()
+                            });
+                        }
+                        ContentBlock::Image { data, mime_type } => {
+                            parts.push(GeminiPart {
+                                inline_data: Some(GeminiInlineData {
+                                    mime_type: mime_type.clone(),
+                                    data: data.clone(),
+                                }),
+                                ..Default::default()
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                if parts.is_empty() {
+                    parts.push(GeminiPart {
+                        text: Some(String::new()),
+                        ..Default::default()
+                    });
+                }
                 result.push(GeminiContent {
                     role: "user".to_string(),
-                    parts: vec![GeminiPart {
-                        text: Some(text),
-                        function_call: None,
-                        function_response: None,
-                    }],
+                    parts,
                 });
             }
             Role::System => {
@@ -234,30 +259,22 @@ fn convert_response(resp: GeminiResponse) -> Result<Choice> {
         .next()
         .ok_or_else(|| Error::ApiError("No candidates in Gemini response".to_string()))?;
 
-    let mut text_parts = Vec::new();
-    let mut tool_calls = Vec::new();
+    let mut content = Vec::new();
+    let mut tool_call_count = 0usize;
 
     for part in candidate.content.parts {
         if let Some(text) = part.text {
-            text_parts.push(text);
+            content.push(ContentBlock::Text { text });
         }
         if let Some(fc) = part.function_call {
-            tool_calls.push(ToolCall {
-                id: format!("call_{}", tool_calls.len()),
-                call_type: "function".to_string(),
-                function: FunctionCall {
-                    name: fc.name,
-                    arguments: serde_json::to_string(&fc.args)?,
-                },
+            content.push(ContentBlock::ToolUse {
+                id: format!("call_{tool_call_count}"),
+                name: fc.name,
+                arguments: serde_json::to_string(&fc.args)?,
             });
+            tool_call_count += 1;
         }
     }
-
-    let content = if text_parts.is_empty() {
-        None
-    } else {
-        Some(text_parts.join(""))
-    };
 
     let finish_reason = match candidate.finish_reason.as_deref() {
         Some("STOP") => Some("stop".to_string()),
@@ -269,26 +286,16 @@ fn convert_response(resp: GeminiResponse) -> Result<Choice> {
         message: Message {
             role: Role::Assistant,
             content,
-            tool_calls: if tool_calls.is_empty() {
-                None
-            } else {
-                Some(tool_calls)
-            },
-            tool_call_id: None,
-            tool_name: None,
-            is_error: false,
-            thinking: None,
-            thinking_signature: None,
         },
         finish_reason,
     })
 }
 
 fn gemini_system_instruction(messages: &[Message]) -> Option<GeminiContent> {
-    let parts: Vec<&str> = messages
+    let parts: Vec<String> = messages
         .iter()
         .filter(|m| m.role == Role::System)
-        .filter_map(|m| m.content.as_deref())
+        .filter_map(|m| m.text())
         .collect();
     if parts.is_empty() {
         None
@@ -297,8 +304,7 @@ fn gemini_system_instruction(messages: &[Message]) -> Option<GeminiContent> {
             role: "user".to_string(),
             parts: vec![GeminiPart {
                 text: Some(parts.join("\n\n")),
-                function_call: None,
-                function_response: None,
+                ..Default::default()
             }],
         })
     }
@@ -389,7 +395,7 @@ impl LlmClient for GeminiClient {
         }
 
         let mut text_buf = String::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut tool_calls_accum: Vec<(String, String)> = Vec::new();
         let mut finish_reason: Option<String> = None;
         let mut decoder = SseDecoder::new();
 
@@ -421,37 +427,28 @@ impl LlmClient for GeminiClient {
                         let _ = chunk_tx.send(LlmChunk::Text(text));
                     }
                     if let Some(fc) = part.function_call {
-                        tool_calls.push(ToolCall {
-                            id: format!("call_{}", tool_calls.len()),
-                            call_type: "function".to_string(),
-                            function: FunctionCall {
-                                name: fc.name,
-                                arguments: serde_json::to_string(&fc.args)?,
-                            },
-                        });
+                        tool_calls_accum.push((fc.name, serde_json::to_string(&fc.args)?));
                     }
                 }
             }
         }
 
+        let mut content = Vec::new();
+        if !text_buf.is_empty() {
+            content.push(ContentBlock::Text { text: text_buf });
+        }
+        for (i, (name, arguments)) in tool_calls_accum.into_iter().enumerate() {
+            content.push(ContentBlock::ToolUse {
+                id: format!("call_{i}"),
+                name,
+                arguments,
+            });
+        }
+
         Ok(Choice {
             message: Message {
                 role: Role::Assistant,
-                content: if text_buf.is_empty() {
-                    None
-                } else {
-                    Some(text_buf)
-                },
-                tool_calls: if tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(tool_calls)
-                },
-                tool_call_id: None,
-                tool_name: None,
-                is_error: false,
-                thinking: None,
-                thinking_signature: None,
+                content,
             },
             finish_reason,
         })
@@ -465,7 +462,7 @@ mod tests {
 
     #[test]
     fn convert_messages_user() {
-        let messages = vec![Message::user("hello".into())];
+        let messages = vec![Message::user("hello")];
         let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
@@ -473,8 +470,30 @@ mod tests {
     }
 
     #[test]
+    fn convert_messages_user_with_image() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "what is this?".into(),
+                },
+                ContentBlock::Image {
+                    data: "base64data".into(),
+                    mime_type: "image/png".into(),
+                },
+            ],
+        }];
+        let result = convert_messages(&messages).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].parts.len(), 2);
+        let inline = result[0].parts[1].inline_data.as_ref().unwrap();
+        assert_eq!(inline.mime_type, "image/png");
+        assert_eq!(inline.data, "base64data");
+    }
+
+    #[test]
     fn convert_messages_assistant_becomes_model() {
-        let messages = vec![Message::assistant("response".into())];
+        let messages = vec![Message::assistant("response")];
         let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "model");
@@ -485,20 +504,11 @@ mod tests {
     fn convert_messages_assistant_with_tool_calls() {
         let messages = vec![Message {
             role: Role::Assistant,
-            content: None,
-            tool_calls: Some(vec![ToolCall {
+            content: vec![ContentBlock::ToolUse {
                 id: "call_1".into(),
-                call_type: "function".into(),
-                function: FunctionCall {
-                    name: "read_file".into(),
-                    arguments: r#"{"path":"a.txt"}"#.into(),
-                },
-            }]),
-            tool_call_id: None,
-            tool_name: None,
-            is_error: false,
-            thinking: None,
-            thinking_signature: None,
+                name: "read_file".into(),
+                arguments: r#"{"path":"a.txt"}"#.into(),
+            }],
         }];
         let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
@@ -514,20 +524,11 @@ mod tests {
     fn convert_messages_invalid_tool_arguments_returns_error() {
         let messages = vec![Message {
             role: Role::Assistant,
-            content: None,
-            tool_calls: Some(vec![ToolCall {
+            content: vec![ContentBlock::ToolUse {
                 id: "call_1".into(),
-                call_type: "function".into(),
-                function: FunctionCall {
-                    name: "read_file".into(),
-                    arguments: "not valid json".into(),
-                },
-            }]),
-            tool_call_id: None,
-            tool_name: None,
-            is_error: false,
-            thinking: None,
-            thinking_signature: None,
+                name: "read_file".into(),
+                arguments: "not valid json".into(),
+            }],
         }];
         assert!(convert_messages(&messages).is_err());
     }
@@ -535,9 +536,9 @@ mod tests {
     #[test]
     fn convert_messages_tool_result_as_function_response() {
         let messages = vec![Message::tool_result(
-            "call_1".into(),
-            "read_file".into(),
-            "file content".into(),
+            "call_1",
+            "read_file",
+            "file content",
             false,
         )];
         let result = convert_messages(&messages).unwrap();
@@ -550,8 +551,8 @@ mod tests {
     #[test]
     fn convert_messages_merges_tool_results_into_user() {
         let messages = vec![
-            Message::tool_result("call_1".into(), "read_file".into(), "a".into(), false),
-            Message::tool_result("call_2".into(), "write_file".into(), "b".into(), false),
+            Message::tool_result("call_1", "read_file", "a", false),
+            Message::tool_result("call_2", "write_file", "b", false),
         ];
         let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
@@ -589,16 +590,15 @@ mod tests {
                     role: "model".into(),
                     parts: vec![GeminiPart {
                         text: Some("Hello!".into()),
-                        function_call: None,
-                        function_response: None,
+                        ..Default::default()
                     }],
                 },
                 finish_reason: Some("STOP".into()),
             }],
         };
         let choice = convert_response(resp).unwrap();
-        assert_eq!(choice.message.content.as_deref(), Some("Hello!"));
-        assert!(choice.message.tool_calls.is_none());
+        assert_eq!(choice.message.text().as_deref(), Some("Hello!"));
+        assert!(choice.message.tool_calls().is_empty());
         assert_eq!(choice.finish_reason.as_deref(), Some("stop"));
     }
 
@@ -609,22 +609,21 @@ mod tests {
                 content: GeminiContent {
                     role: "model".into(),
                     parts: vec![GeminiPart {
-                        text: None,
                         function_call: Some(GeminiFunctionCall {
                             name: "read_file".into(),
                             args: json!({"path": "test.txt"}),
                         }),
-                        function_response: None,
+                        ..Default::default()
                     }],
                 },
                 finish_reason: Some("STOP".into()),
             }],
         };
         let choice = convert_response(resp).unwrap();
-        assert!(choice.message.content.is_none());
-        let tool_calls = choice.message.tool_calls.unwrap();
+        assert!(choice.message.text().is_none());
+        let tool_calls = choice.message.tool_calls();
         assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].function.name, "read_file");
+        assert_eq!(tool_calls[0].name, "read_file");
         assert_eq!(tool_calls[0].id, "call_0");
     }
 
@@ -637,8 +636,7 @@ mod tests {
                     role: "model".into(),
                     parts: vec![GeminiPart {
                         text: Some("x".into()),
-                        function_call: None,
-                        function_response: None,
+                        ..Default::default()
                     }],
                 },
                 finish_reason: Some("STOP".into()),
@@ -656,8 +654,7 @@ mod tests {
                     role: "model".into(),
                     parts: vec![GeminiPart {
                         text: Some("x".into()),
-                        function_call: None,
-                        function_response: None,
+                        ..Default::default()
                     }],
                 },
                 finish_reason: Some("MAX_TOKENS".into()),

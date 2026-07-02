@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::core::models::{Choice, FunctionCall, Message, Role, Tool, ToolCall};
+use crate::core::models::{Choice, ContentBlock, Message, Role, Tool};
 use crate::error::{Error, Result};
 
 use super::sse::SseDecoder;
@@ -82,6 +82,8 @@ enum AnthropicContentBlock {
     Text { text: String },
     #[serde(rename = "thinking")]
     Thinking { thinking: String, signature: String },
+    #[serde(rename = "image")]
+    Image { source: AnthropicImageSource },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -95,6 +97,14 @@ enum AnthropicContentBlock {
         #[serde(skip_serializing_if = "is_false")]
         is_error: bool,
     },
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicImageSource {
+    #[serde(rename = "type")]
+    source_type: &'static str,
+    media_type: String,
+    data: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -134,10 +144,13 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
         match msg.role {
             Role::Tool => {
                 // Tool results must be sent as user messages with tool_result content blocks
+                let Some(tr) = msg.tool_result_block() else {
+                    continue;
+                };
                 let block = AnthropicContentBlock::ToolResult {
-                    tool_use_id: msg.tool_call_id.clone().unwrap_or_default(),
-                    content: msg.content.clone().unwrap_or_default(),
-                    is_error: msg.is_error,
+                    tool_use_id: tr.tool_call_id,
+                    content: tr.content,
+                    is_error: tr.is_error,
                 };
                 // Merge into the last user message if it exists, otherwise create new
                 if let Some(last) = result.last_mut() {
@@ -156,32 +169,37 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
                 let mut blocks = Vec::new();
                 // Thinking blocks must lead the assistant turn's content and be
                 // replayed verbatim, or the API rejects the next request.
-                if let (Some(thinking), Some(signature)) = (&msg.thinking, &msg.thinking_signature)
-                {
-                    blocks.push(AnthropicContentBlock::Thinking {
-                        thinking: thinking.clone(),
-                        signature: signature.clone(),
-                    });
-                }
-                if let Some(text) = &msg.content
-                    && !text.is_empty()
-                {
-                    blocks.push(AnthropicContentBlock::Text { text: text.clone() });
-                }
-                if let Some(tool_calls) = &msg.tool_calls {
-                    for tc in tool_calls {
-                        let input: Value =
-                            serde_json::from_str(&tc.function.arguments).map_err(|e| {
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Thinking {
+                            thinking,
+                            signature: Some(signature),
+                        } => {
+                            blocks.push(AnthropicContentBlock::Thinking {
+                                thinking: thinking.clone(),
+                                signature: signature.clone(),
+                            });
+                        }
+                        ContentBlock::Text { text } if !text.is_empty() => {
+                            blocks.push(AnthropicContentBlock::Text { text: text.clone() });
+                        }
+                        ContentBlock::ToolUse {
+                            id,
+                            name,
+                            arguments,
+                        } => {
+                            let input: Value = serde_json::from_str(arguments).map_err(|e| {
                                 Error::ParseError(format!(
-                                    "invalid JSON in tool call arguments for '{}': {}",
-                                    tc.function.name, e
+                                    "invalid JSON in tool call arguments for '{name}': {e}"
                                 ))
                             })?;
-                        blocks.push(AnthropicContentBlock::ToolUse {
-                            id: tc.id.clone(),
-                            name: tc.function.name.clone(),
-                            input,
-                        });
+                            blocks.push(AnthropicContentBlock::ToolUse {
+                                id: id.clone(),
+                                name: name.clone(),
+                                input,
+                            });
+                        }
+                        _ => {}
                     }
                 }
                 if !blocks.is_empty() {
@@ -192,10 +210,32 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
                 }
             }
             Role::User => {
-                let text = msg.content.clone().unwrap_or_default();
+                let mut blocks = Vec::new();
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Text { text } => {
+                            blocks.push(AnthropicContentBlock::Text { text: text.clone() });
+                        }
+                        ContentBlock::Image { data, mime_type } => {
+                            blocks.push(AnthropicContentBlock::Image {
+                                source: AnthropicImageSource {
+                                    source_type: "base64",
+                                    media_type: mime_type.clone(),
+                                    data: data.clone(),
+                                },
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                if blocks.is_empty() {
+                    blocks.push(AnthropicContentBlock::Text {
+                        text: String::new(),
+                    });
+                }
                 result.push(AnthropicMessage {
                     role: "user".to_string(),
-                    content: vec![AnthropicContentBlock::Text { text }],
+                    content: blocks,
                 });
             }
             Role::System => {
@@ -219,32 +259,22 @@ fn convert_tools(tools: &[Tool]) -> Vec<AnthropicTool> {
 }
 
 fn convert_response(resp: AnthropicResponse) -> Result<Choice> {
-    let mut text_parts = Vec::new();
-    let mut tool_calls = Vec::new();
+    let mut content = Vec::new();
 
     for block in resp.content {
         match block {
             AnthropicResponseBlock::Text { text } => {
-                text_parts.push(text);
+                content.push(ContentBlock::Text { text });
             }
             AnthropicResponseBlock::ToolUse { id, name, input } => {
-                tool_calls.push(ToolCall {
+                content.push(ContentBlock::ToolUse {
                     id,
-                    call_type: "function".to_string(),
-                    function: FunctionCall {
-                        name,
-                        arguments: serde_json::to_string(&input)?,
-                    },
+                    name,
+                    arguments: serde_json::to_string(&input)?,
                 });
             }
         }
     }
-
-    let content = if text_parts.is_empty() {
-        None
-    } else {
-        Some(text_parts.join(""))
-    };
 
     let finish_reason = match resp.stop_reason.as_deref() {
         Some("tool_use") => Some("tool_calls".to_string()),
@@ -256,26 +286,16 @@ fn convert_response(resp: AnthropicResponse) -> Result<Choice> {
         message: Message {
             role: Role::Assistant,
             content,
-            tool_calls: if tool_calls.is_empty() {
-                None
-            } else {
-                Some(tool_calls)
-            },
-            tool_call_id: None,
-            tool_name: None,
-            is_error: false,
-            thinking: None,
-            thinking_signature: None,
         },
         finish_reason,
     })
 }
 
 fn extract_system(messages: &[Message]) -> Option<String> {
-    let parts: Vec<&str> = messages
+    let parts: Vec<String> = messages
         .iter()
         .filter(|m| m.role == Role::System)
-        .filter_map(|m| m.content.as_deref())
+        .filter_map(|m| m.text())
         .collect();
     if parts.is_empty() {
         None
@@ -405,7 +425,7 @@ impl LlmClient for AnthropicClient {
         let mut text_content = String::new();
         let mut thinking_content = String::new();
         let mut thinking_signature = String::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut tool_calls: Vec<ContentBlock> = Vec::new();
         let mut stop_reason: Option<String> = None;
 
         let mut response = response;
@@ -470,13 +490,10 @@ impl LlmClient for AnthropicClient {
                             if let (Some(id), Some(name)) =
                                 (current_tool_id.take(), current_tool_name.take())
                             {
-                                tool_calls.push(ToolCall {
+                                tool_calls.push(ContentBlock::ToolUse {
                                     id,
-                                    call_type: "function".to_string(),
-                                    function: FunctionCall {
-                                        name,
-                                        arguments: current_tool_json.clone(),
-                                    },
+                                    name,
+                                    arguments: current_tool_json.clone(),
                                 });
                             }
                             current_tool_json.clear();
@@ -506,32 +523,26 @@ impl LlmClient for AnthropicClient {
             other => other.map(|s| s.to_string()),
         };
 
-        Ok(Choice {
-            message: Message {
-                role: Role::Assistant,
-                content: if text_content.is_empty() {
-                    None
-                } else {
-                    Some(text_content)
-                },
-                tool_calls: if tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(tool_calls)
-                },
-                tool_call_id: None,
-                tool_name: None,
-                is_error: false,
-                thinking: if thinking_content.is_empty() {
-                    None
-                } else {
-                    Some(thinking_content)
-                },
-                thinking_signature: if thinking_signature.is_empty() {
+        let mut content = Vec::new();
+        if !thinking_content.is_empty() {
+            content.push(ContentBlock::Thinking {
+                thinking: thinking_content,
+                signature: if thinking_signature.is_empty() {
                     None
                 } else {
                     Some(thinking_signature)
                 },
+            });
+        }
+        if !text_content.is_empty() {
+            content.push(ContentBlock::Text { text: text_content });
+        }
+        content.extend(tool_calls);
+
+        Ok(Choice {
+            message: Message {
+                role: Role::Assistant,
+                content,
             },
             finish_reason,
         })
@@ -545,7 +556,7 @@ mod tests {
 
     #[test]
     fn convert_messages_user_message() {
-        let messages = vec![Message::user("hello".into())];
+        let messages = vec![Message::user("hello")];
         let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
@@ -555,16 +566,36 @@ mod tests {
     }
 
     #[test]
+    fn convert_messages_user_message_with_image() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "what is this?".into(),
+                },
+                ContentBlock::Image {
+                    data: "base64data".into(),
+                    mime_type: "image/png".into(),
+                },
+            ],
+        }];
+        let result = convert_messages(&messages).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content.len(), 2);
+        assert!(matches!(
+            &result[0].content[1],
+            AnthropicContentBlock::Image { source }
+                if source.media_type == "image/png" && source.data == "base64data"
+        ));
+    }
+
+    #[test]
     fn convert_messages_system_is_excluded() {
         let messages = vec![Message {
             role: Role::System,
-            content: Some("system prompt".into()),
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-            is_error: false,
-            thinking: None,
-            thinking_signature: None,
+            content: vec![ContentBlock::Text {
+                text: "system prompt".into(),
+            }],
         }];
         let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 0);
@@ -574,20 +605,16 @@ mod tests {
     fn convert_messages_assistant_with_tool_calls() {
         let messages = vec![Message {
             role: Role::Assistant,
-            content: Some("thinking".into()),
-            tool_calls: Some(vec![ToolCall {
-                id: "call_1".into(),
-                call_type: "function".into(),
-                function: FunctionCall {
+            content: vec![
+                ContentBlock::Text {
+                    text: "thinking".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
                     name: "read_file".into(),
                     arguments: r#"{"path":"a.txt"}"#.into(),
                 },
-            }]),
-            tool_call_id: None,
-            tool_name: None,
-            is_error: false,
-            thinking: None,
-            thinking_signature: None,
+            ],
         }];
         let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
@@ -599,20 +626,20 @@ mod tests {
     fn convert_messages_replays_thinking_block_first() {
         let messages = vec![Message {
             role: Role::Assistant,
-            content: Some("here's my answer".into()),
-            tool_calls: Some(vec![ToolCall {
-                id: "call_1".into(),
-                call_type: "function".into(),
-                function: FunctionCall {
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "reasoning about the file".into(),
+                    signature: Some("sig123".into()),
+                },
+                ContentBlock::Text {
+                    text: "here's my answer".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
                     name: "read_file".into(),
                     arguments: r#"{"path":"a.txt"}"#.into(),
                 },
-            }]),
-            tool_call_id: None,
-            tool_name: None,
-            is_error: false,
-            thinking: Some("reasoning about the file".into()),
-            thinking_signature: Some("sig123".into()),
+            ],
         }];
         let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
@@ -628,20 +655,11 @@ mod tests {
     fn convert_messages_invalid_tool_arguments_returns_error() {
         let messages = vec![Message {
             role: Role::Assistant,
-            content: None,
-            tool_calls: Some(vec![ToolCall {
+            content: vec![ContentBlock::ToolUse {
                 id: "call_1".into(),
-                call_type: "function".into(),
-                function: FunctionCall {
-                    name: "read_file".into(),
-                    arguments: "not valid json".into(),
-                },
-            }]),
-            tool_call_id: None,
-            tool_name: None,
-            is_error: false,
-            thinking: None,
-            thinking_signature: None,
+                name: "read_file".into(),
+                arguments: "not valid json".into(),
+            }],
         }];
         assert!(convert_messages(&messages).is_err());
     }
@@ -649,18 +667,8 @@ mod tests {
     #[test]
     fn convert_messages_merges_consecutive_tool_results() {
         let messages = vec![
-            Message::tool_result(
-                "call_1".into(),
-                "read_file".into(),
-                "content1".into(),
-                false,
-            ),
-            Message::tool_result(
-                "call_2".into(),
-                "write_file".into(),
-                "content2".into(),
-                false,
-            ),
+            Message::tool_result("call_1", "read_file", "content1", false),
+            Message::tool_result("call_2", "write_file", "content2", false),
         ];
         let result = convert_messages(&messages).unwrap();
         // Both tool results should merge into a single user message
@@ -700,8 +708,8 @@ mod tests {
             stop_reason: Some("end_turn".into()),
         };
         let choice = convert_response(resp).unwrap();
-        assert_eq!(choice.message.content.as_deref(), Some("Hello!"));
-        assert!(choice.message.tool_calls.is_none());
+        assert_eq!(choice.message.text().as_deref(), Some("Hello!"));
+        assert!(choice.message.tool_calls().is_empty());
         assert_eq!(choice.finish_reason.as_deref(), Some("stop"));
     }
 
@@ -716,11 +724,11 @@ mod tests {
             stop_reason: Some("tool_use".into()),
         };
         let choice = convert_response(resp).unwrap();
-        assert!(choice.message.content.is_none());
-        let tool_calls = choice.message.tool_calls.unwrap();
+        assert!(choice.message.text().is_none());
+        let tool_calls = choice.message.tool_calls();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].id, "call_1");
-        assert_eq!(tool_calls[0].function.name, "read_file");
+        assert_eq!(tool_calls[0].name, "read_file");
         assert_eq!(choice.finish_reason.as_deref(), Some("tool_calls"));
     }
 
@@ -740,8 +748,8 @@ mod tests {
             stop_reason: Some("tool_use".into()),
         };
         let choice = convert_response(resp).unwrap();
-        assert_eq!(choice.message.content.as_deref(), Some("Let me read that."));
-        assert_eq!(choice.message.tool_calls.unwrap().len(), 1);
+        assert_eq!(choice.message.text().as_deref(), Some("Let me read that."));
+        assert_eq!(choice.message.tool_calls().len(), 1);
     }
 
     #[test]

@@ -43,7 +43,7 @@ mod tests {
     fn save_sets_title_from_first_user_message() {
         let (mgr, _dir) = make_manager();
         let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
-        conv.messages.push(Message::user("hello world".into()));
+        conv.messages.push(Message::user("hello world"));
         mgr.save_conversation(&conv).unwrap();
         let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
         assert_eq!(loaded.meta.title.as_deref(), Some("hello world"));
@@ -91,7 +91,7 @@ mod tests {
         let second = mgr.create_conversation(None, None, vec![]).unwrap();
         // Save second with a message so its updated_at is newer
         let mut conv = second.clone();
-        conv.messages.push(Message::user("latest".into()));
+        conv.messages.push(Message::user("latest"));
         mgr.save_conversation(&conv).unwrap();
         let last = mgr.get_last_conversation().unwrap().unwrap();
         assert_eq!(last.meta.id, conv.meta.id);
@@ -260,7 +260,7 @@ impl HistoryManager {
 
         if conv_to_save.meta.title.is_none()
             && let Some(msg) = conv_to_save.messages.iter().find(|m| m.role == Role::User)
-            && let Some(content) = &msg.content
+            && let Some(content) = msg.text()
         {
             let title: String = content.chars().take(80).collect();
             conv_to_save.meta.title = Some(title);

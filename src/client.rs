@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use agent_client_protocol::schema::{SessionInfo, SessionUpdate};
+use agent_client_protocol::schema::{ContentBlock, SessionInfo, SessionUpdate};
 use uuid::Uuid;
 
 use crate::{
@@ -186,7 +186,7 @@ impl SessionHandle {
         self.state
             .acp_prompt(
                 &self.id,
-                text.to_string(),
+                vec![ContentBlock::from(text)],
                 Arc::new(AllowAll),
                 Arc::new(NoClientIo),
                 on_update,

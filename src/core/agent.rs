@@ -136,17 +136,18 @@ where
         };
         messages.push(choice.message.clone());
 
-        if let Some(tool_calls) = &choice.message.tool_calls {
+        let tool_calls = choice.message.tool_calls();
+        if !tool_calls.is_empty() {
             let mut tool_results = Vec::new();
 
-            for tool_call in tool_calls {
+            for tool_call in &tool_calls {
                 if turn.cancel.is_cancelled() {
                     break;
                 }
 
                 let id = &tool_call.id;
-                let tool_name = &tool_call.function.name;
-                let arguments = &tool_call.function.arguments;
+                let tool_name = &tool_call.name;
+                let arguments = &tool_call.arguments;
 
                 if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::ToolCall {
@@ -209,14 +210,14 @@ where
                 message: "Tool calls executed".to_string(),
                 tool_calls: Some(tool_results),
             });
-        } else if let Some(content) = &choice.message.content {
+        } else if let Some(content) = choice.message.text() {
             // LlmResponse chunks already fired per-token from the streaming select
             // loop above; just record the final text here.
             final_response = content.clone();
 
             steps.push(AgentStep {
                 iteration: iter_num,
-                message: content.clone(),
+                message: content,
                 tool_calls: None,
             });
 
@@ -341,7 +342,7 @@ mod tests {
 
     fn text_choice(content: &str, finish: &str) -> Choice {
         Choice {
-            message: Message::assistant(content.into()),
+            message: Message::assistant(content),
             finish_reason: Some(finish.into()),
         }
     }
@@ -350,20 +351,11 @@ mod tests {
         Choice {
             message: Message {
                 role: Role::Assistant,
-                content: None,
-                tool_calls: Some(vec![ToolCall {
+                content: vec![ContentBlock::ToolUse {
                     id: "call_1".into(),
-                    call_type: "function".into(),
-                    function: FunctionCall {
-                        name: tool_name.into(),
-                        arguments: args.into(),
-                    },
-                }]),
-                tool_call_id: None,
-                tool_name: None,
-                is_error: false,
-                thinking: None,
-                thinking_signature: None,
+                    name: tool_name.into(),
+                    arguments: args.into(),
+                }],
             },
             finish_reason: Some("tool_calls".into()),
         }
@@ -444,7 +436,7 @@ mod tests {
         let llm = Arc::new(MockLlm::new(vec![text_choice("done", "stop")]));
         let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));
         let config = make_config(10);
-        let mut messages = vec![Message::user("hi".into())];
+        let mut messages = vec![Message::user("hi")];
 
         let result = run_agent_with_history(
             llm.clone(),
@@ -473,7 +465,7 @@ mod tests {
         ]));
         let executor = Arc::new(MockToolExecutor::new("file data"));
         let config = make_config(10);
-        let mut messages = vec![Message::user("read a.txt".into())];
+        let mut messages = vec![Message::user("read a.txt")];
 
         let result = run_agent_with_history(
             llm.clone(),
@@ -507,7 +499,7 @@ mod tests {
         ]));
         let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new("data"));
         let config = make_config(3);
-        let mut messages = vec![Message::user("loop".into())];
+        let mut messages = vec![Message::user("loop")];
 
         let result = run_agent_with_history(
             llm,
@@ -534,7 +526,7 @@ mod tests {
         ]));
         let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new("ok"));
         let config = make_config(10);
-        let mut messages = vec![Message::user("test".into())];
+        let mut messages = vec![Message::user("test")];
 
         let mut events = Vec::new();
         let result = run_agent_streaming_with_history(
@@ -616,7 +608,7 @@ mod tests {
         ]));
         let executor: Arc<dyn ToolExecutor> = Arc::new(FailingToolExecutor);
         let config = make_config(10);
-        let mut messages = vec![Message::user("do something".into())];
+        let mut messages = vec![Message::user("do something")];
 
         // Should not propagate the error; LLM should receive it as a tool result
         let result = run_agent_with_history(
@@ -635,12 +627,15 @@ mod tests {
 
         assert_eq!(result.final_response, "I got an error");
         // The tool result message should contain the error text
-        let tool_result_msg = messages.iter().find(|m| m.tool_call_id.is_some()).unwrap();
+        let tool_result_msg = messages
+            .iter()
+            .find(|m| m.tool_result_block().is_some())
+            .unwrap();
         assert!(
             tool_result_msg
+                .tool_result_block()
+                .unwrap()
                 .content
-                .as_deref()
-                .unwrap_or("")
                 .contains("Error:")
         );
     }
@@ -655,7 +650,7 @@ mod tests {
         ]));
         let executor = Arc::new(MockToolExecutor::new("data"));
         let config = make_config(10);
-        let mut messages = vec![Message::user("loop".into())];
+        let mut messages = vec![Message::user("loop")];
         let cancel = CancellationToken::new();
         let cancel_signal = cancel.clone();
 
@@ -707,7 +702,7 @@ mod tests {
         ]));
         let executor = Arc::new(MockToolExecutor::new("should not run"));
         let config = make_config(10);
-        let mut messages = vec![Message::user("do something dangerous".into())];
+        let mut messages = vec![Message::user("do something dangerous")];
 
         let result = run_agent_with_history(
             llm,
@@ -726,11 +721,13 @@ mod tests {
         assert_eq!(result.final_response, "I was denied");
         // The tool must never actually execute once permission is denied.
         assert!(executor.calls.lock().unwrap().is_empty());
-        let tool_result_msg = messages.iter().find(|m| m.tool_call_id.is_some()).unwrap();
-        assert_eq!(
-            tool_result_msg.content.as_deref(),
-            Some("Permission denied by user.")
-        );
+        let tool_result_msg = messages
+            .iter()
+            .find(|m| m.tool_result_block().is_some())
+            .unwrap()
+            .tool_result_block()
+            .unwrap();
+        assert_eq!(tool_result_msg.content, "Permission denied by user.");
         assert!(tool_result_msg.is_error);
     }
 }

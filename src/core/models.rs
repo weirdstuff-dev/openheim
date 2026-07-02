@@ -17,104 +17,166 @@ pub enum Role {
     Tool,
 }
 
-/// Serialised body sent to a chat-completion endpoint.
-#[derive(Debug, Serialize, Clone)]
-pub struct ChatRequest {
-    pub model: String,
-    pub messages: Vec<Message>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<Tool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
+/// A single piece of message content. Close to Anthropic's own content-block
+/// shape (and by extension ACP's), since both this codebase's richest
+/// provider and its host protocol already think in these terms; lossless
+/// providers convert directly, lossy ones (see `core::llm::openai`) flatten
+/// at their own edge instead of forcing the core type to be the lossy one.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    Text {
+        text: String,
+    },
+    /// Extended-thinking text for an assistant turn. Must be replayed
+    /// verbatim (with `signature`) as the first block of the turn when it also
+    /// contains `ToolUse` blocks, or Anthropic rejects the next request.
+    Thinking {
+        thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    Image {
+        /// Base64-encoded image data.
+        data: String,
+        mime_type: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        /// JSON string of the arguments object.
+        arguments: String,
+    },
+    ToolResult {
+        tool_call_id: String,
+        tool_name: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_error: bool,
+    },
 }
 
-/// A single message in a conversation thread, compatible with the OpenAI chat format.
+impl<T: Into<String>> From<T> for ContentBlock {
+    fn from(value: T) -> Self {
+        ContentBlock::Text { text: value.into() }
+    }
+}
+
+/// A `ToolUse` block extracted from a [`Message`] for convenient iteration;
+/// see [`Message::tool_calls`].
+#[derive(Debug, Clone)]
+pub struct ToolUseBlock {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+/// The `ToolResult` block on a `Role::Tool` [`Message`]; see
+/// [`Message::tool_result_block`].
+#[derive(Debug, Clone)]
+pub struct ToolResultBlock {
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub content: String,
+    pub is_error: bool,
+}
+
+/// A single message in a conversation thread.
+///
+/// `role` says what the message *is*; `content` is an ordered list of blocks
+/// describing what it *contains*. A tool-result message is `role: Tool` with
+/// a single `ToolResult` block rather than a distinct role.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Message {
     pub role: Role,
-    pub content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCall>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
-    /// Whether the tool returned an error. Stored in history so replayed sessions
-    /// can surface the correct status without heuristics.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub is_error: bool,
-    /// Extended-thinking text for this assistant turn, if the provider returned one.
-    /// Must be replayed verbatim (with `thinking_signature`) on the next request when
-    /// the turn also contains tool calls, or Anthropic rejects the request.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<String>,
-    /// Opaque signature accompanying `thinking`; required to replay the thinking
-    /// block unmodified.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking_signature: Option<String>,
+    pub content: Vec<ContentBlock>,
 }
 
 impl Message {
-    pub fn user(content: String) -> Self {
+    pub fn user(text: impl Into<String>) -> Self {
         Self {
             role: Role::User,
-            content: Some(content),
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-            is_error: false,
-            thinking: None,
-            thinking_signature: None,
+            content: vec![ContentBlock::from(text)],
         }
     }
 
-    pub fn assistant(content: String) -> Self {
+    pub fn assistant(text: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
-            content: Some(content),
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-            is_error: false,
-            thinking: None,
-            thinking_signature: None,
+            content: vec![ContentBlock::from(text)],
         }
     }
 
     pub fn tool_result(
-        tool_call_id: String,
-        tool_name: String,
-        content: String,
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        content: impl Into<String>,
         is_error: bool,
     ) -> Self {
         Self {
             role: Role::Tool,
-            content: Some(content),
-            tool_calls: None,
-            tool_call_id: Some(tool_call_id),
-            tool_name: Some(tool_name),
-            is_error,
-            thinking: None,
-            thinking_signature: None,
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: tool_call_id.into(),
+                tool_name: tool_name.into(),
+                content: content.into(),
+                is_error,
+            }],
         }
     }
-}
 
-/// A tool-call request emitted by the LLM inside an assistant message.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ToolCall {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub call_type: String,
-    pub function: FunctionCall,
-}
+    /// Concatenation of all `Text` blocks' text, or `None` if there are none.
+    pub fn text(&self) -> Option<String> {
+        let joined: String = self
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        if joined.is_empty() {
+            None
+        } else {
+            Some(joined)
+        }
+    }
 
-/// Function name and JSON-encoded arguments from a tool call.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct FunctionCall {
-    pub name: String,
-    /// JSON string of the arguments object.
-    pub arguments: String,
+    /// All `ToolUse` blocks in this message, in order.
+    pub fn tool_calls(&self) -> Vec<ToolUseBlock> {
+        self.content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse {
+                    id,
+                    name,
+                    arguments,
+                } => Some(ToolUseBlock {
+                    id: id.clone(),
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `ToolResult` block, if this is a `Role::Tool` message.
+    pub fn tool_result_block(&self) -> Option<ToolResultBlock> {
+        self.content.iter().find_map(|b| match b {
+            ContentBlock::ToolResult {
+                tool_call_id,
+                tool_name,
+                content,
+                is_error,
+            } => Some(ToolResultBlock {
+                tool_call_id: tool_call_id.clone(),
+                tool_name: tool_name.clone(),
+                content: content.clone(),
+                is_error: *is_error,
+            }),
+            _ => None,
+        })
+    }
 }
 
 /// A tool available to the agent, serialised in the OpenAI function-calling format.
@@ -132,12 +194,6 @@ pub struct FunctionDefinition {
     pub description: String,
     /// JSON Schema object describing the function's parameters.
     pub parameters: Value,
-}
-
-/// Raw response from a chat-completion endpoint.
-#[derive(Debug, Deserialize)]
-pub struct ChatResponse {
-    pub choices: Vec<Choice>,
 }
 
 /// A single completion choice returned by the provider.
@@ -405,32 +461,75 @@ mod tests {
 
     #[test]
     fn message_user_sets_correct_fields() {
-        let msg = Message::user("hello".into());
+        let msg = Message::user("hello");
         assert_eq!(msg.role, Role::User);
-        assert_eq!(msg.content.as_deref(), Some("hello"));
-        assert!(msg.tool_calls.is_none());
-        assert!(msg.tool_call_id.is_none());
-        assert!(msg.tool_name.is_none());
+        assert_eq!(msg.text().as_deref(), Some("hello"));
+        assert!(msg.tool_calls().is_empty());
+        assert!(msg.tool_result_block().is_none());
     }
 
     #[test]
     fn message_assistant_sets_correct_fields() {
-        let msg = Message::assistant("response".into());
+        let msg = Message::assistant("response");
         assert_eq!(msg.role, Role::Assistant);
-        assert_eq!(msg.content.as_deref(), Some("response"));
-        assert!(msg.tool_calls.is_none());
+        assert_eq!(msg.text().as_deref(), Some("response"));
+        assert!(msg.tool_calls().is_empty());
     }
 
     #[test]
     fn message_tool_result_sets_correct_fields() {
-        let msg =
-            Message::tool_result("call_1".into(), "read_file".into(), "content".into(), false);
+        let msg = Message::tool_result("call_1", "read_file", "content", false);
         assert_eq!(msg.role, Role::Tool);
-        assert_eq!(msg.content.as_deref(), Some("content"));
-        assert_eq!(msg.tool_call_id.as_deref(), Some("call_1"));
-        assert_eq!(msg.tool_name.as_deref(), Some("read_file"));
-        assert!(!msg.is_error);
-        assert!(msg.tool_calls.is_none());
+        assert!(msg.tool_calls().is_empty());
+        let tr = msg.tool_result_block().unwrap();
+        assert_eq!(tr.tool_call_id, "call_1");
+        assert_eq!(tr.tool_name, "read_file");
+        assert_eq!(tr.content, "content");
+        assert!(!tr.is_error);
+    }
+
+    #[test]
+    fn message_text_joins_multiple_text_blocks() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "hello ".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                },
+                ContentBlock::Text {
+                    text: "world".into(),
+                },
+            ],
+        };
+        assert_eq!(msg.text().as_deref(), Some("hello world"));
+        let calls = msg.tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+    }
+
+    #[test]
+    fn content_block_serializes_with_type_tag() {
+        let block = ContentBlock::ToolUse {
+            id: "call_1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        };
+        let json: Value = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["type"], "tool_use");
+        assert_eq!(json["name"], "read_file");
+
+        let block = ContentBlock::Thinking {
+            thinking: "hmm".into(),
+            signature: Some("sig".into()),
+        };
+        let json: Value = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["type"], "thinking");
+        assert_eq!(json["signature"], "sig");
     }
 
     #[test]
@@ -534,18 +633,5 @@ mod tests {
         let json: Value = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["type"], "error");
         assert_eq!(json["message"], "not found");
-    }
-
-    #[test]
-    fn chat_request_skips_empty_tools() {
-        let req = ChatRequest {
-            model: "gpt-4".into(),
-            messages: vec![Message::user("hi".into())],
-            tools: vec![],
-            max_tokens: None,
-        };
-        let json: Value = serde_json::to_value(&req).unwrap();
-        assert!(json.get("tools").is_none());
-        assert!(json.get("max_tokens").is_none());
     }
 }

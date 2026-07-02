@@ -107,22 +107,12 @@ impl LlmClient for RetryClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::models::Role;
     use crate::error::Error;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn ok_choice(content: &str) -> Choice {
         Choice {
-            message: Message {
-                role: Role::Assistant,
-                content: Some(content.into()),
-                tool_calls: None,
-                tool_call_id: None,
-                tool_name: None,
-                is_error: false,
-                thinking: None,
-                thinking_signature: None,
-            },
+            message: Message::assistant(content),
             finish_reason: Some("stop".into()),
         }
     }
@@ -207,7 +197,7 @@ mod tests {
         let client = RetryClient::new(Arc::new(AlwaysOk));
         let result = client.send(&[], &[]).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().message.content.as_deref(), Some("success"));
+        assert_eq!(result.unwrap().message.text().as_deref(), Some("success"));
     }
 
     #[tokio::test]
@@ -229,10 +219,7 @@ mod tests {
         let client = RetryClient::new(inner);
         let result = client.send(&[], &[]).await;
         assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap().message.content.as_deref(),
-            Some("recovered")
-        );
+        assert_eq!(result.unwrap().message.text().as_deref(), Some("recovered"));
     }
 
     #[tokio::test]
