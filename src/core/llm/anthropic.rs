@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use reqwest::Client as ReqwestClient;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
@@ -112,27 +112,6 @@ struct AnthropicTool {
     name: String,
     description: String,
     input_schema: Value,
-}
-
-// --- Anthropic response types ---
-
-#[derive(Debug, Deserialize)]
-struct AnthropicResponse {
-    content: Vec<AnthropicResponseBlock>,
-    stop_reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum AnthropicResponseBlock {
-    #[serde(rename = "text")]
-    Text { text: String },
-    #[serde(rename = "tool_use")]
-    ToolUse {
-        id: String,
-        name: String,
-        input: Value,
-    },
 }
 
 // --- Conversions ---
@@ -258,37 +237,15 @@ fn convert_tools(tools: &[Tool]) -> Vec<AnthropicTool> {
         .collect()
 }
 
-fn convert_response(resp: AnthropicResponse) -> Result<Choice> {
-    let mut content = Vec::new();
-
-    for block in resp.content {
-        match block {
-            AnthropicResponseBlock::Text { text } => {
-                content.push(ContentBlock::Text { text });
-            }
-            AnthropicResponseBlock::ToolUse { id, name, input } => {
-                content.push(ContentBlock::ToolUse {
-                    id,
-                    name,
-                    arguments: serde_json::to_string(&input)?,
-                });
-            }
-        }
-    }
-
-    let finish_reason = match resp.stop_reason.as_deref() {
+/// Maps Anthropic's `stop_reason` vocabulary onto this codebase's
+/// provider-agnostic `finish_reason` strings; anything without a known
+/// equivalent (e.g. `max_tokens`) passes through unchanged.
+fn map_stop_reason(reason: Option<&str>) -> Option<String> {
+    match reason {
         Some("tool_use") => Some("tool_calls".to_string()),
         Some("end_turn") => Some("stop".to_string()),
         other => other.map(|s| s.to_string()),
-    };
-
-    Ok(Choice {
-        message: Message {
-            role: Role::Assistant,
-            content,
-        },
-        finish_reason,
-    })
+    }
 }
 
 fn extract_system(messages: &[Message]) -> Option<String> {
@@ -335,19 +292,23 @@ fn thinking_config(model: &str) -> Option<AnthropicThinkingConfig> {
     })
 }
 
-#[async_trait]
-impl LlmClient for AnthropicClient {
-    async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
-        let request = AnthropicRequest {
+impl AnthropicClient {
+    fn build_request(&self, messages: &[Message], tools: &[Tool]) -> Result<AnthropicRequest> {
+        Ok(AnthropicRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
-            stream: false,
+            stream: true,
             system: extract_system(messages),
             messages: convert_messages(messages)?,
             tools: convert_tools(tools),
-            thinking: None,
-        };
+            thinking: thinking_config(&self.model),
+        })
+    }
 
+    /// POSTs `request` and returns the response body stream, having already
+    /// checked the status and turned a non-2xx response into an `Err` with
+    /// its body attached.
+    async fn post(&self, request: &AnthropicRequest) -> Result<reqwest::Response> {
         let endpoint = format!("{}/messages", self.api_base.trim_end_matches('/'));
 
         let response = self
@@ -356,7 +317,7 @@ impl LlmClient for AnthropicClient {
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("Content-Type", "application/json")
-            .json(&request)
+            .json(request)
             .send()
             .await
             .map_err(Error::ReqwestError)?;
@@ -370,10 +331,21 @@ impl LlmClient for AnthropicClient {
             return Err(Error::HttpError { status, body });
         }
 
-        let anthropic_response: AnthropicResponse =
-            response.json().await.map_err(Error::ReqwestError)?;
+        Ok(response)
+    }
+}
 
-        convert_response(anthropic_response)
+#[async_trait]
+impl LlmClient for AnthropicClient {
+    /// Implemented in terms of [`Self::send_streaming`] with a discarded
+    /// channel: Anthropic's streaming and non-streaming responses carry the
+    /// same information, so there is no reason to maintain a second
+    /// request/response code path (and the JSON non-streaming path used to
+    /// silently skip `thinking_config`, leaving thinking enabled only for
+    /// streaming callers).
+    async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
+        let (chunk_tx, _chunk_rx) = mpsc::unbounded_channel();
+        self.send_streaming(messages, tools, chunk_tx).await
     }
 
     async fn send_streaming(
@@ -382,39 +354,8 @@ impl LlmClient for AnthropicClient {
         tools: &[Tool],
         chunk_tx: mpsc::UnboundedSender<LlmChunk>,
     ) -> Result<Choice> {
-        let thinking = thinking_config(&self.model);
-
-        let request = AnthropicRequest {
-            model: self.model.clone(),
-            max_tokens: self.max_tokens,
-            stream: true,
-            system: extract_system(messages),
-            messages: convert_messages(messages)?,
-            tools: convert_tools(tools),
-            thinking,
-        };
-
-        let endpoint = format!("{}/messages", self.api_base.trim_end_matches('/'));
-
-        let response = self
-            .client
-            .post(&endpoint)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .map_err(Error::ReqwestError)?;
-
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to read error body>".into());
-            return Err(Error::HttpError { status, body });
-        }
+        let request = self.build_request(messages, tools)?;
+        let response = self.post(&request).await?;
 
         // Parse SSE stream.
         let mut decoder = SseDecoder::new();
@@ -517,11 +458,7 @@ impl LlmClient for AnthropicClient {
             }
         }
 
-        let finish_reason = match stop_reason.as_deref() {
-            Some("tool_use") => Some("tool_calls".to_string()),
-            Some("end_turn") => Some("stop".to_string()),
-            other => other.map(|s| s.to_string()),
-        };
+        let finish_reason = map_stop_reason(stop_reason.as_deref());
 
         let mut content = Vec::new();
         if !thinking_content.is_empty() {
@@ -700,98 +637,25 @@ mod tests {
     }
 
     #[test]
-    fn convert_response_text_only() {
-        let resp = AnthropicResponse {
-            content: vec![AnthropicResponseBlock::Text {
-                text: "Hello!".into(),
-            }],
-            stop_reason: Some("end_turn".into()),
-        };
-        let choice = convert_response(resp).unwrap();
-        assert_eq!(choice.message.text().as_deref(), Some("Hello!"));
-        assert!(choice.message.tool_calls().is_empty());
-        assert_eq!(choice.finish_reason.as_deref(), Some("stop"));
-    }
-
-    #[test]
-    fn convert_response_tool_use() {
-        let resp = AnthropicResponse {
-            content: vec![AnthropicResponseBlock::ToolUse {
-                id: "call_1".into(),
-                name: "read_file".into(),
-                input: json!({"path": "a.txt"}),
-            }],
-            stop_reason: Some("tool_use".into()),
-        };
-        let choice = convert_response(resp).unwrap();
-        assert!(choice.message.text().is_none());
-        let tool_calls = choice.message.tool_calls();
-        assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].id, "call_1");
-        assert_eq!(tool_calls[0].name, "read_file");
-        assert_eq!(choice.finish_reason.as_deref(), Some("tool_calls"));
-    }
-
-    #[test]
-    fn convert_response_mixed_text_and_tool() {
-        let resp = AnthropicResponse {
-            content: vec![
-                AnthropicResponseBlock::Text {
-                    text: "Let me read that.".into(),
-                },
-                AnthropicResponseBlock::ToolUse {
-                    id: "call_1".into(),
-                    name: "read_file".into(),
-                    input: json!({"path": "test.txt"}),
-                },
-            ],
-            stop_reason: Some("tool_use".into()),
-        };
-        let choice = convert_response(resp).unwrap();
-        assert_eq!(choice.message.text().as_deref(), Some("Let me read that."));
-        assert_eq!(choice.message.tool_calls().len(), 1);
-    }
-
-    #[test]
-    fn convert_response_stop_reason_mapping() {
-        // end_turn -> stop
-        let resp = AnthropicResponse {
-            content: vec![AnthropicResponseBlock::Text {
-                text: "done".into(),
-            }],
-            stop_reason: Some("end_turn".into()),
-        };
+    fn map_stop_reason_translates_known_values() {
+        assert_eq!(map_stop_reason(Some("end_turn")).as_deref(), Some("stop"));
         assert_eq!(
-            convert_response(resp).unwrap().finish_reason.as_deref(),
-            Some("stop")
-        );
-
-        // tool_use -> tool_calls
-        let resp = AnthropicResponse {
-            content: vec![AnthropicResponseBlock::Text { text: "x".into() }],
-            stop_reason: Some("tool_use".into()),
-        };
-        assert_eq!(
-            convert_response(resp).unwrap().finish_reason.as_deref(),
+            map_stop_reason(Some("tool_use")).as_deref(),
             Some("tool_calls")
         );
+    }
 
-        // max_tokens passes through
-        let resp = AnthropicResponse {
-            content: vec![AnthropicResponseBlock::Text { text: "x".into() }],
-            stop_reason: Some("max_tokens".into()),
-        };
+    #[test]
+    fn map_stop_reason_passes_through_unknown_values() {
         assert_eq!(
-            convert_response(resp).unwrap().finish_reason.as_deref(),
+            map_stop_reason(Some("max_tokens")).as_deref(),
             Some("max_tokens")
         );
+    }
 
-        // None stays None
-        let resp = AnthropicResponse {
-            content: vec![AnthropicResponseBlock::Text { text: "x".into() }],
-            stop_reason: None,
-        };
-        assert!(convert_response(resp).unwrap().finish_reason.is_none());
+    #[test]
+    fn map_stop_reason_none_stays_none() {
+        assert!(map_stop_reason(None).is_none());
     }
 
     #[test]
@@ -822,5 +686,23 @@ mod tests {
                 "expected thinking disabled for {model}"
             );
         }
+    }
+
+    #[test]
+    fn build_request_always_streams_and_enables_thinking_when_supported() {
+        // Regression test for the non-streaming `send()` bug: it used to build
+        // its own request with `stream: false, thinking: None`, so thinking
+        // silently never worked outside of `send_streaming`. `build_request`
+        // is now the single source for both, so this holds for both callers.
+        let client = AnthropicClient::new(
+            ReqwestClient::new(),
+            "https://api.anthropic.com/v1".into(),
+            "test-key".into(),
+            "claude-sonnet-5".into(),
+            None,
+        );
+        let request = client.build_request(&[Message::user("hi")], &[]).unwrap();
+        assert!(request.stream);
+        assert!(request.thinking.is_some());
     }
 }
