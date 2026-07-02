@@ -19,4 +19,7 @@ pub struct SessionState {
     /// `session/request_permission` prompts, keyed by tool name, so the same
     /// tool isn't re-prompted for the rest of the session.
     pub approved_tools: HashMap<String, PermissionDecision>,
+    /// ACP session mode ID (see [`crate::acp::MODE_CODE`] / [`crate::acp::MODE_ARCHITECT`]),
+    /// set via `session/set_mode`. Controls which tools are offered to the LLM.
+    pub mode: String,
 }

@@ -82,6 +82,7 @@ where
     let mut steps = Vec::new();
     let mut final_response = String::new();
     let mut iterations_used = 0;
+    let mut plan_steps: Vec<PlanStep> = Vec::new();
 
     for iteration in 0..config.max_iterations {
         if turn.cancel.is_cancelled() {
@@ -153,6 +154,14 @@ where
                         tool_name: tool_name.clone(),
                         arguments: arguments.clone(),
                     });
+
+                    plan_steps.push(PlanStep {
+                        content: tool_name.clone(),
+                        status: PlanStepStatus::InProgress,
+                    });
+                    cb(StreamEvent::PlanUpdate {
+                        entries: plan_steps.clone(),
+                    });
                 }
 
                 let decision = turn.permission_gate.check(id, tool_name, arguments).await;
@@ -171,6 +180,13 @@ where
                         tool_name: tool_name.clone(),
                         result: result.clone(),
                         is_error,
+                    });
+
+                    if let Some(last) = plan_steps.last_mut() {
+                        last.status = PlanStepStatus::Completed;
+                    }
+                    cb(StreamEvent::PlanUpdate {
+                        entries: plan_steps.clone(),
                     });
                 }
 
@@ -536,25 +552,58 @@ mod tests {
 
         assert_eq!(result.final_response, "all done");
 
-        // Check event sequence
+        // Check relative event ordering (not raw indices, since plan_update
+        // events are interleaved around the tool call/result pair).
+        let tool_call_idx = events
+            .iter()
+            .position(
+                |e| matches!(e, StreamEvent::ToolCall { tool_name, .. } if tool_name == "echo"),
+            )
+            .unwrap();
+        let tool_result_idx = events
+            .iter()
+            .position(
+                |e| matches!(e, StreamEvent::ToolResult { tool_name, .. } if tool_name == "echo"),
+            )
+            .unwrap();
+        let llm_response_idx = events
+            .iter()
+            .position(
+                |e| matches!(e, StreamEvent::LlmResponse { content } if content == "all done"),
+            )
+            .unwrap();
+
         assert!(matches!(
             events[0],
             StreamEvent::IterationStart { iteration: 1 }
         ));
-        assert!(
-            matches!(&events[1], StreamEvent::ToolCall { tool_name, .. } if tool_name == "echo")
-        );
-        assert!(
-            matches!(&events[2], StreamEvent::ToolResult { tool_name, .. } if tool_name == "echo")
-        );
+        assert!(tool_call_idx < tool_result_idx);
+        assert!(tool_result_idx < llm_response_idx);
         assert!(matches!(
-            events[3],
-            StreamEvent::IterationStart { iteration: 2 }
+            &events[llm_response_idx + 1],
+            StreamEvent::Finished { .. }
         ));
-        assert!(
-            matches!(&events[4], StreamEvent::LlmResponse { content } if content == "all done")
-        );
-        assert!(matches!(&events[5], StreamEvent::Finished { .. }));
+
+        // Two plan_update events: one after the tool call starts, one after it completes.
+        let plan_updates: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::PlanUpdate { .. }))
+            .collect();
+        assert_eq!(plan_updates.len(), 2);
+        assert!(matches!(
+            plan_updates[0],
+            StreamEvent::PlanUpdate { entries } if entries == &[PlanStep {
+                content: "echo".to_string(),
+                status: PlanStepStatus::InProgress,
+            }]
+        ));
+        assert!(matches!(
+            plan_updates[1],
+            StreamEvent::PlanUpdate { entries } if entries == &[PlanStep {
+                content: "echo".to_string(),
+                status: PlanStepStatus::Completed,
+            }]
+        ));
     }
 
     #[tokio::test]

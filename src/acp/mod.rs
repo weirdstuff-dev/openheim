@@ -13,12 +13,13 @@ use agent_client_protocol::{
         AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Implementation,
         InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
         LoadSessionRequest, LoadSessionResponse, ModelInfo, NewSessionRequest, NewSessionResponse,
-        PermissionOption, PermissionOptionKind, PromptRequest, PromptResponse,
-        RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-        SessionCapabilities, SessionInfo, SessionListCapabilities, SessionModelState,
-        SessionNotification, SessionUpdate, SetSessionModelRequest, SetSessionModelResponse,
-        StopReason, TextContent, ToolCall as AcpToolCall, ToolCallStatus, ToolCallUpdate,
-        ToolCallUpdateFields, ToolKind,
+        PermissionOption, PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority,
+        PlanEntryStatus, PromptRequest, PromptResponse, RequestPermissionOutcome,
+        RequestPermissionRequest, RequestPermissionResponse, SessionCapabilities, SessionInfo,
+        SessionListCapabilities, SessionMode, SessionModeState, SessionModelState,
+        SessionNotification, SessionUpdate, SetSessionModeRequest, SetSessionModeResponse,
+        SetSessionModelRequest, SetSessionModelResponse, StopReason, TextContent,
+        ToolCall as AcpToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     },
     util::internal_error,
 };
@@ -30,19 +31,38 @@ use crate::{
     config::{AgentConfig, AppConfig, build_http_client, create_client},
     core::{
         agent::{TurnContext, run_agent_streaming_with_history},
-        models::{Message, Role, StreamEvent},
+        models::{Message, PlanStepStatus, Role, StreamEvent},
         permission::{PermissionDecision, PermissionGate},
     },
     error::{Error, Result},
     llm::LlmClient,
     rag::RagContext,
     subagents::SubagentLoader,
-    tools::{SandboxedExecutor, SystemToolExecutor, ToolExecutor, with_delegation},
+    tools::{SandboxedExecutor, ScopedExecutor, SystemToolExecutor, ToolExecutor, with_delegation},
 };
 
 use session::SessionState;
 
 type Sessions = Arc<RwLock<HashMap<String, SessionState>>>;
+
+/// Full tool access; tool calls go through the permission gate as normal.
+pub const MODE_CODE: &str = "code";
+/// Read-only: only `read_file` is offered to the LLM, regardless of
+/// permission decisions. No `session/request_permission` prompts occur
+/// since nothing mutating is ever on the tool list.
+pub const MODE_ARCHITECT: &str = "architect";
+
+fn session_mode_state(current_mode_id: &str) -> SessionModeState {
+    SessionModeState::new(
+        current_mode_id.to_string(),
+        vec![
+            SessionMode::new(MODE_CODE, "Code")
+                .description("Full tool access; tool calls request permission."),
+            SessionMode::new(MODE_ARCHITECT, "Architect")
+                .description("Read-only: inspects and plans without editing or executing."),
+        ],
+    )
+}
 
 pub struct AgentState {
     pub llm: Arc<dyn LlmClient>,
@@ -119,6 +139,7 @@ impl AgentState {
                 skills,
                 cancel: CancellationToken::new(),
                 approved_tools: HashMap::new(),
+                mode: MODE_CODE.to_string(),
             },
         );
         Ok(session_key)
@@ -179,6 +200,18 @@ impl AgentState {
         self.apply_session_config(session_id, new_config).await
     }
 
+    pub async fn acp_set_session_mode(&self, session_id: &str, mode_id: &str) -> Result<()> {
+        if mode_id != MODE_CODE && mode_id != MODE_ARCHITECT {
+            return Err(Error::Other(format!("unknown session mode: {mode_id}")));
+        }
+        let mut sessions = self.sessions.write().await;
+        let s = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| Error::Other(format!("session not found: {session_id}")))?;
+        s.mode = mode_id.to_string();
+        Ok(())
+    }
+
     pub fn session_model_state(&self, current_model: &str) -> SessionModelState {
         let available_models = self
             .app_config
@@ -218,8 +251,16 @@ impl AgentState {
                 .ok_or_else(|| Error::Other(format!("session not found: {session_id}")))?;
             s.cancel = CancellationToken::new();
             let llm = crate::config::client_for_config(&s.config, &self.config, &self.llm)?;
+            let base: Arc<dyn ToolExecutor> = if s.mode == MODE_ARCHITECT {
+                Arc::new(ScopedExecutor::new(
+                    self.executor.clone(),
+                    vec!["read_file".to_string()],
+                ))
+            } else {
+                self.executor.clone()
+            };
             let sandboxed = Arc::new(SandboxedExecutor::new(
-                self.executor.clone(),
+                base,
                 self.work_dir.clone(),
                 self.allow_shell,
             )) as Arc<dyn ToolExecutor>;
@@ -306,6 +347,21 @@ impl AgentState {
                         ToolCallUpdateFields::new()
                             .status(status)
                             .raw_output(serde_json::Value::String(result)),
+                    )));
+                }
+                StreamEvent::PlanUpdate { entries } => {
+                    on_update(SessionUpdate::Plan(Plan::new(
+                        entries
+                            .into_iter()
+                            .map(|step| {
+                                let status = match step.status {
+                                    PlanStepStatus::Pending => PlanEntryStatus::Pending,
+                                    PlanStepStatus::InProgress => PlanEntryStatus::InProgress,
+                                    PlanStepStatus::Completed => PlanEntryStatus::Completed,
+                                };
+                                PlanEntry::new(step.content, PlanEntryPriority::Medium, status)
+                            })
+                            .collect(),
                     )));
                 }
                 _ => {}
@@ -397,6 +453,7 @@ impl AgentState {
                 skills: conversation.meta.skills.clone(),
                 cancel: CancellationToken::new(),
                 approved_tools: HashMap::new(),
+                mode: MODE_CODE.to_string(),
             },
         );
 
@@ -593,6 +650,7 @@ pub async fn serve(
     let state_list = state.clone();
     let state_load = state.clone();
     let state_set_model = state.clone();
+    let state_set_mode = state.clone();
     let state_cancel = state.clone();
 
     Agent
@@ -661,9 +719,11 @@ pub async fn serve(
                     .acp_new_session(model.as_deref(), skills, req.cwd)
                     .await
                 {
-                    Ok(session_key) => {
-                        responder.respond(NewSessionResponse::new(session_key).models(model_state))
-                    }
+                    Ok(session_key) => responder.respond(
+                        NewSessionResponse::new(session_key)
+                            .models(model_state)
+                            .modes(session_mode_state(MODE_CODE)),
+                    ),
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
                 }
             },
@@ -749,7 +809,8 @@ pub async fn serve(
                     .await;
 
                 match result {
-                    Ok(()) => responder.respond(LoadSessionResponse::new()),
+                    Ok(()) => responder
+                        .respond(LoadSessionResponse::new().modes(session_mode_state(MODE_CODE))),
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
                 }
             },
@@ -764,6 +825,20 @@ pub async fn serve(
                     .await
                 {
                     Ok(_) => responder.respond(SetSessionModelResponse::new()),
+                    Err(e) => responder.respond_with_internal_error(e.to_string()),
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: SetSessionModeRequest, responder, _cx: ConnectionTo<Client>| {
+                let session_id = req.session_id.0.as_ref().to_string();
+                let mode_id = req.mode_id.0.as_ref();
+                match state_set_mode
+                    .acp_set_session_mode(&session_id, mode_id)
+                    .await
+                {
+                    Ok(()) => responder.respond(SetSessionModeResponse::new()),
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
                 }
             },

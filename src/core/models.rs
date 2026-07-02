@@ -192,6 +192,27 @@ pub enum StreamEvent {
         final_response: String,
         iterations: usize,
     },
+    /// The running list of tool-call steps for this turn, replacing any
+    /// previously emitted plan. Derived from tool calls issued so far — not
+    /// an upfront LLM-authored plan.
+    #[serde(rename = "plan_update")]
+    PlanUpdate { entries: Vec<PlanStep> },
+}
+
+/// One entry in a [`StreamEvent::PlanUpdate`]. Protocol-agnostic mirror of
+/// ACP's `PlanEntry` (see [`crate::acp`] for the mapping).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanStep {
+    pub content: String,
+    pub status: PlanStepStatus,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStepStatus {
+    Pending,
+    InProgress,
+    Completed,
 }
 
 // Filesystem WebSocket Models
