@@ -226,9 +226,11 @@ println!("model: {:?}", conv.meta.model);
 println!("messages: {}", conv.messages.len());
 
 for msg in &conv.messages {
-    println!("[{:?}] {}", msg.role, msg.content.as_deref().unwrap_or(""));
+    println!("[{:?}] {}", msg.role, msg.text().unwrap_or_default());
 }
 ```
+
+`msg.content` is a `Vec<core::models::ContentBlock>` (`Text`/`Thinking`/`Image`/`ToolUse`/`ToolResult`) rather than a plain string — `msg.text()` concatenates the `Text` blocks. Use `msg.tool_calls()` / `msg.tool_result_block()` for the other block types; see `docs/custom-llm-provider.md` for the full `ContentBlock` shape.
 
 ### Resume a session (load + continue prompting)
 

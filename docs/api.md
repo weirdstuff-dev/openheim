@@ -309,47 +309,50 @@ Returns the full conversation for a session, including all messages.
   "messages": [
     {
       "role": "user",
-      "content": "Refactor the auth module to use JWTs.",
-      "tool_calls": null,
-      "tool_call_id": null,
-      "tool_name": null
+      "content": [
+        { "type": "text", "text": "Refactor the auth module to use JWTs." }
+      ]
     },
     {
       "role": "assistant",
-      "content": "I'll help you refactor the auth module...",
-      "tool_calls": null,
-      "tool_call_id": null,
-      "tool_name": null
+      "content": [
+        { "type": "thinking", "thinking": "The user wants JWTs...", "signature": "..." },
+        { "type": "text", "text": "I'll help you refactor the auth module..." }
+      ]
     },
     {
       "role": "assistant",
-      "content": null,
-      "tool_calls": [
+      "content": [
         {
+          "type": "tool_use",
           "id": "call_abc123",
-          "function": {
-            "name": "read_file",
-            "arguments": "{\"path\": \"src/auth.rs\"}"
-          }
+          "name": "read_file",
+          "arguments": "{\"path\": \"src/auth.rs\"}"
         }
-      ],
-      "tool_call_id": null,
-      "tool_name": null
+      ]
     },
     {
       "role": "tool",
-      "content": "use actix_web::...\n// file contents",
-      "tool_calls": null,
-      "tool_call_id": "call_abc123",
-      "tool_name": "read_file"
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_call_id": "call_abc123",
+          "tool_name": "read_file",
+          "content": "use actix_web::...\n// file contents"
+        }
+      ]
     },
     {
       "role": "tool",
-      "content": "Error: permission denied: /etc/shadow",
-      "tool_calls": null,
-      "tool_call_id": "call_def456",
-      "tool_name": "read_file",
-      "is_error": true
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_call_id": "call_def456",
+          "tool_name": "read_file",
+          "content": "Error: permission denied: /etc/shadow",
+          "is_error": true
+        }
+      ]
     }
   ]
 }
@@ -360,17 +363,21 @@ Returns the full conversation for a session, including all messages.
 | `role` | Description |
 |---|---|
 | `"user"` | Message sent by the human |
-| `"assistant"` | LLM response text or tool call request |
+| `"assistant"` | LLM response text, reasoning, and/or tool call requests |
 | `"tool"` | Tool execution result fed back to the LLM |
 | `"system"` | System prompt injected by the agent (skills, context) |
 
-**`role: "tool"` fields:**
+**Content block types** (`content` is always an array, in order — an assistant
+turn commonly holds a leading `thinking` block followed by `text` and/or
+`tool_use` blocks; a `tool` message holds exactly one `tool_result` block):
 
-| Field | Type | Description |
+| `type` | Fields | Description |
 |---|---|---|
-| `tool_call_id` | `string` | ID linking this result to the assistant's tool call request |
-| `tool_name` | `string` | Name of the tool that was invoked |
-| `is_error` | `boolean` | `true` if the tool returned an error. Omitted from JSON when `false` (i.e. absence means success). Also forwarded to Anthropic as `is_error` in the tool result block so the LLM receives accurate signal. |
+| `"text"` | `text: string` | Plain text (user, assistant, or system content) |
+| `"thinking"` | `thinking: string`, `signature?: string \| null` | Extended-thinking output. `signature` must be replayed unmodified — it's how the provider verifies the block wasn't tampered with. |
+| `"image"` | `data: string` (base64), `mime_type: string` | User-supplied image, e.g. from an ACP client's `image` content block |
+| `"tool_use"` | `id: string`, `name: string`, `arguments: string` (JSON string) | A tool call the assistant requested |
+| `"tool_result"` | `tool_call_id: string`, `tool_name: string`, `content: string`, `is_error?: boolean` | Result of executing a tool call. `is_error` omitted from JSON when `false` (absence means success); forwarded to Anthropic as `is_error` in the tool result block so the LLM receives accurate signal. |
 
 **Error `400`** — if `:id` is not a valid UUID:
 
@@ -1409,20 +1416,21 @@ interface ConversationMeta {
 
 interface Message {
   role: "user" | "assistant" | "tool" | "system";
-  content: string | null;
-  tool_calls?: ToolCall[] | null;
-  tool_call_id?: string | null; // present on role:"tool" messages
-  tool_name?: string | null;    // present on role:"tool" messages
-  is_error?: boolean;           // true when the tool returned an error; omitted when false
+  content: ContentBlock[];
 }
 
-interface ToolCall {
-  id: string;
-  function: {
-    name: string;
-    arguments: string; // JSON string
-  };
-}
+type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "thinking"; thinking: string; signature?: string | null }
+  | { type: "image"; data: string; mime_type: string } // data is base64-encoded
+  | { type: "tool_use"; id: string; name: string; arguments: string } // arguments is a JSON string
+  | {
+      type: "tool_result";
+      tool_call_id: string;
+      tool_name: string;
+      content: string;
+      is_error?: boolean; // omitted when false
+    };
 
 interface Conversation {
   meta: ConversationMeta;

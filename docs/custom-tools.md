@@ -115,11 +115,13 @@ Use `SystemToolExecutor::register` before running the agent:
 
 ```rust
 use openheim::tools::SystemToolExecutor;
-use openheim::core::agent::run_agent_with_history;
+use openheim::core::agent::{TurnContext, run_agent_with_history};
 use openheim::core::models::Message;
+use openheim::core::permission::{AllowAll, PermissionGate};
 use openheim::config::{AgentConfig, load_config};
 use openheim::rag::RagContext;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> openheim::Result<()> {
@@ -135,14 +137,20 @@ async fn main() -> openheim::Result<()> {
     let http = openheim::config::build_http_client(agent_config.timeout_secs)?;
     let llm = openheim::config::create_client(&agent_config, &http);
 
-    let mut messages = vec![Message::user("Fetch https://example.com and summarise it.".into())];
+    let mut messages = vec![Message::user("Fetch https://example.com and summarise it.")];
+
+    let turn = TurnContext {
+        cancel: &CancellationToken::new(),
+        permission_gate: &(Arc::new(AllowAll) as Arc<dyn PermissionGate>),
+    };
 
     let result = run_agent_with_history(
         llm,
         executor,
         &agent_config,
         &mut messages,
-        None,
+        None, // prompt_builder
+        &turn,
     )
     .await?;
 
