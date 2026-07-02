@@ -282,7 +282,7 @@ Returns a list of all persisted conversation sessions, sorted newest-first by `u
 | `skills` | `string[]` | Skills loaded for this session |
 | `cwd` | `string \| null` | Working directory — populated after the first prompt in the session |
 
-> Sessions are persisted to `~/.openheim/history/{uuid}.json` and survive server restarts.
+> Sessions are persisted to `~/.openheim/history/{uuid}.json` (metadata) and `~/.openheim/history/{uuid}.jsonl` (messages, appended incrementally as the conversation grows) and survive server restarts.
 
 ---
 
