@@ -25,7 +25,7 @@ use agent_client_protocol::{
     },
     util::internal_error,
 };
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -161,6 +161,7 @@ impl AgentState {
                 cancel: CancellationToken::new(),
                 approved_tools: HashMap::new(),
                 mode: MODE_CODE.to_string(),
+                prompt_lock: Arc::new(Mutex::new(())),
             },
         );
         Ok(session_key)
@@ -256,7 +257,7 @@ impl AgentState {
     where
         F: FnMut(SessionUpdate) + Send,
     {
-        let (llm, executor, config, chat_id, skills, cwd, cancel) = {
+        let (llm, executor, config, chat_id, skills, cwd, cancel, _prompt_guard) = {
             // Write lock: each new prompt turn gets a fresh cancellation token,
             // since a token can only ever transition uncancelled -> cancelled
             // and must not leak a previous turn's cancellation into this one.
@@ -264,6 +265,10 @@ impl AgentState {
             let s = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| Error::Other(format!("session not found: {session_id}")))?;
+            // Held until this function returns (success, error, or cancellation);
+            // a second overlapping `session/prompt` on the same session would
+            // otherwise race this one to reset `cancel` and to save history.
+            let prompt_guard = s.try_acquire_prompt_lock(session_id)?;
             s.cancel = CancellationToken::new();
             let llm = crate::config::client_for_config(&s.config, &self.config, &self.llm)?;
             let base: Arc<dyn ToolExecutor> = if s.mode == MODE_ARCHITECT {
@@ -288,6 +293,7 @@ impl AgentState {
                 s.skills.clone(),
                 s.cwd.clone(),
                 s.cancel.clone(),
+                prompt_guard,
             )
         };
 
@@ -473,6 +479,7 @@ impl AgentState {
                 cancel: CancellationToken::new(),
                 approved_tools: HashMap::new(),
                 mode: MODE_CODE.to_string(),
+                prompt_lock: Arc::new(Mutex::new(())),
             },
         );
 
