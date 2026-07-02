@@ -10,16 +10,18 @@ use agent_client_protocol::{
     Agent, Client, ConnectTo, ConnectionTo, Dispatch, on_receive_dispatch, on_receive_notification,
     on_receive_request,
     schema::{
-        AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Implementation,
-        InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-        LoadSessionRequest, LoadSessionResponse, ModelInfo, NewSessionRequest, NewSessionResponse,
-        PermissionOption, PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority,
-        PlanEntryStatus, PromptRequest, PromptResponse, RequestPermissionOutcome,
+        AgentCapabilities, CancelNotification, ClientCapabilities, ContentBlock, ContentChunk,
+        Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
+        ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, ModelInfo,
+        NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, Plan,
+        PlanEntry, PlanEntryPriority, PlanEntryStatus, PromptRequest, PromptResponse,
+        ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome,
         RequestPermissionRequest, RequestPermissionResponse, SessionCapabilities, SessionInfo,
         SessionListCapabilities, SessionMode, SessionModeState, SessionModelState,
         SessionNotification, SessionUpdate, SetSessionModeRequest, SetSessionModeResponse,
         SetSessionModelRequest, SetSessionModelResponse, StopReason, TextContent,
         ToolCall as AcpToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        WriteTextFileRequest, WriteTextFileResponse,
     },
     util::internal_error,
 };
@@ -31,6 +33,7 @@ use crate::{
     config::{AgentConfig, AppConfig, build_http_client, create_client},
     core::{
         agent::{TurnContext, run_agent_streaming_with_history},
+        client_io::ClientIo,
         models::{Message, PlanStepStatus, Role, StreamEvent},
         permission::{PermissionDecision, PermissionGate},
     },
@@ -236,6 +239,7 @@ impl AgentState {
         session_id: &str,
         text: String,
         permission_gate: Arc<dyn PermissionGate>,
+        client_io: Arc<dyn ClientIo>,
         mut on_update: F,
     ) -> Result<()>
     where
@@ -263,6 +267,7 @@ impl AgentState {
                 base,
                 self.work_dir.clone(),
                 self.allow_shell,
+                client_io,
             )) as Arc<dyn ToolExecutor>;
             (
                 llm,
@@ -629,6 +634,55 @@ impl PermissionGate for AcpPermissionGate {
     }
 }
 
+/// [`ClientIo`] backed by ACP's `fs/read_text_file` / `fs/write_text_file`.
+/// Only attempts them when the client actually advertised the corresponding
+/// capability at `initialize` time; otherwise defers to local I/O.
+struct AcpClientIo {
+    cx: ConnectionTo<Client>,
+    session_id: String,
+    client_capabilities: Arc<RwLock<ClientCapabilities>>,
+}
+
+#[async_trait::async_trait]
+impl ClientIo for AcpClientIo {
+    async fn read_file(&self, path: &std::path::Path) -> Option<Result<String>> {
+        if !self.client_capabilities.read().await.fs.read_text_file {
+            return None;
+        }
+        let response = self
+            .cx
+            .send_request(ReadTextFileRequest::new(
+                self.session_id.clone(),
+                path.to_path_buf(),
+            ))
+            .block_task()
+            .await;
+        Some(match response {
+            Ok(ReadTextFileResponse { content, .. }) => Ok(content),
+            Err(e) => Err(Error::Other(format!("fs/read_text_file failed: {e}"))),
+        })
+    }
+
+    async fn write_file(&self, path: &std::path::Path, content: &str) -> Option<Result<()>> {
+        if !self.client_capabilities.read().await.fs.write_text_file {
+            return None;
+        }
+        let response = self
+            .cx
+            .send_request(WriteTextFileRequest::new(
+                self.session_id.clone(),
+                path.to_path_buf(),
+                content,
+            ))
+            .block_task()
+            .await;
+        Some(match response {
+            Ok(WriteTextFileResponse { .. }) => Ok(()),
+            Err(e) => Err(Error::Other(format!("fs/write_text_file failed: {e}"))),
+        })
+    }
+}
+
 fn extract_prompt_text(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
@@ -653,11 +707,19 @@ pub async fn serve(
     let state_set_mode = state.clone();
     let state_cancel = state.clone();
 
+    // Client capabilities are per-connection (learned once, at `initialize`),
+    // not per-session — `serve()` runs fresh per connection even though
+    // `AgentState` itself is shared, so this is scoped correctly here.
+    let client_capabilities = Arc::new(RwLock::new(ClientCapabilities::default()));
+    let client_capabilities_init = client_capabilities.clone();
+    let client_capabilities_prompt = client_capabilities.clone();
+
     Agent
         .builder()
         .name("openheim")
         .on_receive_request(
             async move |req: InitializeRequest, responder, _cx: ConnectionTo<Client>| {
+                *client_capabilities_init.write().await = req.client_capabilities.clone();
                 let mut meta = serde_json::Map::new();
                 if let Ok(val) = serde_json::to_value(state_init.app_config.models_info()) {
                     meta.insert("models".to_string(), val);
@@ -741,6 +803,11 @@ pub async fn serve(
                     session_id: session_key.clone(),
                     state: state.clone(),
                 }) as Arc<dyn PermissionGate>;
+                let client_io = Arc::new(AcpClientIo {
+                    cx: cx.clone(),
+                    session_id: session_key.clone(),
+                    client_capabilities: client_capabilities_prompt.clone(),
+                }) as Arc<dyn ClientIo>;
 
                 // The prompt turn can run for a long time (many LLM/tool round-trips)
                 // and, once permission requests land, will itself await replies from
@@ -751,12 +818,18 @@ pub async fn serve(
                 // inside the spawned task once the turn actually finishes.
                 cx.spawn(async move {
                     let result = state
-                        .acp_prompt(&session_key, text, permission_gate, move |update| {
-                            let _ = cx_cb.send_notification(SessionNotification::new(
-                                session_id_cb.clone(),
-                                update,
-                            ));
-                        })
+                        .acp_prompt(
+                            &session_key,
+                            text,
+                            permission_gate,
+                            client_io,
+                            move |update| {
+                                let _ = cx_cb.send_notification(SessionNotification::new(
+                                    session_id_cb.clone(),
+                                    update,
+                                ));
+                            },
+                        )
                         .await;
 
                     // A spawned task returning an error shuts down the whole

@@ -12,7 +12,7 @@ use crate::{
     config::{
         AgentConfig, AppConfig, McpServerConfig, ProviderConfig, load_config, load_config_from,
     },
-    core::permission::AllowAll,
+    core::{client_io::NoClientIo, permission::AllowAll},
     error::Result,
     mcp::McpServerStatus,
     rag::{Conversation, ConversationMeta, RagContext},
@@ -184,7 +184,13 @@ impl SessionHandle {
         on_update: impl FnMut(SessionUpdate) + Send,
     ) -> Result<()> {
         self.state
-            .acp_prompt(&self.id, text.to_string(), Arc::new(AllowAll), on_update)
+            .acp_prompt(
+                &self.id,
+                text.to_string(),
+                Arc::new(AllowAll),
+                Arc::new(NoClientIo),
+                on_update,
+            )
             .await
     }
 

@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{AgentConfig, AppConfig, client_for_config};
 use crate::core::agent::{TurnContext, run_agent_with_history};
+use crate::core::client_io::NoClientIo;
 use crate::core::llm::LlmClient;
 use crate::core::models::{FunctionDefinition, Message, Tool};
 use crate::core::permission::{AllowAll, PermissionGate};
@@ -112,6 +113,7 @@ impl DelegateTool {
             scoped,
             self.work_dir.clone(),
             self.allow_shell,
+            Arc::new(NoClientIo),
         ))
     }
 }
