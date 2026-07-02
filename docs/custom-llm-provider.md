@@ -51,7 +51,14 @@ pub struct FunctionDefinition {
 // Output
 pub struct Choice {
     pub message: Message,
-    pub finish_reason: Option<String>,    // "stop" | "tool_calls" | "length" | …
+    pub finish_reason: Option<FinishReason>,
+}
+
+pub enum FinishReason {
+    Stop,               // normal completion
+    ToolCalls,          // model wants to invoke tools
+    MaxTokens,          // truncated at the token limit
+    Other(String),      // provider-specific reason with no equivalent above
 }
 ```
 
@@ -66,7 +73,7 @@ and constructors for building your own:
 - `Message::user(text)`, `Message::assistant(text)` — single-`Text`-block message
 - `Message::tool_result(tool_call_id, tool_name, content, is_error)` — single-`ToolResult`-block message
 
-The agent loop treats `finish_reason == "stop"` as the signal to end the conversation. Any other finish reason with no tool calls also ends the loop (with a warning). If `message.tool_calls()` is non-empty, the loop executes them and continues.
+The agent loop treats `finish_reason == Some(FinishReason::Stop)` as the signal to end the conversation. Any other finish reason with no tool calls also ends the loop (with a warning). If `message.tool_calls()` is non-empty, the loop executes them and continues.
 
 ---
 
@@ -78,7 +85,7 @@ The following implements a provider that speaks a hypothetical OpenAI-compatible
 
 ```rust
 use async_trait::async_trait;
-use openheim::core::models::{Choice, ContentBlock, Message, Role, Tool};
+use openheim::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool};
 use openheim::error::{Error, Result};
 use openheim::llm::LlmClient;
 use reqwest::Client;
@@ -210,12 +217,22 @@ impl LlmClient for MyCustomProvider {
             None => vec![],
         };
 
+        // Map the raw wire value onto the provider-agnostic `FinishReason` —
+        // do this once, at the response-parsing boundary, per the pattern
+        // used by `core::llm::{anthropic,gemini,openai}`.
+        let finish_reason = choice.finish_reason.as_deref().map(|r| match r {
+            "stop" => FinishReason::Stop,
+            "tool_calls" => FinishReason::ToolCalls,
+            "length" => FinishReason::MaxTokens,
+            other => FinishReason::Other(other.to_string()),
+        });
+
         Ok(Choice {
             message: Message {
                 role: Role::Assistant,
                 content,
             },
-            finish_reason: choice.finish_reason,
+            finish_reason,
         })
     }
 }
