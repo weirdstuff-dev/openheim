@@ -57,6 +57,8 @@ The server exposes:
 - `ws://{host}:{port}/ws` — WebSocket endpoint (ACP agent + filesystem sidecar)
 - `http://{host}:{port}/api/*` — REST endpoints (config, models, skills, tools, sessions)
 
+The filesystem sidecar is sandboxed to the configured `work_dir` (see [configuration.md](./configuration.md)) — connected clients cannot read or write outside it.
+
 ---
 
 ## Configuration

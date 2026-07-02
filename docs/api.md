@@ -983,11 +983,13 @@ pending → in_progress → completed
 
 ### 3.3 Filesystem Channel
 
-All filesystem operations are sent over the `fs` channel. Paths are relative to the workspace root (set via `watch`). Absolute paths must be within the workspace.
+All filesystem operations are sent over the `fs` channel. The channel is sandboxed to the agent's configured `work_dir` (see [configuration.md](./configuration.md)) — the same boundary the agent's own `read_file`/`write_file` tools are held to. Relative paths resolve against `work_dir`; absolute paths must be within it. Symlinks are followed and canonicalized so they cannot escape the boundary.
+
+No `watch` call is required before file operations — every request is validated against `work_dir` directly.
 
 #### 3.3.1 Watch / Unwatch
 
-Start watching a workspace directory. This sets the workspace root for all subsequent path validations and enables live file change events.
+Start watching a directory for live file change events. The directory must be within `work_dir`. Watching does **not** affect path validation for other operations.
 
 **Watch (Client → Server):**
 
@@ -1035,7 +1037,7 @@ Start watching a workspace directory. This sets the workspace root for all subse
 }
 ```
 
-> You must call `watch` before any file operations. All paths in subsequent requests must be within the watched directory. You can only watch one directory at a time; calling `watch` again replaces the previous watch.
+> You can only watch one directory at a time; calling `watch` again replaces the previous watch. Watching is only needed for live `fs_event` notifications — all other operations work without it.
 
 ---
 
@@ -1056,7 +1058,7 @@ Start watching a workspace directory. This sets the workspace root for all subse
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `path` | `string` | Yes | — | Directory path (relative to workspace root or absolute within workspace) |
+| `path` | `string` | Yes | — | Directory path (relative to `work_dir` or absolute within it) |
 | `recursive` | `boolean` | No | `false` | If true, lists all descendants recursively |
 
 **Response:**
@@ -1251,7 +1253,7 @@ Deletes a file or directory (recursively if directory).
 
 #### 3.3.8 Filesystem Events (Server → Client)
 
-When a workspace is being watched, file change events are pushed automatically:
+When a directory is being watched, file change events are pushed automatically:
 
 ```json
 {
@@ -1288,7 +1290,7 @@ Any fs operation can return an error:
   "channel": "fs",
   "data": {
     "type": "error",
-    "message": "Path not within workspace or does not exist"
+    "message": "Tool execution error: path '../secrets' is outside the work directory '/path/to/work_dir'"
   }
 }
 ```
@@ -1297,8 +1299,9 @@ Common error messages:
 
 | Message | Cause |
 |---|---|
-| `"Path not within workspace or does not exist"` | Path outside watched workspace or `watch` not called |
-| `"Invalid directory: ..."` | Watch path doesn't exist or isn't a directory |
+| `"Tool execution error: path '...' is outside the work directory '...'"` | Path escapes `work_dir` (absolute path outside it, or `..` traversal) |
+| `"Tool execution error: path '...' is a dangling symlink ..."` | Path is a symlink whose target does not exist (rejected so writes can't create the target outside the sandbox) |
+| `"Invalid directory: ..."` | Watch path isn't a directory |
 | `"Failed to read: ..."` | File read error (permissions, missing, etc.) |
 | `"Failed to write: ..."` | File write error |
 | `"Failed to create dirs: ..."` | Parent directory creation failed |

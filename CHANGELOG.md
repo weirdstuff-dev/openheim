@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Security
+
+- **`/ws` filesystem sidecar is now sandboxed to `work_dir`** — previously the fs channel validated paths against a *client-chosen* root (whatever directory the client sent in `watch`), giving any connected WebSocket client read/write/delete access to arbitrary directories, bypassing the agent's own `work_dir` sandbox. All fs operations (`list`/`read`/`write`/`mkdir`/`delete`/`rename`/`watch`) are now validated against the agent's configured `work_dir` using the same path validator as the built-in `read_file`/`write_file` tools — including its symlink canonicalization and dangling-symlink protection, which the sidecar's old validator lacked.
+
+### Changed (WS protocol)
+
+- **`watch` no longer sets the fs validation root** — it only enables live `fs_event` notifications, and the watched directory must be within `work_dir`.
+- **fs operations no longer require a prior `watch`** — requests used to error until the client sent one; they now work immediately, validated against `work_dir`. Relative paths resolve against `work_dir` instead of the watched root.
+- **fs error messages changed** — path rejections now return the validator's descriptive message (e.g. `"Tool execution error: path '...' is outside the work directory '...'"`) instead of the generic `"Path not within workspace or does not exist"`.
+
 ### Added
 
 - **Tool-call permission requests** — before executing a tool call, the ACP layer now sends `session/request_permission` and waits for the client's decision (allow/reject, once or always) instead of executing immediately. `AllowAlways`/`RejectAlways` decisions are remembered for the rest of the session. Non-ACP callers (TUI, library embedding, subagents) are unaffected — they use an always-allow gate.
