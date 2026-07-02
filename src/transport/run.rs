@@ -48,10 +48,10 @@ pub async fn run_headless(prompt: String, model: Option<String>) -> crate::error
         .builder()
         // `openheim run` is a one-shot, non-interactive CLI invocation with no
         // human to prompt — the user already consented to this run by invoking
-        // it. Auto-allow every tool call so a headless run behaves like it did
-        // before `session/request_permission` existed, instead of hanging
-        // forever (unhandled requests for a not-yet-existing session-scoped
-        // handler are queued for retry, not rejected).
+        // it. Without this handler, the agent's session/request_permission
+        // requests go unclaimed and every tool call is treated as denied.
+        // Auto-allow so a headless run behaves like it did before
+        // session/request_permission existed.
         .on_receive_request(
             async |req: RequestPermissionRequest, responder, _cx: ConnectionTo<Agent>| {
                 let option_id = req
