@@ -52,9 +52,11 @@ async fn call_llm_streaming(
 /// step: iteration start, tool calls, tool results, LLM text responses, and
 /// the final completion.
 ///
-/// `cancel` is checked between iterations and before each tool call so a
-/// caller (e.g. the ACP layer reacting to `session/cancel`) can stop an
-/// in-flight turn early. The loop always returns a normal [`AgentResult`];
+/// `cancel` is checked between iterations and before each tool call, and is
+/// also raced against the in-flight LLM call itself (both streaming and
+/// non-streaming) so a caller (e.g. the ACP layer reacting to
+/// `session/cancel`) can abort a slow or hanging request rather than waiting
+/// for it to finish. The loop always returns a normal [`AgentResult`];
 /// callers that care whether cancellation actually happened should check
 /// `cancel.is_cancelled()` themselves after this returns.
 async fn run_agent_loop<F>(
@@ -75,7 +77,7 @@ where
     let mut iterations_used = 0;
     let mut plan_steps: Vec<PlanStep> = Vec::new();
 
-    for iteration in 0..config.max_iterations {
+    'turn: for iteration in 0..config.max_iterations {
         if turn.cancel.is_cancelled() {
             break;
         }
@@ -97,6 +99,11 @@ where
             let mut maybe_choice: Option<Result<Choice>> = None;
             loop {
                 tokio::select! {
+                    _ = turn.cancel.cancelled() => {
+                        // Dropping `choice_fut` here aborts the in-flight
+                        // LLM request rather than waiting for it to finish.
+                        break 'turn;
+                    }
                     result = &mut choice_fut, if maybe_choice.is_none() => {
                         maybe_choice = Some(result);
                     }
@@ -123,7 +130,15 @@ where
                 ))
             })?
         } else {
-            call_llm(llm, messages, &tools, prompt_builder).await?
+            let result: Result<Choice> = tokio::select! {
+                _ = turn.cancel.cancelled() => {
+                    // Dropping the `call_llm` future here aborts the
+                    // in-flight LLM request rather than waiting for it.
+                    break 'turn;
+                }
+                result = call_llm(llm, messages, &tools, prompt_builder) => result,
+            };
+            result?
         };
         messages.push(choice.message.clone());
 
@@ -680,6 +695,94 @@ mod tests {
         assert_eq!(result.iterations_used, 1);
         let calls = executor.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
+    }
+
+    /// LLM that never resolves on its own; used to prove cancellation aborts
+    /// an in-flight call instead of waiting for it to finish.
+    struct SlowLlm;
+
+    #[async_trait]
+    impl LlmClient for SlowLlm {
+        async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> Result<Choice> {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            unreachable!("cancellation should abort this call before the sleep elapses");
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_in_flight_llm_call_streaming() {
+        let llm = Arc::new(SlowLlm);
+        let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));
+        let config = make_config(10);
+        let mut messages = vec![Message::user("hi")];
+        let cancel = CancellationToken::new();
+        let cancel_signal = cancel.clone();
+
+        // Cancel as soon as the loop starts its first iteration, i.e. right
+        // before the (never-resolving) LLM call is made.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_agent_streaming_with_history(
+                llm,
+                executor,
+                &config,
+                &mut messages,
+                None,
+                &TurnContext {
+                    cancel: &cancel,
+                    permission_gate: &allow_all(),
+                },
+                move |event| {
+                    if matches!(event, StreamEvent::IterationStart { .. }) {
+                        cancel_signal.cancel();
+                    }
+                },
+            ),
+        )
+        .await
+        .expect("run_agent_loop should abort the in-flight LLM call instead of hanging")
+        .unwrap();
+
+        assert_eq!(result.final_response, "");
+        assert_eq!(result.iterations_used, 1);
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_in_flight_llm_call_non_streaming() {
+        let llm = Arc::new(SlowLlm);
+        let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));
+        let config = make_config(10);
+        let mut messages = vec![Message::user("hi")];
+        let cancel = CancellationToken::new();
+        let cancel_signal = cancel.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            cancel_signal.cancel();
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_agent_with_history(
+                llm,
+                executor,
+                &config,
+                &mut messages,
+                None,
+                &TurnContext {
+                    cancel: &cancel,
+                    permission_gate: &allow_all(),
+                },
+            ),
+        )
+        .await
+        .expect("run_agent_loop should abort the in-flight LLM call instead of hanging")
+        .unwrap();
+
+        assert_eq!(result.final_response, "");
+        assert_eq!(result.iterations_used, 1);
+        assert_eq!(messages.len(), 1);
     }
 
     struct RejectPermissionGate;
