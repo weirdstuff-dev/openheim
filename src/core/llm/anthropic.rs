@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::core::models::{Choice, ContentBlock, Message, Role, Tool};
+use crate::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool};
 use crate::error::{Error, Result};
 
 use super::sse::SseDecoder;
@@ -237,14 +237,15 @@ fn convert_tools(tools: &[Tool]) -> Vec<AnthropicTool> {
         .collect()
 }
 
-/// Maps Anthropic's `stop_reason` vocabulary onto this codebase's
-/// provider-agnostic `finish_reason` strings; anything without a known
-/// equivalent (e.g. `max_tokens`) passes through unchanged.
-fn map_stop_reason(reason: Option<&str>) -> Option<String> {
+/// Maps Anthropic's `stop_reason` vocabulary onto the provider-agnostic
+/// [`FinishReason`]; anything without a known equivalent passes through as
+/// [`FinishReason::Other`].
+fn map_stop_reason(reason: Option<&str>) -> Option<FinishReason> {
     match reason {
-        Some("tool_use") => Some("tool_calls".to_string()),
-        Some("end_turn") => Some("stop".to_string()),
-        other => other.map(|s| s.to_string()),
+        Some("tool_use") => Some(FinishReason::ToolCalls),
+        Some("end_turn") => Some(FinishReason::Stop),
+        Some("max_tokens") => Some(FinishReason::MaxTokens),
+        other => other.map(|s| FinishReason::Other(s.to_string())),
     }
 }
 
@@ -638,18 +639,22 @@ mod tests {
 
     #[test]
     fn map_stop_reason_translates_known_values() {
-        assert_eq!(map_stop_reason(Some("end_turn")).as_deref(), Some("stop"));
+        assert_eq!(map_stop_reason(Some("end_turn")), Some(FinishReason::Stop));
         assert_eq!(
-            map_stop_reason(Some("tool_use")).as_deref(),
-            Some("tool_calls")
+            map_stop_reason(Some("tool_use")),
+            Some(FinishReason::ToolCalls)
+        );
+        assert_eq!(
+            map_stop_reason(Some("max_tokens")),
+            Some(FinishReason::MaxTokens)
         );
     }
 
     #[test]
     fn map_stop_reason_passes_through_unknown_values() {
         assert_eq!(
-            map_stop_reason(Some("max_tokens")).as_deref(),
-            Some("max_tokens")
+            map_stop_reason(Some("refusal")),
+            Some(FinishReason::Other("refusal".to_string()))
         );
     }
 

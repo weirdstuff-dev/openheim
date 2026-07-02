@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::core::models::{Choice, ContentBlock, Message, Role, Tool};
+use crate::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool};
 use crate::error::{Error, Result};
 
 use super::sse::SseDecoder;
@@ -276,11 +276,7 @@ fn convert_response(resp: GeminiResponse) -> Result<Choice> {
         }
     }
 
-    let finish_reason = match candidate.finish_reason.as_deref() {
-        Some("STOP") => Some("stop".to_string()),
-        Some("MAX_TOKENS") => Some("length".to_string()),
-        other => other.map(|s| s.to_lowercase()),
-    };
+    let finish_reason = candidate.finish_reason.as_deref().map(map_finish_reason);
 
     Ok(Choice {
         message: Message {
@@ -289,6 +285,18 @@ fn convert_response(resp: GeminiResponse) -> Result<Choice> {
         },
         finish_reason,
     })
+}
+
+/// Maps Gemini's `finishReason` vocabulary onto the provider-agnostic
+/// [`FinishReason`]; anything without a known equivalent passes through as
+/// [`FinishReason::Other`] (lowercased, matching this function's prior
+/// string-based behavior).
+fn map_finish_reason(reason: &str) -> FinishReason {
+    match reason {
+        "STOP" => FinishReason::Stop,
+        "MAX_TOKENS" => FinishReason::MaxTokens,
+        other => FinishReason::Other(other.to_lowercase()),
+    }
 }
 
 fn gemini_system_instruction(messages: &[Message]) -> Option<GeminiContent> {
@@ -396,7 +404,7 @@ impl LlmClient for GeminiClient {
 
         let mut text_buf = String::new();
         let mut tool_calls_accum: Vec<(String, String)> = Vec::new();
-        let mut finish_reason: Option<String> = None;
+        let mut finish_reason: Option<FinishReason> = None;
         let mut decoder = SseDecoder::new();
 
         while let Some(bytes) = response.chunk().await.map_err(Error::ReqwestError)? {
@@ -412,11 +420,7 @@ impl LlmClient for GeminiClient {
                 };
 
                 if let Some(fr) = candidate.finish_reason {
-                    finish_reason = Some(match fr.as_str() {
-                        "STOP" => "stop".to_string(),
-                        "MAX_TOKENS" => "length".to_string(),
-                        other => other.to_lowercase(),
-                    });
+                    finish_reason = Some(map_finish_reason(&fr));
                 }
 
                 for part in candidate.content.parts {
@@ -599,7 +603,7 @@ mod tests {
         let choice = convert_response(resp).unwrap();
         assert_eq!(choice.message.text().as_deref(), Some("Hello!"));
         assert!(choice.message.tool_calls().is_empty());
-        assert_eq!(choice.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
     }
 
     #[test]
@@ -629,7 +633,7 @@ mod tests {
 
     #[test]
     fn convert_response_finish_reason_mapping() {
-        // STOP -> stop
+        // STOP -> Stop
         let resp = GeminiResponse {
             candidates: vec![GeminiCandidate {
                 content: GeminiContent {
@@ -643,11 +647,11 @@ mod tests {
             }],
         };
         assert_eq!(
-            convert_response(resp).unwrap().finish_reason.as_deref(),
-            Some("stop")
+            convert_response(resp).unwrap().finish_reason,
+            Some(FinishReason::Stop)
         );
 
-        // MAX_TOKENS -> length
+        // MAX_TOKENS -> MaxTokens
         let resp = GeminiResponse {
             candidates: vec![GeminiCandidate {
                 content: GeminiContent {
@@ -661,8 +665,8 @@ mod tests {
             }],
         };
         assert_eq!(
-            convert_response(resp).unwrap().finish_reason.as_deref(),
-            Some("length")
+            convert_response(resp).unwrap().finish_reason,
+            Some(FinishReason::MaxTokens)
         );
     }
 

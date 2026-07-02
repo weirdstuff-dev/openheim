@@ -107,13 +107,14 @@ impl LlmClient for RetryClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::models::FinishReason;
     use crate::error::Error;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn ok_choice(content: &str) -> Choice {
         Choice {
             message: Message::assistant(content),
-            finish_reason: Some("stop".into()),
+            finish_reason: Some(FinishReason::Stop),
         }
     }
 

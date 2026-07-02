@@ -42,7 +42,7 @@ async fn call_llm_streaming(
 }
 
 /// Core agent loop: repeatedly calls the LLM and executes tool calls until a
-/// final text response with `finish_reason == "stop"` is produced or
+/// final text response with `finish_reason == FinishReason::Stop` is produced or
 /// `config.max_iterations` is reached.
 ///
 /// Appends all assistant and tool-result messages to `messages` in place so the
@@ -226,7 +226,7 @@ where
                 tool_calls: None,
             });
 
-            if choice.finish_reason.as_deref() == Some("stop") {
+            if choice.finish_reason == Some(FinishReason::Stop) {
                 if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::Finished {
                         final_response: final_response.clone(),
@@ -349,10 +349,10 @@ mod tests {
         Arc::new(AllowAll)
     }
 
-    fn text_choice(content: &str, finish: &str) -> Choice {
+    fn text_choice(content: &str) -> Choice {
         Choice {
             message: Message::assistant(content),
-            finish_reason: Some(finish.into()),
+            finish_reason: Some(FinishReason::Stop),
         }
     }
 
@@ -366,7 +366,7 @@ mod tests {
                     arguments: args.into(),
                 }],
             },
-            finish_reason: Some("tool_calls".into()),
+            finish_reason: Some(FinishReason::ToolCalls),
         }
     }
 
@@ -452,7 +452,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_stops_on_finish_reason_stop() {
-        let llm = Arc::new(MockLlm::new(vec![text_choice("done", "stop")]));
+        let llm = Arc::new(MockLlm::new(vec![text_choice("done")]));
         let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));
         let config = make_config(10);
         let mut messages = vec![Message::user("hi")];
@@ -481,7 +481,7 @@ mod tests {
     async fn agent_executes_tool_calls_and_continues() {
         let llm = Arc::new(MockLlm::new(vec![
             tool_call_choice("read_file", r#"{"path":"a.txt"}"#),
-            text_choice("here is the file content", "stop"),
+            text_choice("here is the file content"),
         ]));
         let executor = Arc::new(MockToolExecutor::new("file data"));
         let config = make_config(10);
@@ -543,7 +543,7 @@ mod tests {
     async fn agent_streaming_emits_events() {
         let llm = Arc::new(MockLlm::new(vec![
             tool_call_choice("echo", r#"{"cmd":"hi"}"#),
-            text_choice("all done", "stop"),
+            text_choice("all done"),
         ]));
         let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new("ok"));
         let config = make_config(10);
@@ -603,7 +603,7 @@ mod tests {
     async fn agent_feeds_tool_error_back_to_llm() {
         let llm = Arc::new(MockLlm::new(vec![
             tool_call_choice("bad_tool", "{}"),
-            text_choice("I got an error", "stop"),
+            text_choice("I got an error"),
         ]));
         let executor: Arc<dyn ToolExecutor> = Arc::new(FailingToolExecutor);
         let config = make_config(10);
@@ -779,7 +779,7 @@ mod tests {
                 role: Role::Assistant,
                 content: vec![],
             },
-            finish_reason: Some("stop".into()),
+            finish_reason: Some(FinishReason::Stop),
         };
         let llm = Arc::new(MockLlm::new(vec![empty_choice]));
         let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));
@@ -823,7 +823,7 @@ mod tests {
     async fn agent_skips_execution_when_permission_denied() {
         let llm = Arc::new(MockLlm::new(vec![
             tool_call_choice("execute_command", r#"{"command":"rm -rf /"}"#),
-            text_choice("I was denied", "stop"),
+            text_choice("I was denied"),
         ]));
         let executor = Arc::new(MockToolExecutor::new("should not run"));
         let config = make_config(10);

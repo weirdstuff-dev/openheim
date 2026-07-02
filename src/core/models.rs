@@ -195,11 +195,30 @@ pub struct FunctionDefinition {
     pub parameters: Value,
 }
 
+/// Why the provider stopped generating, normalized across providers'
+/// differing vocabularies (Anthropic's `stop_reason`, Gemini's
+/// `finishReason`, OpenAI's `finish_reason`). Each `core::llm` provider
+/// module maps its own wire values onto this once, at the response-parsing
+/// boundary.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishReason {
+    /// The model completed its response normally.
+    Stop,
+    /// The model wants to invoke one or more tools.
+    ToolCalls,
+    /// The response was truncated because it hit the token limit.
+    MaxTokens,
+    /// A provider-specific reason with no equivalent above (e.g. Anthropic's
+    /// `refusal`, Gemini's `SAFETY`/`RECITATION`), passed through verbatim.
+    Other(String),
+}
+
 /// A single completion choice returned by the provider.
 #[derive(Debug, Deserialize)]
 pub struct Choice {
     pub message: Message,
-    pub finish_reason: Option<String>,
+    pub finish_reason: Option<FinishReason>,
 }
 
 /// One iteration of an agent run, including the LLM response and any tools invoked.

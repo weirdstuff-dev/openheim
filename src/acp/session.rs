@@ -5,6 +5,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::acp::AgentMode;
 use crate::config::AgentConfig;
 use crate::core::permission::PermissionDecision;
 use crate::error::{Error, Result};
@@ -22,9 +23,8 @@ pub struct SessionState {
     /// `session/request_permission` prompts, keyed by tool name, so the same
     /// tool isn't re-prompted for the rest of the session.
     pub approved_tools: HashMap<String, PermissionDecision>,
-    /// ACP session mode ID (see [`crate::acp::MODE_CODE`] / [`crate::acp::MODE_ARCHITECT`]),
-    /// set via `session/set_mode`. Controls which tools are offered to the LLM.
-    pub mode: String,
+    /// Set via `session/set_mode`. Controls which tools are offered to the LLM.
+    pub mode: AgentMode,
     /// Held for the duration of a `session/prompt` turn so a second, overlapping
     /// prompt on the same session is rejected instead of racing the first one
     /// (both would otherwise reset `cancel` and clobber the saved history).
@@ -63,7 +63,7 @@ mod tests {
             skills: vec![],
             cancel: CancellationToken::new(),
             approved_tools: HashMap::new(),
-            mode: "code".into(),
+            mode: AgentMode::Code,
             prompt_lock: Arc::new(Mutex::new(())),
         }
     }

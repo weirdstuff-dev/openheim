@@ -73,8 +73,8 @@ pub use llm::{AnthropicClient, GeminiClient, LlmClient, OpenAiClient, OpenAiComp
 // below is the one library users see at the crate root. Reach the core content-block
 // type via `openheim::core::models::ContentBlock` if needed.
 pub use models::{
-    AgentResult, AgentStep, Choice, FunctionDefinition, Message, Role, StopReason, StreamEvent,
-    Tool, ToolExecutionResult, ToolResultBlock, ToolUseBlock,
+    AgentResult, AgentStep, Choice, FinishReason, FunctionDefinition, Message, Role, StopReason,
+    StreamEvent, Tool, ToolExecutionResult, ToolResultBlock, ToolUseBlock,
 };
 pub use rag::{Conversation, ConversationMeta, HistoryManager, PromptBuilder, RagContext};
 

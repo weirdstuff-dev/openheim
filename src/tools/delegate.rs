@@ -297,7 +297,7 @@ pub fn with_delegation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::models::{Choice, ContentBlock, Role};
+    use crate::core::models::{Choice, ContentBlock, FinishReason, Role};
     use crate::core::permission::{AllowAll, PermissionDecision, PermissionGate};
     use crate::tools::test_support::TurnHarness;
     use std::collections::BTreeMap;
@@ -339,10 +339,10 @@ mod tests {
         }
     }
 
-    fn text_choice(content: &str, finish: &str) -> Choice {
+    fn text_choice(content: &str) -> Choice {
         Choice {
             message: Message::assistant(content),
-            finish_reason: Some(finish.into()),
+            finish_reason: Some(FinishReason::Stop),
         }
     }
 
@@ -356,7 +356,7 @@ mod tests {
                     arguments: "{}".into(),
                 }],
             },
-            finish_reason: Some("tool_calls".into()),
+            finish_reason: Some(FinishReason::ToolCalls),
         }
     }
 
@@ -455,7 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_runs_subagent_in_isolated_context_and_returns_final_answer() {
-        let llm = Arc::new(MockLlm::new(vec![text_choice("subagent answer", "stop")]));
+        let llm = Arc::new(MockLlm::new(vec![text_choice("subagent answer")]));
         let tool = make_tool(vec![sample_profile("reviewer", "desc")], llm);
         let harness = TurnHarness::new();
 
@@ -494,10 +494,7 @@ mod tests {
         // Subagent must inherit the parent's cancel token, not a fresh one —
         // otherwise a `session/cancel` on the orchestrator would never reach
         // an in-flight subagent.
-        let llm = Arc::new(MockLlm::new(vec![text_choice(
-            "should not be seen",
-            "stop",
-        )]));
+        let llm = Arc::new(MockLlm::new(vec![text_choice("should not be seen")]));
         let tool = make_tool(vec![sample_profile("reviewer", "desc")], llm);
 
         let cancel = CancellationToken::new();
@@ -541,7 +538,7 @@ mod tests {
         // subagents.
         let llm = Arc::new(MockLlm::new(vec![
             tool_call_choice(),
-            text_choice("denied", "stop"),
+            text_choice("denied"),
         ]));
         let tool = make_tool(vec![sample_profile("reviewer", "desc")], llm);
 
@@ -581,7 +578,7 @@ mod tests {
 
     #[tokio::test]
     async fn with_delegation_exposes_delegate_tool_alongside_base_tools() {
-        let llm = Arc::new(MockLlm::new(vec![text_choice("done", "stop")]));
+        let llm = Arc::new(MockLlm::new(vec![text_choice("done")]));
         let base: Arc<dyn ToolExecutor> = Arc::new(EmptyExecutor);
         let executor = with_delegation(
             base,

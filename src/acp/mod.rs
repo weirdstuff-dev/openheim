@@ -52,20 +52,44 @@ use session::SessionState;
 
 type Sessions = Arc<RwLock<HashMap<String, SessionState>>>;
 
-/// Full tool access; tool calls go through the permission gate as normal.
-pub const MODE_CODE: &str = "code";
-/// Read-only: only `read_file` is offered to the LLM, regardless of
-/// permission decisions. No `session/request_permission` prompts occur
-/// since nothing mutating is ever on the tool list.
-pub const MODE_ARCHITECT: &str = "architect";
+/// Which tool policy a session runs under, set via `session/set_mode`.
+/// [`Self::as_str`] gives the ACP wire-level mode id; [`Self::parse`] is the
+/// inverse, for the boundary where that id arrives as a `&str`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentMode {
+    /// Full tool access; tool calls go through the permission gate as normal.
+    #[default]
+    Code,
+    /// Read-only: only `read_file` is offered to the LLM, regardless of
+    /// permission decisions. No `session/request_permission` prompts occur
+    /// since nothing mutating is ever on the tool list.
+    Architect,
+}
 
-fn session_mode_state(current_mode_id: &str) -> SessionModeState {
+impl AgentMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            AgentMode::Code => "code",
+            AgentMode::Architect => "architect",
+        }
+    }
+
+    pub fn parse(mode_id: &str) -> Result<Self> {
+        match mode_id {
+            "code" => Ok(AgentMode::Code),
+            "architect" => Ok(AgentMode::Architect),
+            other => Err(Error::Other(format!("unknown session mode: {other}"))),
+        }
+    }
+}
+
+fn session_mode_state(current_mode: AgentMode) -> SessionModeState {
     SessionModeState::new(
-        current_mode_id.to_string(),
+        current_mode.as_str().to_string(),
         vec![
-            SessionMode::new(MODE_CODE, "Code")
+            SessionMode::new(AgentMode::Code.as_str(), "Code")
                 .description("Full tool access; tool calls request permission."),
-            SessionMode::new(MODE_ARCHITECT, "Architect")
+            SessionMode::new(AgentMode::Architect.as_str(), "Architect")
                 .description("Read-only: inspects and plans without editing or executing."),
         ],
     )
@@ -158,7 +182,7 @@ impl AgentState {
                 skills,
                 cancel: CancellationToken::new(),
                 approved_tools: HashMap::new(),
-                mode: MODE_CODE.to_string(),
+                mode: AgentMode::Code,
                 prompt_lock: Arc::new(Mutex::new(())),
             },
         );
@@ -210,14 +234,12 @@ impl AgentState {
     }
 
     pub async fn acp_set_session_mode(&self, session_id: &str, mode_id: &str) -> Result<()> {
-        if mode_id != MODE_CODE && mode_id != MODE_ARCHITECT {
-            return Err(Error::Other(format!("unknown session mode: {mode_id}")));
-        }
+        let mode = AgentMode::parse(mode_id)?;
         let mut sessions = self.sessions.write().await;
         let s = sessions
             .get_mut(session_id)
             .ok_or_else(|| Error::Other(format!("session not found: {session_id}")))?;
-        s.mode = mode_id.to_string();
+        s.mode = mode;
         Ok(())
     }
 
@@ -269,7 +291,7 @@ impl AgentState {
             let prompt_guard = s.try_acquire_prompt_lock(session_id)?;
             s.cancel = CancellationToken::new();
             let llm = crate::config::client_for_config(&s.config, &self.config, &self.llm)?;
-            let base: Arc<dyn ToolExecutor> = if s.mode == MODE_ARCHITECT {
+            let base: Arc<dyn ToolExecutor> = if s.mode == AgentMode::Architect {
                 Arc::new(ScopedExecutor::new(
                     self.executor.clone(),
                     vec!["read_file".to_string()],
@@ -461,7 +483,7 @@ impl AgentState {
                 skills: conversation.meta.skills.clone(),
                 cancel: CancellationToken::new(),
                 approved_tools: HashMap::new(),
-                mode: MODE_CODE.to_string(),
+                mode: AgentMode::Code,
                 prompt_lock: Arc::new(Mutex::new(())),
             },
         );
@@ -835,7 +857,7 @@ pub async fn serve(
                     Ok(session_key) => responder.respond(
                         NewSessionResponse::new(session_key)
                             .models(model_state)
-                            .modes(session_mode_state(MODE_CODE)),
+                            .modes(session_mode_state(AgentMode::Code)),
                     ),
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
                 }
@@ -928,8 +950,9 @@ pub async fn serve(
                     .await;
 
                 match result {
-                    Ok(()) => responder
-                        .respond(LoadSessionResponse::new().modes(session_mode_state(MODE_CODE))),
+                    Ok(()) => responder.respond(
+                        LoadSessionResponse::new().modes(session_mode_state(AgentMode::Code)),
+                    ),
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
                 }
             },

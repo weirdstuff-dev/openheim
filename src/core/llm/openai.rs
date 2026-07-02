@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::core::models::{Choice, ContentBlock, Message, Role, Tool};
+use crate::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool};
 use crate::error::{Error, Result};
 
 use super::sse::SseDecoder;
@@ -142,6 +142,19 @@ struct OpenAiResponseToolCall {
 struct OpenAiResponseFunctionCall {
     name: String,
     arguments: String,
+}
+
+/// Maps OpenAI's `finish_reason` vocabulary onto the provider-agnostic
+/// [`FinishReason`]; anything without a known equivalent (e.g.
+/// `content_filter`, the legacy `function_call`) passes through as
+/// [`FinishReason::Other`].
+fn map_finish_reason(reason: &str) -> FinishReason {
+    match reason {
+        "stop" => FinishReason::Stop,
+        "tool_calls" => FinishReason::ToolCalls,
+        "length" => FinishReason::MaxTokens,
+        other => FinishReason::Other(other.to_string()),
+    }
 }
 
 // --- Conversions ---
@@ -321,7 +334,7 @@ pub(super) async fn send_openai_style(
             role: Role::Assistant,
             content,
         },
-        finish_reason: choice.finish_reason,
+        finish_reason: choice.finish_reason.as_deref().map(map_finish_reason),
     })
 }
 
@@ -374,7 +387,7 @@ pub(super) async fn send_openai_style_streaming(
 
     let mut text_buf = String::new();
     let mut tool_acc: Vec<ToolCallAcc> = Vec::new();
-    let mut finish_reason: Option<String> = None;
+    let mut finish_reason: Option<FinishReason> = None;
     let mut decoder = SseDecoder::new();
     let mut done = false;
 
@@ -397,7 +410,7 @@ pub(super) async fn send_openai_style_streaming(
             let choice = &event["choices"][0];
 
             if let Some(fr) = choice["finish_reason"].as_str() {
-                finish_reason = Some(fr.to_string());
+                finish_reason = Some(map_finish_reason(fr));
             }
 
             let delta = &choice["delta"];
