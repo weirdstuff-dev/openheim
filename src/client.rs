@@ -470,7 +470,7 @@ fn build_programmatic(
     let model = model.unwrap_or_else(|| default_model.to_string());
     let api_key = api_key.unwrap_or_default();
     let max_iter = max_iterations.unwrap_or(10);
-    let timeout = timeout_secs.unwrap_or(120);
+    let timeout = timeout_secs.unwrap_or_else(crate::config::default_timeout_secs);
 
     let mut providers = BTreeMap::new();
     providers.insert(

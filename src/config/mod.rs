@@ -3,6 +3,7 @@ mod resolve;
 mod types;
 
 pub use client::{build_http_client, client_for_config, create_client};
+pub(crate) use types::default_timeout_secs;
 pub use types::{
     AgentConfig, AppConfig, McpServerConfig, ModelsInfo, ProviderConfig, ProviderModels,
 };

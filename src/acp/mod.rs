@@ -486,25 +486,25 @@ impl AgentState {
 
         let mut session_config = self.config.clone();
         if let Some(provider_name) = &conversation.meta.provider {
-            if let Some(provider_cfg) = self.app_config.providers.get(provider_name) {
-                session_config.provider_name = provider_name.clone();
-                session_config.api_base = provider_cfg.api_base.clone();
-                session_config.api_key = provider_cfg.resolve_api_key();
-                session_config.timeout_secs = provider_cfg.timeout_secs.unwrap_or(120);
-                session_config.max_tokens = provider_cfg.max_tokens;
-                session_config.model = conversation
-                    .meta
-                    .model
-                    .clone()
-                    .unwrap_or_else(|| provider_cfg.default_model.clone());
-            } else {
-                let warning = format!(
-                    "[warning] Provider '{}' from this session is not configured. Falling back to the default provider '{}'.",
-                    provider_name, session_config.provider_name
-                );
-                on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                    AcpContentBlock::from(warning),
-                )));
+            // Same resolution (and validation) as every other config path;
+            // a session whose saved provider/model no longer resolves —
+            // removed from the config, model dropped from the allowlist —
+            // falls back to the default provider rather than failing the load.
+            let resolved = match &conversation.meta.model {
+                Some(model) => self.app_config.resolve_with_provider(provider_name, model),
+                None => self.app_config.resolve_provider_default(provider_name),
+            };
+            match resolved {
+                Ok(config) => session_config = config,
+                Err(e) => {
+                    let warning = format!(
+                        "[warning] Could not restore this session's provider '{}' ({e}). Falling back to the default provider '{}'.",
+                        provider_name, session_config.provider_name
+                    );
+                    on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                        AcpContentBlock::from(warning),
+                    )));
+                }
             }
         } else if let Some(model) = &conversation.meta.model {
             session_config.model = model.clone();
