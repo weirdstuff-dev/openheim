@@ -82,22 +82,25 @@ impl OpenheimClient {
     }
 
     /// Fetch the full `Conversation` (messages + metadata) for a session id.
-    pub fn get_session(&self, session_id: &str) -> Result<Conversation> {
+    pub async fn get_session(&self, session_id: &str) -> Result<Conversation> {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| crate::error::Error::ParseError("invalid session id".to_string()))?;
-        self.state.rag.history.load_conversation(&uuid)
+        let history = self.state.rag.history.clone();
+        tokio::task::spawn_blocking(move || history.load_conversation(&uuid)).await?
     }
 
     /// List all conversation metadata without loading messages.
-    pub fn list_all_sessions(&self) -> Result<Vec<ConversationMeta>> {
-        self.state.rag.history.list_conversations()
+    pub async fn list_all_sessions(&self) -> Result<Vec<ConversationMeta>> {
+        let history = self.state.rag.history.clone();
+        tokio::task::spawn_blocking(move || history.list_conversations()).await?
     }
 
     /// Permanently delete a persisted session.
-    pub fn delete_session(&self, session_id: &str) -> Result<()> {
+    pub async fn delete_session(&self, session_id: &str) -> Result<()> {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| crate::error::Error::ParseError("invalid session id".to_string()))?;
-        self.state.rag.history.delete_conversation(&uuid)
+        let history = self.state.rag.history.clone();
+        tokio::task::spawn_blocking(move || history.delete_conversation(&uuid)).await?
     }
 
     // ── RAG ───────────────────────────────────────────────────────────────────

@@ -246,9 +246,12 @@ async fn mcp_servers_handler(State(state): State<Arc<AgentState>>) -> impl IntoR
 }
 
 async fn sessions_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
-    match state.rag.history.list_conversations() {
-        Ok(metas) => Json(metas).into_response(),
-        Err(_) => (
+    // History I/O is synchronous file access; run it off the runtime threads
+    // (same as the ACP layer does) instead of blocking a worker.
+    let history = state.rag.history.clone();
+    match tokio::task::spawn_blocking(move || history.list_conversations()).await {
+        Ok(Ok(metas)) => Json(metas).into_response(),
+        _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "failed to load conversations" })),
         )
@@ -270,14 +273,15 @@ async fn session_handler(
                 .into_response();
         }
     };
-    match state.rag.history.load_conversation(&uuid) {
-        Ok(conv) => Json(conv).into_response(),
-        Err(AppError::NotFound(_)) => (
+    let history = state.rag.history.clone();
+    match tokio::task::spawn_blocking(move || history.load_conversation(&uuid)).await {
+        Ok(Ok(conv)) => Json(conv).into_response(),
+        Ok(Err(AppError::NotFound(_))) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "session not found" })),
         )
             .into_response(),
-        Err(_) => (
+        _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "failed to load session" })),
         )
