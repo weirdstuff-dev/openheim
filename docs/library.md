@@ -270,7 +270,7 @@ for info in &workspace {
 ### Get full conversation (messages + metadata)
 
 ```rust
-let conv = client.get_session("550e8400-e29b-41d4-a716-446655440000")?;
+let conv = client.get_session("550e8400-e29b-41d4-a716-446655440000").await?;
 
 println!("model: {:?}", conv.meta.model);
 println!("messages: {}", conv.messages.len());
@@ -309,7 +309,7 @@ session.prompt("Continue from where you left off", |update| { /* … */ }).await
 ### Delete a session
 
 ```rust
-client.delete_session("550e8400-e29b-41d4-a716-446655440000")?;
+client.delete_session("550e8400-e29b-41d4-a716-446655440000").await?;
 ```
 
 ---
@@ -469,7 +469,7 @@ All fallible operations return `openheim::Result<T>` (`std::result::Result<T, op
 ```rust
 use openheim::{Error, OpenheimClient};
 
-match client.get_session("bad-id") {
+match client.get_session("bad-id").await {
     Ok(conv) => { /* … */ }
     Err(Error::ConfigError(msg)) => eprintln!("config: {msg}"),
     Err(Error::Other(msg)) => eprintln!("error: {msg}"),
