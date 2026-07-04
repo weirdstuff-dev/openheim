@@ -5,6 +5,7 @@
 //! | Endpoint | Description |
 //! |----------|-------------|
 //! | `GET /ws` | WebSocket endpoint; multiplexes ACP agent messages and filesystem events |
+//! | `GET /acp` | WebSocket endpoint; bare ACP JSON-RPC, no envelope or fs sidecar |
 //! | `GET /api/config` | Resolved configuration (providers, models) |
 //! | `GET /api/models` | Available providers and their model lists |
 //! | `GET /api/skills` | Installed skill names |
@@ -13,9 +14,20 @@
 //! | `GET /api/sessions` | Conversation history listing |
 //! | `GET /api/sessions/{id}` | Single conversation by UUID |
 //!
-//! WebSocket messages are JSON-encoded with a `channel` discriminator:
+//! `/ws` messages are JSON-encoded with a `channel` discriminator:
 //! - `{"channel":"agent","data":{…}}` — ACP protocol frames
 //! - `{"channel":"fs","data":{…}}` — filesystem sidecar (watch / list / read / write / mkdir / delete / rename)
+//!
+//! The fs sidecar is rooted at the agent's resolved `work_dir` — the same
+//! sandbox boundary the agent's own tools are held to. Every request path is
+//! validated against it (relative paths resolve within it) and `watch` may
+//! only select directories inside it.
+//!
+//! `/acp` carries the same ACP protocol frames as `/ws`'s `agent` channel, but
+//! unwrapped: each WebSocket text message is exactly one JSON-RPC object, with
+//! no `channel` tag and no filesystem sidecar. Use this endpoint for generic
+//! ACP clients that only speak the spec and don't know about openheim's `/ws`
+//! envelope or `fs` channel.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -47,9 +59,9 @@ use agent_client_protocol::Lines;
 use crate::{
     acp::{self, AgentState},
     config::load_config,
-    core::models::{FileEntry, FsRequest, FsResponse},
     error::Error as AppError,
     rag::RagContext,
+    tools::sandbox::validate_path,
 };
 
 #[derive(Deserialize)]
@@ -70,6 +82,103 @@ enum WsOutbound {
     Fs(FsResponse),
 }
 
+/// Entry in the file tree
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FileEntry {
+    pub path: String,
+    pub name: String,
+    pub is_dir: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified: Option<u64>,
+}
+
+/// Requests from the frontend to the filesystem WebSocket
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action")]
+pub enum FsRequest {
+    /// Initialize watching on a workspace directory
+    #[serde(rename = "watch")]
+    Watch { path: String },
+
+    /// Stop watching
+    #[serde(rename = "unwatch")]
+    Unwatch,
+
+    /// List directory contents
+    #[serde(rename = "list")]
+    List {
+        path: String,
+        recursive: Option<bool>,
+    },
+
+    /// Read file contents
+    #[serde(rename = "read")]
+    Read { path: String },
+
+    /// Write file contents
+    #[serde(rename = "write")]
+    Write { path: String, content: String },
+
+    /// Create a directory
+    #[serde(rename = "mkdir")]
+    Mkdir { path: String },
+
+    /// Delete a file or directory
+    #[serde(rename = "delete")]
+    Delete { path: String },
+
+    /// Rename/move a file or directory
+    #[serde(rename = "rename")]
+    Rename { from: String, to: String },
+}
+
+/// Responses/events from the filesystem WebSocket to the frontend
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "type")]
+pub enum FsResponse {
+    #[serde(rename = "connected")]
+    Connected { message: String },
+
+    #[serde(rename = "watching")]
+    Watching { path: String },
+
+    #[serde(rename = "unwatched")]
+    Unwatched,
+
+    #[serde(rename = "file_list")]
+    FileList {
+        path: String,
+        entries: Vec<FileEntry>,
+    },
+
+    #[serde(rename = "file_content")]
+    FileContent { path: String, content: String },
+
+    #[serde(rename = "write_success")]
+    WriteSuccess { path: String },
+
+    #[serde(rename = "mkdir_success")]
+    MkdirSuccess { path: String },
+
+    #[serde(rename = "delete_success")]
+    DeleteSuccess { path: String },
+
+    #[serde(rename = "rename_success")]
+    RenameSuccess { from: String, to: String },
+
+    /// File system change event (from watcher)
+    #[serde(rename = "fs_event")]
+    FsEvent {
+        event_kind: String,
+        paths: Vec<String>,
+    },
+
+    #[serde(rename = "error")]
+    Error { message: String },
+}
+
 /// Loads configuration, initialises the agent runtime, and starts the HTTP/WebSocket server.
 ///
 /// Blocks until a Ctrl-C signal is received, then shuts down gracefully.
@@ -77,7 +186,7 @@ pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
     let app_config = load_config()?;
     let agent_config = app_config.resolve(None)?;
     let rag = RagContext::new(app_config.default_skills.clone())?;
-    let state = Arc::new(AgentState::new(agent_config, app_config, rag).await?);
+    let state = Arc::new(AgentState::new(agent_config, app_config, rag, vec![]).await?);
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -86,6 +195,7 @@ pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        .route("/acp", get(acp_ws_handler))
         .route("/api/config", get(config_handler))
         .route("/api/models", get(models_handler))
         .route("/api/skills", get(skills_handler))
@@ -101,7 +211,7 @@ pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
         .await
         .map_err(|e| crate::error::Error::Other(format!("Failed to bind {addr}: {e}")))?;
 
-    tracing::info!("WS server listening on ws://{addr}/ws");
+    tracing::info!("WS server listening on ws://{addr}/ws (bare ACP also available at /acp)");
     tracing::info!("API available at http://{addr}/api/{{config,models,skills,tools,mcp-servers}}");
 
     axum::serve(listener, app)
@@ -136,9 +246,12 @@ async fn mcp_servers_handler(State(state): State<Arc<AgentState>>) -> impl IntoR
 }
 
 async fn sessions_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
-    match state.rag.history.list_conversations() {
-        Ok(metas) => Json(metas).into_response(),
-        Err(_) => (
+    // History I/O is synchronous file access; run it off the runtime threads
+    // (same as the ACP layer does) instead of blocking a worker.
+    let history = state.rag.history.clone();
+    match tokio::task::spawn_blocking(move || history.list_conversations()).await {
+        Ok(Ok(metas)) => Json(metas).into_response(),
+        _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "failed to load conversations" })),
         )
@@ -160,14 +273,15 @@ async fn session_handler(
                 .into_response();
         }
     };
-    match state.rag.history.load_conversation(&uuid) {
-        Ok(conv) => Json(conv).into_response(),
-        Err(AppError::Other(_)) => (
+    let history = state.rag.history.clone();
+    match tokio::task::spawn_blocking(move || history.load_conversation(&uuid)).await {
+        Ok(Ok(conv)) => Json(conv).into_response(),
+        Ok(Err(AppError::NotFound(_))) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "session not found" })),
         )
             .into_response(),
-        Err(_) => (
+        _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "failed to load session" })),
         )
@@ -184,6 +298,7 @@ async fn ws_handler(
 
 async fn handle_socket(socket: WebSocket, state: Arc<AgentState>) {
     let (mut ws_tx, mut ws_rx) = socket.split();
+    let work_dir = state.work_dir.clone();
 
     // ACP bridge: futures mpsc channels between the dispatch loop and the ACP server
     let (acp_out_tx, mut acp_out_rx) = mpsc::unbounded::<String>(); // ACP server → WS
@@ -232,7 +347,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AgentState>) {
     });
 
     // Inbound: dispatch WS frames to ACP server or FS handler
-    let mut fs_state = FsState::new();
+    let mut fs_state = FsState::new(work_dir);
     while let Some(Ok(msg)) = ws_rx.next().await {
         match msg {
             Message::Text(text) => match serde_json::from_str::<WsInbound>(&text) {
@@ -258,18 +373,74 @@ async fn handle_socket(socket: WebSocket, state: Arc<AgentState>) {
     outbound.abort();
 }
 
+async fn acp_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AgentState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(|socket| handle_acp_socket(socket, state))
+}
+
+/// Bare ACP over WebSocket: each text frame is exactly one JSON-RPC message,
+/// no `{"channel":...}` envelope and no `fs` sidecar — see module docs.
+async fn handle_acp_socket(socket: WebSocket, state: Arc<AgentState>) {
+    let (mut ws_tx, mut ws_rx) = socket.split();
+
+    let (acp_out_tx, mut acp_out_rx) = mpsc::unbounded::<String>();
+    let (acp_in_tx, acp_in_rx) = mpsc::unbounded::<std::io::Result<String>>();
+
+    let acp_sink = acp_out_tx
+        .sink_map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()));
+    tokio::spawn(acp::serve(Lines::new(acp_sink, acp_in_rx), state));
+
+    let outbound = tokio::spawn(async move {
+        while let Some(line) = acp_out_rx.next().await {
+            if ws_tx.send(Message::Text(line.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    while let Some(Ok(msg)) = ws_rx.next().await {
+        match msg {
+            Message::Text(text) => {
+                let _ = acp_in_tx.unbounded_send(Ok(text.to_string()));
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    outbound.abort();
+}
+
 // FS sidecar state
 
 struct FsState {
-    workspace_root: Option<PathBuf>,
+    /// Sandbox boundary shared with the agent's own tools: every fs request
+    /// is validated against this root, never against a client-chosen path.
+    work_dir: PathBuf,
     _watcher: Option<RecommendedWatcher>,
 }
 
 impl FsState {
-    fn new() -> Self {
+    fn new(work_dir: PathBuf) -> Self {
         Self {
-            workspace_root: None,
+            work_dir,
             _watcher: None,
+        }
+    }
+
+    /// Validates `path` against `work_dir` via the shared sandbox validator.
+    /// On rejection the error is reported to the client and `None` returned.
+    fn validate(&self, path: &str, tx: &UnboundedSender<WsOutbound>) -> Option<PathBuf> {
+        match validate_path(path, &self.work_dir) {
+            Ok(validated) => Some(validated),
+            Err(e) => {
+                let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
+                    message: e.to_string(),
+                }));
+                None
+            }
         }
     }
 
@@ -281,17 +452,14 @@ impl FsState {
                 let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Unwatched));
             }
             FsRequest::List { path, recursive } => {
-                match validate_path_opt(&self.workspace_root, &path) {
-                    Some(validated) => {
-                        let entries = list_directory(&validated, recursive.unwrap_or(false)).await;
-                        let _ = tx
-                            .unbounded_send(WsOutbound::Fs(FsResponse::FileList { path, entries }));
-                    }
-                    None => send_path_error(&tx),
+                if let Some(validated) = self.validate(&path, &tx) {
+                    let entries = list_directory(&validated, recursive.unwrap_or(false)).await;
+                    let _ =
+                        tx.unbounded_send(WsOutbound::Fs(FsResponse::FileList { path, entries }));
                 }
             }
-            FsRequest::Read { path } => match validate_path_opt(&self.workspace_root, &path) {
-                Some(validated) => {
+            FsRequest::Read { path } => {
+                if let Some(validated) = self.validate(&path, &tx) {
                     let resp = match fs::read_to_string(&validated).await {
                         Ok(content) => FsResponse::FileContent { path, content },
                         Err(e) => FsResponse::Error {
@@ -300,33 +468,29 @@ impl FsState {
                     };
                     let _ = tx.unbounded_send(WsOutbound::Fs(resp));
                 }
-                None => send_path_error(&tx),
-            },
+            }
             FsRequest::Write { path, content } => {
-                match validate_path_opt(&self.workspace_root, &path) {
-                    Some(validated) => {
-                        if let Some(parent) = validated.parent()
-                            && !parent.exists()
-                            && let Err(e) = fs::create_dir_all(parent).await
-                        {
-                            let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
-                                message: format!("Failed to create dirs: {e}"),
-                            }));
-                            return;
-                        }
-                        let resp = match fs::write(&validated, content).await {
-                            Ok(()) => FsResponse::WriteSuccess { path },
-                            Err(e) => FsResponse::Error {
-                                message: format!("Failed to write: {e}"),
-                            },
-                        };
-                        let _ = tx.unbounded_send(WsOutbound::Fs(resp));
+                if let Some(validated) = self.validate(&path, &tx) {
+                    if let Some(parent) = validated.parent()
+                        && !parent.exists()
+                        && let Err(e) = fs::create_dir_all(parent).await
+                    {
+                        let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
+                            message: format!("Failed to create dirs: {e}"),
+                        }));
+                        return;
                     }
-                    None => send_path_error(&tx),
+                    let resp = match fs::write(&validated, content).await {
+                        Ok(()) => FsResponse::WriteSuccess { path },
+                        Err(e) => FsResponse::Error {
+                            message: format!("Failed to write: {e}"),
+                        },
+                    };
+                    let _ = tx.unbounded_send(WsOutbound::Fs(resp));
                 }
             }
-            FsRequest::Mkdir { path } => match validate_path_opt(&self.workspace_root, &path) {
-                Some(validated) => {
+            FsRequest::Mkdir { path } => {
+                if let Some(validated) = self.validate(&path, &tx) {
                     let resp = match fs::create_dir_all(&validated).await {
                         Ok(()) => FsResponse::MkdirSuccess { path },
                         Err(e) => FsResponse::Error {
@@ -335,10 +499,9 @@ impl FsState {
                     };
                     let _ = tx.unbounded_send(WsOutbound::Fs(resp));
                 }
-                None => send_path_error(&tx),
-            },
-            FsRequest::Delete { path } => match validate_path_opt(&self.workspace_root, &path) {
-                Some(validated) => {
+            }
+            FsRequest::Delete { path } => {
+                if let Some(validated) = self.validate(&path, &tx) {
                     let resp = if validated.is_dir() {
                         match fs::remove_dir_all(&validated).await {
                             Ok(()) => FsResponse::DeleteSuccess { path },
@@ -356,46 +519,31 @@ impl FsState {
                     };
                     let _ = tx.unbounded_send(WsOutbound::Fs(resp));
                 }
-                None => send_path_error(&tx),
-            },
+            }
             FsRequest::Rename { from, to } => {
-                match (
-                    validate_path_opt(&self.workspace_root, &from),
-                    validate_path_opt(&self.workspace_root, &to),
-                ) {
-                    (Some(vf), Some(vt)) => {
-                        let resp = match fs::rename(&vf, &vt).await {
-                            Ok(()) => FsResponse::RenameSuccess { from, to },
-                            Err(e) => FsResponse::Error {
-                                message: format!("Failed to rename: {e}"),
-                            },
-                        };
-                        let _ = tx.unbounded_send(WsOutbound::Fs(resp));
-                    }
-                    _ => send_path_error(&tx),
+                if let (Some(vf), Some(vt)) = (self.validate(&from, &tx), self.validate(&to, &tx)) {
+                    let resp = match fs::rename(&vf, &vt).await {
+                        Ok(()) => FsResponse::RenameSuccess { from, to },
+                        Err(e) => FsResponse::Error {
+                            message: format!("Failed to rename: {e}"),
+                        },
+                    };
+                    let _ = tx.unbounded_send(WsOutbound::Fs(resp));
                 }
             }
         }
     }
 
     fn start_watching(&mut self, path: String, tx: UnboundedSender<WsOutbound>) {
-        let workspace_path = PathBuf::from(&path);
-        if !workspace_path.exists() || !workspace_path.is_dir() {
+        let Some(validated) = self.validate(&path, &tx) else {
+            return;
+        };
+        if !validated.is_dir() {
             let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
                 message: format!("Invalid directory: {path}"),
             }));
             return;
         }
-
-        let workspace_canonical = match workspace_path.canonicalize() {
-            Ok(p) => p,
-            Err(e) => {
-                let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
-                    message: format!("Failed to resolve path: {e}"),
-                }));
-                return;
-            }
-        };
 
         self.stop_watching();
 
@@ -432,13 +580,12 @@ impl FsState {
 
         match watcher_result {
             Ok(mut watcher) => {
-                if let Err(e) = watcher.watch(&workspace_canonical, RecursiveMode::Recursive) {
+                if let Err(e) = watcher.watch(&validated, RecursiveMode::Recursive) {
                     let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
                         message: format!("Failed to watch: {e}"),
                     }));
                     return;
                 }
-                self.workspace_root = Some(workspace_canonical);
                 self._watcher = Some(watcher);
                 let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Watching { path }));
             }
@@ -452,58 +599,6 @@ impl FsState {
 
     fn stop_watching(&mut self) {
         self._watcher = None;
-        self.workspace_root = None;
-    }
-}
-
-fn send_path_error(tx: &UnboundedSender<WsOutbound>) {
-    let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
-        message: "Path not within workspace or does not exist".to_string(),
-    }));
-}
-
-fn validate_path_opt(workspace: &Option<PathBuf>, path: &str) -> Option<PathBuf> {
-    let workspace = workspace.as_ref()?;
-    let workspace_canonical = workspace.canonicalize().ok()?;
-
-    let requested = PathBuf::from(path);
-
-    let canonical = if requested.is_absolute() {
-        requested
-    } else {
-        if let Ok(cwd) = std::env::current_dir() {
-            let from_cwd = cwd.join(&requested);
-            if from_cwd.exists()
-                && let Ok(c) = from_cwd.canonicalize()
-                && c.starts_with(&workspace_canonical)
-            {
-                return Some(c);
-            }
-        }
-        // Fallback: treat path as relative to the workspace root
-        workspace_canonical.join(&requested)
-    };
-
-    let check_path = if canonical.exists() {
-        canonical.canonicalize().ok()?
-    } else {
-        let mut parent = canonical.as_path();
-        loop {
-            parent = parent.parent()?;
-            if parent.exists() {
-                let canonical_ancestor = parent.canonicalize().ok()?;
-                if !canonical_ancestor.starts_with(&workspace_canonical) {
-                    return None;
-                }
-                return Some(canonical);
-            }
-        }
-    };
-
-    if check_path.starts_with(&workspace_canonical) {
-        Some(check_path)
-    } else {
-        None
     }
 }
 
@@ -553,4 +648,203 @@ fn path_to_file_entry(path: &Path) -> Option<FileEntry> {
         size,
         modified,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_fs_state(work_dir: &Path) -> FsState {
+        FsState::new(work_dir.to_path_buf())
+    }
+
+    /// Runs one fs request and returns the first response sent to the client.
+    async fn run_request(state: &mut FsState, req: FsRequest) -> FsResponse {
+        let (tx, mut rx) = mpsc::unbounded::<WsOutbound>();
+        state.handle(req, tx).await;
+        // `tx` was dropped inside `handle`, so this yields the response or None.
+        match rx.next().await {
+            Some(WsOutbound::Fs(resp)) => resp,
+            _ => panic!("expected an fs response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fs_read_outside_work_dir_is_rejected() {
+        let work = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "top secret").unwrap();
+
+        let mut state = make_fs_state(work.path());
+        let resp = run_request(
+            &mut state,
+            FsRequest::Read {
+                path: secret.to_str().unwrap().to_string(),
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(&resp, FsResponse::Error { message } if message.contains("outside the work directory")),
+            "unexpected response: {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_write_and_delete_outside_work_dir_are_rejected() {
+        let work = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("evil.txt");
+
+        let mut state = make_fs_state(work.path());
+        let resp = run_request(
+            &mut state,
+            FsRequest::Write {
+                path: target.to_str().unwrap().to_string(),
+                content: "pwned".into(),
+            },
+        )
+        .await;
+        assert!(matches!(resp, FsResponse::Error { .. }));
+        assert!(!target.exists());
+
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "data").unwrap();
+        let resp = run_request(
+            &mut state,
+            FsRequest::Delete {
+                path: victim.to_str().unwrap().to_string(),
+            },
+        )
+        .await;
+        assert!(matches!(resp, FsResponse::Error { .. }));
+        assert!(victim.exists());
+    }
+
+    #[tokio::test]
+    async fn fs_dotdot_traversal_is_rejected() {
+        let work = tempfile::tempdir().unwrap();
+        let mut state = make_fs_state(work.path());
+        let resp = run_request(
+            &mut state,
+            FsRequest::Read {
+                path: "../../etc/passwd".into(),
+            },
+        )
+        .await;
+        assert!(matches!(resp, FsResponse::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn fs_relative_path_resolves_against_work_dir() {
+        let work = tempfile::tempdir().unwrap();
+        let mut state = make_fs_state(work.path());
+
+        let resp = run_request(
+            &mut state,
+            FsRequest::Write {
+                path: "sub/file.txt".into(),
+                content: "hello".into(),
+            },
+        )
+        .await;
+        assert!(matches!(resp, FsResponse::WriteSuccess { .. }));
+        assert_eq!(
+            std::fs::read_to_string(work.path().join("sub/file.txt")).unwrap(),
+            "hello"
+        );
+
+        let resp = run_request(
+            &mut state,
+            FsRequest::Read {
+                path: "sub/file.txt".into(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(&resp, FsResponse::FileContent { content, .. } if content == "hello"),
+            "unexpected response: {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_watch_outside_work_dir_is_rejected() {
+        let work = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        let mut state = make_fs_state(work.path());
+        let resp = run_request(
+            &mut state,
+            FsRequest::Watch {
+                path: outside.path().to_str().unwrap().to_string(),
+            },
+        )
+        .await;
+        assert!(matches!(resp, FsResponse::Error { .. }));
+        assert!(state._watcher.is_none());
+    }
+
+    #[tokio::test]
+    async fn fs_watch_inside_work_dir_succeeds() {
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir(work.path().join("proj")).unwrap();
+
+        let mut state = make_fs_state(work.path());
+        let resp = run_request(
+            &mut state,
+            FsRequest::Watch {
+                path: "proj".into(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(resp, FsResponse::Watching { .. }),
+            "unexpected response: {resp:?}"
+        );
+        assert!(state._watcher.is_some());
+    }
+
+    #[test]
+    fn fs_request_deserializes_watch() {
+        let json = r#"{"action": "watch", "path": "/tmp"}"#;
+        let req: FsRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(req, FsRequest::Watch { path } if path == "/tmp"));
+    }
+
+    #[test]
+    fn fs_request_deserializes_write() {
+        let json = r#"{"action": "write", "path": "a.txt", "content": "hello"}"#;
+        let req: FsRequest = serde_json::from_str(json).unwrap();
+        assert!(
+            matches!(req, FsRequest::Write { path, content } if path == "a.txt" && content == "hello")
+        );
+    }
+
+    #[test]
+    fn fs_request_deserializes_rename() {
+        let json = r#"{"action": "rename", "from": "a.txt", "to": "b.txt"}"#;
+        let req: FsRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(req, FsRequest::Rename { from, to } if from == "a.txt" && to == "b.txt"));
+    }
+
+    #[test]
+    fn fs_response_serializes_with_type_tag() {
+        let resp = FsResponse::Connected {
+            message: "ok".into(),
+        };
+        let json: Value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["type"], "connected");
+        assert_eq!(json["message"], "ok");
+    }
+
+    #[test]
+    fn fs_response_error_serializes() {
+        let resp = FsResponse::Error {
+            message: "not found".into(),
+        };
+        let json: Value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["type"], "error");
+        assert_eq!(json["message"], "not found");
+    }
 }

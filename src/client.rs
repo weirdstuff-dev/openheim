@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use agent_client_protocol::schema::{SessionInfo, SessionUpdate};
+use agent_client_protocol::schema::{ContentBlock, SessionInfo, SessionUpdate};
 use uuid::Uuid;
 
 use crate::{
@@ -12,9 +12,14 @@ use crate::{
     config::{
         AgentConfig, AppConfig, McpServerConfig, ProviderConfig, load_config, load_config_from,
     },
+    core::{
+        client_io::{ClientIo, NoClientIo},
+        permission::{AllowAll, PermissionGate},
+    },
     error::Result,
     mcp::McpServerStatus,
     rag::{Conversation, ConversationMeta, RagContext},
+    tools::ToolHandler,
 };
 
 /// The main entry point for embedding openheim in your application.
@@ -70,29 +75,32 @@ impl OpenheimClient {
         self.state
             .acp_load_session(session_id, cwd, on_history)
             .await?;
-        Ok(SessionHandle {
-            id: session_id.to_string(),
-            state: self.state.clone(),
-        })
+        Ok(SessionHandle::new(
+            session_id.to_string(),
+            self.state.clone(),
+        ))
     }
 
     /// Fetch the full `Conversation` (messages + metadata) for a session id.
-    pub fn get_session(&self, session_id: &str) -> Result<Conversation> {
+    pub async fn get_session(&self, session_id: &str) -> Result<Conversation> {
         let uuid = Uuid::parse_str(session_id)
-            .map_err(|_| crate::error::Error::Other("invalid session id".to_string()))?;
-        self.state.rag.history.load_conversation(&uuid)
+            .map_err(|_| crate::error::Error::ParseError("invalid session id".to_string()))?;
+        let history = self.state.rag.history.clone();
+        tokio::task::spawn_blocking(move || history.load_conversation(&uuid)).await?
     }
 
     /// List all conversation metadata without loading messages.
-    pub fn list_all_sessions(&self) -> Result<Vec<ConversationMeta>> {
-        self.state.rag.history.list_conversations()
+    pub async fn list_all_sessions(&self) -> Result<Vec<ConversationMeta>> {
+        let history = self.state.rag.history.clone();
+        tokio::task::spawn_blocking(move || history.list_conversations()).await?
     }
 
     /// Permanently delete a persisted session.
-    pub fn delete_session(&self, session_id: &str) -> Result<()> {
+    pub async fn delete_session(&self, session_id: &str) -> Result<()> {
         let uuid = Uuid::parse_str(session_id)
-            .map_err(|_| crate::error::Error::Other("invalid session id".to_string()))?;
-        self.state.rag.history.delete_conversation(&uuid)
+            .map_err(|_| crate::error::Error::ParseError("invalid session id".to_string()))?;
+        let history = self.state.rag.history.clone();
+        tokio::task::spawn_blocking(move || history.delete_conversation(&uuid)).await?
     }
 
     // ── RAG ───────────────────────────────────────────────────────────────────
@@ -155,10 +163,7 @@ impl<'a> SessionBuilder<'a> {
             .state
             .acp_new_session(self.model.as_deref(), self.skills, self.cwd)
             .await?;
-        Ok(SessionHandle {
-            id,
-            state: self.state.clone(),
-        })
+        Ok(SessionHandle::new(id, self.state.clone()))
     }
 }
 
@@ -168,9 +173,38 @@ impl<'a> SessionBuilder<'a> {
 pub struct SessionHandle {
     pub id: String,
     state: Arc<AgentState>,
+    permission_gate: Arc<dyn PermissionGate>,
+    client_io: Arc<dyn ClientIo>,
 }
 
 impl SessionHandle {
+    fn new(id: String, state: Arc<AgentState>) -> Self {
+        Self {
+            id,
+            state,
+            permission_gate: Arc::new(AllowAll),
+            client_io: Arc::new(NoClientIo),
+        }
+    }
+
+    /// Supply a permission gate consulted before every tool call this session
+    /// makes (see [`PermissionGate`]). Defaults to [`AllowAll`] — the caller
+    /// is trusted to have already consented to the run (e.g. `openheim run`,
+    /// a one-shot library embedding). An interactive embedder (like the TUI)
+    /// should set a real gate here instead of relying on the default.
+    pub fn permission_gate(mut self, gate: Arc<dyn PermissionGate>) -> Self {
+        self.permission_gate = gate;
+        self
+    }
+
+    /// Delegate `read_file`/`write_file` to the embedder's own I/O (e.g. an
+    /// editor's unsaved buffers) before falling back to local disk. Defaults
+    /// to [`NoClientIo`], which always uses local disk.
+    pub fn client_io(mut self, io: Arc<dyn ClientIo>) -> Self {
+        self.client_io = io;
+        self
+    }
+
     /// Send a prompt and stream ACP `SessionUpdate` events to `on_update`.
     ///
     /// The callback receives:
@@ -183,8 +217,21 @@ impl SessionHandle {
         on_update: impl FnMut(SessionUpdate) + Send,
     ) -> Result<()> {
         self.state
-            .acp_prompt(&self.id, text.to_string(), on_update)
+            .acp_prompt(
+                &self.id,
+                vec![ContentBlock::from(text)],
+                self.permission_gate.clone(),
+                self.client_io.clone(),
+                on_update,
+            )
             .await
+            .map(|_| ())
+    }
+
+    /// Cancels the turn currently in flight for this session, if any.
+    /// No-op if no prompt is running.
+    pub async fn cancel(&self) {
+        self.state.cancel_session(&self.id).await;
     }
 
     /// Switch the model for this session mid-conversation.
@@ -202,7 +249,8 @@ impl SessionHandle {
     ///
     /// Registers the conversation in the agent state so subsequent `prompt`
     /// calls continue from its history. Pass a no-op callback — the TUI
-    /// already replays history visually before calling this.
+    /// already replays history visually before calling this. The returned
+    /// handle inherits this handle's permission gate and client I/O.
     pub async fn restore(
         &self,
         session_id: &str,
@@ -212,6 +260,8 @@ impl SessionHandle {
         Ok(SessionHandle {
             id: session_id.to_string(),
             state: Arc::clone(&self.state),
+            permission_gate: self.permission_gate.clone(),
+            client_io: self.client_io.clone(),
         })
     }
 }
@@ -242,6 +292,7 @@ pub struct OpenheimBuilder {
     default_skills: Vec<String>,
     work_dir: Option<PathBuf>,
     allow_shell: Option<bool>,
+    tools: Vec<Box<dyn ToolHandler>>,
 }
 
 impl OpenheimBuilder {
@@ -321,6 +372,15 @@ impl OpenheimBuilder {
         self
     }
 
+    /// Register a custom tool (see [`crate::tools::ToolHandler`]). Registered
+    /// alongside the built-ins and any MCP-sourced tools, and subject to the
+    /// same `work_dir`/`allow_shell` sandbox boundary. Call multiple times to
+    /// register more than one.
+    pub fn tool(mut self, handler: Box<dyn ToolHandler>) -> Self {
+        self.tools.push(handler);
+        self
+    }
+
     /// Build the client, connecting to MCP servers and initialising the agent state.
     pub async fn build(self) -> Result<OpenheimClient> {
         let (agent_config, mut app_config) = if self.provider.is_some()
@@ -372,12 +432,14 @@ impl OpenheimBuilder {
             } else {
                 std::env::current_dir()
                     .map_err(|e| {
-                        crate::error::Error::Other(format!("cannot resolve relative work_dir: {e}"))
+                        crate::error::Error::ConfigError(format!(
+                            "cannot resolve relative work_dir: {e}"
+                        ))
                     })?
                     .join(&wd)
             };
             let canonical = abs.canonicalize().map_err(|e| {
-                crate::error::Error::Other(format!(
+                crate::error::Error::ConfigError(format!(
                     "work_dir '{}' is inaccessible: {e}",
                     wd.display()
                 ))
@@ -389,7 +451,7 @@ impl OpenheimBuilder {
         }
 
         let rag = RagContext::new(app_config.default_skills.clone())?;
-        let state = Arc::new(AgentState::new(agent_config, app_config, rag).await?);
+        let state = Arc::new(AgentState::new(agent_config, app_config, rag, self.tools).await?);
         Ok(OpenheimClient { state })
     }
 }
@@ -406,11 +468,12 @@ fn build_programmatic(
     default_skills: Vec<String>,
 ) -> (AgentConfig, AppConfig) {
     let provider = provider.unwrap_or_else(|| "openai".to_string());
-    let api_base = api_base.unwrap_or_else(|| default_api_base(&provider));
-    let model = model.unwrap_or_else(|| default_model(&provider));
+    let (default_api_base, default_model) = crate::config::builtin_provider_defaults(&provider);
+    let api_base = api_base.unwrap_or_else(|| default_api_base.to_string());
+    let model = model.unwrap_or_else(|| default_model.to_string());
     let api_key = api_key.unwrap_or_default();
     let max_iter = max_iterations.unwrap_or(10);
-    let timeout = timeout_secs.unwrap_or(120);
+    let timeout = timeout_secs.unwrap_or_else(crate::config::default_timeout_secs);
 
     let mut providers = BTreeMap::new();
     providers.insert(
@@ -448,20 +511,4 @@ fn build_programmatic(
     };
 
     (agent_config, app_config)
-}
-
-fn default_api_base(provider: &str) -> String {
-    match provider {
-        "anthropic" => "https://api.anthropic.com/v1".to_string(),
-        "gemini" => "https://generativelanguage.googleapis.com/v1beta".to_string(),
-        _ => "https://api.openai.com/v1".to_string(),
-    }
-}
-
-fn default_model(provider: &str) -> String {
-    match provider {
-        "anthropic" => "claude-sonnet-4-6".to_string(),
-        "gemini" => "gemini-2.0-flash".to_string(),
-        _ => "gpt-4o".to_string(),
-    }
 }

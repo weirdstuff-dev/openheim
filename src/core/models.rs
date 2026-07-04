@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use uuid::Uuid;
 
 fn is_false(b: &bool) -> bool {
     !b
@@ -17,89 +16,166 @@ pub enum Role {
     Tool,
 }
 
-/// Serialised body sent to a chat-completion endpoint.
-#[derive(Debug, Serialize, Clone)]
-pub struct ChatRequest {
-    pub model: String,
-    pub messages: Vec<Message>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<Tool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
+/// A single piece of message content. Close to Anthropic's own content-block
+/// shape (and by extension ACP's), since both this codebase's richest
+/// provider and its host protocol already think in these terms; lossless
+/// providers convert directly, lossy ones (see `core::llm::openai`) flatten
+/// at their own edge instead of forcing the core type to be the lossy one.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    Text {
+        text: String,
+    },
+    /// Extended-thinking text for an assistant turn. Must be replayed
+    /// verbatim (with `signature`) as the first block of the turn when it also
+    /// contains `ToolUse` blocks, or Anthropic rejects the next request.
+    Thinking {
+        thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    Image {
+        /// Base64-encoded image data.
+        data: String,
+        mime_type: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        /// JSON string of the arguments object.
+        arguments: String,
+    },
+    ToolResult {
+        tool_call_id: String,
+        tool_name: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_error: bool,
+    },
 }
 
-/// A single message in a conversation thread, compatible with the OpenAI chat format.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Message {
-    pub role: Role,
-    pub content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCall>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
-    /// Whether the tool returned an error. Stored in history so replayed sessions
-    /// can surface the correct status without heuristics.
-    #[serde(default, skip_serializing_if = "is_false")]
+impl<T: Into<String>> From<T> for ContentBlock {
+    fn from(value: T) -> Self {
+        ContentBlock::Text { text: value.into() }
+    }
+}
+
+/// A `ToolUse` block extracted from a [`Message`] for convenient iteration;
+/// see [`Message::tool_calls`].
+#[derive(Debug, Clone)]
+pub struct ToolUseBlock {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+/// The `ToolResult` block on a `Role::Tool` [`Message`]; see
+/// [`Message::tool_result_block`].
+#[derive(Debug, Clone)]
+pub struct ToolResultBlock {
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub content: String,
     pub is_error: bool,
 }
 
+/// A single message in a conversation thread.
+///
+/// `role` says what the message *is*; `content` is an ordered list of blocks
+/// describing what it *contains*. A tool-result message is `role: Tool` with
+/// a single `ToolResult` block rather than a distinct role.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Message {
+    pub role: Role,
+    pub content: Vec<ContentBlock>,
+}
+
 impl Message {
-    pub fn user(content: String) -> Self {
+    pub fn user(text: impl Into<String>) -> Self {
         Self {
             role: Role::User,
-            content: Some(content),
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-            is_error: false,
+            content: vec![ContentBlock::from(text)],
         }
     }
 
-    pub fn assistant(content: String) -> Self {
+    pub fn assistant(text: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
-            content: Some(content),
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-            is_error: false,
+            content: vec![ContentBlock::from(text)],
         }
     }
 
     pub fn tool_result(
-        tool_call_id: String,
-        tool_name: String,
-        content: String,
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        content: impl Into<String>,
         is_error: bool,
     ) -> Self {
         Self {
             role: Role::Tool,
-            content: Some(content),
-            tool_calls: None,
-            tool_call_id: Some(tool_call_id),
-            tool_name: Some(tool_name),
-            is_error,
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: tool_call_id.into(),
+                tool_name: tool_name.into(),
+                content: content.into(),
+                is_error,
+            }],
         }
     }
-}
 
-/// A tool-call request emitted by the LLM inside an assistant message.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ToolCall {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub call_type: String,
-    pub function: FunctionCall,
-}
+    /// Concatenation of all `Text` blocks' text, or `None` if there are none.
+    pub fn text(&self) -> Option<String> {
+        let joined: String = self
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        if joined.is_empty() {
+            None
+        } else {
+            Some(joined)
+        }
+    }
 
-/// Function name and JSON-encoded arguments from a tool call.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct FunctionCall {
-    pub name: String,
-    /// JSON string of the arguments object.
-    pub arguments: String,
+    /// All `ToolUse` blocks in this message, in order.
+    pub fn tool_calls(&self) -> Vec<ToolUseBlock> {
+        self.content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse {
+                    id,
+                    name,
+                    arguments,
+                } => Some(ToolUseBlock {
+                    id: id.clone(),
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `ToolResult` block, if this is a `Role::Tool` message.
+    pub fn tool_result_block(&self) -> Option<ToolResultBlock> {
+        self.content.iter().find_map(|b| match b {
+            ContentBlock::ToolResult {
+                tool_call_id,
+                tool_name,
+                content,
+                is_error,
+            } => Some(ToolResultBlock {
+                tool_call_id: tool_call_id.clone(),
+                tool_name: tool_name.clone(),
+                content: content.clone(),
+                is_error: *is_error,
+            }),
+            _ => None,
+        })
+    }
 }
 
 /// A tool available to the agent, serialised in the OpenAI function-calling format.
@@ -119,17 +195,30 @@ pub struct FunctionDefinition {
     pub parameters: Value,
 }
 
-/// Raw response from a chat-completion endpoint.
-#[derive(Debug, Deserialize)]
-pub struct ChatResponse {
-    pub choices: Vec<Choice>,
+/// Why the provider stopped generating, normalized across providers'
+/// differing vocabularies (Anthropic's `stop_reason`, Gemini's
+/// `finishReason`, OpenAI's `finish_reason`). Each `core::llm` provider
+/// module maps its own wire values onto this once, at the response-parsing
+/// boundary.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishReason {
+    /// The model completed its response normally.
+    Stop,
+    /// The model wants to invoke one or more tools.
+    ToolCalls,
+    /// The response was truncated because it hit the token limit.
+    MaxTokens,
+    /// A provider-specific reason with no equivalent above (e.g. Anthropic's
+    /// `refusal`, Gemini's `SAFETY`/`RECITATION`), passed through verbatim.
+    Other(String),
 }
 
 /// A single completion choice returned by the provider.
 #[derive(Debug, Deserialize)]
 pub struct Choice {
     pub message: Message,
-    pub finish_reason: Option<String>,
+    pub finish_reason: Option<FinishReason>,
 }
 
 /// One iteration of an agent run, including the LLM response and any tools invoked.
@@ -148,12 +237,28 @@ pub struct ToolExecutionResult {
     pub result: String,
 }
 
+/// Why an agent run stopped. Distinct from ACP's own `StopReason` (which this
+/// maps onto at the ACP boundary) so `core` doesn't depend on the `acp` crate.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    /// The LLM produced a final response with `finish_reason == "stop"`.
+    EndTurn,
+    /// `config.max_iterations` was reached without the LLM stopping on its own.
+    MaxIterations,
+    /// The turn was cancelled via `TurnContext::cancel`.
+    Cancelled,
+    /// The LLM returned a response with neither text content nor tool calls.
+    NoContent,
+}
+
 /// Final output of a completed agent run.
 #[derive(Debug, Serialize)]
 pub struct AgentResult {
     pub final_response: String,
     pub steps: Vec<AgentStep>,
     pub iterations_used: usize,
+    pub stop_reason: StopReason,
 }
 
 /// Streaming event emitted during an agent run over a WebSocket connection.
@@ -166,12 +271,16 @@ pub enum StreamEvent {
     /// The agent is about to invoke a tool.
     #[serde(rename = "tool_call")]
     ToolCall {
+        /// Provider-assigned tool-call ID; stable across the matching
+        /// [`StreamEvent::ToolResult`] and any permission check in between.
+        id: String,
         tool_name: String,
         arguments: String,
     },
     /// A tool has finished executing.
     #[serde(rename = "tool_result")]
     ToolResult {
+        id: String,
         tool_name: String,
         result: String,
         is_error: bool,
@@ -188,175 +297,14 @@ pub enum StreamEvent {
         final_response: String,
         iterations: usize,
     },
-}
-
-// Filesystem WebSocket Models
-
-/// Entry in the file tree
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct FileEntry {
-    pub path: String,
-    pub name: String,
-    pub is_dir: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub size: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub modified: Option<u64>,
-}
-
-/// Requests from the frontend to the filesystem WebSocket
-#[derive(Debug, Deserialize)]
-#[serde(tag = "action")]
-pub enum FsRequest {
-    /// Initialize watching on a workspace directory
-    #[serde(rename = "watch")]
-    Watch { path: String },
-
-    /// Stop watching
-    #[serde(rename = "unwatch")]
-    Unwatch,
-
-    /// List directory contents
-    #[serde(rename = "list")]
-    List {
-        path: String,
-        recursive: Option<bool>,
-    },
-
-    /// Read file contents
-    #[serde(rename = "read")]
-    Read { path: String },
-
-    /// Write file contents
-    #[serde(rename = "write")]
-    Write { path: String, content: String },
-
-    /// Create a directory
-    #[serde(rename = "mkdir")]
-    Mkdir { path: String },
-
-    /// Delete a file or directory
-    #[serde(rename = "delete")]
-    Delete { path: String },
-
-    /// Rename/move a file or directory
-    #[serde(rename = "rename")]
-    Rename { from: String, to: String },
-}
-
-/// Responses/events from the filesystem WebSocket to the frontend
-#[derive(Debug, Serialize, Clone)]
-#[serde(tag = "type")]
-pub enum FsResponse {
-    #[serde(rename = "connected")]
-    Connected { message: String },
-
-    #[serde(rename = "watching")]
-    Watching { path: String },
-
-    #[serde(rename = "unwatched")]
-    Unwatched,
-
-    #[serde(rename = "file_list")]
-    FileList {
-        path: String,
-        entries: Vec<FileEntry>,
-    },
-
-    #[serde(rename = "file_content")]
-    FileContent { path: String, content: String },
-
-    #[serde(rename = "write_success")]
-    WriteSuccess { path: String },
-
-    #[serde(rename = "mkdir_success")]
-    MkdirSuccess { path: String },
-
-    #[serde(rename = "delete_success")]
-    DeleteSuccess { path: String },
-
-    #[serde(rename = "rename_success")]
-    RenameSuccess { from: String, to: String },
-
-    /// File system change event (from watcher)
-    #[serde(rename = "fs_event")]
-    FsEvent {
-        event_kind: String,
-        paths: Vec<String>,
-    },
-
-    #[serde(rename = "error")]
-    Error { message: String },
-}
-
-/// Inbound prompt request over the agent WebSocket channel.
-#[derive(Debug, Deserialize)]
-pub struct WsRequest {
-    pub prompt: String,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub max_iterations: Option<usize>,
-    #[serde(default)]
-    pub chat_id: Option<Uuid>,
-    #[serde(default)]
-    pub skills: Option<Vec<String>>,
-}
-
-/// Outbound response over the agent WebSocket channel.
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-pub enum WsResponse {
-    #[serde(rename = "event")]
-    Event { data: StreamEvent },
-
-    #[serde(rename = "error")]
-    Error { message: String },
-
-    #[serde(rename = "done")]
-    Done {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        chat_id: Option<String>,
-    },
-}
-
-// Unified WebSocket envelope types
-
-/// System-level events not tied to a specific channel.
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-pub enum SystemEvent {
-    #[serde(rename = "connected")]
-    Connected { message: String },
-
-    #[serde(rename = "error")]
-    Error { message: String },
-}
-
-/// Inbound envelope: every message from the client wraps its payload with a channel tag.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "channel", content = "data")]
-pub enum ClientEnvelope {
-    #[serde(rename = "agent")]
-    Agent(WsRequest),
-
-    #[serde(rename = "fs")]
-    Fs(FsRequest),
-}
-
-/// Outbound envelope: every message to the client carries a channel tag so the
-/// client can route responses without maintaining two separate connections.
-#[derive(Debug, Serialize)]
-#[serde(tag = "channel", content = "data")]
-pub enum ServerEnvelope {
-    #[serde(rename = "system")]
-    System(SystemEvent),
-
-    #[serde(rename = "agent")]
-    Agent(WsResponse),
-
-    #[serde(rename = "fs")]
-    Fs(FsResponse),
+    /// `message` was just appended to the turn's message history (mirrors
+    /// exactly what `run_agent_loop` pushed onto its `messages` argument).
+    /// Fired for every assistant and tool-result message, not just the final
+    /// response — a caller that wants to persist history incrementally
+    /// (rather than only once the whole turn completes) can checkpoint here
+    /// instead of reconstructing message content from the other event types.
+    #[serde(rename = "message_appended")]
+    MessageAppended { message: Message },
 }
 
 #[cfg(test)]
@@ -365,32 +313,75 @@ mod tests {
 
     #[test]
     fn message_user_sets_correct_fields() {
-        let msg = Message::user("hello".into());
+        let msg = Message::user("hello");
         assert_eq!(msg.role, Role::User);
-        assert_eq!(msg.content.as_deref(), Some("hello"));
-        assert!(msg.tool_calls.is_none());
-        assert!(msg.tool_call_id.is_none());
-        assert!(msg.tool_name.is_none());
+        assert_eq!(msg.text().as_deref(), Some("hello"));
+        assert!(msg.tool_calls().is_empty());
+        assert!(msg.tool_result_block().is_none());
     }
 
     #[test]
     fn message_assistant_sets_correct_fields() {
-        let msg = Message::assistant("response".into());
+        let msg = Message::assistant("response");
         assert_eq!(msg.role, Role::Assistant);
-        assert_eq!(msg.content.as_deref(), Some("response"));
-        assert!(msg.tool_calls.is_none());
+        assert_eq!(msg.text().as_deref(), Some("response"));
+        assert!(msg.tool_calls().is_empty());
     }
 
     #[test]
     fn message_tool_result_sets_correct_fields() {
-        let msg =
-            Message::tool_result("call_1".into(), "read_file".into(), "content".into(), false);
+        let msg = Message::tool_result("call_1", "read_file", "content", false);
         assert_eq!(msg.role, Role::Tool);
-        assert_eq!(msg.content.as_deref(), Some("content"));
-        assert_eq!(msg.tool_call_id.as_deref(), Some("call_1"));
-        assert_eq!(msg.tool_name.as_deref(), Some("read_file"));
-        assert!(!msg.is_error);
-        assert!(msg.tool_calls.is_none());
+        assert!(msg.tool_calls().is_empty());
+        let tr = msg.tool_result_block().unwrap();
+        assert_eq!(tr.tool_call_id, "call_1");
+        assert_eq!(tr.tool_name, "read_file");
+        assert_eq!(tr.content, "content");
+        assert!(!tr.is_error);
+    }
+
+    #[test]
+    fn message_text_joins_multiple_text_blocks() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "hello ".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                },
+                ContentBlock::Text {
+                    text: "world".into(),
+                },
+            ],
+        };
+        assert_eq!(msg.text().as_deref(), Some("hello world"));
+        let calls = msg.tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+    }
+
+    #[test]
+    fn content_block_serializes_with_type_tag() {
+        let block = ContentBlock::ToolUse {
+            id: "call_1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        };
+        let json: Value = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["type"], "tool_use");
+        assert_eq!(json["name"], "read_file");
+
+        let block = ContentBlock::Thinking {
+            thinking: "hmm".into(),
+            signature: Some("sig".into()),
+        };
+        let json: Value = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["type"], "thinking");
+        assert_eq!(json["signature"], "sig");
     }
 
     #[test]
@@ -444,67 +435,12 @@ mod tests {
     #[test]
     fn stream_event_tool_call_serializes() {
         let event = StreamEvent::ToolCall {
+            id: "call_1".into(),
             tool_name: "read_file".into(),
             arguments: r#"{"path":"a.txt"}"#.into(),
         };
         let json: Value = serde_json::to_value(&event).unwrap();
         assert_eq!(json["event_type"], "tool_call");
         assert_eq!(json["tool_name"], "read_file");
-    }
-
-    #[test]
-    fn fs_request_deserializes_watch() {
-        let json = r#"{"action": "watch", "path": "/tmp"}"#;
-        let req: FsRequest = serde_json::from_str(json).unwrap();
-        assert!(matches!(req, FsRequest::Watch { path } if path == "/tmp"));
-    }
-
-    #[test]
-    fn fs_request_deserializes_write() {
-        let json = r#"{"action": "write", "path": "a.txt", "content": "hello"}"#;
-        let req: FsRequest = serde_json::from_str(json).unwrap();
-        assert!(
-            matches!(req, FsRequest::Write { path, content } if path == "a.txt" && content == "hello")
-        );
-    }
-
-    #[test]
-    fn fs_request_deserializes_rename() {
-        let json = r#"{"action": "rename", "from": "a.txt", "to": "b.txt"}"#;
-        let req: FsRequest = serde_json::from_str(json).unwrap();
-        assert!(matches!(req, FsRequest::Rename { from, to } if from == "a.txt" && to == "b.txt"));
-    }
-
-    #[test]
-    fn fs_response_serializes_with_type_tag() {
-        let resp = FsResponse::Connected {
-            message: "ok".into(),
-        };
-        let json: Value = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["type"], "connected");
-        assert_eq!(json["message"], "ok");
-    }
-
-    #[test]
-    fn fs_response_error_serializes() {
-        let resp = FsResponse::Error {
-            message: "not found".into(),
-        };
-        let json: Value = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["type"], "error");
-        assert_eq!(json["message"], "not found");
-    }
-
-    #[test]
-    fn chat_request_skips_empty_tools() {
-        let req = ChatRequest {
-            model: "gpt-4".into(),
-            messages: vec![Message::user("hi".into())],
-            tools: vec![],
-            max_tokens: None,
-        };
-        let json: Value = serde_json::to_value(&req).unwrap();
-        assert!(json.get("tools").is_none());
-        assert!(json.get("max_tokens").is_none());
     }
 }

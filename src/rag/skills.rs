@@ -35,7 +35,7 @@ impl SkillsManager {
     pub fn load_skill(&self, name: &str) -> Result<String> {
         let path = self.skills_dir.join(format!("{}.md", name));
         if !path.exists() {
-            return Err(Error::Other(format!(
+            return Err(Error::NotFound(format!(
                 "Skill '{}' not found at {}",
                 name,
                 path.display()

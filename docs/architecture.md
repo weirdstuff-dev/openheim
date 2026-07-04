@@ -138,13 +138,16 @@ User / Client
 │    │      executor.execute(name, args)   │  │
 │    │      append tool result message     │  │
 │    │      emit StreamEvent::ToolCall/    │  │
-│    │           ToolResult                │  │
-│    │    else if finish == "stop":        │  │
+│    │        ToolResult/MessageAppended   │  │
+│    │    else if finish_reason == Stop:   │  │
 │    │      emit StreamEvent::Finished     │  │
 │    │      break                          │  │
 │    └─────────────────────────────────────┘  │
 │                                             │
-│  After loop: history.save_conversation()    │
+│  acp_prompt appends each MessageAppended    │
+│  event to history.jsonl as it's emitted,    │
+│  then rewrites the full log once more       │
+│  after the loop (history.save_conversation) │
 └──────────┬──────────────────┬───────────────┘
            │                  │
            ▼                  ▼
@@ -173,14 +176,15 @@ All persistence lives under `~/.openheim/` by default.
 ├── config.toml              Agent configuration (providers, MCP servers, default_skills, …)
 ├── system.md                Agent identity — loaded on every session (required)
 ├── history/
-│   ├── {uuid}.json          One file per conversation
+│   ├── {uuid}.json          Conversation metadata (rewritten wholesale)
+│   ├── {uuid}.jsonl         Conversation messages (appended one per line)
 │   └── …
 └── skills/
     ├── rust.md              Named skill files (Markdown)
     └── …
 ```
 
-`SystemLoader` reads `system.md` on every `prepare()` call — missing file is a hard error (run `openheim init` to create it). `HistoryManager` reads and writes conversation JSON files. `SkillsManager` reads `.md` files from the skills directory. Both history and skills paths are configurable at construction time, which is how the test suite uses temporary directories.
+`SystemLoader` reads `system.md` on every `prepare()` call — missing file is a hard error (run `openheim init` to create it). `HistoryManager` reads and writes each conversation's metadata (`.json`) and message log (`.jsonl`) — see `src/rag/history.rs`'s doc comment for why they're split. `SkillsManager` reads `.md` files from the skills directory. Both history and skills paths are configurable at construction time, which is how the test suite uses temporary directories.
 
 ---
 
@@ -203,7 +207,9 @@ This means the library API and the server transports share the exact same agent 
 |----------------|-------|-----|
 | Add a new LLM provider | `src/core/llm/` | Implement `LlmClient` |
 | Add a built-in tool | `src/tools/` | Implement `ToolHandler`, register in `register_builtins` |
+| Add a tool without touching source | any embedder | Implement `ToolHandler`, register via `OpenheimBuilder::tool()` |
 | Add an external tool source | `src/mcp/` | MCP servers via configuration or `McpClient` |
 | Add a new transport | `src/transport/` | Call `acp::serve(your_transport, state)` |
+| Gate tool calls on user approval | any embedder | Implement `PermissionGate`, set via `SessionHandle::permission_gate()` |
 
 See [custom-tools.md](./custom-tools.md) and [custom-llm-provider.md](./custom-llm-provider.md) for step-by-step guides.

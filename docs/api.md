@@ -37,6 +37,7 @@ This document describes every HTTP and WebSocket endpoint that openheim server e
      - [Delete](#336-delete)
      - [Rename / Move](#337-rename--move)
      - [Filesystem Events (Server → Client)](#338-filesystem-events-server--client)
+   - [Bare ACP Endpoint (/acp)](#34-bare-acp-endpoint-acp)
 4. [TypeScript Interfaces](#4-typescript-interfaces)
 5. [Sequence Diagrams](#5-sequence-diagrams)
 6. [Error Handling](#6-error-handling)
@@ -45,16 +46,16 @@ This document describes every HTTP and WebSocket endpoint that openheim server e
 
 ## 1. Overview
 
-Openheim exposes a single multiplexed WebSocket at `/ws` and a small set of REST endpoints at `/api/*`.
+Openheim exposes a multiplexed WebSocket at `/ws`, a second bare-ACP WebSocket at `/acp`, and a small set of REST endpoints at `/api/*`.
 
-The WebSocket carries two logical channels over one physical connection:
+`/ws` carries two logical channels over one physical connection:
 
 | Channel | Purpose |
 |---|---|
 | **agent** | ACP (Agent Client Protocol) — initialize, create sessions, send prompts, receive streamed LLM responses + tool call updates |
 | **fs** | Filesystem operations — CRUD, directory listing, live file watching |
 
-All WS messages are JSON envelopes tagged with a `channel` field so the client can route them without opening multiple connections.
+All `/ws` messages are JSON envelopes tagged with a `channel` field so the client can route them without opening multiple connections. `/acp` (see [§3.4](#34-bare-acp-endpoint-acp)) carries only the `agent` channel's content, unwrapped — for generic ACP clients that don't know about the envelope or the `fs` channel.
 
 ---
 
@@ -281,7 +282,7 @@ Returns a list of all persisted conversation sessions, sorted newest-first by `u
 | `skills` | `string[]` | Skills loaded for this session |
 | `cwd` | `string \| null` | Working directory — populated after the first prompt in the session |
 
-> Sessions are persisted to `~/.openheim/history/{uuid}.json` and survive server restarts.
+> Sessions are persisted to `~/.openheim/history/{uuid}.json` (metadata) and `~/.openheim/history/{uuid}.jsonl` (messages, appended incrementally as the conversation grows) and survive server restarts.
 
 ---
 
@@ -308,47 +309,50 @@ Returns the full conversation for a session, including all messages.
   "messages": [
     {
       "role": "user",
-      "content": "Refactor the auth module to use JWTs.",
-      "tool_calls": null,
-      "tool_call_id": null,
-      "tool_name": null
+      "content": [
+        { "type": "text", "text": "Refactor the auth module to use JWTs." }
+      ]
     },
     {
       "role": "assistant",
-      "content": "I'll help you refactor the auth module...",
-      "tool_calls": null,
-      "tool_call_id": null,
-      "tool_name": null
+      "content": [
+        { "type": "thinking", "thinking": "The user wants JWTs...", "signature": "..." },
+        { "type": "text", "text": "I'll help you refactor the auth module..." }
+      ]
     },
     {
       "role": "assistant",
-      "content": null,
-      "tool_calls": [
+      "content": [
         {
+          "type": "tool_use",
           "id": "call_abc123",
-          "function": {
-            "name": "read_file",
-            "arguments": "{\"path\": \"src/auth.rs\"}"
-          }
+          "name": "read_file",
+          "arguments": "{\"path\": \"src/auth.rs\"}"
         }
-      ],
-      "tool_call_id": null,
-      "tool_name": null
+      ]
     },
     {
       "role": "tool",
-      "content": "use actix_web::...\n// file contents",
-      "tool_calls": null,
-      "tool_call_id": "call_abc123",
-      "tool_name": "read_file"
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_call_id": "call_abc123",
+          "tool_name": "read_file",
+          "content": "use actix_web::...\n// file contents"
+        }
+      ]
     },
     {
       "role": "tool",
-      "content": "Error: permission denied: /etc/shadow",
-      "tool_calls": null,
-      "tool_call_id": "call_def456",
-      "tool_name": "read_file",
-      "is_error": true
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_call_id": "call_def456",
+          "tool_name": "read_file",
+          "content": "Error: permission denied: /etc/shadow",
+          "is_error": true
+        }
+      ]
     }
   ]
 }
@@ -359,17 +363,21 @@ Returns the full conversation for a session, including all messages.
 | `role` | Description |
 |---|---|
 | `"user"` | Message sent by the human |
-| `"assistant"` | LLM response text or tool call request |
+| `"assistant"` | LLM response text, reasoning, and/or tool call requests |
 | `"tool"` | Tool execution result fed back to the LLM |
 | `"system"` | System prompt injected by the agent (skills, context) |
 
-**`role: "tool"` fields:**
+**Content block types** (`content` is always an array, in order — an assistant
+turn commonly holds a leading `thinking` block followed by `text` and/or
+`tool_use` blocks; a `tool` message holds exactly one `tool_result` block):
 
-| Field | Type | Description |
+| `type` | Fields | Description |
 |---|---|---|
-| `tool_call_id` | `string` | ID linking this result to the assistant's tool call request |
-| `tool_name` | `string` | Name of the tool that was invoked |
-| `is_error` | `boolean` | `true` if the tool returned an error. Omitted from JSON when `false` (i.e. absence means success). Also forwarded to Anthropic as `is_error` in the tool result block so the LLM receives accurate signal. |
+| `"text"` | `text: string` | Plain text (user, assistant, or system content) |
+| `"thinking"` | `thinking: string`, `signature?: string \| null` | Extended-thinking output. `signature` must be replayed unmodified — it's how the provider verifies the block wasn't tampered with. |
+| `"image"` | `data: string` (base64), `mime_type: string` | User-supplied image, e.g. from an ACP client's `image` content block |
+| `"tool_use"` | `id: string`, `name: string`, `arguments: string` (JSON string) | A tool call the assistant requested |
+| `"tool_result"` | `tool_call_id: string`, `tool_name: string`, `content: string`, `is_error?: boolean` | Result of executing a tool call. `is_error` omitted from JSON when `false` (absence means success); forwarded to Anthropic as `is_error` in the tool result block so the LLM receives accurate signal. |
 
 **Error `400`** — if `:id` is not a valid UUID:
 
@@ -982,11 +990,13 @@ pending → in_progress → completed
 
 ### 3.3 Filesystem Channel
 
-All filesystem operations are sent over the `fs` channel. Paths are relative to the workspace root (set via `watch`). Absolute paths must be within the workspace.
+All filesystem operations are sent over the `fs` channel. The channel is sandboxed to the agent's configured `work_dir` (see [configuration.md](./configuration.md)) — the same boundary the agent's own `read_file`/`write_file` tools are held to. Relative paths resolve against `work_dir`; absolute paths must be within it. Symlinks are followed and canonicalized so they cannot escape the boundary.
+
+No `watch` call is required before file operations — every request is validated against `work_dir` directly.
 
 #### 3.3.1 Watch / Unwatch
 
-Start watching a workspace directory. This sets the workspace root for all subsequent path validations and enables live file change events.
+Start watching a directory for live file change events. The directory must be within `work_dir`. Watching does **not** affect path validation for other operations.
 
 **Watch (Client → Server):**
 
@@ -1034,7 +1044,7 @@ Start watching a workspace directory. This sets the workspace root for all subse
 }
 ```
 
-> You must call `watch` before any file operations. All paths in subsequent requests must be within the watched directory. You can only watch one directory at a time; calling `watch` again replaces the previous watch.
+> You can only watch one directory at a time; calling `watch` again replaces the previous watch. Watching is only needed for live `fs_event` notifications — all other operations work without it.
 
 ---
 
@@ -1055,7 +1065,7 @@ Start watching a workspace directory. This sets the workspace root for all subse
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `path` | `string` | Yes | — | Directory path (relative to workspace root or absolute within workspace) |
+| `path` | `string` | Yes | — | Directory path (relative to `work_dir` or absolute within it) |
 | `recursive` | `boolean` | No | `false` | If true, lists all descendants recursively |
 
 **Response:**
@@ -1250,7 +1260,7 @@ Deletes a file or directory (recursively if directory).
 
 #### 3.3.8 Filesystem Events (Server → Client)
 
-When a workspace is being watched, file change events are pushed automatically:
+When a directory is being watched, file change events are pushed automatically:
 
 ```json
 {
@@ -1287,7 +1297,7 @@ Any fs operation can return an error:
   "channel": "fs",
   "data": {
     "type": "error",
-    "message": "Path not within workspace or does not exist"
+    "message": "Tool execution error: path '../secrets' is outside the work directory '/path/to/work_dir'"
   }
 }
 ```
@@ -1296,14 +1306,29 @@ Common error messages:
 
 | Message | Cause |
 |---|---|
-| `"Path not within workspace or does not exist"` | Path outside watched workspace or `watch` not called |
-| `"Invalid directory: ..."` | Watch path doesn't exist or isn't a directory |
+| `"Tool execution error: path '...' is outside the work directory '...'"` | Path escapes `work_dir` (absolute path outside it, or `..` traversal) |
+| `"Tool execution error: path '...' is a dangling symlink ..."` | Path is a symlink whose target does not exist (rejected so writes can't create the target outside the sandbox) |
+| `"Invalid directory: ..."` | Watch path isn't a directory |
 | `"Failed to read: ..."` | File read error (permissions, missing, etc.) |
 | `"Failed to write: ..."` | File write error |
 | `"Failed to create dirs: ..."` | Parent directory creation failed |
 | `"Failed to mkdir: ..."` | Directory creation failed |
 | `"Failed to delete file: ..."` / `"Failed to delete dir: ..."` | Deletion error |
 | `"Failed to rename: ..."` | Rename/move error |
+
+---
+
+## 3.4 Bare ACP Endpoint (`/acp`)
+
+`/ws` is openheim's rich, product-specific endpoint: an envelope multiplexing ACP with the filesystem sidecar above. `/acp` is a second, minimal endpoint for clients that only speak plain ACP and know nothing about that envelope or the `fs` channel.
+
+Each WebSocket text frame on `/acp` is **exactly one JSON-RPC 2.0 message** — no `{"channel": "agent", "data": {...}}` wrapper. Send the same `initialize` / `session/new` / `session/prompt` / etc. requests documented in [§3.2](#32-agent-channel-acp), just unwrapped:
+
+```json
+{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1}}
+```
+
+There is no filesystem sidecar on this endpoint — use `/ws` if you need it. Everything else (session lifecycle, streaming `session/update` notifications, tool calls, permission requests) behaves identically to the `agent` channel on `/ws`.
 
 ---
 
@@ -1391,20 +1416,21 @@ interface ConversationMeta {
 
 interface Message {
   role: "user" | "assistant" | "tool" | "system";
-  content: string | null;
-  tool_calls?: ToolCall[] | null;
-  tool_call_id?: string | null; // present on role:"tool" messages
-  tool_name?: string | null;    // present on role:"tool" messages
-  is_error?: boolean;           // true when the tool returned an error; omitted when false
+  content: ContentBlock[];
 }
 
-interface ToolCall {
-  id: string;
-  function: {
-    name: string;
-    arguments: string; // JSON string
-  };
-}
+type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "thinking"; thinking: string; signature?: string | null }
+  | { type: "image"; data: string; mime_type: string } // data is base64-encoded
+  | { type: "tool_use"; id: string; name: string; arguments: string } // arguments is a JSON string
+  | {
+      type: "tool_result";
+      tool_call_id: string;
+      tool_name: string;
+      content: string;
+      is_error?: boolean; // omitted when false
+    };
 
 interface Conversation {
   meta: ConversationMeta;
@@ -1829,6 +1855,8 @@ All REST endpoints return `200` with JSON body on success. If the server is misc
 | `GET` | `/api/mcp-servers` | `McpServerStatus[]` | MCP server statuses |
 | `GET` | `/api/sessions` | `ConversationMeta[]` | All persisted sessions, newest-first |
 | `GET` | `/api/sessions/:id` | `Conversation` | Full conversation including all messages |
+| `GET` | `/ws` | WebSocket upgrade | Multiplexed `agent` + `fs` channels (§3) |
+| `GET` | `/acp` | WebSocket upgrade | Bare ACP JSON-RPC, no envelope, no `fs` (§3.4) |
 
 ### WebSocket Message Types Summary
 

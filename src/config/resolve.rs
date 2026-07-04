@@ -26,41 +26,52 @@ fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<()> {
 }
 
 impl AppConfig {
-    pub fn resolve(&self, model_name: Option<&str>) -> Result<AgentConfig> {
-        match model_name {
-            Some(name) => self.resolve_model(name),
-            None => self.resolve_default(),
+    /// The single place an [`AgentConfig`] is assembled from a provider entry;
+    /// every `resolve_*` path below funnels through here so field defaults
+    /// (like the timeout) cannot drift between them.
+    fn agent_config(
+        &self,
+        provider_name: &str,
+        provider: &ProviderConfig,
+        model: String,
+    ) -> AgentConfig {
+        AgentConfig {
+            provider_name: provider_name.to_string(),
+            api_base: provider.api_base.clone(),
+            api_key: provider.resolve_api_key(),
+            model,
+            max_iterations: self.max_iterations,
+            timeout_secs: provider.resolve_timeout_secs(),
+            max_tokens: provider.max_tokens,
         }
     }
 
-    fn resolve_default(&self) -> Result<AgentConfig> {
-        let provider = self.providers.get(&self.default_provider).ok_or_else(|| {
-            Error::config(format!(
-                "Default provider '{}' not found in config. Available providers: {}",
-                self.default_provider,
-                self.provider_names()
-            ))
-        })?;
-        validate_provider(&self.default_provider, provider)?;
-        Ok(AgentConfig {
-            provider_name: self.default_provider.clone(),
-            api_base: provider.api_base.clone(),
-            api_key: provider.resolve_api_key(),
-            model: provider.default_model.clone(),
-            max_iterations: self.max_iterations,
-            timeout_secs: provider.timeout_secs.unwrap_or(120),
-            max_tokens: provider.max_tokens,
-        })
-    }
-
-    pub fn resolve_with_provider(&self, provider_name: &str, model: &str) -> Result<AgentConfig> {
-        let provider = self.providers.get(provider_name).ok_or_else(|| {
+    fn get_provider(&self, provider_name: &str) -> Result<&ProviderConfig> {
+        self.providers.get(provider_name).ok_or_else(|| {
             Error::config(format!(
                 "Provider '{}' not found in config. Available providers: {}",
                 provider_name,
                 self.provider_names()
             ))
-        })?;
+        })
+    }
+
+    pub fn resolve(&self, model_name: Option<&str>) -> Result<AgentConfig> {
+        match model_name {
+            Some(name) => self.resolve_model(name),
+            None => self.resolve_provider_default(&self.default_provider),
+        }
+    }
+
+    /// Resolves a provider by name using its own `default_model`.
+    pub fn resolve_provider_default(&self, provider_name: &str) -> Result<AgentConfig> {
+        let provider = self.get_provider(provider_name)?;
+        validate_provider(provider_name, provider)?;
+        Ok(self.agent_config(provider_name, provider, provider.default_model.clone()))
+    }
+
+    pub fn resolve_with_provider(&self, provider_name: &str, model: &str) -> Result<AgentConfig> {
+        let provider = self.get_provider(provider_name)?;
         validate_provider(provider_name, provider)?;
         if !provider.models.is_empty() && !provider.models.contains(&model.to_string()) {
             return Err(Error::config(format!(
@@ -70,30 +81,14 @@ impl AppConfig {
                 provider.models.join(", ")
             )));
         }
-        Ok(AgentConfig {
-            provider_name: provider_name.to_string(),
-            api_base: provider.api_base.clone(),
-            api_key: provider.resolve_api_key(),
-            model: model.to_string(),
-            max_iterations: self.max_iterations,
-            timeout_secs: provider.timeout_secs.unwrap_or(120),
-            max_tokens: provider.max_tokens,
-        })
+        Ok(self.agent_config(provider_name, provider, model.to_string()))
     }
 
     fn resolve_model(&self, model_name: &str) -> Result<AgentConfig> {
         for (name, provider) in &self.providers {
             if provider.models.contains(&model_name.to_string()) {
                 validate_provider(name, provider)?;
-                return Ok(AgentConfig {
-                    provider_name: name.clone(),
-                    api_base: provider.api_base.clone(),
-                    api_key: provider.resolve_api_key(),
-                    model: model_name.to_string(),
-                    max_iterations: self.max_iterations,
-                    timeout_secs: provider.timeout_secs.unwrap_or(120),
-                    max_tokens: provider.max_tokens,
-                });
+                return Ok(self.agent_config(name, provider, model_name.to_string()));
             }
         }
         Err(Error::config(format!(
@@ -238,6 +233,22 @@ mod tests {
     fn validate_accepts_valid_provider() {
         let p = provider_with_base("https://api.example.com");
         assert!(validate_provider("test", &p).is_ok());
+    }
+
+    #[test]
+    fn resolve_provider_default_uses_providers_default_model() {
+        let config = sample_config();
+        let agent = config.resolve_provider_default("anthropic").unwrap();
+        assert_eq!(agent.provider_name, "anthropic");
+        assert_eq!(agent.model, "claude-3");
+        assert_eq!(agent.timeout_secs, 120); // default when None
+    }
+
+    #[test]
+    fn resolve_provider_default_errors_on_unknown_provider() {
+        let config = sample_config();
+        let err = config.resolve_provider_default("nope").unwrap_err();
+        assert!(err.to_string().contains("nope"));
     }
 
     #[test]

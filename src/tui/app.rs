@@ -10,9 +10,11 @@ use tokio::sync::mpsc;
 
 use crate::{
     config::{AgentConfig, AppConfig},
+    core::permission::PermissionDecision,
     rag::{ConversationMeta, RagContext, SkillsManager},
 };
 
+use super::permission::{PERMISSION_OPTIONS, PermissionRequest};
 use super::render;
 use super::types::{AgentUpdate, ChatItem, ConfigRow, Screen, Status};
 
@@ -84,6 +86,8 @@ pub(super) struct App {
     theme_color: Color,
     theme_color_name: String,
     theme_selected: usize,
+    pending_permission: Option<PermissionRequest>,
+    permission_selected: usize,
 }
 
 impl App {
@@ -132,6 +136,8 @@ impl App {
             theme_color,
             theme_color_name: theme_name,
             theme_selected: 0,
+            pending_permission: None,
+            permission_selected: 0,
         }
     }
 
@@ -281,6 +287,58 @@ impl App {
         }
     }
 
+    pub(super) fn handle_permission_request(&mut self, request: PermissionRequest) {
+        self.permission_selected = 0;
+        self.pending_permission = Some(request);
+        self.push_screen(Screen::PermissionPrompt);
+    }
+
+    /// Answers the pending request (if any) and returns to the prior screen.
+    /// A dropped `respond_to` (send fails) means the agent task already gave
+    /// up waiting — nothing to do beyond discarding the request.
+    fn resolve_permission(&mut self, decision: PermissionDecision) {
+        if let Some(request) = self.pending_permission.take() {
+            let label = match decision {
+                PermissionDecision::AllowOnce => "allowed",
+                PermissionDecision::AllowAlways => "always allowed",
+                PermissionDecision::RejectOnce => "rejected",
+                PermissionDecision::RejectAlways => "always rejected",
+            };
+            self.push(ChatItem::SystemInfo(format!(
+                "{label} '{}'",
+                request.tool_name
+            )));
+            let _ = request.respond_to.send(decision);
+        }
+        self.screen = self.pre_picker_screen;
+    }
+
+    fn handle_permission_prompt_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.should_quit = true;
+            }
+            KeyCode::Up => {
+                self.permission_selected = self.permission_selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                self.permission_selected =
+                    (self.permission_selected + 1).min(PERMISSION_OPTIONS.len() - 1);
+            }
+            KeyCode::Enter => {
+                let (_, decision) = PERMISSION_OPTIONS[self.permission_selected];
+                self.resolve_permission(decision);
+            }
+            KeyCode::Char('y') => self.resolve_permission(PermissionDecision::AllowOnce),
+            KeyCode::Char('a') => self.resolve_permission(PermissionDecision::AllowAlways),
+            KeyCode::Char('n') => self.resolve_permission(PermissionDecision::RejectOnce),
+            KeyCode::Char('r') => self.resolve_permission(PermissionDecision::RejectAlways),
+            // No Esc-to-dismiss: unlike other overlays, a permission prompt
+            // needs an explicit decision — the agent task is blocked on it.
+            _ => {}
+        }
+    }
+
     fn apply_theme(&mut self, name: &str) {
         self.theme_color = render::theme_color(name);
         self.theme_color_name = name.to_string();
@@ -350,6 +408,10 @@ impl App {
             }
             Screen::ThemePicker => {
                 self.handle_theme_picker_key(key);
+                return;
+            }
+            Screen::PermissionPrompt => {
+                self.handle_permission_prompt_key(key);
                 return;
             }
             Screen::Welcome | Screen::Chat => {}
@@ -632,32 +694,26 @@ impl App {
                     match msg.role {
                         Role::System => {}
                         Role::User => {
-                            if let Some(content) = &msg.content
-                                && !content.is_empty()
-                            {
-                                self.push(ChatItem::UserMessage(content.clone()));
+                            if let Some(content) = msg.text() {
+                                self.push(ChatItem::UserMessage(content));
                             }
                         }
                         Role::Assistant => {
-                            if let Some(content) = &msg.content
-                                && !content.is_empty()
-                            {
-                                self.push(ChatItem::AssistantMessage(content.clone()));
+                            if let Some(content) = msg.text() {
+                                self.push(ChatItem::AssistantMessage(content));
                             }
-                            if let Some(tool_calls) = &msg.tool_calls {
-                                for tc in tool_calls {
-                                    self.push(ChatItem::ToolCall {
-                                        name: tc.function.name.clone(),
-                                        args: tc.function.arguments.clone(),
-                                    });
-                                }
+                            for tc in msg.tool_calls() {
+                                self.push(ChatItem::ToolCall {
+                                    name: tc.name,
+                                    args: tc.arguments,
+                                });
                             }
                         }
                         Role::Tool => {
-                            if let Some(content) = &msg.content {
+                            if let Some(tr) = msg.tool_result_block() {
                                 self.push(ChatItem::ToolResult {
-                                    result: content.clone(),
-                                    is_error: msg.is_error,
+                                    result: tr.content,
+                                    is_error: tr.is_error,
                                 });
                             }
                         }
@@ -776,6 +832,18 @@ impl App {
                     &self.theme_color_name,
                     theme,
                 );
+            }
+            Screen::PermissionPrompt => {
+                if let Some(request) = &self.pending_permission {
+                    render::render_permission_prompt(
+                        f,
+                        area,
+                        &request.tool_name,
+                        &request.arguments,
+                        self.permission_selected,
+                        theme,
+                    );
+                }
             }
             Screen::Welcome | Screen::Chat => {}
         }
