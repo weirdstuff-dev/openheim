@@ -21,7 +21,10 @@ use super::{ToolExecutor, sandbox::validate_path};
 ///   `work_dir` (following symlinks for existing paths); access outside the
 ///   boundary is rejected with an error the LLM can read and react to. The I/O
 ///   itself is delegated to `client_io` first (e.g. an ACP client's editor
-///   buffers), falling back to local `tokio::fs` when it defers.
+///   buffers), falling back to local `tokio::fs` when it defers. The
+///   `client_io` await is raced against `turn.cancel` so a slow or
+///   unresponsive client can't block `session/cancel` from interrupting the
+///   turn.
 /// - `execute_command`: when `allow_shell` is `false` the call is rejected
 ///   immediately. When `true` the command runs with its working directory set
 ///   to `work_dir` so relative paths behave correctly. Note that absolute
@@ -75,9 +78,14 @@ impl ToolExecutor for SandboxedExecutor {
                     .as_str()
                     .ok_or_else(|| Error::ParseError("missing 'path' argument".to_string()))?;
                 let validated = validate_path(path, &self.work_dir)?;
-                match self.client_io.read_file(&validated).await {
-                    Some(result) => result,
-                    None => read_file(&validated).await,
+                tokio::select! {
+                    _ = turn.cancel.cancelled() => Err(Error::ToolExecutionError(
+                        "read_file cancelled".to_string(),
+                    )),
+                    result = self.client_io.read_file(&validated) => match result {
+                        Some(result) => result,
+                        None => read_file(&validated).await,
+                    },
                 }
             }
 
@@ -91,10 +99,15 @@ impl ToolExecutor for SandboxedExecutor {
                     .as_str()
                     .ok_or_else(|| Error::ParseError("missing 'content' argument".to_string()))?;
                 let validated = validate_path(path, &self.work_dir)?;
-                match self.client_io.write_file(&validated, content).await {
-                    Some(Ok(())) => Ok(format!("Successfully wrote to {}", validated.display())),
-                    Some(Err(e)) => Err(e),
-                    None => write_file(&validated, content).await,
+                tokio::select! {
+                    _ = turn.cancel.cancelled() => Err(Error::ToolExecutionError(
+                        "write_file cancelled".to_string(),
+                    )),
+                    result = self.client_io.write_file(&validated, content) => match result {
+                        Some(Ok(())) => Ok(format!("Successfully wrote to {}", validated.display())),
+                        Some(Err(e)) => Err(e),
+                        None => write_file(&validated, content).await,
+                    },
                 }
             }
 
@@ -227,6 +240,82 @@ mod tests {
             .await
             .unwrap();
         assert!(result.contains("Successfully wrote"));
+        assert!(!path.exists());
+    }
+
+    /// Never resolves on its own; used to prove cancellation aborts the wait
+    /// on an unresponsive client rather than blocking the turn.
+    struct HangingClientIo;
+
+    #[async_trait]
+    impl ClientIo for HangingClientIo {
+        async fn read_file(&self, _path: &std::path::Path) -> Option<Result<String>> {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            unreachable!("cancellation should abort this wait before the sleep elapses");
+        }
+
+        async fn write_file(&self, _path: &std::path::Path, _content: &str) -> Option<Result<()>> {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            unreachable!("cancellation should abort this wait before the sleep elapses");
+        }
+    }
+
+    #[tokio::test]
+    async fn read_file_cancel_aborts_hanging_client_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "local content").unwrap();
+
+        let executor = SandboxedExecutor::new(
+            Arc::new(EmptyExecutor),
+            dir.path().to_path_buf(),
+            false,
+            Arc::new(HangingClientIo),
+        );
+        let args = serde_json::json!({"path": path.to_str().unwrap()}).to_string();
+        let harness = TurnHarness::new();
+        let cancel = harness.cancel_handle();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            cancel.cancel();
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            executor.execute("read_file", &args, &harness.turn()),
+        )
+        .await
+        .expect("cancellation should abort the hanging client_io call");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn write_file_cancel_aborts_hanging_client_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+
+        let executor = SandboxedExecutor::new(
+            Arc::new(EmptyExecutor),
+            dir.path().to_path_buf(),
+            false,
+            Arc::new(HangingClientIo),
+        );
+        let args =
+            serde_json::json!({"path": path.to_str().unwrap(), "content": "hello"}).to_string();
+        let harness = TurnHarness::new();
+        let cancel = harness.cancel_handle();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            cancel.cancel();
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            executor.execute("write_file", &args, &harness.turn()),
+        )
+        .await
+        .expect("cancellation should abort the hanging client_io call");
+        assert!(result.is_err());
         assert!(!path.exists());
     }
 

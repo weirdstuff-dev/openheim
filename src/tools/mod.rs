@@ -244,6 +244,12 @@ pub(crate) mod test_support {
                 permission_gate: &self.permission_gate,
             }
         }
+
+        /// A clone of the underlying token, so a test can cancel the turn
+        /// from outside while `turn()` is borrowed elsewhere.
+        pub(crate) fn cancel_handle(&self) -> CancellationToken {
+            self.cancel.clone()
+        }
     }
 }
 
