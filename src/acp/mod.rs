@@ -60,9 +60,10 @@ pub enum AgentMode {
     /// Full tool access; tool calls go through the permission gate as normal.
     #[default]
     Code,
-    /// Read-only: only `read_file` is offered to the LLM, regardless of
-    /// permission decisions. No `session/request_permission` prompts occur
-    /// since nothing mutating is ever on the tool list.
+    /// Read-only: only `read_file` is offered to the LLM, so nothing
+    /// mutating can run. `read_file` calls still go through the permission
+    /// gate and can trigger a `session/request_permission` prompt unless
+    /// already approved.
     Architect,
 }
 
