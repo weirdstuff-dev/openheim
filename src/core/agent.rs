@@ -53,9 +53,10 @@ async fn call_llm_streaming(
 /// the final completion.
 ///
 /// `cancel` is checked between iterations and before each tool call, and is
-/// also raced against the in-flight LLM call itself (both streaming and
-/// non-streaming) so a caller (e.g. the ACP layer reacting to
-/// `session/cancel`) can abort a slow or hanging request rather than waiting
+/// also raced against the in-flight LLM call and the pending permission-gate
+/// approval (both streaming and non-streaming LLM calls) so a caller (e.g.
+/// the ACP layer reacting to `session/cancel`) can abort a slow or hanging
+/// request — or a turn stuck waiting on user approval — rather than waiting
 /// for it to finish. The loop always returns `Ok`; [`AgentResult::stop_reason`]
 /// reports why it stopped (`EndTurn` / `MaxIterations` / `Cancelled` /
 /// `NoContent`) instead of callers having to reverse-engineer it.
@@ -174,7 +175,17 @@ where
                     });
                 }
 
-                let decision = turn.permission_gate.check(id, tool_name, arguments).await;
+                let decision = tokio::select! {
+                    _ = turn.cancel.cancelled() => {
+                        // Dropping the `check` future here abandons the
+                        // pending approval prompt rather than blocking the
+                        // turn (and holding `prompt_lock`) until the user
+                        // responds.
+                        stop_reason = StopReason::Cancelled;
+                        break 'turn;
+                    }
+                    decision = turn.permission_gate.check(id, tool_name, arguments) => decision,
+                };
                 let (result, is_error) = if decision.is_allowed() {
                     match tool_executor.execute(tool_name, arguments, turn).await {
                         Ok(r) => (r, false),
@@ -819,6 +830,60 @@ mod tests {
         assert_eq!(result.final_response, "");
         assert_eq!(result.iterations_used, 1);
         assert_eq!(result.stop_reason, StopReason::NoContent);
+    }
+
+    struct HangingPermissionGate;
+
+    #[async_trait]
+    impl PermissionGate for HangingPermissionGate {
+        async fn check(
+            &self,
+            _tool_call_id: &str,
+            _tool_name: &str,
+            _arguments: &str,
+        ) -> PermissionDecision {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            unreachable!("cancellation should abort this wait before the sleep elapses");
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_pending_permission_approval() {
+        let llm = Arc::new(MockLlm::new(vec![tool_call_choice(
+            "execute_command",
+            r#"{"command":"echo hi"}"#,
+        )]));
+        let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new("should not run"));
+        let config = make_config(10);
+        let mut messages = vec![Message::user("do something")];
+        let cancel = CancellationToken::new();
+        let cancel_signal = cancel.clone();
+        let gate: Arc<dyn PermissionGate> = Arc::new(HangingPermissionGate);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            cancel_signal.cancel();
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_agent_with_history(
+                llm,
+                executor,
+                &config,
+                &mut messages,
+                None,
+                &TurnContext {
+                    cancel: &cancel,
+                    permission_gate: &gate,
+                },
+            ),
+        )
+        .await
+        .expect("run_agent_loop should abort the pending permission check instead of hanging")
+        .unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Cancelled);
     }
 
     struct RejectPermissionGate;
