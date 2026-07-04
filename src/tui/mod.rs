@@ -50,8 +50,7 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
 
     let (permission_tx, mut permission_rx) =
         mpsc::unbounded_channel::<permission::PermissionRequest>();
-    let permission_gate: Arc<dyn PermissionGate> =
-        Arc::new(TuiPermissionGate { tx: permission_tx });
+    let permission_gate: Arc<dyn PermissionGate> = Arc::new(TuiPermissionGate::new(permission_tx));
 
     let session = client
         .new_session()

@@ -35,7 +35,7 @@ use crate::{
         agent::run_agent_streaming_with_history,
         client_io::ClientIo,
         models::{ContentBlock, Message, Role, StopReason as CoreStopReason, StreamEvent},
-        permission::{PermissionDecision, PermissionGate},
+        permission::{PermissionDecision, PermissionGate, approval_key},
         turn::TurnContext,
     },
     error::{Error, Result},
@@ -605,30 +605,6 @@ fn map_stop_reason(reason: CoreStopReason) -> StopReason {
     }
 }
 
-/// Key used to remember an `AllowAlways`/`RejectAlways` decision in
-/// [`session::SessionState::approved_tools`]. For most tools this is just the
-/// tool name — one approval covers every future call to that tool. For
-/// `execute_command` specifically, this is scoped by the invoked command's
-/// first word (its program name, e.g. `git`, `rm`, `npm`) instead: otherwise
-/// "Allow Always" on `git status` would silently approve every future shell
-/// command, including `rm -rf /`. Falls back to the bare tool name if the
-/// command can't be extracted from `arguments` — broader than per-command
-/// scoping, but no worse than this cache's pre-existing per-tool-name
-/// behavior.
-fn approval_key(tool_name: &str, arguments: &str) -> String {
-    if tool_name != "execute_command" {
-        return tool_name.to_string();
-    }
-    let command_prefix = serde_json::from_str::<serde_json::Value>(arguments)
-        .ok()
-        .and_then(|v| v.get("command")?.as_str().map(str::to_string))
-        .and_then(|cmd| cmd.split_whitespace().next().map(str::to_string));
-    match command_prefix {
-        Some(prefix) => format!("{tool_name}:{prefix}"),
-        None => tool_name.to_string(),
-    }
-}
-
 /// [`PermissionGate`] backed by ACP's `session/request_permission`. Lives here
 /// (not in `core`) because it depends on the live client connection.
 struct AcpPermissionGate {
@@ -1151,53 +1127,5 @@ mod prompt_block_tests {
             )),
         ))];
         assert!(convert_prompt_blocks(&blocks).is_err());
-    }
-}
-
-#[cfg(test)]
-mod approval_key_tests {
-    use super::*;
-
-    #[test]
-    fn non_shell_tools_are_keyed_by_bare_tool_name_regardless_of_arguments() {
-        assert_eq!(
-            approval_key("read_file", r#"{"path": "a.txt"}"#),
-            "read_file"
-        );
-        assert_eq!(
-            approval_key("read_file", r#"{"path": "b.txt"}"#),
-            "read_file"
-        );
-    }
-
-    #[test]
-    fn shell_commands_are_scoped_by_their_first_word() {
-        assert_eq!(
-            approval_key("execute_command", r#"{"command": "git status"}"#),
-            "execute_command:git"
-        );
-        assert_eq!(
-            approval_key("execute_command", r#"{"command": "git commit -m x"}"#),
-            "execute_command:git"
-        );
-    }
-
-    #[test]
-    fn different_shell_commands_get_different_keys() {
-        let git = approval_key("execute_command", r#"{"command": "git status"}"#);
-        let rm = approval_key("execute_command", r#"{"command": "rm -rf /"}"#);
-        assert_ne!(git, rm);
-    }
-
-    #[test]
-    fn unparseable_shell_arguments_fall_back_to_the_bare_tool_name() {
-        assert_eq!(
-            approval_key("execute_command", "not json"),
-            "execute_command"
-        );
-        assert_eq!(
-            approval_key("execute_command", r#"{"no_command_field": true}"#),
-            "execute_command"
-        );
     }
 }
