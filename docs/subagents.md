@@ -80,7 +80,12 @@ description, openheim:
    parent — subagents cannot escalate privileges beyond what the parent has.
 3. Starts a **fresh, isolated** agent run: its own message history (just the `task`
    as the first user message) and its own system prompt (the profile's persona —
-   not the parent's `system.md` or skills).
+   not the parent's `system.md` or skills) — but the **same cancellation token
+   and permission gate** as the orchestrating turn. Every tool call the subagent
+   makes is checked exactly like the orchestrator's own (e.g. an interactive
+   client still sees `session/request_permission` for a subagent's shell
+   command), and a `session/cancel` on the parent turn stops an in-flight
+   subagent too. There is no separate, more-trusting policy for subagents.
 4. Runs that agent loop to completion and returns only its final answer to the
    orchestrator. Intermediate tool calls and reasoning are not visible to the
    parent — the subagent genuinely runs "in the background", much like Claude

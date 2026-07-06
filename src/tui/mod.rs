@@ -1,8 +1,10 @@
 mod app;
+mod permission;
 mod render;
 mod types;
 
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::{ContentBlock, SessionUpdate, ToolCallStatus};
@@ -19,9 +21,10 @@ use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
-use crate::{client::OpenheimClient, config::load_config};
+use crate::{client::OpenheimClient, config::load_config, core::permission::PermissionGate};
 
 use app::App;
+use permission::TuiPermissionGate;
 use types::AgentUpdate;
 
 struct TerminalGuard {
@@ -43,17 +46,18 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
     let app_config = load_config()?;
     let agent_config = app_config.resolve(None)?;
 
-    let client = OpenheimClient::builder()
-        .build()
-        .await
-        .map_err(|e| crate::error::Error::Other(e.to_string()))?;
+    let client = OpenheimClient::builder().build().await?;
+
+    let (permission_tx, mut permission_rx) =
+        mpsc::unbounded_channel::<permission::PermissionRequest>();
+    let permission_gate: Arc<dyn PermissionGate> = Arc::new(TuiPermissionGate::new(permission_tx));
 
     let session = client
         .new_session()
         .skills(skills.clone())
         .start()
-        .await
-        .map_err(|e| crate::error::Error::Other(e.to_string()))?;
+        .await?
+        .permission_gate(permission_gate);
 
     let (update_tx, mut update_rx) = mpsc::unbounded_channel::<AgentUpdate>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<String>();
@@ -181,6 +185,9 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
             }
             Some(update) = update_rx.recv() => {
                 app.handle_update(update);
+            }
+            Some(request) = permission_rx.recv() => {
+                app.handle_permission_request(request);
             }
         }
     }

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::core::models::Tool;
+use crate::core::turn::TurnContext;
 use crate::error::Result;
 
 use super::ToolExecutor;
@@ -43,14 +44,14 @@ impl ToolExecutor for ScopedExecutor {
             .collect()
     }
 
-    async fn execute(&self, name: &str, args_json: &str) -> Result<String> {
+    async fn execute(&self, name: &str, args_json: &str, turn: &TurnContext<'_>) -> Result<String> {
         if !self.is_allowed(name) {
             return Ok(format!(
                 "Tool '{name}' is not available to this agent. Available tools: {}",
                 self.allowed.join(", ")
             ));
         }
-        self.inner.execute(name, args_json).await
+        self.inner.execute(name, args_json, turn).await
     }
 }
 
@@ -59,6 +60,7 @@ mod tests {
     use super::*;
     use crate::core::models::FunctionDefinition;
     use crate::error::Error;
+    use crate::tools::test_support::TurnHarness;
 
     struct FixedExecutor(Vec<&'static str>);
 
@@ -78,7 +80,12 @@ mod tests {
                 .collect()
         }
 
-        async fn execute(&self, name: &str, _args_json: &str) -> Result<String> {
+        async fn execute(
+            &self,
+            name: &str,
+            _args_json: &str,
+            _turn: &TurnContext<'_>,
+        ) -> Result<String> {
             if self.0.contains(&name) {
                 Ok(format!("ran {name}"))
             } else {
@@ -107,7 +114,11 @@ mod tests {
     async fn execute_forwards_allowed_calls() {
         let inner = Arc::new(FixedExecutor(vec!["read_file"]));
         let scoped = ScopedExecutor::new(inner, vec!["read_file".to_string()]);
-        let result = scoped.execute("read_file", "{}").await.unwrap();
+        let harness = TurnHarness::new();
+        let result = scoped
+            .execute("read_file", "{}", &harness.turn())
+            .await
+            .unwrap();
         assert_eq!(result, "ran read_file");
     }
 
@@ -115,7 +126,11 @@ mod tests {
     async fn execute_returns_descriptive_string_for_disallowed_calls() {
         let inner = Arc::new(FixedExecutor(vec!["read_file", "execute_command"]));
         let scoped = ScopedExecutor::new(inner, vec!["read_file".to_string()]);
-        let result = scoped.execute("execute_command", "{}").await.unwrap();
+        let harness = TurnHarness::new();
+        let result = scoped
+            .execute("execute_command", "{}", &harness.turn())
+            .await
+            .unwrap();
         assert!(result.contains("not available"));
         assert!(result.contains("read_file"));
     }

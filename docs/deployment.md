@@ -57,6 +57,8 @@ The server exposes:
 - `ws://{host}:{port}/ws` — WebSocket endpoint (ACP agent + filesystem sidecar)
 - `http://{host}:{port}/api/*` — REST endpoints (config, models, skills, tools, sessions)
 
+The filesystem sidecar is sandboxed to the configured `work_dir` (see [configuration.md](./configuration.md)) — connected clients cannot read or write outside it.
+
 ---
 
 ## Configuration
@@ -271,4 +273,4 @@ Openheim is designed as a single-user or small-team server. For multi-tenant dep
 
 ### Data residency
 
-Conversation history is written to `~/.openheim/history/` as JSON files. Mount this path on network storage or back it up with standard file-system tooling. For enterprises with strict data residency requirements, use a provider endpoint that runs in your region (Anthropic Bedrock, Azure OpenAI, self-hosted Ollama, etc.) and point openheim at it via an `openai_compatible` provider entry.
+Conversation history is written to `~/.openheim/history/` as a pair of files per conversation: `{uuid}.json` (metadata, rewritten wholesale on each change) and `{uuid}.jsonl` (messages, appended one per line as the conversation grows). Back up the whole directory, not just `*.json` — the message content lives in the `.jsonl` files. For enterprises with strict data residency requirements, use a provider endpoint that runs in your region (Anthropic Bedrock, Azure OpenAI, self-hosted Ollama, etc.) and point openheim at it via an `openai_compatible` provider entry.

@@ -51,7 +51,7 @@ Openheim is built in Rust from the ground up:
 - **System identity** — edit `~/.openheim/system.md` to define how the agent presents itself. Required when preparing a session (created by `openheim init`).
 - **Skills** — drop a markdown file into `~/.openheim/skills/` and it's injected into the system prompt. Set `default_skills` in config to auto-load skills every session; pass `--skills` for per-session additions. ACP clients can also pass skills per-session via `_meta`.
 - **ACP transport** — implements the [Agent Client Protocol](https://github.com/block/agent-client-protocol) over stdio (for editor integrations) and WebSocket (for remote clients), with real-time streaming of message chunks and tool calls
-- **Unified WebSocket** — single multiplexed `WS /ws` connection carries both ACP agent traffic (sessions, streaming, tool calls) and filesystem operations (file CRUD, live watching) via channel envelopes
+- **Unified WebSocket** — single multiplexed `WS /ws` connection carries both ACP agent traffic (sessions, streaming, tool calls) and filesystem operations (file CRUD, live watching) via channel envelopes; filesystem operations are sandboxed to the configured `work_dir`
 - **Retry with backoff** — transient failures (429s, 5xx, network errors) are retried automatically with exponential backoff
 - **Docker ready** — multi-stage Dockerfile and docker-compose included
 
@@ -240,7 +240,7 @@ The server speaks the [Agent Client Protocol](https://github.com/block/agent-cli
 |---|---|
 | `WS /ws` | Single multiplexed connection carrying two channels via JSON envelopes: **agent** (ACP sessions, streaming, tool calls) and **fs** (file CRUD, live watching) |
 
-Every message is wrapped in `{ "channel": "<agent|fs>", "data": <payload> }`.
+Every message is wrapped in `{ "channel": "<agent|fs>", "data": <payload> }`. The **fs** channel is sandboxed to the agent's configured `work_dir` — the same boundary enforced for the agent's own file tools.
 
 ### REST API
 

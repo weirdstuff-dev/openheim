@@ -43,8 +43,8 @@ pub trait LlmClient: Send + Sync {
         chunk_tx: mpsc::UnboundedSender<LlmChunk>,
     ) -> Result<Choice> {
         let choice = self.send(messages, tools).await?;
-        if let Some(ref content) = choice.message.content {
-            let _ = chunk_tx.send(LlmChunk::Text(content.clone()));
+        if let Some(content) = choice.message.text() {
+            let _ = chunk_tx.send(LlmChunk::Text(content));
         }
         Ok(choice)
     }

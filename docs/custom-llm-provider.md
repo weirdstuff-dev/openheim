@@ -16,6 +16,8 @@ pub trait LlmClient: Send + Sync {
 
 `messages` is the full conversation history (user, assistant, tool-result turns). `tools` is the list of currently registered tools in JSON-schema format. Return the model's next `Choice` — either a text response or a set of tool calls.
 
+`send_streaming` is a second trait method with a default implementation that calls `send` and forwards the whole response as one `LlmChunk::Text`. Override it if your provider supports token-by-token streaming; otherwise the default is fine.
+
 ---
 
 ## Key types
@@ -23,11 +25,16 @@ pub trait LlmClient: Send + Sync {
 ```rust
 // Input
 pub struct Message {
-    pub role: Role,                        // User | Assistant | System | Tool
-    pub content: Option<String>,
-    pub tool_calls: Option<Vec<ToolCall>>, // set by the model when it calls tools
-    pub tool_call_id: Option<String>,      // set on Role::Tool messages
-    pub tool_name: Option<String>,
+    pub role: Role,              // User | Assistant | System | Tool
+    pub content: Vec<ContentBlock>,
+}
+
+pub enum ContentBlock {
+    Text { text: String },
+    Thinking { thinking: String, signature: Option<String> }, // extended-thinking output; signature must round-trip unmodified
+    Image { data: String, mime_type: String },                // data is base64-encoded
+    ToolUse { id: String, name: String, arguments: String },  // arguments is a JSON string
+    ToolResult { tool_call_id: String, tool_name: String, content: String, is_error: bool },
 }
 
 pub struct Tool {
@@ -44,11 +51,29 @@ pub struct FunctionDefinition {
 // Output
 pub struct Choice {
     pub message: Message,
-    pub finish_reason: Option<String>,    // "stop" | "tool_calls" | "length" | …
+    pub finish_reason: Option<FinishReason>,
+}
+
+pub enum FinishReason {
+    Stop,               // normal completion
+    ToolCalls,          // model wants to invoke tools
+    MaxTokens,          // truncated at the token limit
+    Other(String),      // provider-specific reason with no equivalent above
 }
 ```
 
-The agent loop treats `finish_reason == "stop"` as the signal to end the conversation. Any other finish reason with no tool calls also ends the loop (with a warning). If `message.tool_calls` is set, the loop executes them and continues.
+`content` is an ordered list of blocks rather than a single string — an assistant turn is commonly `[Thinking?, Text?, ToolUse*]`; a `Role::Tool` message holds exactly one `ToolResult` block; a `Role::User` message holds `Text`/`Image` blocks. `Message` has convenience accessors so you rarely need to pattern-match the enum directly:
+
+- `message.text() -> Option<String>` — concatenation of all `Text` blocks
+- `message.tool_calls() -> Vec<ToolUseBlock>` — all `ToolUse` blocks, each `{ id, name, arguments }`
+- `message.tool_result_block() -> Option<ToolResultBlock>` — the `ToolResult` block on a `Role::Tool` message, `{ tool_call_id, tool_name, content, is_error }`
+
+and constructors for building your own:
+
+- `Message::user(text)`, `Message::assistant(text)` — single-`Text`-block message
+- `Message::tool_result(tool_call_id, tool_name, content, is_error)` — single-`ToolResult`-block message
+
+The agent loop treats `finish_reason == Some(FinishReason::Stop)` as the signal to end the conversation. Any other finish reason with no tool calls also ends the loop (with a warning). If `message.tool_calls()` is non-empty, the loop executes them and continues.
 
 ---
 
@@ -60,7 +85,7 @@ The following implements a provider that speaks a hypothetical OpenAI-compatible
 
 ```rust
 use async_trait::async_trait;
-use openheim::core::models::{Choice, Message, Role, Tool, ToolCall, FunctionCall};
+use openheim::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool};
 use openheim::error::{Error, Result};
 use openheim::llm::LlmClient;
 use reqwest::Client;
@@ -87,7 +112,7 @@ impl MyCustomProvider {
 
 ### 2. Define request/response shapes
 
-Map openheim's types to what the remote API expects. Most chat-completion APIs follow the OpenAI schema closely, so if that's the case, use `OpenAiCompatibleClient` instead of writing this by hand.
+Map openheim's types to what the remote API expects. Most chat-completion APIs follow the OpenAI schema closely, so if that's the case, use `OpenAiCompatibleClient` instead of writing this by hand — see `core/llm/openai.rs` for the reference conversion (including how it flattens `ContentBlock`s into OpenAI's `content`/`tool_calls` wire shape).
 
 ```rust
 #[derive(Serialize)]
@@ -137,7 +162,10 @@ impl LlmClient for MyCustomProvider {
                     Role::System => "system".into(),
                     Role::Tool => "tool".into(),
                 },
-                content: m.content.clone(),
+                // This example only forwards text; a real provider that supports
+                // images or tool calls would walk `m.content` for those block
+                // types too (see `ContentBlock` above).
+                content: m.text(),
             })
             .collect();
 
@@ -165,12 +193,12 @@ impl LlmClient for MyCustomProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| Error::HttpError(e.to_string()))?;
+            .map_err(Error::ReqwestError)?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(Error::ApiError(format!("HTTP {status}: {text}")));
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::HttpError { status, body });
         }
 
         let api_resp: ApiResponse = response
@@ -184,15 +212,27 @@ impl LlmClient for MyCustomProvider {
             .next()
             .ok_or_else(|| Error::ApiError("empty choices array".into()))?;
 
+        let content = match choice.message.content {
+            Some(text) => vec![ContentBlock::Text { text }],
+            None => vec![],
+        };
+
+        // Map the raw wire value onto the provider-agnostic `FinishReason` —
+        // do this once, at the response-parsing boundary, per the pattern
+        // used by `core::llm::{anthropic,gemini,openai}`.
+        let finish_reason = choice.finish_reason.as_deref().map(|r| match r {
+            "stop" => FinishReason::Stop,
+            "tool_calls" => FinishReason::ToolCalls,
+            "length" => FinishReason::MaxTokens,
+            other => FinishReason::Other(other.to_string()),
+        });
+
         Ok(Choice {
             message: Message {
                 role: Role::Assistant,
-                content: choice.message.content,
-                tool_calls: None,
-                tool_call_id: None,
-                tool_name: None,
+                content,
             },
-            finish_reason: choice.finish_reason,
+            finish_reason,
         })
     }
 }
@@ -217,14 +257,17 @@ let llm: Arc<dyn LlmClient> = Arc::new(RetryClient::new(Arc::new(base_provider))
 
 ### 5. Use with the agent loop
 
-Pass the custom client directly to `run_agent_with_history`:
+Pass the custom client directly to `run_agent_with_history`. It also needs a `TurnContext` (cancellation token + permission gate) — use `permission::AllowAll` and a fresh `CancellationToken` for a one-shot, non-interactive run:
 
 ```rust
 use openheim::core::agent::run_agent_with_history;
 use openheim::core::models::Message;
-use openheim::config::{AgentConfig, load_config};
+use openheim::core::permission::{AllowAll, PermissionGate};
+use openheim::core::turn::TurnContext;
+use openheim::config::load_config;
 use openheim::tools::SystemToolExecutor;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> openheim::Result<()> {
@@ -243,14 +286,20 @@ async fn main() -> openheim::Result<()> {
     let app_config = load_config()?;
     let agent_config = app_config.resolve(None)?;
 
-    let mut messages = vec![Message::user("Hello!".into())];
+    let mut messages = vec![Message::user("Hello!")];
+
+    let turn = TurnContext {
+        cancel: &CancellationToken::new(),
+        permission_gate: &(Arc::new(AllowAll) as Arc<dyn PermissionGate>),
+    };
 
     let result = run_agent_with_history(
         llm,
         executor,
         &agent_config,
         &mut messages,
-        None,
+        None, // prompt_builder — Some(&builder) to prepend a system.md/skills identity
+        &turn,
     )
     .await?;
 
@@ -293,6 +342,8 @@ impl LlmClient for MockLlm {
     }
 }
 ```
+
+Build a tool-call response for a mock with `Message { role: Role::Assistant, content: vec![ContentBlock::ToolUse { id: "call_1".into(), name: "read_file".into(), arguments: "{}".into() }] }` — see `core::models::ContentBlock` for the other block types.
 
 ---
 

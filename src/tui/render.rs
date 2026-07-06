@@ -751,6 +751,88 @@ pub(crate) fn render_theme_picker(
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+pub(crate) fn render_permission_prompt(
+    f: &mut Frame,
+    area: Rect,
+    tool_name: &str,
+    arguments: &str,
+    selected: usize,
+    theme: Color,
+) {
+    use super::permission::PERMISSION_OPTIONS;
+
+    const MAX_ARG_LINES: usize = 6;
+
+    let popup_w = area.width.saturating_sub(8).clamp(40, 70);
+    let inner_w = (popup_w.saturating_sub(2)) as usize;
+
+    let mut arg_lines = word_wrap(arguments, inner_w.max(1));
+    let truncated = arg_lines.len() > MAX_ARG_LINES;
+    arg_lines.truncate(MAX_ARG_LINES);
+    if truncated {
+        arg_lines.push("…".to_string());
+    }
+
+    let body_h = 1 /* tool name */
+        + 1 /* blank */
+        + arg_lines.len() as u16
+        + 1 /* blank */
+        + PERMISSION_OPTIONS.len() as u16;
+    let popup_h = (body_h + 2).min(area.height.saturating_sub(4));
+    let popup_rect = centered_popup(area, popup_w, popup_h);
+
+    f.render_widget(Clear, popup_rect);
+
+    let warn = Style::default().fg(Color::Yellow);
+    let block = Block::default()
+        .title(
+            Line::from(Span::styled(
+                " permission requested ",
+                warn.add_modifier(Modifier::BOLD),
+            ))
+            .centered(),
+        )
+        .title_bottom(Line::from(Span::styled(" y/a/n/r  ↑/↓ enter ", warn)).centered())
+        .borders(Borders::ALL)
+        .border_style(warn);
+
+    let inner = block.inner(popup_rect);
+    f.render_widget(block, popup_rect);
+    if inner.height == 0 {
+        return;
+    }
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("tool  ", Style::default().fg(theme)),
+        Span::styled(
+            tool_name.to_string(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::raw(""));
+    for arg_line in arg_lines {
+        lines.push(Line::styled(arg_line, Style::default().fg(Color::DarkGray)));
+    }
+    lines.push(Line::raw(""));
+
+    let inner_w = inner.width as usize;
+    for (i, (label, _)) in PERMISSION_OPTIONS.iter().enumerate() {
+        if i == selected {
+            lines.push(highlight_row(&format!("  {label}"), inner_w));
+        } else {
+            lines.push(Line::styled(
+                format!("  {label}"),
+                Style::default().fg(Color::White),
+            ));
+        }
+    }
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 fn word_wrap(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return text.lines().map(String::from).collect();

@@ -163,6 +163,12 @@ pub struct ProviderConfig {
 }
 
 impl ProviderConfig {
+    /// Request timeout for this provider, falling back to the crate-wide
+    /// default when `timeout_secs` is not set.
+    pub fn resolve_timeout_secs(&self) -> u64 {
+        self.timeout_secs.unwrap_or_else(default_timeout_secs)
+    }
+
     /// Resolve the API key: try env_var first, then inline api_key, then empty string (for keyless providers like Ollama)
     pub fn resolve_api_key(&self) -> String {
         if let Some(env_var) = &self.env_var
@@ -189,7 +195,10 @@ pub struct AgentConfig {
     pub max_tokens: Option<u32>,
 }
 
-fn default_timeout_secs() -> u64 {
+/// The one source of truth for the request-timeout default; every path that
+/// needs a timeout when none is configured goes through this (or through
+/// [`ProviderConfig::resolve_timeout_secs`], which wraps it).
+pub(crate) fn default_timeout_secs() -> u64 {
     120
 }
 

@@ -16,14 +16,16 @@ use serde_json::json;
 
 use crate::config::{AgentConfig, AppConfig, client_for_config};
 use crate::core::agent::run_agent_with_history;
+use crate::core::client_io::NoClientIo;
 use crate::core::llm::LlmClient;
-use crate::core::models::{FunctionDefinition, Message, Tool};
+use crate::core::models::{FunctionDefinition, Message, StopReason, Tool};
+use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 use crate::rag::PromptBuilder;
 use crate::subagents::AgentProfile;
 
 use super::scoped_executor::ScopedExecutor;
-use super::{SandboxedExecutor, ToolExecutor, ToolHandler};
+use super::{SandboxedExecutor, ToolExecutor};
 
 /// Name under which [`DelegateTool`] is exposed to the orchestrating LLM.
 pub const DELEGATE_TOOL_NAME: &str = "delegate_task";
@@ -110,13 +112,15 @@ impl DelegateTool {
             scoped,
             self.work_dir.clone(),
             self.allow_shell,
+            Arc::new(NoClientIo),
         ))
     }
-}
 
-#[async_trait]
-impl ToolHandler for DelegateTool {
-    fn definition(&self) -> Tool {
+    /// Not a [`ToolHandler`](super::ToolHandler): unlike ordinary tools,
+    /// `delegate_task` needs the calling turn's [`TurnContext`] to spawn its
+    /// subagent run (see [`Self::execute`]), so it's dispatched directly by
+    /// [`WithDelegate`] rather than registered into a [`super::SystemToolExecutor`].
+    pub fn definition(&self) -> Tool {
         let names: Vec<String> = self.profiles.iter().map(|p| p.name.clone()).collect();
 
         let mut listing = String::new();
@@ -165,7 +169,13 @@ impl ToolHandler for DelegateTool {
         }
     }
 
-    async fn execute(&self, args: &str) -> Result<String> {
+    /// Runs the delegated subagent turn, reusing `turn`'s cancellation token
+    /// and permission gate rather than manufacturing fresh ones: a
+    /// `session/cancel` on the orchestrating turn must stop the subagent too,
+    /// and there is no separate trust policy for subagent tool calls — they
+    /// go through the same approval flow (e.g. `session/request_permission`)
+    /// as the orchestrator's own.
+    pub async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
         let v: serde_json::Value = serde_json::from_str(args)
             .map_err(|e| Error::ParseError(format!("invalid arguments: {e}")))?;
 
@@ -197,11 +207,20 @@ impl ToolHandler for DelegateTool {
         // Fresh, isolated history — the subagent only ever sees its own task.
         let mut messages = vec![Message::user(task.to_string())];
 
-        let result =
-            run_agent_with_history(llm, executor, &config, &mut messages, Some(&prompt_builder))
-                .await?;
+        let result = run_agent_with_history(
+            llm,
+            executor,
+            &config,
+            &mut messages,
+            Some(&prompt_builder),
+            &TurnContext {
+                cancel: turn.cancel,
+                permission_gate: turn.permission_gate,
+            },
+        )
+        .await?;
 
-        if result.iterations_used >= config.max_iterations {
+        if result.stop_reason == StopReason::MaxIterations {
             Ok(format!(
                 "{}\n\n[Note: subagent '{agent_name}' reached its iteration limit \
                  ({}) before finishing — this answer may be incomplete.]",
@@ -238,11 +257,11 @@ impl ToolExecutor for WithDelegate {
         tools
     }
 
-    async fn execute(&self, name: &str, args_json: &str) -> Result<String> {
+    async fn execute(&self, name: &str, args_json: &str, turn: &TurnContext<'_>) -> Result<String> {
         if name == DELEGATE_TOOL_NAME {
-            self.delegate.execute(args_json).await
+            self.delegate.execute(args_json, turn).await
         } else {
-            self.inner.execute(name, args_json).await
+            self.inner.execute(name, args_json, turn).await
         }
     }
 }
@@ -278,9 +297,12 @@ pub fn with_delegation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::models::{Choice, FunctionCall, Role, ToolCall};
+    use crate::core::models::{Choice, ContentBlock, FinishReason, Role};
+    use crate::core::permission::{AllowAll, PermissionDecision, PermissionGate};
+    use crate::tools::test_support::TurnHarness;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
+    use tokio_util::sync::CancellationToken;
 
     fn sample_app_config() -> AppConfig {
         AppConfig {
@@ -317,10 +339,10 @@ mod tests {
         }
     }
 
-    fn text_choice(content: &str, finish: &str) -> Choice {
+    fn text_choice(content: &str) -> Choice {
         Choice {
-            message: Message::assistant(content.into()),
-            finish_reason: Some(finish.into()),
+            message: Message::assistant(content),
+            finish_reason: Some(FinishReason::Stop),
         }
     }
 
@@ -328,20 +350,13 @@ mod tests {
         Choice {
             message: Message {
                 role: Role::Assistant,
-                content: None,
-                tool_calls: Some(vec![ToolCall {
+                content: vec![ContentBlock::ToolUse {
                     id: "call_1".into(),
-                    call_type: "function".into(),
-                    function: FunctionCall {
-                        name: "nonexistent".into(),
-                        arguments: "{}".into(),
-                    },
-                }]),
-                tool_call_id: None,
-                tool_name: None,
-                is_error: false,
+                    name: "nonexistent".into(),
+                    arguments: "{}".into(),
+                }],
             },
-            finish_reason: Some("tool_calls".into()),
+            finish_reason: Some(FinishReason::ToolCalls),
         }
     }
 
@@ -379,7 +394,12 @@ mod tests {
             vec![]
         }
 
-        async fn execute(&self, name: &str, _args_json: &str) -> Result<String> {
+        async fn execute(
+            &self,
+            name: &str,
+            _args_json: &str,
+            _turn: &TurnContext<'_>,
+        ) -> Result<String> {
             Err(Error::ToolExecutionError(format!("Unknown tool: {name}")))
         }
     }
@@ -419,9 +439,13 @@ mod tests {
     async fn execute_returns_message_for_unknown_agent() {
         let llm = Arc::new(MockLlm::new(vec![]));
         let tool = make_tool(vec![sample_profile("reviewer", "desc")], llm);
+        let harness = TurnHarness::new();
 
         let result = tool
-            .execute(r#"{"agent": "ghost", "task": "do something"}"#)
+            .execute(
+                r#"{"agent": "ghost", "task": "do something"}"#,
+                &harness.turn(),
+            )
             .await
             .unwrap();
 
@@ -431,11 +455,15 @@ mod tests {
 
     #[tokio::test]
     async fn execute_runs_subagent_in_isolated_context_and_returns_final_answer() {
-        let llm = Arc::new(MockLlm::new(vec![text_choice("subagent answer", "stop")]));
+        let llm = Arc::new(MockLlm::new(vec![text_choice("subagent answer")]));
         let tool = make_tool(vec![sample_profile("reviewer", "desc")], llm);
+        let harness = TurnHarness::new();
 
         let result = tool
-            .execute(r#"{"agent": "reviewer", "task": "look at this diff"}"#)
+            .execute(
+                r#"{"agent": "reviewer", "task": "look at this diff"}"#,
+                &harness.turn(),
+            )
             .await
             .unwrap();
 
@@ -448,13 +476,88 @@ mod tests {
         let mut profile = sample_profile("looper", "desc");
         profile.max_iterations = Some(2);
         let tool = make_tool(vec![profile], llm);
+        let harness = TurnHarness::new();
 
         let result = tool
-            .execute(r#"{"agent": "looper", "task": "loop forever"}"#)
+            .execute(
+                r#"{"agent": "looper", "task": "loop forever"}"#,
+                &harness.turn(),
+            )
             .await
             .unwrap();
 
         assert!(result.contains("reached its iteration limit (2)"));
+    }
+
+    #[tokio::test]
+    async fn execute_stops_immediately_when_parent_turn_already_cancelled() {
+        // Subagent must inherit the parent's cancel token, not a fresh one —
+        // otherwise a `session/cancel` on the orchestrator would never reach
+        // an in-flight subagent.
+        let llm = Arc::new(MockLlm::new(vec![text_choice("should not be seen")]));
+        let tool = make_tool(vec![sample_profile("reviewer", "desc")], llm);
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let permission_gate: Arc<dyn PermissionGate> = Arc::new(AllowAll);
+        let turn = TurnContext {
+            cancel: &cancel,
+            permission_gate: &permission_gate,
+        };
+
+        let result = tool
+            .execute(
+                r#"{"agent": "reviewer", "task": "look at this diff"}"#,
+                &turn,
+            )
+            .await
+            .unwrap();
+
+        // The loop bails before ever calling the LLM, so no final text is produced.
+        assert_eq!(result, "");
+    }
+
+    struct RejectPermissionGate;
+
+    #[async_trait]
+    impl PermissionGate for RejectPermissionGate {
+        async fn check(
+            &self,
+            _tool_call_id: &str,
+            _tool_name: &str,
+            _arguments: &str,
+        ) -> PermissionDecision {
+            PermissionDecision::RejectOnce
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_tool_calls_go_through_parent_permission_gate() {
+        // Subagent tool calls must be checked by the same gate as the
+        // orchestrator's own — there is no separate, more-trusting policy for
+        // subagents.
+        let llm = Arc::new(MockLlm::new(vec![
+            tool_call_choice(),
+            text_choice("denied"),
+        ]));
+        let tool = make_tool(vec![sample_profile("reviewer", "desc")], llm);
+
+        let cancel = CancellationToken::new();
+        let permission_gate: Arc<dyn PermissionGate> = Arc::new(RejectPermissionGate);
+        let turn = TurnContext {
+            cancel: &cancel,
+            permission_gate: &permission_gate,
+        };
+
+        let result = tool
+            .execute(
+                r#"{"agent": "reviewer", "task": "look at this diff"}"#,
+                &turn,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result, "denied");
     }
 
     #[test]
@@ -475,7 +578,7 @@ mod tests {
 
     #[tokio::test]
     async fn with_delegation_exposes_delegate_tool_alongside_base_tools() {
-        let llm = Arc::new(MockLlm::new(vec![text_choice("done", "stop")]));
+        let llm = Arc::new(MockLlm::new(vec![text_choice("done")]));
         let base: Arc<dyn ToolExecutor> = Arc::new(EmptyExecutor);
         let executor = with_delegation(
             base,
@@ -494,8 +597,13 @@ mod tests {
             .collect();
         assert!(names.contains(&DELEGATE_TOOL_NAME.to_string()));
 
+        let harness = TurnHarness::new();
         let result = executor
-            .execute(DELEGATE_TOOL_NAME, r#"{"agent": "reviewer", "task": "go"}"#)
+            .execute(
+                DELEGATE_TOOL_NAME,
+                r#"{"agent": "reviewer", "task": "go"}"#,
+                &harness.turn(),
+            )
             .await
             .unwrap();
         assert_eq!(result, "done");

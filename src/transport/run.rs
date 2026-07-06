@@ -8,9 +8,11 @@ use std::io::Write as _;
 use std::sync::Arc;
 
 use agent_client_protocol::{
-    ByteStreams, Client, SessionMessage,
+    Agent, ByteStreams, Client, ConnectionTo, SessionMessage, on_receive_request,
     schema::{
-        ContentBlock, InitializeRequest, ProtocolVersion, SessionNotification, SessionUpdate,
+        ContentBlock, InitializeRequest, PermissionOptionKind, ProtocolVersion,
+        RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+        SelectedPermissionOutcome, SessionNotification, SessionUpdate,
     },
     util::MatchDispatch,
 };
@@ -31,7 +33,7 @@ pub async fn run_headless(prompt: String, model: Option<String>) -> crate::error
     let app_config = load_config()?;
     let agent_config = app_config.resolve(model.as_deref())?;
     let rag = RagContext::new(app_config.default_skills.clone())?;
-    let state = Arc::new(AgentState::new(agent_config, app_config, rag).await?);
+    let state = Arc::new(AgentState::new(agent_config, app_config, rag, vec![]).await?);
 
     let (server_half, client_half) = tokio::io::duplex(65536);
     let (server_read, server_write) = tokio::io::split(server_half);
@@ -44,6 +46,29 @@ pub async fn run_headless(prompt: String, model: Option<String>) -> crate::error
 
     Client
         .builder()
+        // `openheim run` is a one-shot, non-interactive CLI invocation with no
+        // human to prompt — the user already consented to this run by invoking
+        // it. Without this handler, the agent's session/request_permission
+        // requests go unclaimed and every tool call is treated as denied.
+        // Auto-allow so a headless run behaves like it did before
+        // session/request_permission existed.
+        .on_receive_request(
+            async |req: RequestPermissionRequest, responder, _cx: ConnectionTo<Agent>| {
+                let option_id = req
+                    .options
+                    .iter()
+                    .find(|o| o.kind == PermissionOptionKind::AllowOnce)
+                    .map(|o| o.option_id.clone());
+                let outcome = match option_id {
+                    Some(id) => {
+                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id))
+                    }
+                    None => RequestPermissionOutcome::Cancelled,
+                };
+                responder.respond(RequestPermissionResponse::new(outcome))
+            },
+            on_receive_request!(),
+        )
         .connect_with(client_transport, async |cx| {
             cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                 .block_task()

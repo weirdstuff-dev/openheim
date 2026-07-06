@@ -69,7 +69,13 @@ pub use config::{AgentConfig, AppConfig, McpServerConfig, ModelsInfo};
 pub use core::{agent, llm, models};
 pub use error::{Error, Result};
 pub use llm::{AnthropicClient, GeminiClient, LlmClient, OpenAiClient, OpenAiCompatibleClient};
-pub use models::*;
+// `ContentBlock` is deliberately omitted here: `agent_client_protocol::schema::ContentBlock`
+// below is the one library users see at the crate root. Reach the core content-block
+// type via `openheim::core::models::ContentBlock` if needed.
+pub use models::{
+    AgentResult, AgentStep, Choice, FinishReason, FunctionDefinition, Message, Role, StopReason,
+    StreamEvent, Tool, ToolExecutionResult, ToolResultBlock, ToolUseBlock,
+};
 pub use rag::{Conversation, ConversationMeta, HistoryManager, PromptBuilder, RagContext};
 
 // Library facade
