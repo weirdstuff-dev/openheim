@@ -201,6 +201,23 @@ session
     .await?;
 ```
 
+### Send a prompt with images
+
+`prompt_with_images` sends a turn that mixes text with one or more images — useful with any vision-capable provider (Anthropic, OpenAI, Gemini). Each image is a `(base64_data, mime_type)` pair; the text block (when non-empty) leads, followed by the images. It streams the same `SessionUpdate` events as `prompt`, which itself delegates to `prompt_with_images` with no images.
+
+```rust
+let png = std::fs::read("screenshot.png")?;
+let data = base64::engine::general_purpose::STANDARD.encode(&png);
+
+session
+    .prompt_with_images(
+        "What's in this screenshot?",
+        vec![(data, "image/png".to_string())],
+        |update| { /* same SessionUpdate events as `prompt` */ },
+    )
+    .await?;
+```
+
 ### Multi-turn conversation
 
 Call `prompt` multiple times on the same handle. The agent accumulates history on disk automatically.

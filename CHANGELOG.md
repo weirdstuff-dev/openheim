@@ -1,5 +1,11 @@
 # Changelog
 
+## [unreleased]
+
+### Added
+
+- **`SessionHandle::prompt_with_images(text, images, on_update)`** — library embedders can now send mixed text+image turns, not just text. Each image is a `(base64_data, mime_type)` pair; the text block (when non-empty) leads, followed by the images. The core already modeled images end-to-end (`ContentBlock::Image`, forwarded to Anthropic/OpenAI/Gemini), and the ACP `session/prompt` wire already accepted them (see 0.5.0) — this closes the gap in the library facade, which previously only sent text. `prompt` now delegates to it with no images. See `docs/library.md` §"Send a prompt with images".
+
 ## [0.5.0] - 2026-07-06
 
 ### Security
