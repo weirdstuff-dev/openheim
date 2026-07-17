@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use agent_client_protocol::schema::{ContentBlock, SessionInfo, SessionUpdate};
+use agent_client_protocol::schema::{ContentBlock, ImageContent, SessionInfo, SessionUpdate};
 use uuid::Uuid;
 
 use crate::{
@@ -216,10 +216,32 @@ impl SessionHandle {
         text: &str,
         on_update: impl FnMut(SessionUpdate) + Send,
     ) -> Result<()> {
+        self.prompt_with_images(text, Vec::new(), on_update).await
+    }
+
+    /// Send a prompt that mixes text with one or more images.
+    ///
+    /// Each image is `(base64_data, mime_type)` — e.g. the raw base64 payload
+    /// of a `data:` URL and `"image/png"`. The text block (when non-empty)
+    /// leads, followed by the images, matching the order a user composes them.
+    /// Streams the same `SessionUpdate` events as [`prompt`].
+    pub async fn prompt_with_images(
+        &self,
+        text: &str,
+        images: Vec<(String, String)>,
+        on_update: impl FnMut(SessionUpdate) + Send,
+    ) -> Result<()> {
+        let mut blocks: Vec<ContentBlock> = Vec::new();
+        if !text.is_empty() {
+            blocks.push(ContentBlock::from(text));
+        }
+        for (data, mime_type) in images {
+            blocks.push(ContentBlock::Image(ImageContent::new(data, mime_type)));
+        }
         self.state
             .acp_prompt(
                 &self.id,
-                vec![ContentBlock::from(text)],
+                blocks,
                 self.permission_gate.clone(),
                 self.client_io.clone(),
                 on_update,

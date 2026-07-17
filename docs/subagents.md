@@ -11,6 +11,14 @@ This mirrors how [skills](skills.md) work — drop a Markdown file in a director
 it's picked up automatically — except a subagent profile defines a *whole separate
 agent* rather than a snippet appended to the current one.
 
+Subagents come in two flavours:
+
+- **Named profiles** — `.md` files in `~/.openheim/agents/`, written by you ahead
+  of time.
+- **Inline subagents** — defined by the orchestrating agent itself, on the fly, in
+  the `delegate_task` call (a `system_prompt` plus optional overrides). These are
+  ephemeral: they exist only for that one call and are never persisted.
+
 ---
 
 ## Where subagent profiles live
@@ -27,11 +35,10 @@ Profiles are `.md` files in `~/.openheim/agents/`:
 The filename (without extension) is the subagent's name. Names are case-sensitive
 and must not contain spaces.
 
-If the directory contains at least one valid profile, the orchestrating agent gains
-a `delegate_task` tool whose description lists every available subagent by name and
-description, so the LLM knows what's available and when to reach for it. If the
-directory is empty, `delegate_task` is not added — there's no overhead for agents
-that don't use subagents.
+The `delegate_task` tool's description lists every available profile by name and
+description, so the LLM knows what's available and when to reach for it. The tool
+is always present — even with no profiles configured, the orchestrator can still
+spin up inline subagents (see below).
 
 ---
 
@@ -68,10 +75,36 @@ skipped (with a warning logged) rather than preventing startup.
 
 ---
 
+## Inline subagents
+
+The orchestrating agent can also create a subagent on the fly, without any profile
+file, by calling `delegate_task` with a `system_prompt` instead of an `agent` name:
+
+```json
+{
+  "system_prompt": "You are a fact-checker. Respond with a verdict and a one-paragraph explanation.",
+  "tools": ["read_file"],
+  "model": "claude-haiku-4-5",
+  "max_iterations": 4,
+  "task": "Verify the claim: water boils at 100°C at sea level."
+}
+```
+
+`tools`, `model`, `provider`, and `max_iterations` are optional and mean exactly
+what the corresponding profile frontmatter fields mean. Exactly one of `agent` or
+`system_prompt` must be provided.
+
+Inline subagents are **ephemeral by design**: nothing is written to
+`~/.openheim/agents/` and nothing survives the call. They run through the same
+machinery as named profiles, so all the sandboxing, permission, and no-recursion
+guarantees below apply identically.
+
+---
+
 ## How a delegated task runs
 
-When the orchestrator calls `delegate_task` with an `agent` name and a `task`
-description, openheim:
+When the orchestrator calls `delegate_task` with a `task` and either an `agent`
+name or an inline `system_prompt`, openheim:
 
 1. Resolves the subagent's model/provider/iteration cap from the profile (falling
    back to the parent's configuration for anything left unset).
