@@ -1,5 +1,9 @@
 //! Subagent delegation: a tool that lets the orchestrating agent hand off a
-//! self-contained task to a named subagent profile (see [`crate::subagents`]).
+//! self-contained task to a subagent — either a named profile from
+//! `~/.openheim/agents/` (see [`crate::subagents`]) or an ephemeral one the
+//! orchestrator defines inline in the tool call itself (a `system_prompt` plus
+//! optional model/tools overrides). Inline subagents exist only for the duration
+//! of the call and are never persisted anywhere.
 //!
 //! Each call to `delegate_task` runs a fresh, isolated [`run_agent_with_history`]
 //! turn — its own message history, its own system prompt (the profile's persona,
@@ -121,17 +125,20 @@ impl DelegateTool {
     /// subagent run (see [`Self::execute`]), so it's dispatched directly by
     /// [`WithDelegate`] rather than registered into a [`super::SystemToolExecutor`].
     pub fn definition(&self) -> Tool {
-        let names: Vec<String> = self.profiles.iter().map(|p| p.name.clone()).collect();
-
-        let mut listing = String::new();
-        for profile in &self.profiles {
-            let description = if profile.description.is_empty() {
-                "(no description provided)"
-            } else {
-                profile.description.as_str()
-            };
-            listing.push_str(&format!("\n- `{}`: {description}", profile.name));
-        }
+        let listing = if self.profiles.is_empty() {
+            "\n(none configured — define one inline via `system_prompt`)".to_string()
+        } else {
+            let mut listing = String::new();
+            for profile in &self.profiles {
+                let description = if profile.description.is_empty() {
+                    "(no description provided)"
+                } else {
+                    profile.description.as_str()
+                };
+                listing.push_str(&format!("\n- `{}`: {description}", profile.name));
+            }
+            listing
+        };
 
         let description = format!(
             "Delegate a self-contained task to a specialized subagent that runs independently \
@@ -140,8 +147,23 @@ impl DelegateTool {
              standalone brief containing every detail it needs. Only its final answer is \
              returned to you — its intermediate steps are not visible.\n\
              \n\
+             Pick a pre-configured subagent by `agent` name, OR define an ephemeral one \
+             inline by providing `system_prompt` (with optional `tools`, `model`, \
+             `provider`, `max_iterations`). Inline subagents exist only for this one call \
+             and are not saved. Exactly one of `agent` or `system_prompt` is required.\n\
+             \n\
              Available subagents:{listing}"
         );
+
+        let mut agent_schema = json!({
+            "type": "string",
+            "description": "Name of a pre-configured subagent to delegate to. \
+                            Mutually exclusive with `system_prompt`."
+        });
+        if !self.profiles.is_empty() {
+            let names: Vec<String> = self.profiles.iter().map(|p| p.name.clone()).collect();
+            agent_schema["enum"] = json!(names);
+        }
 
         Tool {
             tool_type: "function".to_string(),
@@ -151,10 +173,32 @@ impl DelegateTool {
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "agent": {
+                        "agent": agent_schema,
+                        "system_prompt": {
                             "type": "string",
-                            "enum": names,
-                            "description": "Name of the subagent to delegate to."
+                            "description": "System prompt for an ephemeral inline subagent — \
+                                            its persona and instructions. Mutually exclusive \
+                                            with `agent`."
+                        },
+                        "tools": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Inline subagent only: restrict it to this set of \
+                                            tool names. Omitted = it inherits your full tool set."
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Inline subagent only: run it on this model instead \
+                                            of yours."
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": "Inline subagent only: provider for `model`. Only \
+                                            used when `model` is also set."
+                        },
+                        "max_iterations": {
+                            "type": "integer",
+                            "description": "Inline subagent only: cap its agent-loop iterations."
                         },
                         "task": {
                             "type": "string",
@@ -163,7 +207,7 @@ impl DelegateTool {
                                             see your conversation history."
                         }
                     },
-                    "required": ["agent", "task"]
+                    "required": ["task"]
                 }),
             },
         }
@@ -179,24 +223,43 @@ impl DelegateTool {
         let v: serde_json::Value = serde_json::from_str(args)
             .map_err(|e| Error::ParseError(format!("invalid arguments: {e}")))?;
 
-        let agent_name = v["agent"]
-            .as_str()
-            .ok_or_else(|| Error::ParseError("missing 'agent' argument".to_string()))?;
         let task = v["task"]
             .as_str()
             .ok_or_else(|| Error::ParseError("missing 'task' argument".to_string()))?;
 
-        let Some(profile) = self.find_profile(agent_name) else {
-            let available = self
-                .profiles
-                .iter()
-                .map(|p| p.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Ok(format!(
-                "Unknown subagent '{agent_name}'. Available subagents: {available}"
-            ));
+        let profile = match (v["agent"].as_str(), v["system_prompt"].as_str()) {
+            (Some(_), Some(_)) => {
+                return Ok(
+                    "Provide either 'agent' (a pre-configured subagent) or 'system_prompt' \
+                     (an inline one), not both."
+                        .to_string(),
+                );
+            }
+            (Some(agent_name), None) => match self.find_profile(agent_name) {
+                Some(profile) => profile.clone(),
+                None => {
+                    let available = self
+                        .profiles
+                        .iter()
+                        .map(|p| p.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Ok(format!(
+                        "Unknown subagent '{agent_name}'. Available subagents: {available}. \
+                         Alternatively, define an inline subagent via 'system_prompt'."
+                    ));
+                }
+            },
+            (None, Some(system_prompt)) => inline_profile(system_prompt, &v)?,
+            (None, None) => {
+                return Ok(
+                    "Missing subagent: provide 'agent' (a pre-configured subagent) or \
+                     'system_prompt' (an inline one)."
+                        .to_string(),
+                );
+            }
         };
+        let profile = &profile;
 
         let (config, llm) = self.resolve_runtime(profile)?;
         let executor = self.build_executor(profile);
@@ -222,14 +285,52 @@ impl DelegateTool {
 
         if result.stop_reason == StopReason::MaxIterations {
             Ok(format!(
-                "{}\n\n[Note: subagent '{agent_name}' reached its iteration limit \
+                "{}\n\n[Note: subagent '{}' reached its iteration limit \
                  ({}) before finishing — this answer may be incomplete.]",
-                result.final_response, config.max_iterations
+                result.final_response, profile.name, config.max_iterations
             ))
         } else {
             Ok(result.final_response)
         }
     }
+}
+
+/// Builds an ephemeral [`AgentProfile`] from `delegate_task`'s inline arguments.
+///
+/// The profile lives only for this one call — it is never written to
+/// `~/.openheim/agents/` or registered anywhere. Because it flows through the
+/// same [`DelegateTool::resolve_runtime`]/[`DelegateTool::build_executor`] path
+/// as named profiles, inline subagents get the identical sandbox, permission
+/// gate, and no-recursion guarantees.
+fn inline_profile(system_prompt: &str, v: &serde_json::Value) -> Result<AgentProfile> {
+    let tools = match &v["tools"] {
+        serde_json::Value::Null => None,
+        serde_json::Value::Array(items) => {
+            let mut names = Vec::with_capacity(items.len());
+            for item in items {
+                let name = item.as_str().ok_or_else(|| {
+                    Error::ParseError("'tools' must be an array of strings".to_string())
+                })?;
+                names.push(name.to_string());
+            }
+            Some(names)
+        }
+        _ => {
+            return Err(Error::ParseError(
+                "'tools' must be an array of strings".to_string(),
+            ));
+        }
+    };
+
+    Ok(AgentProfile {
+        name: "inline".to_string(),
+        description: String::new(),
+        model: v["model"].as_str().map(str::to_string),
+        provider: v["provider"].as_str().map(str::to_string),
+        tools,
+        max_iterations: v["max_iterations"].as_u64().map(|n| n as usize),
+        system_prompt: system_prompt.to_string(),
+    })
 }
 
 /// Composes a base [`ToolExecutor`] with [`DelegateTool`], surfacing
@@ -266,9 +367,9 @@ impl ToolExecutor for WithDelegate {
     }
 }
 
-/// Wraps `executor` with [`DelegateTool`] support when `profiles` is non-empty;
-/// otherwise returns `executor` unchanged so agents with no configured subagents
-/// pay no overhead and never see a useless `delegate_task` tool.
+/// Wraps `executor` with [`DelegateTool`] support. `delegate_task` is always
+/// exposed — even with no configured profiles the orchestrator can define an
+/// ephemeral subagent inline via `system_prompt`.
 #[allow(clippy::too_many_arguments)]
 pub fn with_delegation(
     executor: Arc<dyn ToolExecutor>,
@@ -279,9 +380,6 @@ pub fn with_delegation(
     app_config: AppConfig,
     base_config: AgentConfig,
 ) -> Arc<dyn ToolExecutor> {
-    if profiles.is_empty() {
-        return executor;
-    }
     let delegate = Arc::new(DelegateTool::new(
         executor.clone(),
         work_dir,
@@ -561,11 +659,13 @@ mod tests {
     }
 
     #[test]
-    fn with_delegation_returns_executor_unchanged_when_no_profiles() {
+    fn with_delegation_exposes_delegate_tool_even_without_profiles() {
+        // Inline subagents make delegate_task useful with zero configured
+        // profiles, so the wrapper is unconditional.
         let llm = Arc::new(MockLlm::new(vec![]));
         let base: Arc<dyn ToolExecutor> = Arc::new(EmptyExecutor);
-        let result = with_delegation(
-            base.clone(),
+        let executor = with_delegation(
+            base,
             PathBuf::from("/tmp"),
             false,
             vec![],
@@ -573,7 +673,130 @@ mod tests {
             sample_app_config(),
             sample_agent_config(),
         );
-        assert!(Arc::ptr_eq(&base, &result));
+
+        let names: Vec<_> = executor
+            .list_tools()
+            .into_iter()
+            .map(|t| t.function.name)
+            .collect();
+        assert!(names.contains(&DELEGATE_TOOL_NAME.to_string()));
+    }
+
+    #[test]
+    fn definition_omits_enum_when_no_profiles() {
+        // An empty `enum` would make `agent` unusable on strict providers; with
+        // no profiles the constraint is dropped entirely.
+        let llm = Arc::new(MockLlm::new(vec![]));
+        let tool = make_tool(vec![], llm);
+        let def = tool.definition();
+
+        assert!(def.function.parameters["properties"]["agent"]["enum"].is_null());
+        assert!(def.function.description.contains("none configured"));
+        let required = def.function.parameters["required"].as_array().unwrap();
+        assert_eq!(required, &vec![serde_json::Value::String("task".into())]);
+    }
+
+    #[tokio::test]
+    async fn execute_runs_inline_subagent_from_system_prompt() {
+        let llm = Arc::new(MockLlm::new(vec![text_choice("inline answer")]));
+        let tool = make_tool(vec![], llm);
+        let harness = TurnHarness::new();
+
+        let result = tool
+            .execute(
+                r#"{"system_prompt": "You are a poet.", "task": "write a haiku"}"#,
+                &harness.turn(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result, "inline answer");
+    }
+
+    #[tokio::test]
+    async fn execute_notes_when_inline_subagent_hits_iteration_limit() {
+        let llm = Arc::new(MockLlm::new(vec![tool_call_choice(), tool_call_choice()]));
+        let tool = make_tool(vec![], llm);
+        let harness = TurnHarness::new();
+
+        let result = tool
+            .execute(
+                r#"{"system_prompt": "Loop.", "max_iterations": 2, "task": "go"}"#,
+                &harness.turn(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.contains("subagent 'inline' reached its iteration limit (2)"));
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_both_agent_and_system_prompt() {
+        let llm = Arc::new(MockLlm::new(vec![]));
+        let tool = make_tool(vec![sample_profile("reviewer", "desc")], llm);
+        let harness = TurnHarness::new();
+
+        let result = tool
+            .execute(
+                r#"{"agent": "reviewer", "system_prompt": "You are X.", "task": "go"}"#,
+                &harness.turn(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.contains("not both"));
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_neither_agent_nor_system_prompt() {
+        let llm = Arc::new(MockLlm::new(vec![]));
+        let tool = make_tool(vec![], llm);
+        let harness = TurnHarness::new();
+
+        let result = tool
+            .execute(r#"{"task": "go"}"#, &harness.turn())
+            .await
+            .unwrap();
+
+        assert!(result.contains("Missing subagent"));
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_non_string_inline_tools() {
+        let llm = Arc::new(MockLlm::new(vec![]));
+        let tool = make_tool(vec![], llm);
+        let harness = TurnHarness::new();
+
+        let err = tool
+            .execute(
+                r#"{"system_prompt": "X.", "tools": [1, 2], "task": "go"}"#,
+                &harness.turn(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("array of strings"));
+    }
+
+    #[test]
+    fn inline_profile_maps_all_optional_fields() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{
+                "tools": ["read_file"],
+                "model": "claude-haiku-4-5",
+                "provider": "anthropic",
+                "max_iterations": 3
+            }"#,
+        )
+        .unwrap();
+
+        let profile = inline_profile("You are X.", &v).unwrap();
+        assert_eq!(profile.name, "inline");
+        assert_eq!(profile.system_prompt, "You are X.");
+        assert_eq!(profile.tools, Some(vec!["read_file".to_string()]));
+        assert_eq!(profile.model.as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(profile.provider.as_deref(), Some("anthropic"));
+        assert_eq!(profile.max_iterations, Some(3));
     }
 
     #[tokio::test]
