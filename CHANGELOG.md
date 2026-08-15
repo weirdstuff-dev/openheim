@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+
+- **Fixed a sandbox escape in work-directory path validation (audit C1)** — `validate_path` resolved `..` segments through the kernel while walking ancestors to find something to canonicalize, but a path whose first component doesn't exist yet (e.g. `x/../../../outside/pwned.txt`) returns `ENOENT` for *every* ancestor containing `x/..`, so the walk validated only `work_dir` itself and handed the raw, un-normalized path back to the caller. The kernel then resolved the `..`s at syscall time — after `write_file`'s `create_dir_all` had created the missing `x/` prefix — letting a tool call (or a remote WS client via the fs sidecar's `mkdir`/`write`) create files and directories **outside `work_dir`**. Paths are now normalized lexically (`.` stripped, `..` resolved against the preceding component) *before* any filesystem probing, and the normalized path is what gets validated and returned, so no `..` component ever survives to syscall time. One deliberate behavior change: `link/../foo`, where `link` is a symlink, now resolves lexically to `work_dir/foo` instead of following the symlink — strictly safer for containment, since the returned path is always the one the caller opens.
+
 ## [0.6.0] - 2026-07-17
 
 ### Added
