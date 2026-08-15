@@ -7,7 +7,7 @@
 //!
 //! | Name | Description |
 //! |------|-------------|
-//! | `execute_command` | Run a shell command (`sh -c` on Unix, `cmd /C` on Windows) |
+//! | `execute_command` | Run a shell command (`sh -c` on Unix, `cmd /C` on Windows), with a hard timeout, cancellation, and output caps |
 //! | `read_file` | Read a file from disk |
 //! | `write_file` | Write a file to disk, creating parent directories as needed |
 //!
