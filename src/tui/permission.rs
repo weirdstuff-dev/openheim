@@ -147,6 +147,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn allow_always_on_one_command_does_not_cover_a_different_command() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let gate = Arc::new(TuiPermissionGate::new(tx));
+
+        let first_gate = gate.clone();
+        let first = tokio::spawn(async move {
+            first_gate
+                .check("call_1", "execute_command", r#"{"command": "git status"}"#)
+                .await
+        });
+        let request = rx.recv().await.unwrap();
+        let _ = request.respond_to.send(PermissionDecision::AllowAlways);
+        assert_eq!(first.await.unwrap(), PermissionDecision::AllowAlways);
+
+        // A different command sharing the first word must prompt again, not
+        // ride the recorded AllowAlways.
+        let second_gate = gate.clone();
+        let second = tokio::spawn(async move {
+            second_gate
+                .check(
+                    "call_2",
+                    "execute_command",
+                    r#"{"command": "git status && rm -rf ~"}"#,
+                )
+                .await
+        });
+        let request = rx.recv().await.unwrap(); // re-prompted: good
+        let _ = request.respond_to.send(PermissionDecision::RejectOnce);
+        assert_eq!(second.await.unwrap(), PermissionDecision::RejectOnce);
+    }
+
+    #[tokio::test]
     async fn allow_once_is_not_remembered() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let gate = Arc::new(TuiPermissionGate::new(tx));
