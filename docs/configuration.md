@@ -52,7 +52,7 @@ Each key under `[providers]` defines a provider. The key name is used as the pro
 | `models` | string[] | Yes | List of available models (used for validation and the `/api/models` endpoint) |
 | `env_var` | string | No | Name of the environment variable holding the API key (recommended) |
 | `api_key` | string | No | Inline API key — `env_var` takes precedence if both are set |
-| `timeout_secs` | integer | `120` | Request timeout in seconds |
+| `timeout_secs` | integer | `120` | Connect and idle-read timeout in seconds — bounds the connect phase and the maximum gap between body reads, not total request duration, so long streaming responses are not cut off mid-stream |
 | `max_tokens` | integer | No | Maximum output tokens per response (provider default if omitted) |
 
 Key resolution order: `env_var` (if set and non-empty) → `api_key` → empty string (for keyless providers like Ollama).

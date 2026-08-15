@@ -13,26 +13,32 @@
 
 /// Accumulates raw byte chunks and yields complete SSE `data:` payloads.
 pub(crate) struct SseDecoder {
-    buf: String,
+    buf: Vec<u8>,
 }
 
 impl SseDecoder {
     pub(crate) fn new() -> Self {
-        Self { buf: String::new() }
+        Self { buf: Vec::new() }
     }
 
     /// Appends a raw byte chunk (as received from the HTTP body) to the buffer.
+    ///
+    /// Bytes are buffered undecoded: a multi-byte UTF-8 sequence can straddle
+    /// a chunk boundary, and decoding each chunk in isolation would corrupt it
+    /// into U+FFFD replacement characters. Decoding happens per complete line
+    /// in [`SseDecoder::next_payload`].
     pub(crate) fn feed(&mut self, bytes: &[u8]) {
-        self.buf.push_str(&String::from_utf8_lossy(bytes));
+        self.buf.extend_from_slice(bytes);
     }
 
     /// Pops the next complete `data:` payload, or `None` if no full line is
     /// buffered yet. Blank lines, comment lines (`:` prefix), and non-`data`
     /// fields (`event:`, `id:`, …) are skipped. The returned payload is trimmed.
     pub(crate) fn next_payload(&mut self) -> Option<String> {
-        while let Some(nl) = self.buf.find('\n') {
-            let line = self.buf[..nl].trim_end_matches('\r').to_string();
-            self.buf.drain(..=nl);
+        while let Some(nl) = self.buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = self.buf.drain(..=nl).collect();
+            let line = String::from_utf8_lossy(&line_bytes);
+            let line = line.trim_end_matches('\r');
 
             if line.is_empty() || line.starts_with(':') {
                 continue;
@@ -78,5 +84,28 @@ mod tests {
         dec.feed(b"data:no-space\r\ndata: [DONE]\r\n");
         assert_eq!(dec.next_payload().as_deref(), Some("no-space"));
         assert_eq!(dec.next_payload().as_deref(), Some("[DONE]"));
+    }
+
+    #[test]
+    fn preserves_multibyte_utf8_split_across_chunk_boundary() {
+        // "日" (U+65E5) is 0xE6 0x97 0xA5 and "語" (U+8A9E) is 0xE8 0xAA 0x9E;
+        // the chunk split lands inside the first sequence. Per-chunk lossy
+        // decoding would turn each orphaned fragment into U+FFFD.
+        let mut dec = SseDecoder::new();
+        dec.feed(b"data: a\xE6\x97");
+        assert_eq!(dec.next_payload(), None);
+        dec.feed(b"\xA5\xE8\xAA\x9E\n");
+        assert_eq!(dec.next_payload().as_deref(), Some("a日語"));
+    }
+
+    #[test]
+    fn preserves_4byte_utf8_split_across_chunks() {
+        // "🚀" (U+1F680) is 0xF0 0x9F 0x9A 0x80; split after the second byte,
+        // with the trailing newline arriving in yet another chunk.
+        let mut dec = SseDecoder::new();
+        dec.feed(b"data: \xF0\x9F");
+        dec.feed(b"\x9A\x80");
+        dec.feed(b"\n");
+        assert_eq!(dec.next_payload().as_deref(), Some("🚀"));
     }
 }
