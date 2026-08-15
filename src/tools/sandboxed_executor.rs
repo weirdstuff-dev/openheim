@@ -339,4 +339,44 @@ mod tests {
             .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
     }
+
+    /// End-to-end C1 repro: `x` does not exist, so pre-normalization the
+    /// ancestor walk only saw the work dir and handed the raw `..`-bearing
+    /// path to `write_file`, whose `create_dir_all` then built the missing
+    /// prefix and let the kernel resolve the `..`s outside the sandbox.
+    #[tokio::test]
+    async fn write_file_cannot_escape_through_nonexistent_prefix() {
+        let work = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let escape_target = outside.path().join("pwned.txt");
+        let requested = work
+            .path()
+            .join("x")
+            .join("..")
+            .join("..")
+            .join(outside.path().file_name().unwrap())
+            .join("pwned.txt");
+
+        let executor = SandboxedExecutor::new(
+            Arc::new(EmptyExecutor),
+            work.path().to_path_buf(),
+            false,
+            Arc::new(NoClientIo),
+        );
+        let args = serde_json::json!({
+            "path": requested.to_str().unwrap(),
+            "content": "escaped",
+        })
+        .to_string();
+        let harness = TurnHarness::new();
+        let err = executor
+            .execute("write_file", &args, &harness.turn())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("outside the work directory"),
+            "unexpected error: {err}"
+        );
+        assert!(!escape_target.exists());
+    }
 }
