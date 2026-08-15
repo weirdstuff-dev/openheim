@@ -158,8 +158,16 @@ pub(crate) async fn run_command(command: &str, opts: &RunCommandOptions<'_>) -> 
         ))),
         Termination::TimedOut => {
             kill_and_reap(&mut child).await;
-            let stdout_s = render_stream(&out_buf, out_truncated, opts.max_output_bytes);
-            let stderr_s = render_stream(&err_buf, err_truncated, opts.max_output_bytes);
+            // The collect future can be dropped mid-read when the timeout
+            // fires, so the `*_truncated` flags (assigned only after both
+            // reads finish) may be stale `false` even though a buffer already
+            // reached the cap. Derive the marker state from the buffers:
+            // `read_capped` never appends past the cap, so `len() == cap`
+            // means the stream was clipped.
+            let out_capped = out_buf.len() >= opts.max_output_bytes;
+            let err_capped = err_buf.len() >= opts.max_output_bytes;
+            let stdout_s = render_stream(&out_buf, out_capped, opts.max_output_bytes);
+            let stderr_s = render_stream(&err_buf, err_capped, opts.max_output_bytes);
             Err(Error::ToolExecutionError(format!(
                 "Command timed out after {:?} and was killed.\nStdout: {}\nStderr: {}",
                 opts.timeout, stdout_s, stderr_s
@@ -386,6 +394,29 @@ mod tests {
             output.matches('x').count(),
             100,
             "unexpected output: {output}"
+        );
+    }
+
+    #[cfg(target_family = "unix")]
+    #[tokio::test]
+    async fn timeout_marks_capped_stream_when_reads_were_interrupted() {
+        let opts = RunCommandOptions {
+            timeout: Duration::from_millis(300),
+            max_output_bytes: 100,
+            ..Default::default()
+        };
+        // stdout blows past the cap immediately; the trailing sleep holds
+        // both pipe ends open with stderr silent, so the read join is still
+        // pending when the timeout fires — the cap state must come from the
+        // buffer, not the flags that never got assigned.
+        let err = run_command("head -c 200 /dev/zero | tr '\\0' x; sleep 30", &opts)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("timed out"), "unexpected error: {err}");
+        assert!(
+            err.contains("truncated"),
+            "capped stream missing its truncation marker: {err}"
         );
     }
 
