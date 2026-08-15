@@ -22,7 +22,8 @@ pub struct SessionState {
     /// Remembered `AllowAlways`/`RejectAlways` decisions from prior
     /// `session/request_permission` prompts, so the same tool call isn't
     /// re-prompted for the rest of the session. Keyed by tool name for most
-    /// tools; see [`crate::acp::approval_key`] for `execute_command`'s
+    /// tools; see
+    /// [`crate::core::permission::approval_key`] for `execute_command`'s
     /// exact-command-string scoping.
     pub approved_tools: HashMap<String, PermissionDecision>,
     /// Set via `session/set_mode`. Controls which tools are offered to the LLM.
