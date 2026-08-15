@@ -35,7 +35,7 @@ allow_shell = false
 
 ### Security notes
 
-**`work_dir`** is enforced at the application layer for `read_file` and `write_file`, and for the `/ws` filesystem sidecar (all `fs`-channel operations are validated against the same boundary). Symlinks are followed and canonicalized so they cannot be used to escape the boundary. Shell commands (`execute_command`) are launched with `work_dir` as their working directory so relative paths resolve correctly, but absolute paths inside a shell command are not blocked — OS-level sandboxing (chroot, containers) is required for full shell isolation.
+**`work_dir`** is enforced at the application layer for `read_file` and `write_file`, and for the `/ws` filesystem sidecar (all `fs`-channel operations are validated against the same boundary). Symlinks are followed and canonicalized so they cannot be used to escape the boundary. Shell commands (`execute_command`) are launched with `work_dir` as their working directory so relative paths resolve correctly, but absolute paths inside a shell command are not blocked — OS-level sandboxing (chroot, containers) is required for full shell isolation. Shell commands are additionally bounded: each runs in its own process group, is killed after a 120-second timeout (or on turn cancellation), and has stdout/stderr capped at 64 KiB per stream with a truncation marker.
 
 **`allow_shell`** removes `execute_command` from the tool list sent to the LLM. When `false`, the LLM never sees the tool and cannot request it.
 

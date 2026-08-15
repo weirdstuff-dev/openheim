@@ -9,7 +9,7 @@ use crate::{
     error::{Error, Result},
 };
 
-use super::execute_command::run_command;
+use super::execute_command::{RunCommandOptions, run_command};
 use super::read_file::read_file;
 use super::write_file::write_file;
 use super::{ToolExecutor, sandbox::validate_path};
@@ -27,9 +27,11 @@ use super::{ToolExecutor, sandbox::validate_path};
 ///   turn.
 /// - `execute_command`: when `allow_shell` is `false` the call is rejected
 ///   immediately. When `true` the command runs with its working directory set
-///   to `work_dir` so relative paths behave correctly. Note that absolute
-///   paths inside the shell command are not blocked at the application layer
-///   — OS-level sandboxing is required for that.
+///   to `work_dir` so relative paths behave correctly, and is bounded by the
+///   turn's cancel token, a hard timeout, and per-stream output caps (see
+///   [`run_command`]). Note that absolute paths inside the shell command are
+///   not blocked at the application layer — OS-level sandboxing is required
+///   for that.
 ///
 /// All other tools are forwarded to the inner executor unchanged.
 pub struct SandboxedExecutor {
@@ -123,7 +125,15 @@ impl ToolExecutor for SandboxedExecutor {
                     .as_str()
                     .ok_or_else(|| Error::ParseError("missing 'command' argument".to_string()))?;
 
-                run_command(command, Some(&self.work_dir)).await
+                run_command(
+                    command,
+                    &RunCommandOptions {
+                        cwd: Some(&self.work_dir),
+                        cancel: Some(turn.cancel),
+                        ..Default::default()
+                    },
+                )
+                .await
             }
 
             _ => self.inner.execute(name, args_json, turn).await,
@@ -338,6 +348,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+    }
+
+    #[cfg(target_family = "unix")]
+    #[tokio::test]
+    async fn execute_command_cancel_aborts_running_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let executor = SandboxedExecutor::new(
+            Arc::new(EmptyExecutor),
+            dir.path().to_path_buf(),
+            true,
+            Arc::new(NoClientIo),
+        );
+        let args = serde_json::json!({"command": "sleep 30"}).to_string();
+        let harness = TurnHarness::new();
+        let cancel = harness.cancel_handle();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            cancel.cancel();
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            executor.execute("execute_command", &args, &harness.turn()),
+        )
+        .await
+        .expect("turn cancel should abort the running command");
+        assert!(result.is_err());
     }
 
     /// End-to-end C1 repro: `x` does not exist, so pre-normalization the

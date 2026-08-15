@@ -143,7 +143,7 @@ Returns all registered tool definitions (built-in + MCP). Each tool follows the 
     "type": "function",
     "function": {
       "name": "execute_command",
-      "description": "Execute a shell command (e.g., ls, pwd, echo). Use this for listing directories and running system commands.",
+      "description": "Execute a shell command (e.g., ls, pwd, echo). Use this for listing directories and running system commands. Commands are killed after 120 seconds and output is truncated at 64 KiB per stream.",
       "parameters": {
         "type": "object",
         "properties": {
