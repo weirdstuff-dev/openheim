@@ -38,7 +38,7 @@ Skills are stored as `.md` files in `~/.openheim/skills/`:
 └── concise.md
 ```
 
-The filename (without extension) is the skill name. Names are case-sensitive and must not contain spaces — use hyphens or underscores instead.
+The filename (without extension) is the skill name. Names are case-sensitive and must not contain spaces — use hyphens or underscores instead. Names must also be a single path component: `/`, `\`, and `..` are rejected, and a skill file must resolve inside the skills directory (a symlink pointing elsewhere is refused). Skill names come from config, the CLI, and remote ACP clients, so they are validated as untrusted input.
 
 ---
 
