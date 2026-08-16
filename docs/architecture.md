@@ -13,7 +13,7 @@ Openheim can be used in two ways:
 | **Library** | `OpenheimClient` in `src/client.rs` | Embedded in a Rust application |
 | **Server** | `src/main.rs` subcommands | Standalone process driven by a client over a transport |
 
-Both modes converge on the same `acp::serve` loop — the library mode runs it in-process over an in-memory pipe; server mode exposes it over a real transport.
+Both modes share the same agent logic. Transports speak the ACP wire protocol to `acp::serve`; the library facade calls the same `AgentState` request handlers directly, and the headless `run` mode connects an ACP client to `acp::serve` over an in-memory duplex pipe.
 
 ---
 
@@ -76,6 +76,7 @@ src/
 └── tui/                Interactive terminal UI (ratatui)
     ├── mod.rs          Entry point — event loop, AgentUpdate channel
     ├── app.rs          App state, command dispatch (:models, :theme, …)
+    ├── permission.rs   TUI permission prompt (Allow once/always, Reject)
     ├── render.rs       Frame rendering, theme colors, chat item layout
     └── types.rs        ChatItem, AgentUpdate, Status, Screen enums
 ```
@@ -190,14 +191,12 @@ All persistence lives under `~/.openheim/` by default.
 
 ## ACP and the library facade
 
-The `OpenheimClient` facade (`src/client.rs`) wraps the ACP protocol behind a simple Rust API. Internally it:
+The `OpenheimClient` facade (`src/client.rs`) wraps the same `AgentState` the transports use, behind a simple Rust API. Internally it:
 
 1. Builds an `AgentState` (LLM client, tool executor, RAG context).
-2. Creates an in-process duplex pipe (`tokio::io::duplex`).
-3. Runs `acp::serve` on one end as a background task.
-4. Drives an ACP `Client` on the other end in response to `session.prompt(…)` calls.
+2. Calls its request handlers (`acp_prompt`, `acp_load_session`, `acp_cancel`, …) directly — no wire protocol, no background task. Streaming updates reach your callback through the same `SessionUpdate` events a transport would forward.
 
-This means the library API and the server transports share the exact same agent logic — there is no separate "library mode" code path.
+The duplex-pipe + ACP-client wiring does exist — in `src/transport/run.rs`, where the headless `openheim run` mode drives `acp::serve` over `tokio::io::duplex`. Either way there is no separate "library mode" agent logic: the facade and every transport share the exact same session and agent-loop code path.
 
 ---
 
