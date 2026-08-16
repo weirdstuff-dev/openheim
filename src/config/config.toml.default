@@ -11,12 +11,16 @@ max_iterations = 10
 # Add skill names matching files in ~/.openheim/skills/{name}.md
 # default_skills = ["rules"]
 
+# TUI accent color (defaults to gray): white, gray, blue, cyan, magenta, green, yellow, red, pink.
+# Can also be changed at runtime with :theme (persisted back to this file).
+# theme_color = "gray"
+
 # Root directory the agent is allowed to read/write.
 # When unset the directory from which openheim is invoked is used.
 # work_dir = "/home/user/projects/myproject"
 
 # Whether to allow the LLM to execute shell commands via the execute_command tool.
-# Set to false to remove the tool from the LLM's view entirely.
+# Disabled by default; set to true to expose the tool to the LLM.
 # allow_shell = true
 
 # --- Provider Configuration ---
@@ -34,7 +38,7 @@ default_model = "gpt-4o"
 models = ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
 env_var = "OPENAI_API_KEY"
 # api_key = "sk-..."  # Not recommended - use environment variable instead
-# timeout_secs = 120  # Request timeout in seconds (default: 120)
+# timeout_secs = 120  # Connect and idle-read timeout in seconds (default: 120)
 # max_tokens = 4096   # Maximum output tokens for LLM responses
 
 # Anthropic Claude

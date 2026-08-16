@@ -15,7 +15,7 @@ openheim init
 | `default_provider` | string | — | Provider to use when no `--model` override is given (must match a key under `[providers]`) |
 | `max_iterations` | integer | `10` | Maximum number of agent loop iterations per prompt before stopping |
 | `default_skills` | string[] | `[]` | Skills loaded automatically in every new session. Merged with per-session `--skills`; defaults appear first, duplicates removed. |
-| `theme_color` | string | `"white"` | TUI accent color. Valid values: `white`, `gray`, `blue`, `cyan`, `magenta`, `green`, `yellow`, `red`, `pink`. Can also be changed at runtime with `:theme` |
+| `theme_color` | string | `"gray"` | TUI accent color. Valid values: `white`, `gray`, `blue`, `cyan`, `magenta`, `green`, `yellow`, `red`, `pink`. Can also be changed at runtime with `:theme` |
 | `work_dir` | path | cwd at invocation | Root directory the agent is allowed to read and write. The agent cannot access files outside this tree. When unset, defaults to the directory from which openheim was invoked. |
 | `allow_shell` | boolean | `false` | Whether to expose the `execute_command` shell tool to the LLM. Disabled by default — set to `true` to expose the tool. When `false`, the LLM never sees it in its tool list. |
 
