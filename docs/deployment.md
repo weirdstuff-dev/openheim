@@ -55,7 +55,7 @@ openheim serve --host 127.0.0.1 --port 8080
 
 The server exposes:
 - `ws://{host}:{port}/ws` — WebSocket endpoint (ACP agent + filesystem sidecar)
-- `http://{host}:{port}/api/*` — REST endpoints (config, models, skills, tools, sessions)
+- `http://{host}:{port}/api/*` — REST endpoints (config, models, skills, tools, mcp-servers, sessions)
 
 The filesystem sidecar is sandboxed to the configured `work_dir` (see [configuration.md](./configuration.md)) — connected clients cannot read or write outside it.
 
@@ -98,44 +98,72 @@ RUST_LOG=openheim=debug openheim serve   # debug only openheim internals
 
 ## Docker
 
-### Dockerfile
+The repo ships a multi-stage `Dockerfile` and a `docker-compose.yml`. The image runs as a non-root `openheim` user, and `docker-entrypoint.sh` generates a default config (`openheim init`) on first start if no config volume is mounted.
 
-```dockerfile
-FROM rust:1.85-slim AS builder
-WORKDIR /app
-COPY . .
-RUN cargo build --release --bin openheim
+```bash
+# Build and start with docker compose
+docker compose up --build
 
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/openheim /usr/local/bin/openheim
-
-# Config and history live here — mount a volume in production
-RUN mkdir -p /root/.openheim
-COPY config.toml /root/.openheim/config.toml
-
-EXPOSE 1217
-CMD ["openheim", "serve", "--host", "0.0.0.0", "--port", "1217"]
+# Or run manually
+docker build -t openheim .
+docker run -p 1217:1217 \
+  -e OPENAI_API_KEY=sk-your-key \
+  -v openheim-data:/home/openheim/.openheim \
+  openheim serve
 ```
 
-### docker-compose.yml
+### Dockerfile (as shipped)
+
+```dockerfile
+FROM rust:1.92-slim-bookworm AS builder
+WORKDIR /workspace
+RUN apt-get update && apt-get install -y pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY Cargo.toml Cargo.lock* ./
+COPY src ./src
+RUN cargo build --release
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates libssl3 curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /workspace/target/release/openheim /usr/local/bin/openheim
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+    && useradd -m -u 1000 openheim
+USER openheim
+EXPOSE 1217
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["openheim", "serve"]
+```
+
+### docker-compose.yml (as shipped)
 
 ```yaml
 services:
   openheim:
     build: .
+    container_name: openheim-agent
     ports:
       - "1217:1217"
-    volumes:
-      - openheim-data:/root/.openheim
     environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - RUST_LOG=warn
+      - RUST_LOG=info
+      # API keys are read from config.toml, but can also be set here
+      # and referenced via env_var in your config
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     restart: unless-stopped
+    volumes:
+      # Config directory — mount your own config.toml here;
+      # a default config is generated on first run if not provided
+      - openheim-config:/home/openheim/.openheim
+      # Persistent workspace directory
+      - openheim-workspace:/workspace
 
 volumes:
-  openheim-data:
+  openheim-config:
+    driver: local
+  openheim-workspace:
+    driver: local
 ```
 
 ```bash

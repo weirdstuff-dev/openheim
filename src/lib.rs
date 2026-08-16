@@ -44,6 +44,21 @@
 //! `{server_name}__{tool_name}`. They are automatically available in every
 //! agent session.
 //!
+//! ## Feature flags
+//!
+//! | Feature  | Default    | Enables                                              |
+//! |----------|------------|------------------------------------------------------|
+//! | `cli`    | ✓          | The `openheim` binary (CLI, TUI, `serve`). Implies `tui` + `server`. |
+//! | `tui`    | via `cli`  | The `tui` module (ratatui/crossterm terminal UI).    |
+//! | `server` | via `cli`  | The `transport::ws` WebSocket/REST server (axum).    |
+//!
+//! Everything else — the client facade, agent loop, providers, tools, MCP,
+//! ACP, and config — is always available. Embedders that don't need the
+//! terminal UI or the built-in server should depend on openheim with
+//! `default-features = false` (optionally adding `"tui"` or `"server"` back)
+//! to skip the `clap`, `ratatui`, `crossterm`, `axum`, `tower-http`, `notify`,
+//! `futures`, `walkdir`, and `tracing-subscriber` dependency trees.
+//!
 //! ## Key types
 //!
 //! - [`OpenheimClient`] / [`OpenheimBuilder`] — main entry point
@@ -62,6 +77,7 @@ pub mod rag;
 pub mod subagents;
 pub mod tools;
 pub mod transport;
+#[cfg(feature = "tui")]
 pub mod tui;
 
 // Core types

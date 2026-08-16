@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: openheim-agent
     ports:
-      - "8080:8080"
+      - "1217:1217"
     environment:
       - RUST_LOG=info
       # API keys are read from config.toml, but can also be set here

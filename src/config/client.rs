@@ -8,10 +8,21 @@ use crate::core::llm::{
 };
 use crate::error::Result;
 
-/// Build a reqwest client with the configured timeout.
+/// Build a reqwest client with the configured timeout applied as a connect
+/// timeout and a per-read idle timeout — deliberately *not* a total request
+/// deadline.
+///
+/// A total timeout (`ClientBuilder::timeout`) spans the entire body read, so
+/// any streaming generation longer than `timeout_secs` (trivial for thinking
+/// models) dies mid-stream, unretryably: chunks already emitted to the caller
+/// can't be replayed. Bounding only the connect phase and the gap between
+/// reads still detects dead connections while letting healthy slow streams
+/// run to completion as long as bytes keep arriving.
 pub fn build_http_client(timeout_secs: u64) -> Result<ReqwestClient> {
+    let timeout = Duration::from_secs(timeout_secs);
     ReqwestClient::builder()
-        .timeout(Duration::from_secs(timeout_secs))
+        .connect_timeout(timeout)
+        .read_timeout(timeout)
         .build()
         .map_err(|e| crate::error::Error::Other(format!("failed to build HTTP client: {}", e)))
 }

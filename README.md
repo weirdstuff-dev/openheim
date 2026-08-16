@@ -8,7 +8,7 @@
 [![crates.io](https://img.shields.io/crates/v/openheim)](https://crates.io/crates/openheim)
 [![docs.rs](https://img.shields.io/docsrs/openheim)](https://docs.rs/openheim)
 [![License](https://img.shields.io/github/license/weirdstuff-dev/openheim)](./LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.91%2B-orange)](https://www.rust-lang.org)
 </div>
 
 **A fast, multi-provider LLM agent runtime built in Rust.**
@@ -26,7 +26,7 @@
 </table>
 </div>
 
-Openheim runs an iterative agent loop — it calls your LLM, executes tools on its behalf, feeds results back, and repeats until the task is done. It works as an interactive REPL, a headless CLI, an ACP stdio agent (for Zed, Claude Code, and other ACP clients), or a self-hosted ACP-over-WebSocket server.
+Openheim runs an iterative agent loop — it calls your LLM, executes tools on its behalf, feeds results back, and repeats until the task is done. It works as an interactive terminal UI, a headless CLI, an ACP stdio agent (for Zed, Claude Code, and other ACP clients), or a self-hosted ACP-over-WebSocket server.
 
 ---
 
@@ -45,7 +45,7 @@ Openheim is built in Rust from the ground up:
 
 - **Multi-provider** — OpenAI, Anthropic Claude, Google Gemini, and any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.)
 - **Tool execution** — built-in shell, file read, and file write tools. Trait-based, so you can add your own.
-- **Agent sandboxing** — configurable work-directory boundary restricts file access to a directory tree. Shell execution can be disabled entirely via `allow_shell = false` in config or `.allow_shell(false)` in the builder.
+- **Agent sandboxing** — configurable work-directory boundary restricts file access to a directory tree. Shell execution is disabled by default and can be enabled via `allow_shell = true` in config or `.allow_shell(true)` in the builder.
 - **MCP (Model Context Protocol)** — connect external MCP servers (stdio or Streamable HTTP) and their tools are automatically exposed to the LLM as `{server_name}__{tool_name}`.
 - **Conversation memory** — conversations (including full tool call history) persist to disk and resume across sessions
 - **System identity** — edit `~/.openheim/system.md` to define how the agent presents itself. Required when preparing a session (created by `openheim init`).
@@ -61,7 +61,7 @@ Openheim is built in Rust from the ground up:
 
 ### Prerequisites
 
-- Rust 1.85+
+- Rust 1.91+
 - An API key for at least one supported provider
 
 ### Install
@@ -101,7 +101,8 @@ max_iterations = 10
 # Restrict the agent to a specific directory tree (defaults to invocation directory)
 # work_dir = "/home/user/projects/myproject"
 
-# Set to false to remove the shell tool from the LLM's tool list entirely
+# Shell execution is disabled by default; set to true to expose the
+# execute_command tool to the LLM
 # allow_shell = true
 
 [providers.anthropic]
@@ -118,8 +119,8 @@ env_var = "OPENAI_API_KEY"
 
 [providers.gemini]
 api_base = "https://generativelanguage.googleapis.com/v1beta"
-default_model = "gemini-2.5-flash"
-models = ["gemini-2.5-flash", "gemini-2.5-pro"]
+default_model = "gemini-2.0-flash"
+models = ["gemini-2.0-flash", "gemini-2.5-pro"]
 env_var = "GEMINI_API_KEY"
 
 # Local Ollama (no API key needed)
@@ -140,10 +141,10 @@ models = ["llama3", "mistral", "codellama"]
 ### Run
 
 ```bash
-# Interactive REPL (default — no subcommand)
+# Interactive TUI (default — no subcommand)
 openheim
 
-# Load skills in the REPL
+# Load skills in the TUI
 openheim --skills rust,debugging
 
 # Single headless prompt, streams to stdout
@@ -266,6 +267,7 @@ Every message is wrapped in `{ "channel": "<agent|fs>", "data": <payload> }`. Th
 | [docs/configuration.md](./docs/configuration.md) | Full `config.toml` reference |
 | [docs/library.md](./docs/library.md) | Embedding openheim as a Rust library |
 | [docs/skills.md](./docs/skills.md) | Writing and enabling skill files |
+| [docs/subagents.md](./docs/subagents.md) | Delegating to named and inline subagent profiles |
 | [docs/deployment.md](./docs/deployment.md) | Docker, systemd, reverse proxy, enterprise |
 | [docs/custom-tools.md](./docs/custom-tools.md) | Implementing a custom `ToolHandler` |
 | [docs/custom-llm-provider.md](./docs/custom-llm-provider.md) | Implementing a custom `LlmClient` |
@@ -281,9 +283,11 @@ Openheim can be embedded directly in your Rust application via the `openheim` cr
 ```toml
 # Cargo.toml
 [dependencies]
-openheim = "0.1"
+openheim = "0.6"
 tokio = { version = "1", features = ["full"] }
 ```
+
+Embedders that don't need the terminal UI or the built-in server can depend with `default-features = false` (optionally adding the `tui` or `server` feature back) to skip those dependency trees — see [docs/library.md](./docs/library.md) §"Feature flags".
 
 See **[docs/library.md](./docs/library.md)** for the full API reference, session management, multi-turn conversations, and MCP integration.
 
@@ -292,8 +296,8 @@ See **[docs/library.md](./docs/library.md)** for the full API reference, session
 ## Docker
 
 ```bash
-# Build and start with docker-compose
-docker-compose up --build
+# Build and start with docker compose
+docker compose up --build
 
 # Or run manually
 docker build -t openheim .
@@ -335,7 +339,7 @@ src/
     stdio.rs        ACP-over-stdio transport (for editor integrations)
     ws.rs           Multiplexed WebSocket server (axum) + REST API + filesystem channel
     run.rs          Headless single-prompt transport
-  tui/              Interactive rustyline REPL
+  tui/              Interactive ratatui terminal UI
 ```
 
 ---

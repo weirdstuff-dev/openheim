@@ -341,7 +341,10 @@ impl LlmClient for GeminiClient {
         let response = self
             .client
             .post(&endpoint)
-            .query(&[("key", &self.api_key)])
+            // Key in header, not query: reqwest embeds the full URL (query
+            // included) in transport error strings, which would leak the key
+            // into logs on any timeout/connect failure.
+            .header("x-goog-api-key", &self.api_key)
             .header("Content-Type", "application/json")
             .json(&request)
             .send()
@@ -386,7 +389,8 @@ impl LlmClient for GeminiClient {
         let mut response = self
             .client
             .post(&endpoint)
-            .query(&[("key", &self.api_key), ("alt", &"sse".to_string())])
+            .query(&[("alt", "sse")])
+            .header("x-goog-api-key", &self.api_key)
             .header("Content-Type", "application/json")
             .json(&request)
             .send()

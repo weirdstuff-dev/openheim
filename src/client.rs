@@ -355,7 +355,9 @@ impl OpenheimBuilder {
         self
     }
 
-    /// Request timeout in seconds.
+    /// Connect and idle-read timeout in seconds. This bounds the connect
+    /// phase and the maximum gap between body reads — not the total request
+    /// duration — so long streaming generations aren't cut off mid-stream.
     pub fn timeout_secs(mut self, secs: u64) -> Self {
         self.timeout_secs = Some(secs);
         self

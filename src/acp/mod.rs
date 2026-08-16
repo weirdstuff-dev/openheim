@@ -4,6 +4,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Instant,
 };
 
 use agent_client_protocol::{
@@ -48,7 +49,10 @@ use crate::{
     },
 };
 
-use session::SessionState;
+use session::{
+    MAX_LIVE_SESSIONS, SESSION_IDLE_EVICTION_AFTER, SessionState, evict_idle_sessions,
+    insert_or_keep_live,
+};
 
 type Sessions = Arc<RwLock<HashMap<String, SessionState>>>;
 
@@ -174,26 +178,41 @@ impl AgentState {
         let config = model
             .and_then(|m| self.app_config.resolve(Some(m)).ok())
             .unwrap_or_else(|| self.config.clone());
-        self.sessions.write().await.insert(
-            session_key.clone(),
-            SessionState {
-                chat_id,
-                config,
-                cwd,
-                skills,
-                cancel: CancellationToken::new(),
-                approved_tools: HashMap::new(),
-                mode: AgentMode::Code,
-                prompt_lock: Arc::new(Mutex::new(())),
-            },
-        );
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.insert(
+                session_key.clone(),
+                SessionState {
+                    chat_id,
+                    config,
+                    cwd,
+                    skills,
+                    cancel: CancellationToken::new(),
+                    approved_tools: HashMap::new(),
+                    mode: AgentMode::Code,
+                    prompt_lock: Arc::new(Mutex::new(())),
+                    last_active: Instant::now(),
+                },
+            );
+            // Bound the map on every insert; a brand-new session has the
+            // freshest `last_active`, so the sweep can only claim others.
+            evict_idle_sessions(
+                &mut sessions,
+                Instant::now(),
+                SESSION_IDLE_EVICTION_AFTER,
+                MAX_LIVE_SESSIONS,
+            );
+        }
         Ok(session_key)
     }
 
     /// Cancels the currently active prompt turn for `session_id`, if any.
     /// No-op if the session doesn't exist or has no turn in flight.
     pub async fn cancel_session(&self, session_id: &str) {
-        if let Some(s) = self.sessions.read().await.get(session_id) {
+        // Write lock: bumping `last_active` marks the session as recently
+        // used so the eviction sweep can't claim an actively used session.
+        if let Some(s) = self.sessions.write().await.get_mut(session_id) {
+            s.last_active = Instant::now();
             s.cancel.cancel();
         }
     }
@@ -212,6 +231,7 @@ impl AgentState {
             .get_mut(session_id)
             .ok_or_else(|| Error::NotFound(format!("session not found: {session_id}")))?;
         s.config = new_config;
+        s.last_active = Instant::now();
         Ok((provider_name, model_name))
     }
 
@@ -241,6 +261,7 @@ impl AgentState {
             .get_mut(session_id)
             .ok_or_else(|| Error::NotFound(format!("session not found: {session_id}")))?;
         s.mode = mode;
+        s.last_active = Instant::now();
         Ok(())
     }
 
@@ -307,6 +328,7 @@ impl AgentState {
             // otherwise race this one to reset `cancel` and to save history.
             let prompt_guard = s.try_acquire_prompt_lock(session_id)?;
             s.cancel = CancellationToken::new();
+            s.last_active = Instant::now();
             let llm = crate::config::client_for_config(&s.config, &self.config, &self.llm)?;
             let base: Arc<dyn ToolExecutor> = if s.mode == AgentMode::Architect {
                 Arc::new(ScopedExecutor::new(
@@ -511,19 +533,36 @@ impl AgentState {
             session_config.model = model.clone();
         }
 
-        self.sessions.write().await.insert(
-            session_id.to_string(),
-            SessionState {
-                chat_id: uuid,
-                config: session_config,
-                cwd,
-                skills: conversation.meta.skills.clone(),
-                cancel: CancellationToken::new(),
-                approved_tools: HashMap::new(),
-                mode: AgentMode::Code,
-                prompt_lock: Arc::new(Mutex::new(())),
-            },
-        );
+        let fresh = SessionState {
+            chat_id: uuid,
+            config: session_config,
+            cwd,
+            skills: conversation.meta.skills.clone(),
+            cancel: CancellationToken::new(),
+            approved_tools: HashMap::new(),
+            mode: AgentMode::Code,
+            prompt_lock: Arc::new(Mutex::new(())),
+            last_active: Instant::now(),
+        };
+        {
+            let mut sessions = self.sessions.write().await;
+            // A second connection attaching to an already-live session
+            // must not replace its control state — a fresh `cancel` token
+            // would orphan an in-flight turn, wiping `approved_tools` loses
+            // remembered AllowAlways decisions, and a fresh `prompt_lock`
+            // would let two turns overlap on one chat. The live entry (if
+            // any) is also newer than the disk snapshot above; the history
+            // replay below still streams to *this* connection either way.
+            if !insert_or_keep_live(&mut sessions, session_id, fresh) {
+                tracing::debug!("session {session_id} is already live; keeping live control state");
+            }
+            evict_idle_sessions(
+                &mut sessions,
+                Instant::now(),
+                SESSION_IDLE_EVICTION_AFTER,
+                MAX_LIVE_SESSIONS,
+            );
+        }
 
         for msg in &conversation.messages {
             match msg.role {

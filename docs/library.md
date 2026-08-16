@@ -9,9 +9,26 @@ Openheim can be embedded directly in your Rust application. The library exposes 
 ```toml
 # Cargo.toml
 [dependencies]
-openheim = "0.1"
+openheim = "0.6"
 tokio = { version = "1", features = ["full"] }
 ```
+
+### Feature flags
+
+By default the `openheim` dependency also builds the CLI/TUI binary stack
+(`clap`, `ratatui`, `crossterm`, `tracing-subscriber`) and the WebSocket
+server stack (`axum`, `tower-http`, `notify`, `walkdir`, `futures`).
+Embedders that drive the agent through `OpenheimClient` (or their own ACP
+wiring) usually don't need those:
+
+```toml
+openheim = { version = "0.6", default-features = false }
+# optionally: features = ["server"]  # axum WS/REST server (openheim::transport::ws)
+# optionally: features = ["tui"]     # ratatui terminal UI (openheim::tui)
+```
+
+Everything else — the client facade, agent loop, providers, tools, MCP, ACP,
+and config — is always available.
 
 ---
 
@@ -102,7 +119,7 @@ let client = OpenheimClient::builder()
 
 **`.work_dir(path)`** — sets the root directory the agent may read and write. The agent cannot access files outside this tree. Relative paths in tool arguments are resolved against this directory. Defaults to the directory from which the process was invoked when not set in the builder or config file.
 
-**`.allow_shell(bool)`** — controls whether the `execute_command` tool is exposed to the LLM. When `false` the tool is removed from the tool list entirely; the LLM never sees it and cannot request it. Defaults to `true`.
+**`.allow_shell(bool)`** — controls whether the `execute_command` tool is exposed to the LLM. When `false` the tool is removed from the tool list entirely; the LLM never sees it and cannot request it. Defaults to `false`.
 
 ### With MCP servers
 
@@ -274,10 +291,10 @@ let session = client
 use std::path::Path;
 
 // All sessions, newest first
-let all = client.list_sessions(None)?;
+let all = client.list_sessions(None).await?;
 
 // Only sessions from a specific working directory
-let workspace = client.list_sessions(Some(Path::new("/my/workspace")))?;
+let workspace = client.list_sessions(Some(Path::new("/my/workspace"))).await?;
 
 for info in &workspace {
     println!("{} — {}", info.id, info.title.as_deref().unwrap_or("untitled"));
@@ -430,7 +447,7 @@ async fn main() -> openheim::Result<()> {
     }
 
     // Check for an existing session or start fresh
-    let all_sessions = client.list_sessions(Some(std::path::Path::new("/workspace")))?;
+    let all_sessions = client.list_sessions(Some(std::path::Path::new("/workspace"))).await?;
     let session = if let Some(last) = all_sessions.first() {
         println!("Resuming session: {}", last.id);
         client

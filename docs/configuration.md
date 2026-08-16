@@ -15,9 +15,9 @@ openheim init
 | `default_provider` | string | — | Provider to use when no `--model` override is given (must match a key under `[providers]`) |
 | `max_iterations` | integer | `10` | Maximum number of agent loop iterations per prompt before stopping |
 | `default_skills` | string[] | `[]` | Skills loaded automatically in every new session. Merged with per-session `--skills`; defaults appear first, duplicates removed. |
-| `theme_color` | string | `"white"` | TUI accent color. Valid values: `white`, `gray`, `blue`, `cyan`, `magenta`, `green`, `yellow`, `red`, `pink`. Can also be changed at runtime with `:theme` |
+| `theme_color` | string | `"gray"` | TUI accent color. Valid values: `white`, `gray`, `blue`, `cyan`, `magenta`, `green`, `yellow`, `red`, `pink`. Can also be changed at runtime with `:theme` |
 | `work_dir` | path | cwd at invocation | Root directory the agent is allowed to read and write. The agent cannot access files outside this tree. When unset, defaults to the directory from which openheim was invoked. |
-| `allow_shell` | boolean | `true` | Whether to expose the `execute_command` shell tool to the LLM. Set to `false` to remove the tool entirely — the LLM will not see it in its tool list. |
+| `allow_shell` | boolean | `false` | Whether to expose the `execute_command` shell tool to the LLM. Disabled by default — set to `true` to expose the tool. When `false`, the LLM never sees it in its tool list. |
 
 ```toml
 default_provider = "anthropic"
@@ -29,15 +29,15 @@ default_skills = ["rules", "concise"]
 # Restrict the agent to a specific directory tree
 work_dir = "/home/user/projects/myproject"
 
-# Disable shell command execution
-allow_shell = false
+# Enable shell command execution (disabled by default)
+# allow_shell = true
 ```
 
 ### Security notes
 
-**`work_dir`** is enforced at the application layer for `read_file` and `write_file`, and for the `/ws` filesystem sidecar (all `fs`-channel operations are validated against the same boundary). Symlinks are followed and canonicalized so they cannot be used to escape the boundary. Shell commands (`execute_command`) are launched with `work_dir` as their working directory so relative paths resolve correctly, but absolute paths inside a shell command are not blocked — OS-level sandboxing (chroot, containers) is required for full shell isolation.
+**`work_dir`** is enforced at the application layer for `read_file` and `write_file`, and for the `/ws` filesystem sidecar (all `fs`-channel operations are validated against the same boundary). Symlinks are followed and canonicalized so they cannot be used to escape the boundary. Shell commands (`execute_command`) are launched with `work_dir` as their working directory so relative paths resolve correctly, but absolute paths inside a shell command are not blocked — OS-level sandboxing (chroot, containers) is required for full shell isolation. Shell commands are additionally bounded: each runs in its own process group, is killed after a 120-second timeout (or on turn cancellation), and has stdout/stderr capped at 64 KiB per stream with a truncation marker.
 
-**`allow_shell`** removes `execute_command` from the tool list sent to the LLM. When `false`, the LLM never sees the tool and cannot request it.
+**`allow_shell`** gates whether `execute_command` appears in the tool list sent to the LLM. It defaults to `false` — the LLM never sees the tool and cannot request it. Set it to `true` to expose the tool (bounded as described above).
 
 ---
 
@@ -52,7 +52,7 @@ Each key under `[providers]` defines a provider. The key name is used as the pro
 | `models` | string[] | Yes | List of available models (used for validation and the `/api/models` endpoint) |
 | `env_var` | string | No | Name of the environment variable holding the API key (recommended) |
 | `api_key` | string | No | Inline API key — `env_var` takes precedence if both are set |
-| `timeout_secs` | integer | `120` | Request timeout in seconds |
+| `timeout_secs` | integer | `120` | Connect and idle-read timeout in seconds — bounds the connect phase and the maximum gap between body reads, not total request duration, so long streaming responses are not cut off mid-stream |
 | `max_tokens` | integer | No | Maximum output tokens per response (provider default if omitted) |
 
 Key resolution order: `env_var` (if set and non-empty) → `api_key` → empty string (for keyless providers like Ollama).
@@ -76,8 +76,8 @@ env_var = "ANTHROPIC_API_KEY"
 
 [providers.gemini]
 api_base = "https://generativelanguage.googleapis.com/v1beta"
-default_model = "gemini-2.5-flash"
-models = ["gemini-2.5-flash", "gemini-2.5-pro"]
+default_model = "gemini-2.0-flash"
+models = ["gemini-2.0-flash", "gemini-2.5-pro"]
 env_var = "GEMINI_API_KEY"
 
 # OpenAI-compatible local model — no API key needed
@@ -132,8 +132,8 @@ max_iterations = 15
 # Restrict the agent to this directory tree
 work_dir = "/home/user/projects/myproject"
 
-# Disable shell command access
-allow_shell = false
+# Enable shell command access (disabled by default)
+# allow_shell = true
 
 [providers.anthropic]
 api_base = "https://api.anthropic.com/v1"
