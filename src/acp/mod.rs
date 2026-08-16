@@ -546,7 +546,7 @@ impl AgentState {
         };
         {
             let mut sessions = self.sessions.write().await;
-            // H5: a second connection attaching to an already-live session
+            // A second connection attaching to an already-live session
             // must not replace its control state — a fresh `cancel` token
             // would orphan an in-flight turn, wiping `approved_tools` loses
             // remembered AllowAlways decisions, and a fresh `prompt_lock`

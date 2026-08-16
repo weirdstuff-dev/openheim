@@ -377,8 +377,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// End-to-end C1 repro: `x` does not exist, so pre-normalization the
-    /// ancestor walk only saw the work dir and handed the raw `..`-bearing
+    /// End-to-end escape repro: `x` does not exist, so without normalization
+    /// the ancestor walk only saw the work dir and handed the raw `..`-bearing
     /// path to `write_file`, whose `create_dir_all` then built the missing
     /// prefix and let the kernel resolve the `..`s outside the sandbox.
     #[tokio::test]

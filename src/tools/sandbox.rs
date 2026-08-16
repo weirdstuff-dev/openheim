@@ -60,7 +60,7 @@ pub fn validate_path(requested: &str, work_dir: &Path) -> Result<PathBuf> {
     } else {
         work_dir_canonical.join(requested_path)
     };
-    // C1: normalize before probing the filesystem. Without this, a path like
+    // Normalize before probing the filesystem. Without this, a path like
     // `x/../../../outside/f` looks non-existent to `exists()` (the kernel
     // cannot resolve `x/..` while `x` is missing), the ancestor walk validates
     // only `work_dir`, and the raw `..`-bearing path is returned — later
@@ -181,8 +181,8 @@ mod tests {
     fn rejects_dotdot_behind_nonexistent_prefix() {
         let dir = tempfile::tempdir().unwrap();
         // `x` does not exist, so every ancestor containing `x/..` returns
-        // ENOENT — the pre-normalization ancestor walk validated only the
-        // work dir and handed back the raw `..`-bearing path (C1).
+        // ENOENT — without normalization the ancestor walk would validate
+        // only the work dir and hand back the raw `..`-bearing path.
         let err = validate_path("x/../../../pwned.txt", dir.path()).unwrap_err();
         assert!(
             err.to_string().contains("outside the work directory"),

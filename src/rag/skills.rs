@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use std::path::{Component, Path, PathBuf};
 
 /// Checks that `name` is safe to interpolate into a skills-directory path.
-/// H8: skill names are untrusted input — they arrive from remote ACP clients
+/// Skill names are untrusted input — they arrive from remote ACP clients
 /// (`session/new` `_meta.skills`), from `default_skills` in the config file,
 /// and from persisted conversation metadata — so a name must be exactly one
 /// normal path component. This rejects `""`, `.`/`..`, any `/` or `\`
@@ -169,8 +169,8 @@ mod tests {
 
     #[test]
     fn rejects_traversal_even_when_target_exists() {
-        // H8 repro (read variant): pre-fix, `../secret` joined to
-        // `<dir>/skills/` reached `<dir>/secret.md` and returned its content.
+        // Without name validation, `../secret` joined to `<dir>/skills/`
+        // would reach `<dir>/secret.md` and return its content.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("skills")).unwrap();
         std::fs::write(dir.path().join("secret.md"), "TOP SECRET").unwrap();
