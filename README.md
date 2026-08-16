@@ -335,7 +335,7 @@ src/
     stdio.rs        ACP-over-stdio transport (for editor integrations)
     ws.rs           Multiplexed WebSocket server (axum) + REST API + filesystem channel
     run.rs          Headless single-prompt transport
-  tui/              Interactive rustyline REPL
+  tui/              Interactive ratatui terminal UI
 ```
 
 ---
