@@ -20,7 +20,11 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --all-targets -- -D warnings
+      # Feature matrix: the lib must stay buildable without the CLI/TUI/server deps.
+      - run: cargo clippy --no-default-features -- -D warnings
+      - run: cargo clippy --no-default-features --features tui -- -D warnings
+      - run: cargo clippy --no-default-features --features server -- -D warnings
       - run: cargo build
 
   test:
@@ -31,3 +35,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.92.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
+      - run: cargo test --no-default-features

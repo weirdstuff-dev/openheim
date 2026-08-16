@@ -13,6 +13,22 @@ openheim = "0.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
+### Feature flags
+
+By default the `openheim` dependency also builds the CLI/TUI binary stack
+(`clap`, `ratatui`, `crossterm`) and the WebSocket server stack (`axum`,
+`tower-http`, `notify`). Embedders that drive the agent through
+`OpenheimClient` (or their own ACP wiring) usually don't need those:
+
+```toml
+openheim = { version = "0.1", default-features = false }
+# optionally: features = ["server"]  # axum WS/REST server (openheim::transport::ws)
+# optionally: features = ["tui"]     # ratatui terminal UI (openheim::tui)
+```
+
+Everything else — the client facade, agent loop, providers, tools, MCP, ACP,
+and config — is always available.
+
 ---
 
 ## Quick start
