@@ -178,6 +178,9 @@ impl AgentState {
         let config = model
             .and_then(|m| self.app_config.resolve(Some(m)).ok())
             .unwrap_or_else(|| self.config.clone());
+        // No write lease taken here — merely creating/holding a session open
+        // doesn't touch history, so it doesn't contend with other processes.
+        // The cross-process write lease is acquired per-turn in `acp_prompt`.
         {
             let mut sessions = self.sessions.write().await;
             sessions.insert(
@@ -315,6 +318,21 @@ impl AgentState {
     where
         F: FnMut(SessionUpdate) + Send,
     {
+        // Cross-process write lease for this turn only (see `rag::lease`),
+        // acquired before the sessions lock below so its file I/O never
+        // blocks other in-process session operations. Held until this
+        // function returns — success, error, or cancellation — via `_lease`
+        // staying in scope for the whole body, so an overlapping
+        // `session/prompt` on this session from *another* process is
+        // rejected immediately instead of racing history writes or
+        // generating against a context that's about to go stale. Merely
+        // loading/holding a session open never takes this lease — see
+        // `SessionState::prompt_lock`'s doc comment — only an in-flight turn
+        // does, in any process.
+        let uuid = Uuid::parse_str(session_id)
+            .map_err(|_| Error::ParseError("invalid session id format".to_string()))?;
+        let _lease = self.rag.history.acquire_lease(&uuid)?;
+
         let (llm, executor, config, chat_id, skills, cwd, cancel, _prompt_guard) = {
             // Write lock: each new prompt turn gets a fresh cancellation token,
             // since a token can only ever transition uncancelled -> cancelled
@@ -410,16 +428,8 @@ impl AgentState {
                     )));
                 }
                 StreamEvent::ThinkingContent { content } => {
-                    // Tunnel thinking through ContentBlock::Text using a meta tag so
-                    // it survives the ACP layer (ACP's ContentBlock has no Thinking variant).
-                    let mut meta = serde_json::Map::new();
-                    meta.insert(
-                        "kind".to_string(),
-                        serde_json::Value::String("thinking".to_string()),
-                    );
-                    let text = TextContent::new(content).meta(meta);
                     on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                        AcpContentBlock::Text(text),
+                        AcpContentBlock::Text(thinking_chunk(content)),
                     )));
                 }
                 StreamEvent::ToolCall {
@@ -533,17 +543,6 @@ impl AgentState {
             session_config.model = model.clone();
         }
 
-        let fresh = SessionState {
-            chat_id: uuid,
-            config: session_config,
-            cwd,
-            skills: conversation.meta.skills.clone(),
-            cancel: CancellationToken::new(),
-            approved_tools: HashMap::new(),
-            mode: AgentMode::Code,
-            prompt_lock: Arc::new(Mutex::new(())),
-            last_active: Instant::now(),
-        };
         {
             let mut sessions = self.sessions.write().await;
             // A second connection attaching to an already-live session
@@ -553,7 +552,23 @@ impl AgentState {
             // would let two turns overlap on one chat. The live entry (if
             // any) is also newer than the disk snapshot above; the history
             // replay below still streams to *this* connection either way.
-            if !insert_or_keep_live(&mut sessions, session_id, fresh) {
+            // No write lease is taken here — loading/attaching to a session
+            // doesn't touch history by itself, so it never contends with
+            // another process merely viewing (or even holding open) the same
+            // session; only an in-flight `session/prompt` turn does.
+            if !insert_or_keep_live(&mut sessions, session_id, || {
+                Ok(SessionState {
+                    chat_id: uuid,
+                    config: session_config,
+                    cwd,
+                    skills: conversation.meta.skills.clone(),
+                    cancel: CancellationToken::new(),
+                    approved_tools: HashMap::new(),
+                    mode: AgentMode::Code,
+                    prompt_lock: Arc::new(Mutex::new(())),
+                    last_active: Instant::now(),
+                })
+            })? {
                 tracing::debug!("session {session_id} is already live; keeping live control state");
             }
             evict_idle_sessions(
@@ -564,60 +579,96 @@ impl AgentState {
             );
         }
 
-        for msg in &conversation.messages {
-            match msg.role {
-                Role::User => {
-                    if let Some(text) = msg.text() {
-                        on_update(SessionUpdate::UserMessageChunk(ContentChunk::new(
-                            AcpContentBlock::from(text),
-                        )));
-                    }
-                }
-                Role::Assistant => {
-                    if let Some(text) = msg.text() {
-                        on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                            AcpContentBlock::from(text),
-                        )));
-                    }
-                    for tc in msg.tool_calls() {
-                        let raw_input = match serde_json::from_str(&tc.arguments) {
-                            Ok(v) => Some(v),
-                            Err(e) => {
-                                tracing::warn!(
-                                    tool_call_id = %tc.id,
-                                    tool_name = %tc.name,
-                                    "failed to parse tool call arguments: {e}"
-                                );
-                                None
-                            }
-                        };
-                        on_update(SessionUpdate::ToolCall(
-                            AcpToolCall::new(tc.id.clone(), &tc.name)
-                                .status(ToolCallStatus::InProgress)
-                                .raw_input(raw_input),
-                        ));
-                    }
-                }
-                Role::Tool => {
-                    if let Some(tr) = msg.tool_result_block() {
-                        let status = if tr.is_error {
-                            ToolCallStatus::Failed
-                        } else {
-                            ToolCallStatus::Completed
-                        };
-                        on_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                            tr.tool_call_id,
-                            ToolCallUpdateFields::new()
-                                .status(status)
-                                .raw_output(serde_json::Value::String(tr.content)),
-                        )));
-                    }
-                }
-                _ => {}
-            }
-        }
+        replay_history_messages(&conversation.messages, &mut on_update);
 
         Ok(())
+    }
+}
+
+/// Wraps reasoning text in a plain text block tagged `_meta.kind == "thinking"`
+/// — the tunnel ACP uses for thinking content (ACP's own content model has no
+/// thinking variant; the `thinking` entry in the session metadata advertised
+/// by `initialize` documents this convention for clients).
+fn thinking_chunk(content: String) -> TextContent {
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "kind".to_string(),
+        serde_json::Value::String("thinking".to_string()),
+    );
+    TextContent::new(content).meta(meta)
+}
+
+/// Replays persisted history to a (re)attaching connection as the same
+/// stream of session updates a live turn would have produced, so a reloaded
+/// session renders identically to one that stayed open — including assistant
+/// thinking blocks, which lead the persisted content (`[Thinking?, Text?,
+/// ToolUse*]`) and are tunneled through `agent_message_chunk` with
+/// `content._meta.kind == "thinking"` exactly as the live streaming path
+/// does. Without this, thinking shown during a turn vanished on reload even
+/// though it was persisted.
+fn replay_history_messages<F>(messages: &[Message], on_update: &mut F)
+where
+    F: FnMut(SessionUpdate),
+{
+    for msg in messages {
+        match msg.role {
+            Role::User => {
+                if let Some(text) = msg.text() {
+                    on_update(SessionUpdate::UserMessageChunk(ContentChunk::new(
+                        AcpContentBlock::from(text),
+                    )));
+                }
+            }
+            Role::Assistant => {
+                for block in &msg.content {
+                    if let ContentBlock::Thinking { thinking, .. } = block {
+                        on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                            AcpContentBlock::Text(thinking_chunk(thinking.clone())),
+                        )));
+                    }
+                }
+                if let Some(text) = msg.text() {
+                    on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                        AcpContentBlock::from(text),
+                    )));
+                }
+                for tc in msg.tool_calls() {
+                    let raw_input = match serde_json::from_str(&tc.arguments) {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            tracing::warn!(
+                                tool_call_id = %tc.id,
+                                tool_name = %tc.name,
+                                "failed to parse tool call arguments: {e}"
+                            );
+                            None
+                        }
+                    };
+                    on_update(SessionUpdate::ToolCall(
+                        AcpToolCall::new(tc.id.clone(), &tc.name)
+                            .kind(tool_kind_for(&tc.name))
+                            .status(ToolCallStatus::InProgress)
+                            .raw_input(raw_input),
+                    ));
+                }
+            }
+            Role::Tool => {
+                if let Some(tr) = msg.tool_result_block() {
+                    let status = if tr.is_error {
+                        ToolCallStatus::Failed
+                    } else {
+                        ToolCallStatus::Completed
+                    };
+                    on_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                        tr.tool_call_id,
+                        ToolCallUpdateFields::new()
+                            .status(status)
+                            .raw_output(serde_json::Value::String(tr.content)),
+                    )));
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -991,7 +1042,27 @@ pub async fn serve(
                         }
                         Err(e) => {
                             tracing::error!("agent loop error: {e}");
-                            responder.respond_with_internal_error(e.to_string())
+                            // SessionLocked carries structured fields a caller
+                            // needs to build a "busy, retry" UX instead of a
+                            // generic failure — encode them in the JSON-RPC
+                            // error's `data` so they survive the trip back to
+                            // the client instead of collapsing to `e.to_string()`.
+                            let acp_error = match &e {
+                                Error::SessionLocked {
+                                    session_id,
+                                    pid,
+                                    host,
+                                } => agent_client_protocol::Error::internal_error().data(
+                                    serde_json::json!({
+                                        "kind": "session_locked",
+                                        "session_id": session_id,
+                                        "pid": pid,
+                                        "host": host,
+                                    }),
+                                ),
+                                _ => internal_error(e.to_string()),
+                            };
+                            responder.respond_with_error(acp_error)
                         }
                     };
                     if let Err(e) = respond_result {
@@ -1166,5 +1237,90 @@ mod prompt_block_tests {
             )),
         ))];
         assert!(convert_prompt_blocks(&blocks).is_err());
+    }
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+
+    fn agent_text_chunks(updates: &[SessionUpdate]) -> Vec<&ContentChunk> {
+        updates
+            .iter()
+            .filter_map(|u| match u {
+                SessionUpdate::AgentMessageChunk(chunk) => Some(chunk),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn replay_emits_thinking_before_text_for_assistant_messages() {
+        let messages = vec![
+            Message::user("hello"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "pondering".into(),
+                        signature: None,
+                    },
+                    ContentBlock::Text {
+                        text: "the answer".into(),
+                    },
+                ],
+            },
+        ];
+        let mut updates = Vec::new();
+        replay_history_messages(&messages, &mut |u| updates.push(u));
+
+        let chunks = agent_text_chunks(&updates);
+        assert_eq!(chunks.len(), 2);
+
+        match &chunks[0].content {
+            AcpContentBlock::Text(t) => {
+                assert_eq!(t.text, "pondering");
+                assert_eq!(
+                    t.meta.as_ref().and_then(|m| m.get("kind")),
+                    Some(&serde_json::json!("thinking"))
+                );
+            }
+            other => panic!("expected a text block, got {other:?}"),
+        }
+        match &chunks[1].content {
+            AcpContentBlock::Text(t) => {
+                assert_eq!(t.text, "the answer");
+                assert!(t.meta.is_none());
+            }
+            other => panic!("expected a text block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_still_emits_user_text_and_tool_calls() {
+        let messages = vec![
+            Message::user("hello"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"a.txt"}"#.into(),
+                }],
+            },
+            Message::tool_result("call_1", "read_file", "file content", false),
+        ];
+        let mut updates = Vec::new();
+        replay_history_messages(&messages, &mut |u| updates.push(u));
+
+        assert!(matches!(
+            &updates[0],
+            SessionUpdate::UserMessageChunk(c) if matches!(&c.content, AcpContentBlock::Text(t) if t.text == "hello")
+        ));
+        assert!(matches!(
+            &updates[1],
+            SessionUpdate::ToolCall(tc) if tc.raw_input.is_some()
+        ));
+        assert!(matches!(&updates[2], SessionUpdate::ToolCallUpdate(_)));
     }
 }

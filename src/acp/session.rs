@@ -30,8 +30,12 @@ pub struct SessionState {
     /// Set via `session/set_mode`. Controls which tools are offered to the LLM.
     pub mode: AgentMode,
     /// Held for the duration of a `session/prompt` turn so a second, overlapping
-    /// prompt on the same session is rejected instead of racing the first one
-    /// (both would otherwise reset `cancel` and clobber the saved history).
+    /// prompt on the same session (in this process) is rejected instead of
+    /// racing the first one (both would otherwise reset `cancel` and clobber
+    /// the saved history). The cross-process write lease (`rag::lease`) is a
+    /// separate, turn-scoped guard acquired directly in `acp_prompt` — not
+    /// stored here — so merely loading/viewing a session never locks it
+    /// against other processes; only an in-flight turn does.
     pub prompt_lock: Arc<Mutex<()>>,
     /// Last time this session was used (prompt, cancel, model/mode switch,
     /// load). Drives least-recently-active ordering in
@@ -65,9 +69,14 @@ pub(crate) const SESSION_IDLE_EVICTION_AFTER: Duration = Duration::from_secs(60 
 /// `session/load` re-materializes the state.
 pub(crate) const MAX_LIVE_SESSIONS: usize = 512;
 
-/// Inserts `fresh` under `session_id` unless that session is already live,
-/// in which case the live entry wins and only its `last_active` is bumped.
-/// Returns `true` when `fresh` was inserted.
+/// Inserts a freshly-built `SessionState` under `session_id` unless that
+/// session is already live, in which case the live entry wins and only its
+/// `last_active` is bumped. Returns `true` when a fresh state was inserted.
+///
+/// `build_fresh` is called at most once, and only once we've confirmed
+/// there's no live entry to keep, so a redundant build (and the disk read it
+/// implies) never happens when the *live* entry is the one that ends up
+/// owning the session.
 ///
 /// Replacing a live entry would break the cross-connection session UX: a
 /// fresh `CancellationToken` orphans any in-flight turn (`session/cancel`
@@ -80,16 +89,16 @@ pub(crate) const MAX_LIVE_SESSIONS: usize = 512;
 pub(crate) fn insert_or_keep_live(
     sessions: &mut HashMap<String, SessionState>,
     session_id: &str,
-    fresh: SessionState,
-) -> bool {
+    build_fresh: impl FnOnce() -> Result<SessionState>,
+) -> Result<bool> {
     match sessions.get_mut(session_id) {
         Some(live) => {
-            live.last_active = fresh.last_active;
-            false
+            live.last_active = Instant::now();
+            Ok(false)
         }
         None => {
-            sessions.insert(session_id.to_string(), fresh);
-            true
+            sessions.insert(session_id.to_string(), build_fresh()?);
+            Ok(true)
         }
     }
 }
@@ -143,8 +152,9 @@ mod tests {
     use crate::core::permission::PermissionDecision;
 
     fn sample_state() -> SessionState {
+        let chat_id = Uuid::new_v4();
         SessionState {
-            chat_id: Uuid::new_v4(),
+            chat_id,
             config: AgentConfig::new(
                 "mock".into(),
                 "https://example.com".into(),
@@ -191,9 +201,8 @@ mod tests {
     #[test]
     fn insert_or_keep_live_inserts_when_absent() {
         let mut sessions = HashMap::new();
-        let fresh = sample_state();
 
-        assert!(insert_or_keep_live(&mut sessions, "s1", fresh));
+        assert!(insert_or_keep_live(&mut sessions, "s1", || Ok(sample_state())).unwrap());
         assert!(sessions.contains_key("s1"));
     }
 
@@ -209,7 +218,7 @@ mod tests {
         );
         sessions.insert("s1".to_string(), live);
 
-        let inserted = insert_or_keep_live(&mut sessions, "s1", sample_state());
+        let inserted = insert_or_keep_live(&mut sessions, "s1", || Ok(sample_state())).unwrap();
 
         assert!(!inserted);
         let kept = sessions.get("s1").unwrap();
@@ -225,17 +234,16 @@ mod tests {
 
     #[test]
     fn insert_or_keep_live_bumps_the_live_entrys_last_active() {
-        let now = Instant::now();
+        let stale_since = Instant::now() - Duration::from_secs(60);
         let mut sessions = HashMap::new();
-        sessions.insert(
-            "s1".to_string(),
-            sample_state_at(now - Duration::from_secs(60)),
-        );
+        sessions.insert("s1".to_string(), sample_state_at(stale_since));
 
-        let fresh = sample_state_at(now);
-        insert_or_keep_live(&mut sessions, "s1", fresh);
+        insert_or_keep_live(&mut sessions, "s1", || {
+            panic!("must not build a fresh state when the session is already live")
+        })
+        .unwrap();
 
-        assert_eq!(sessions.get("s1").unwrap().last_active, now);
+        assert!(sessions.get("s1").unwrap().last_active > stale_since);
     }
 
     #[test]
