@@ -128,6 +128,11 @@ struct OpenAiResponseChoice {
 struct OpenAiResponseMessage {
     #[serde(default)]
     content: Option<String>,
+    /// Extended-thinking output, as returned by reasoning models behind
+    /// OpenAI-compatible APIs (GLM, DeepSeek, …). Absent on non-reasoning
+    /// models and plain OpenAI itself.
+    #[serde(default)]
+    reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<OpenAiResponseToolCall>>,
 }
@@ -255,6 +260,36 @@ fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
     result
 }
 
+/// Assembles an assistant message's content blocks in canonical order:
+/// `Thinking` (when the provider returned reasoning) first, then `Text`,
+/// then tool uses — the same ordering the Anthropic client produces, which
+/// the history persistence and ACP replay layers rely on. Empty strings
+/// produce no block, so an all-empty response yields empty content.
+fn assemble_content(
+    reasoning: Option<String>,
+    text: Option<String>,
+    tool_uses: Vec<ContentBlock>,
+) -> Vec<ContentBlock> {
+    let mut content = Vec::new();
+    if let Some(thinking) = reasoning
+        && !thinking.is_empty()
+    {
+        content.push(ContentBlock::Thinking {
+            thinking,
+            // The OpenAI-compatible `reasoning_content` field carries no
+            // replayable signature — that's Anthropic-specific.
+            signature: None,
+        });
+    }
+    if let Some(text) = text
+        && !text.is_empty()
+    {
+        content.push(ContentBlock::Text { text });
+    }
+    content.extend(tool_uses);
+    content
+}
+
 fn convert_tools(tools: &[Tool]) -> Vec<OpenAiTool> {
     tools
         .iter()
@@ -313,21 +348,22 @@ pub(super) async fn send_openai_style(
         .next()
         .ok_or_else(|| Error::ApiError("No response from LLM".to_string()))?;
 
-    let mut content = Vec::new();
-    if let Some(text) = choice.message.content
-        && !text.is_empty()
-    {
-        content.push(ContentBlock::Text { text });
-    }
-    if let Some(tcs) = choice.message.tool_calls {
-        for tc in tcs {
-            content.push(ContentBlock::ToolUse {
-                id: tc.id,
-                name: tc.function.name,
-                arguments: tc.function.arguments,
-            });
-        }
-    }
+    let tool_uses = choice
+        .message
+        .tool_calls
+        .unwrap_or_default()
+        .into_iter()
+        .map(|tc| ContentBlock::ToolUse {
+            id: tc.id,
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+        })
+        .collect();
+    let content = assemble_content(
+        choice.message.reasoning_content,
+        choice.message.content,
+        tool_uses,
+    );
 
     Ok(Choice {
         message: Message {
@@ -386,6 +422,10 @@ pub(super) async fn send_openai_style_streaming(
     }
 
     let mut text_buf = String::new();
+    // Accumulated alongside `text_buf` so the final message persists the
+    // reasoning (the live chunks are UI-only); without this, thinking
+    // displayed during a turn vanished on reload.
+    let mut reasoning_buf = String::new();
     let mut tool_acc: Vec<ToolCallAcc> = Vec::new();
     let mut finish_reason: Option<FinishReason> = None;
     let mut decoder = SseDecoder::new();
@@ -418,6 +458,7 @@ pub(super) async fn send_openai_style_streaming(
             if let Some(reasoning) = delta["reasoning_content"].as_str()
                 && !reasoning.is_empty()
             {
+                reasoning_buf.push_str(reasoning);
                 let _ = chunk_tx.send(LlmChunk::Thinking(reasoning.to_string()));
             }
 
@@ -452,15 +493,11 @@ pub(super) async fn send_openai_style_streaming(
         }
     }
 
-    let mut content = Vec::new();
-    if !text_buf.is_empty() {
-        content.push(ContentBlock::Text { text: text_buf });
-    }
-    for (i, tc) in tool_acc.into_iter().enumerate() {
-        if tc.name.is_empty() {
-            continue;
-        }
-        content.push(ContentBlock::ToolUse {
+    let tool_uses = tool_acc
+        .into_iter()
+        .enumerate()
+        .filter(|(_, tc)| !tc.name.is_empty())
+        .map(|(i, tc)| ContentBlock::ToolUse {
             id: if tc.id.is_empty() {
                 format!("call_{i}")
             } else {
@@ -468,13 +505,13 @@ pub(super) async fn send_openai_style_streaming(
             },
             name: tc.name,
             arguments: tc.args,
-        });
-    }
+        })
+        .collect();
 
     Ok(Choice {
         message: Message {
             role: Role::Assistant,
-            content,
+            content: assemble_content(Some(reasoning_buf), Some(text_buf), tool_uses),
         },
         finish_reason,
     })
@@ -600,5 +637,46 @@ mod tests {
         let json: Value = serde_json::to_value(&req).unwrap();
         assert!(json.get("tools").is_none());
         assert!(json.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn assemble_content_puts_thinking_before_text_and_tool_uses() {
+        let tool = ContentBlock::ToolUse {
+            id: "call_0".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        };
+        let content = assemble_content(
+            Some("let me think".into()),
+            Some("here's the answer".into()),
+            vec![tool],
+        );
+        assert_eq!(content.len(), 3);
+        assert!(matches!(
+            &content[0],
+            ContentBlock::Thinking { thinking, signature }
+                if thinking == "let me think" && signature.is_none()
+        ));
+        assert!(matches!(&content[1], ContentBlock::Text { text } if text == "here's the answer"));
+        assert!(matches!(&content[2], ContentBlock::ToolUse { name, .. } if name == "read_file"));
+    }
+
+    #[test]
+    fn assemble_content_skips_empty_reasoning_and_text() {
+        assert!(assemble_content(Some(String::new()), None, vec![]).is_empty());
+        assert!(assemble_content(None, Some(String::new()), vec![]).is_empty());
+    }
+
+    #[test]
+    fn response_message_deserializes_reasoning_content() {
+        let msg: OpenAiResponseMessage =
+            serde_json::from_str(r#"{"content":"hi","reasoning_content":"because"}"#).unwrap();
+        assert_eq!(msg.reasoning_content.as_deref(), Some("because"));
+    }
+
+    #[test]
+    fn response_message_reasoning_content_defaults_to_none_when_absent() {
+        let msg: OpenAiResponseMessage = serde_json::from_str(r#"{"content":"hi"}"#).unwrap();
+        assert!(msg.reasoning_content.is_none());
     }
 }
