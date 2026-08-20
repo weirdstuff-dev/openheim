@@ -241,6 +241,31 @@ mod tests {
     }
 
     #[test]
+    fn save_conversation_refuses_when_a_shared_message_was_overwritten_in_place() {
+        // Same scenario as the "more than we know of" case, but the foreign
+        // writer's append lands at the same index this process's stale
+        // `conv` already occupies with a *different* message — so a naive
+        // length-only check would miss it and silently clobber the foreign
+        // line with `conv`'s version.
+        let (mgr, _dir) = make_manager();
+        let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
+
+        mgr.append_message(&conv.meta.id, &Message::user("from another process"))
+            .unwrap();
+        // Stale in-memory view: same length as disk, but disagrees on content.
+        conv.messages.push(Message::user("from this process"));
+
+        let err = mgr.save_conversation(&conv).unwrap_err();
+        assert!(matches!(err, Error::HistoryDiverged { .. }));
+
+        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
+        assert_eq!(
+            loaded.messages[0].text().as_deref(),
+            Some("from another process")
+        );
+    }
+
+    #[test]
     fn a_truncated_trailing_log_line_does_not_lose_earlier_messages() {
         let (mgr, dir) = make_manager();
         let conv = mgr.create_conversation(None, None, vec![]).unwrap();
@@ -561,16 +586,23 @@ impl HistoryManager {
     /// instead of calling this once per message.
     ///
     /// Refuses (returning [`Error::HistoryDiverged`]) instead of rewriting if
-    /// the on-disk log already has more messages than `conv` does: that can
-    /// only mean another process appended to this conversation after `conv`
-    /// was loaded, and a full rewrite from `conv.messages` would silently
-    /// drop them. This process's own [`Self::append_message`] calls don't
-    /// trigger it, since callers are expected to push the same message onto
+    /// the on-disk log isn't exactly a prefix of `conv.messages` — either
+    /// longer, or any message it does share with `conv.messages` doesn't
+    /// match. Either way that can only mean another process appended to (or
+    /// otherwise changed) this conversation after `conv` was loaded, and a
+    /// full rewrite from `conv.messages` would silently drop or clobber that.
+    /// This process's own [`Self::append_message`] calls don't trigger it,
+    /// since callers are expected to push the same message onto
     /// `conv.messages` when they append it (see the `acp` turn loop), so
     /// `conv.messages` and the on-disk log grow in lockstep.
     pub fn save_conversation(&self, conv: &Conversation) -> Result<()> {
-        let on_disk_len = self.read_message_log(&conv.meta.id)?.len();
-        if on_disk_len > conv.messages.len() {
+        let on_disk = self.read_message_log(&conv.meta.id)?;
+        let diverged = on_disk.len() > conv.messages.len()
+            || on_disk
+                .iter()
+                .zip(&conv.messages)
+                .any(|(disk, mem)| disk != mem);
+        if diverged {
             return Err(Error::HistoryDiverged {
                 session_id: conv.meta.id.to_string(),
             });
