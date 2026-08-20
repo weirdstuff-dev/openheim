@@ -318,20 +318,8 @@ impl AgentState {
     where
         F: FnMut(SessionUpdate) + Send,
     {
-        // Cross-process write lease for this turn only (see `rag::lease`),
-        // acquired before the sessions lock below so its file I/O never
-        // blocks other in-process session operations. Held until this
-        // function returns — success, error, or cancellation — via `_lease`
-        // staying in scope for the whole body, so an overlapping
-        // `session/prompt` on this session from *another* process is
-        // rejected immediately instead of racing history writes or
-        // generating against a context that's about to go stale. Merely
-        // loading/holding a session open never takes this lease — see
-        // `SessionState::prompt_lock`'s doc comment — only an in-flight turn
-        // does, in any process.
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| Error::ParseError("invalid session id format".to_string()))?;
-        let _lease = self.rag.history.acquire_lease(&uuid)?;
 
         let (llm, executor, config, chat_id, skills, cwd, cancel, _prompt_guard) = {
             // Write lock: each new prompt turn gets a fresh cancellation token,
@@ -344,6 +332,14 @@ impl AgentState {
             // Held until this function returns (success, error, or cancellation);
             // a second overlapping `session/prompt` on the same session would
             // otherwise race this one to reset `cancel` and to save history.
+            // Must be acquired — and must fail fast on an overlapping call —
+            // before the cross-process lease below: `SessionLease`'s Drop
+            // can't tell "this guard's turn was legitimately accepted, then
+            // later dropped" apart from "this guard was for a redundant,
+            // rejected overlapping call", so if a rejected call had already
+            // created its own lease guard, returning its error here would
+            // drop *that* guard and delete the still-running accepted turn's
+            // lockfile out from under it.
             let prompt_guard = s.try_acquire_prompt_lock(session_id)?;
             s.cancel = CancellationToken::new();
             s.last_active = Instant::now();
@@ -373,6 +369,17 @@ impl AgentState {
                 prompt_guard,
             )
         };
+
+        // Cross-process write lease for this turn only (see `rag::lease`).
+        // Held until this function returns — success, error, or cancellation
+        // — via `_lease` staying in scope for the whole body, so an
+        // overlapping `session/prompt` on this session from *another*
+        // process is rejected immediately instead of racing history writes
+        // or generating against a context that's about to go stale. Merely
+        // loading/holding a session open never takes this lease — see
+        // `SessionState::prompt_lock`'s doc comment — only an in-flight turn
+        // does, in any process.
+        let _lease = self.rag.history.acquire_lease(&uuid)?;
 
         let (mut conversation, prompt_builder) = self.rag.prepare(
             Some(chat_id),
@@ -1392,5 +1399,73 @@ mod replay_tests {
                 AcpContentBlock::Image(img) if img.data == "base64data" && img.mime_type == "image/png"
             )
         ));
+    }
+}
+
+#[cfg(test)]
+mod prompt_lease_ordering_tests {
+    use super::*;
+    use crate::rag::history::HistoryManager;
+    use tempfile::tempdir;
+
+    fn sample_session_state(chat_id: Uuid) -> SessionState {
+        SessionState {
+            chat_id,
+            config: AgentConfig::new(
+                "mock".into(),
+                "https://example.com".into(),
+                "key".into(),
+                "mock-model".into(),
+                5,
+            ),
+            cwd: PathBuf::from("/tmp"),
+            skills: vec![],
+            cancel: CancellationToken::new(),
+            approved_tools: HashMap::new(),
+            mode: AgentMode::Code,
+            prompt_lock: Arc::new(Mutex::new(())),
+            last_active: Instant::now(),
+        }
+    }
+
+    // Regression test for the ordering `acp_prompt` relies on: the
+    // in-process `prompt_lock` must be acquired (and fail fast on an
+    // overlapping call) *before* the cross-process `SessionLease` is
+    // acquired. Getting this backwards let an overlapping, rejected
+    // `session/prompt` call create its own lease guard and then drop it
+    // (`SessionLease::drop` can't tell that apart from a legitimately
+    // superseded one) — deleting the still-running accepted turn's lockfile
+    // out from under it.
+    #[test]
+    fn overlapping_prompt_in_same_process_never_touches_the_accepted_turns_lease() {
+        let dir = tempdir().unwrap();
+        let history = HistoryManager::with_dir(dir.path().to_path_buf());
+        let chat_id = Uuid::new_v4();
+        let lock_path = dir.path().join(format!("{chat_id}.lock"));
+        let state = sample_session_state(chat_id);
+
+        // Turn A: accepted, in the same order `acp_prompt` now uses.
+        let _prompt_guard_a = state.try_acquire_prompt_lock("s1").unwrap();
+        let _lease_a = history.acquire_lease(&chat_id).unwrap();
+        assert!(lock_path.exists());
+
+        // Turn B: an overlapping `session/prompt` for the same session, same
+        // process. Must be rejected via the prompt lock...
+        let turn_b = state.try_acquire_prompt_lock("s1");
+        assert!(turn_b.is_err());
+
+        // ...which means it never got as far as calling `acquire_lease`, so
+        // there's no second `SessionLease` guard to drop here. Turn A's
+        // lease must still be on disk, untouched.
+        assert!(
+            lock_path.exists(),
+            "an overlapping, rejected prompt must not delete the accepted turn's lease"
+        );
+
+        drop(_lease_a);
+        assert!(
+            !lock_path.exists(),
+            "turn A's own lease still releases normally"
+        );
     }
 }
