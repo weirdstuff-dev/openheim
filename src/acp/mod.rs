@@ -51,7 +51,7 @@ use crate::{
 
 use session::{
     MAX_LIVE_SESSIONS, SESSION_IDLE_EVICTION_AFTER, SessionState, evict_idle_sessions,
-    insert_or_keep_live,
+    insert_or_keep_live, prompt_in_flight,
 };
 
 type Sessions = Arc<RwLock<HashMap<String, SessionState>>>;
@@ -550,8 +550,13 @@ impl AgentState {
             // would orphan an in-flight turn, wiping `approved_tools` loses
             // remembered AllowAlways decisions, and a fresh `prompt_lock`
             // would let two turns overlap on one chat. The live entry (if
-            // any) is also newer than the disk snapshot above; the history
-            // replay below still streams to *this* connection either way.
+            // any) is also newer than the disk snapshot above. Note the
+            // history replay below is a one-shot dump of what's on disk, not
+            // a live subscription — it never sees chunks from a turn that's
+            // still streaming, and this connection gets no further updates
+            // for that turn (only the connection that called `session/prompt`
+            // does). The in-flight check below rejects the load outright in
+            // that case rather than silently handing back a stale picture.
             // No write lease is taken here — loading/attaching to a session
             // doesn't touch history by itself, so it never contends with
             // another process merely viewing (or even holding open) the same
@@ -578,13 +583,23 @@ impl AgentState {
                 MAX_LIVE_SESSIONS,
             );
             // The entry was just touched above (inserted or kept live), so it
-            // survives the idle sweep; read back its mode so the response
-            // reflects whatever `acp_prompt` is actually enforcing for it,
-            // not the fresh-session default.
-            sessions
+            // survives the idle sweep.
+            let live = sessions
                 .get(session_id)
-                .map(|s| s.mode)
-                .unwrap_or(AgentMode::Code)
+                .ok_or_else(|| Error::NotFound(format!("session not found: {session_id}")))?;
+            // A turn in flight on this session streams its updates only to
+            // the connection that called `session/prompt` (see comment
+            // above); reject the load instead of handing this connection a
+            // history snapshot that's already stale and will never catch up.
+            if prompt_in_flight(live) {
+                return Err(Error::Other(format!(
+                    "a prompt is already in flight for session {session_id}; retry once it completes"
+                )));
+            }
+            // Read back the mode so the response reflects whatever
+            // `acp_prompt` is actually enforcing for it, not the
+            // fresh-session default.
+            live.mode
         };
 
         replay_history_messages(&conversation.messages, &mut on_update);

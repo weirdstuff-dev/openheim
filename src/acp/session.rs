@@ -142,7 +142,7 @@ pub(crate) fn evict_idle_sessions(
 /// Whether a prompt turn currently holds this session's `prompt_lock`.
 /// Probing takes the lock briefly; safe only under the map's write lock (see
 /// [`evict_idle_sessions`]).
-fn prompt_in_flight(s: &SessionState) -> bool {
+pub(crate) fn prompt_in_flight(s: &SessionState) -> bool {
     s.prompt_lock.clone().try_lock_owned().is_err()
 }
 
@@ -318,5 +318,14 @@ mod tests {
         // though the map is still over the cap.
         assert!(!sessions.contains_key("newest"));
         assert!(sessions.contains_key("in_flight"));
+    }
+
+    #[test]
+    fn prompt_in_flight_reflects_the_lock() {
+        let state = sample_state();
+        assert!(!prompt_in_flight(&state));
+
+        let _guard = state.prompt_lock.clone().try_lock_owned().unwrap();
+        assert!(prompt_in_flight(&state));
     }
 }
