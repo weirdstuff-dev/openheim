@@ -58,6 +58,13 @@ struct OpenAiMessage {
     tool_calls: Option<Vec<OpenAiRequestToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+    /// Reasoning to replay alongside an assistant turn's tool calls, mirroring
+    /// the `reasoning_content` this client reads back from responses (see
+    /// `OpenAiResponseMessage`). DeepSeek expects this on the continuation
+    /// request so the model sees its own prior reasoning when following up
+    /// on tool results; absent entirely for turns with no thinking content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
 }
 
 /// OpenAI accepts `content` as either a plain string or an array of typed
@@ -176,6 +183,7 @@ fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
                         content: Some(OpenAiContent::Text(text)),
                         tool_calls: None,
                         tool_call_id: None,
+                        reasoning_content: None,
                     });
                 }
             }
@@ -215,10 +223,15 @@ fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
                     content: Some(content),
                     tool_calls: None,
                     tool_call_id: None,
+                    reasoning_content: None,
                 });
             }
             Role::Assistant => {
                 let text = msg.text();
+                let reasoning = msg.content.iter().find_map(|b| match b {
+                    ContentBlock::Thinking { thinking, .. } => Some(thinking.clone()),
+                    _ => None,
+                });
                 let calls = msg.tool_calls();
                 let tool_calls = if calls.is_empty() {
                     None
@@ -242,6 +255,7 @@ fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
                     content: text.map(OpenAiContent::Text),
                     tool_calls,
                     tool_call_id: None,
+                    reasoning_content: reasoning,
                 });
             }
             Role::Tool => {
@@ -251,6 +265,7 @@ fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
                         content: Some(OpenAiContent::Text(tr.content)),
                         tool_calls: None,
                         tool_call_id: Some(tr.tool_call_id),
+                        reasoning_content: None,
                     });
                 }
             }
@@ -609,6 +624,50 @@ mod tests {
         let tool_calls = result[0].tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].function.name, "read_file");
+    }
+
+    // `convert_messages` is the single conversion point shared by both
+    // `send_openai_style` (non-streaming) and `send_openai_style_streaming`
+    // (see their bodies above) — so these two cases cover the continuation
+    // request built by either path.
+    #[test]
+    fn convert_messages_assistant_with_tool_calls_replays_reasoning_content() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "let me check the file".into(),
+                    signature: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"a.txt"}"#.into(),
+                },
+            ],
+        }];
+        let result = convert_messages(&messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].reasoning_content.as_deref(),
+            Some("let me check the file")
+        );
+        assert!(result[0].tool_calls.is_some());
+    }
+
+    #[test]
+    fn convert_messages_assistant_without_thinking_omits_reasoning_content() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"a.txt"}"#.into(),
+            }],
+        }];
+        let result = convert_messages(&messages);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].reasoning_content.is_none());
     }
 
     #[test]
