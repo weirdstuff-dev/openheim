@@ -505,7 +505,7 @@ impl AgentState {
         session_id: &str,
         cwd: PathBuf,
         mut on_update: F,
-    ) -> Result<()>
+    ) -> Result<AgentMode>
     where
         F: FnMut(SessionUpdate) + Send,
     {
@@ -543,7 +543,7 @@ impl AgentState {
             session_config.model = model.clone();
         }
 
-        {
+        let mode = {
             let mut sessions = self.sessions.write().await;
             // A second connection attaching to an already-live session
             // must not replace its control state — a fresh `cancel` token
@@ -577,11 +577,19 @@ impl AgentState {
                 SESSION_IDLE_EVICTION_AFTER,
                 MAX_LIVE_SESSIONS,
             );
-        }
+            // The entry was just touched above (inserted or kept live), so it
+            // survives the idle sweep; read back its mode so the response
+            // reflects whatever `acp_prompt` is actually enforcing for it,
+            // not the fresh-session default.
+            sessions
+                .get(session_id)
+                .map(|s| s.mode)
+                .unwrap_or(AgentMode::Code)
+        };
 
         replay_history_messages(&conversation.messages, &mut on_update);
 
-        Ok(())
+        Ok(mode)
     }
 }
 
@@ -1098,9 +1106,8 @@ pub async fn serve(
                     .await;
 
                 match result {
-                    Ok(()) => responder.respond(
-                        LoadSessionResponse::new().modes(session_mode_state(AgentMode::Code)),
-                    ),
+                    Ok(mode) => responder
+                        .respond(LoadSessionResponse::new().modes(session_mode_state(mode))),
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
                 }
             },
