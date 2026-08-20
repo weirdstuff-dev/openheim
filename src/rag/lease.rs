@@ -89,13 +89,40 @@ fn lock_path(dir: &Path, id: &Uuid) -> PathBuf {
     dir.join(format!("{id}.lock"))
 }
 
+/// Writes `contents` to `path` by writing to a sibling temp file and
+/// renaming it into place, so a reader never observes a partial write.
+///
+/// For *refreshing* or *taking over* an already-existing lockfile only —
+/// [`acquire`] uses [`create_lease_exclusively`] instead when no lease was
+/// observed, so two processes racing to claim a session for the first time
+/// can't both win via a rename that neither has to contend for.
 fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+    // Per-call unique suffix (pid + a fresh uuid): a shared `.tmp` name would
+    // let two concurrent writers to the *same* lockfile (e.g. this process
+    // refreshing its lease while another takes it over as stale) clobber
+    // each other's temp file before either gets to rename.
     let mut tmp_path = path.as_os_str().to_owned();
-    tmp_path.push(".tmp");
+    tmp_path.push(format!(".{}.{}.tmp", std::process::id(), Uuid::new_v4()));
     let tmp_path = PathBuf::from(tmp_path);
     std::fs::write(&tmp_path, contents)?;
     std::fs::rename(&tmp_path, path)?;
     Ok(())
+}
+
+/// Atomically creates `path` with `contents`, failing with
+/// [`std::io::ErrorKind::AlreadyExists`] if it's already there instead of
+/// overwriting it. Used by [`acquire`] to claim a session that currently has
+/// no lockfile: unlike [`write_atomic`]'s rename (which always wins,
+/// unconditionally replacing whatever's at `path`), this lets two processes
+/// racing to be the first to acquire the same session's lease discover the
+/// race instead of silently having the second one's rename erase the first.
+fn create_lease_exclusively(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?
+        .write_all(contents.as_bytes())
 }
 
 /// Holds a session's write lease for as long as it's alive; releases it
@@ -140,46 +167,90 @@ impl Drop for SessionLease {
 /// Otherwise returns [`Error::SessionLocked`] naming the holder.
 pub fn acquire(dir: &Path, id: &Uuid) -> Result<SessionLease> {
     let path = lock_path(dir, id);
-
-    if let Ok(data) = std::fs::read_to_string(&path)
-        && let Ok(existing) = serde_json::from_str::<LeaseInfo>(&data)
-        && !(existing.pid == std::process::id() && existing.hostname == IDENTITY.0)
-    {
-        let same_host = existing.hostname == IDENTITY.0;
-        let alive = same_host.then(|| pid_is_alive(existing.pid)).flatten();
-        let stale = match alive {
-            Some(true) => false,
-            Some(false) => true,
-            // Can't confirm liveness (different host, or this platform can't
-            // check): fall back to age.
-            None => std::fs::metadata(&path)
-                .and_then(|m| m.modified())
-                .map(|m| m.elapsed().unwrap_or_default() > STALE_TTL)
-                .unwrap_or(true),
-        };
-
-        if !stale {
-            return Err(Error::SessionLocked {
-                session_id: id.to_string(),
-                pid: existing.pid,
-                host: existing.hostname,
-            });
-        }
-        tracing::warn!(
-            session_id = %id,
-            pid = existing.pid,
-            host = %existing.hostname,
-            "taking over stale session lease"
-        );
-    }
-
     let info = LeaseInfo {
         pid: std::process::id(),
         hostname: IDENTITY.0.clone(),
         acquired_at: Utc::now(),
         process_start: IDENTITY.1,
     };
-    write_atomic(&path, &serde_json::to_string_pretty(&info)?)?;
+    let contents = serde_json::to_string_pretty(&info)?;
+
+    let existing = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|data| serde_json::from_str::<LeaseInfo>(&data).ok());
+
+    let Some(existing) = existing else {
+        // Nothing readable at `path` — either it's genuinely absent, or it
+        // exists but is unreadable/corrupt. Either way there's no live claim
+        // to respect, but only the "genuinely absent" case is safe to claim
+        // via an exclusive create: `create_new` fails against a file that's
+        // merely unparsable, so that case falls back to the unconditional
+        // rename, same as a confirmed-stale takeover below.
+        return match create_lease_exclusively(&path, &contents) {
+            Ok(()) => Ok(SessionLease { path }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Lost the race to claim a brand-new lease — report whoever
+                // actually won it rather than a generic error, same as the
+                // "live foreign lease" case below.
+                let winner = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|data| serde_json::from_str::<LeaseInfo>(&data).ok());
+                Err(match winner {
+                    Some(w) => Error::SessionLocked {
+                        session_id: id.to_string(),
+                        pid: w.pid,
+                        host: w.hostname,
+                    },
+                    None => Error::SessionLocked {
+                        session_id: id.to_string(),
+                        pid: 0,
+                        host: "unknown".to_string(),
+                    },
+                })
+            }
+            Err(_) => {
+                // Path exists but wasn't readable as a `LeaseInfo` above —
+                // overwrite the corrupt file via rename.
+                write_atomic(&path, &contents)?;
+                Ok(SessionLease { path })
+            }
+        };
+    };
+
+    if existing.pid == std::process::id() && existing.hostname == IDENTITY.0 {
+        // Idempotent refresh of our own lease; the file already exists, so
+        // this always goes through the rename path.
+        write_atomic(&path, &contents)?;
+        return Ok(SessionLease { path });
+    }
+
+    let same_host = existing.hostname == IDENTITY.0;
+    let alive = same_host.then(|| pid_is_alive(existing.pid)).flatten();
+    let stale = match alive {
+        Some(true) => false,
+        Some(false) => true,
+        // Can't confirm liveness (different host, or this platform can't
+        // check): fall back to age.
+        None => std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .map(|m| m.elapsed().unwrap_or_default() > STALE_TTL)
+            .unwrap_or(true),
+    };
+
+    if !stale {
+        return Err(Error::SessionLocked {
+            session_id: id.to_string(),
+            pid: existing.pid,
+            host: existing.hostname,
+        });
+    }
+    tracing::warn!(
+        session_id = %id,
+        pid = existing.pid,
+        host = %existing.hostname,
+        "taking over stale session lease"
+    );
+    write_atomic(&path, &contents)?;
     Ok(SessionLease { path })
 }
 
@@ -195,6 +266,19 @@ mod tests {
         let lease = acquire(dir.path(), &id).unwrap();
         assert!(lock_path(dir.path(), &id).exists());
         drop(lease);
+    }
+
+    #[test]
+    fn create_lease_exclusively_fails_if_the_path_already_exists() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("some.lock");
+        create_lease_exclusively(&path, "first").unwrap();
+
+        let err = create_lease_exclusively(&path, "second").unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        // The loser's write must not have clobbered the winner's content.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
     }
 
     #[test]
