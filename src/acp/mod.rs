@@ -12,9 +12,9 @@ use agent_client_protocol::{
     on_receive_notification, on_receive_request,
     schema::{
         AgentCapabilities, CancelNotification, ClientCapabilities, ContentBlock as AcpContentBlock,
-        ContentChunk, Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
-        ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, ModelInfo,
-        NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind,
+        ContentChunk, ImageContent, Implementation, InitializeRequest, InitializeResponse,
+        ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
+        ModelInfo, NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind,
         PromptCapabilities, PromptRequest, PromptResponse, ReadTextFileRequest,
         ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
         RequestPermissionResponse, SessionCapabilities, SessionInfo, SessionListCapabilities,
@@ -636,10 +636,27 @@ where
     for msg in messages {
         match msg.role {
             Role::User => {
-                if let Some(text) = msg.text() {
-                    on_update(SessionUpdate::UserMessageChunk(ContentChunk::new(
-                        AcpContentBlock::from(text),
-                    )));
+                // Iterate every persisted block in order (not just `msg.text()`,
+                // which only concatenates `Text` blocks) so an image attached
+                // to the prompt is restored alongside the text instead of
+                // silently dropped on reload.
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Text { text } => {
+                            on_update(SessionUpdate::UserMessageChunk(ContentChunk::new(
+                                AcpContentBlock::from(text.clone()),
+                            )));
+                        }
+                        ContentBlock::Image { data, mime_type } => {
+                            on_update(SessionUpdate::UserMessageChunk(ContentChunk::new(
+                                AcpContentBlock::Image(ImageContent::new(
+                                    data.clone(),
+                                    mime_type.clone(),
+                                )),
+                            )));
+                        }
+                        _ => {}
+                    }
                 }
             }
             Role::Assistant => {
@@ -1344,5 +1361,36 @@ mod replay_tests {
             SessionUpdate::ToolCall(tc) if tc.raw_input.is_some()
         ));
         assert!(matches!(&updates[2], SessionUpdate::ToolCallUpdate(_)));
+    }
+
+    #[test]
+    fn replay_restores_user_text_and_image_blocks_in_order() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "check this out".into(),
+                },
+                ContentBlock::Image {
+                    data: "base64data".into(),
+                    mime_type: "image/png".into(),
+                },
+            ],
+        }];
+        let mut updates = Vec::new();
+        replay_history_messages(&messages, &mut |u| updates.push(u));
+
+        assert_eq!(updates.len(), 2);
+        assert!(matches!(
+            &updates[0],
+            SessionUpdate::UserMessageChunk(c) if matches!(&c.content, AcpContentBlock::Text(t) if t.text == "check this out")
+        ));
+        assert!(matches!(
+            &updates[1],
+            SessionUpdate::UserMessageChunk(c) if matches!(
+                &c.content,
+                AcpContentBlock::Image(img) if img.data == "base64data" && img.mime_type == "image/png"
+            )
+        ));
     }
 }
