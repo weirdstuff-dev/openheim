@@ -982,6 +982,13 @@ pub async fn serve(
                 if let Ok(val) = serde_json::to_value(state_init.executor.list_tools()) {
                     meta.insert("tools".to_string(), val);
                 }
+                // Resolved sandbox root, shared by every session this connection
+                // opens — not per-session, so `initialize` (not `session/new`)
+                // is the natural home for it.
+                meta.insert(
+                    "work_dir".to_string(),
+                    serde_json::Value::String(state_init.work_dir.display().to_string()),
+                );
                 // Advertise that thinking content arrives as AgentMessageChunk with
                 // content._meta.kind == "thinking" (ACP _meta extensibility).
                 meta.insert(
