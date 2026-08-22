@@ -85,7 +85,7 @@ pub struct ToolResultBlock {
 /// `role` says what the message *is*; `content` is an ordered list of blocks
 /// describing what it *contains*. A tool-result message is `role: Tool` with
 /// a single `ToolResult` block rather than a distinct role.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,

@@ -27,6 +27,26 @@ pub enum Error {
     #[error("{0}")]
     NotFound(String),
 
+    /// A session's write lease (see `rag::lease`) is held by another,
+    /// still-live process. Returned from activation-for-writing (creating or
+    /// loading a session for prompting); reading/listing history never hits
+    /// this. The GUI matches on this variant to offer a read-only fallback.
+    #[error("session {session_id} is active in another process (pid {pid} on {host})")]
+    SessionLocked {
+        session_id: String,
+        pid: u32,
+        host: String,
+    },
+
+    /// `save_conversation` would have rewritten the on-disk message log with
+    /// fewer messages than are already there — another writer (a second
+    /// `openheim` process sharing the same history directory) appended to
+    /// this conversation since it was loaded here. Refused rather than
+    /// silently dropping those messages; the caller should reload the
+    /// conversation and retry.
+    #[error("conversation {session_id} was modified by another process since it was loaded")]
+    HistoryDiverged { session_id: String },
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 

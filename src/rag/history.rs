@@ -5,6 +5,7 @@ use uuid::Uuid;
 use crate::config::config_dir;
 use crate::core::models::{Message, Role};
 use crate::error::{Error, Result};
+use crate::rag::lease::{self, SessionLease};
 use std::path::PathBuf;
 
 #[cfg(test)]
@@ -194,6 +195,77 @@ mod tests {
     }
 
     #[test]
+    fn save_conversation_refuses_when_another_writer_appended_more_than_we_know_of() {
+        // Simulates two processes sharing a session: this process loads the
+        // conversation with 0 messages, then a foreign process appends
+        // directly to the log (bypassing this process's in-memory `conv`).
+        // A stale full save must not clobber the foreign line.
+        let (mgr, _dir) = make_manager();
+        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
+
+        mgr.append_message(&conv.meta.id, &Message::user("from another process"))
+            .unwrap();
+
+        // `conv` is still the stale, pre-append in-memory view (0 messages).
+        let err = mgr.save_conversation(&conv).unwrap_err();
+        assert!(matches!(err, Error::HistoryDiverged { .. }));
+
+        // The foreign message must still be there — the refusal didn't corrupt it.
+        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(
+            loaded.messages[0].text().as_deref(),
+            Some("from another process")
+        );
+    }
+
+    #[test]
+    fn save_conversation_succeeds_when_conv_already_reflects_its_own_appends() {
+        // The normal single-process pattern (see the `acp` turn loop):
+        // `append_message` is called as each message is produced, and the
+        // same message is also pushed onto `conv.messages`, so by the time
+        // the end-of-turn full save runs, `conv.messages` is a superset of
+        // (here, exactly equal to) what's already on disk. This must not be
+        // mistaken for a foreign writer.
+        let (mgr, _dir) = make_manager();
+        let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
+
+        let msg = Message::user("first");
+        mgr.append_message(&conv.meta.id, &msg).unwrap();
+        conv.messages.push(msg);
+
+        mgr.save_conversation(&conv).unwrap();
+
+        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+    }
+
+    #[test]
+    fn save_conversation_refuses_when_a_shared_message_was_overwritten_in_place() {
+        // Same scenario as the "more than we know of" case, but the foreign
+        // writer's append lands at the same index this process's stale
+        // `conv` already occupies with a *different* message — so a naive
+        // length-only check would miss it and silently clobber the foreign
+        // line with `conv`'s version.
+        let (mgr, _dir) = make_manager();
+        let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
+
+        mgr.append_message(&conv.meta.id, &Message::user("from another process"))
+            .unwrap();
+        // Stale in-memory view: same length as disk, but disagrees on content.
+        conv.messages.push(Message::user("from this process"));
+
+        let err = mgr.save_conversation(&conv).unwrap_err();
+        assert!(matches!(err, Error::HistoryDiverged { .. }));
+
+        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
+        assert_eq!(
+            loaded.messages[0].text().as_deref(),
+            Some("from another process")
+        );
+    }
+
+    #[test]
     fn a_truncated_trailing_log_line_does_not_lose_earlier_messages() {
         let (mgr, dir) = make_manager();
         let conv = mgr.create_conversation(None, None, vec![]).unwrap();
@@ -261,6 +333,20 @@ mod tests {
 
         assert!(!dir.path().join(format!("{}.json", conv.meta.id)).exists());
         assert!(!dir.path().join(format!("{}.jsonl", conv.meta.id)).exists());
+    }
+
+    #[test]
+    fn delete_conversation_removes_the_lease_lockfile_too() {
+        let (mgr, dir) = make_manager();
+        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
+        let lease = mgr.acquire_lease(&conv.meta.id).unwrap();
+        assert!(dir.path().join(format!("{}.lock", conv.meta.id)).exists());
+
+        mgr.delete_conversation(&conv.meta.id).unwrap();
+
+        assert!(!dir.path().join(format!("{}.lock", conv.meta.id)).exists());
+        drop(lease); // held past the delete on purpose: must not resurrect the file
+        assert!(!dir.path().join(format!("{}.lock", conv.meta.id)).exists());
     }
 }
 
@@ -353,6 +439,28 @@ impl HistoryManager {
 
     fn log_path(&self, id: &Uuid) -> PathBuf {
         self.history_dir.join(format!("{}.jsonl", id))
+    }
+
+    /// Acquires the write lease for conversation `id`: an advisory,
+    /// cross-process lock so this session can't be written to by two
+    /// `openheim` processes sharing the same history directory at once.
+    ///
+    /// Returns [`Error::SessionLocked`] if another still-live process
+    /// already holds it. A stale lease (its process has since exited or the
+    /// lock has aged past its TTL — see `rag::lease`) is taken over
+    /// automatically. Hold the returned [`SessionLease`] for exactly the
+    /// span that actually writes — a single `session/prompt` turn
+    /// (`acp::AgentState::acp_prompt` acquires and releases one per turn) —
+    /// not for as long as the session merely stays loaded/live; it releases
+    /// on drop.
+    ///
+    /// Only needed around an actual write — [`Self::load_conversation`] and
+    /// [`Self::list_conversations`] stay lease-free, since reading a
+    /// conversation never risks clobbering another process's writes, and
+    /// neither does merely activating/holding a session open without
+    /// prompting it.
+    pub fn acquire_lease(&self, id: &Uuid) -> Result<SessionLease> {
+        lease::acquire(&self.history_dir, id)
     }
 
     /// Writes `contents` to `path` via a temp file + rename in the same
@@ -476,7 +584,30 @@ impl HistoryManager {
     /// end-of-turn consistency checkpoint, but a turn that wants to persist
     /// messages as they're produced should call [`Self::append_message`]
     /// instead of calling this once per message.
+    ///
+    /// Refuses (returning [`Error::HistoryDiverged`]) instead of rewriting if
+    /// the on-disk log isn't exactly a prefix of `conv.messages` — either
+    /// longer, or any message it does share with `conv.messages` doesn't
+    /// match. Either way that can only mean another process appended to (or
+    /// otherwise changed) this conversation after `conv` was loaded, and a
+    /// full rewrite from `conv.messages` would silently drop or clobber that.
+    /// This process's own [`Self::append_message`] calls don't trigger it,
+    /// since callers are expected to push the same message onto
+    /// `conv.messages` when they append it (see the `acp` turn loop), so
+    /// `conv.messages` and the on-disk log grow in lockstep.
     pub fn save_conversation(&self, conv: &Conversation) -> Result<()> {
+        let on_disk = self.read_message_log(&conv.meta.id)?;
+        let diverged = on_disk.len() > conv.messages.len()
+            || on_disk
+                .iter()
+                .zip(&conv.messages)
+                .any(|(disk, mem)| disk != mem);
+        if diverged {
+            return Err(Error::HistoryDiverged {
+                session_id: conv.meta.id.to_string(),
+            });
+        }
+
         let mut meta = conv.meta.clone();
         meta.updated_at = Utc::now();
 
@@ -541,8 +672,10 @@ impl HistoryManager {
     /// Deletes a conversation's meta file and message log by UUID.
     ///
     /// Returns an error if the meta file does not exist; the `.jsonl` log
-    /// (which may not exist for an empty or pre-split-format conversation)
-    /// is removed on a best-effort basis.
+    /// and `.lock` lease file (neither of which necessarily exist — an
+    /// empty or pre-split-format conversation has no log, and a session
+    /// that was never activated for writing has no lease) are removed on a
+    /// best-effort basis.
     pub fn delete_conversation(&self, id: &Uuid) -> Result<()> {
         let path = self.meta_path(id);
         if !path.exists() {
@@ -550,6 +683,7 @@ impl HistoryManager {
         }
         std::fs::remove_file(&path)?;
         let _ = std::fs::remove_file(self.log_path(id));
+        let _ = std::fs::remove_file(self.history_dir.join(format!("{id}.lock")));
         Ok(())
     }
 
