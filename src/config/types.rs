@@ -96,8 +96,18 @@ impl AppConfig {
         }
     }
 
-    pub fn to_public_json(&self) -> serde_json::Value {
+    /// Serializes the config for clients, redacting secrets. `work_dir` is
+    /// overlaid with the *resolved* sandbox root (`AgentState::work_dir`)
+    /// rather than the raw `Option<PathBuf>` config value, since the latter
+    /// is `None` unless `work_dir` was explicitly set in `config.toml`.
+    pub fn to_public_json(&self, work_dir: &std::path::Path) -> serde_json::Value {
         let mut val = serde_json::to_value(self).unwrap_or_default();
+        if let Some(obj) = val.as_object_mut() {
+            obj.insert(
+                "work_dir".to_string(),
+                serde_json::Value::String(work_dir.display().to_string()),
+            );
+        }
         if let Some(providers) = val.get_mut("providers").and_then(|v| v.as_object_mut()) {
             for p in providers.values_mut() {
                 if let Some(obj) = p.as_object_mut() {
