@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.8.0] - 2026-08-26
+
+### Added
+
+- **Cross-process write lease for sessions** — a `session/prompt` turn now takes an advisory per-conversation lockfile for its duration (acquired only after the existing in-process `prompt_lock`, so an overlapping turn on the same process can't take and then drop the lockfile out from under the one that's actually running), so the desktop app's embedded core and a separately-spawned CLI sharing `~/.openheim/history/` can no longer both write the same conversation at once. A second process's overlapping turn fails fast with `Error::SessionLocked` instead of racing; a crashed holder's lease is detected and taken over automatically. `save_conversation` also now refuses a stale rewrite when the on-disk history has diverged from what the caller loaded.
+- **OpenAI-compatible reasoning models (GLM, DeepSeek, …) now persist and replay their extended-thinking output** instead of losing it once streamed to the UI — thinking survives session reload. It's never replayed back to the provider on continuation requests, to keep growing reasoning traces from bloating context.
+
+### Fixed
+
+- **A prompt in flight on one connection no longer lets a second connection load a stale, un-updating history snapshot.** `session/load`'s history replay is a one-shot dump of what's on disk; a turn still streaming only pushes updates to the connection that called `session/prompt`. A second connection loading the same session mid-turn previously got back a snapshot that would never catch up. `session/load` now rejects outright while a prompt is in flight for that session, instead of silently handing back a picture that's already stale.
+- **`session/load`'s response now reports the session's actual mode instead of always claiming the default.** The mode advertised in `LoadSessionResponse` was hardcoded to `AgentMode::Code` regardless of what `session/set_mode` had actually set for a live session, so a client reattaching to an existing session saw the wrong mode in its UI until the next explicit mode change.
+- **Reattaching to a session via `session/load` no longer drops images from replayed user messages.** History replay reconstructed a user turn from `msg.text()`, which only concatenates `Text` blocks — an image attached to the original prompt was silently missing from the replayed conversation. Every persisted block is now iterated in order, so `Image` blocks (alongside `Text`) are restored the same way they'd have appeared live.
+
+### Changed
+
+- **Project logo** — swapped the SVG hexagon mark in the README for the new `openheim-logo.png`.
+
 ## [0.7.0] - 2026-08-16
 
 ### Security

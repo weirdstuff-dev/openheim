@@ -12,9 +12,9 @@ use agent_client_protocol::{
     on_receive_notification, on_receive_request,
     schema::{
         AgentCapabilities, CancelNotification, ClientCapabilities, ContentBlock as AcpContentBlock,
-        ContentChunk, Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
-        ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, ModelInfo,
-        NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind,
+        ContentChunk, ImageContent, Implementation, InitializeRequest, InitializeResponse,
+        ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
+        ModelInfo, NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind,
         PromptCapabilities, PromptRequest, PromptResponse, ReadTextFileRequest,
         ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
         RequestPermissionResponse, SessionCapabilities, SessionInfo, SessionListCapabilities,
@@ -51,7 +51,7 @@ use crate::{
 
 use session::{
     MAX_LIVE_SESSIONS, SESSION_IDLE_EVICTION_AFTER, SessionState, evict_idle_sessions,
-    insert_or_keep_live,
+    insert_or_keep_live, prompt_in_flight,
 };
 
 type Sessions = Arc<RwLock<HashMap<String, SessionState>>>;
@@ -178,6 +178,9 @@ impl AgentState {
         let config = model
             .and_then(|m| self.app_config.resolve(Some(m)).ok())
             .unwrap_or_else(|| self.config.clone());
+        // No write lease taken here — merely creating/holding a session open
+        // doesn't touch history, so it doesn't contend with other processes.
+        // The cross-process write lease is acquired per-turn in `acp_prompt`.
         {
             let mut sessions = self.sessions.write().await;
             sessions.insert(
@@ -315,6 +318,9 @@ impl AgentState {
     where
         F: FnMut(SessionUpdate) + Send,
     {
+        let uuid = Uuid::parse_str(session_id)
+            .map_err(|_| Error::ParseError("invalid session id format".to_string()))?;
+
         let (llm, executor, config, chat_id, skills, cwd, cancel, _prompt_guard) = {
             // Write lock: each new prompt turn gets a fresh cancellation token,
             // since a token can only ever transition uncancelled -> cancelled
@@ -326,6 +332,14 @@ impl AgentState {
             // Held until this function returns (success, error, or cancellation);
             // a second overlapping `session/prompt` on the same session would
             // otherwise race this one to reset `cancel` and to save history.
+            // Must be acquired — and must fail fast on an overlapping call —
+            // before the cross-process lease below: `SessionLease`'s Drop
+            // can't tell "this guard's turn was legitimately accepted, then
+            // later dropped" apart from "this guard was for a redundant,
+            // rejected overlapping call", so if a rejected call had already
+            // created its own lease guard, returning its error here would
+            // drop *that* guard and delete the still-running accepted turn's
+            // lockfile out from under it.
             let prompt_guard = s.try_acquire_prompt_lock(session_id)?;
             s.cancel = CancellationToken::new();
             s.last_active = Instant::now();
@@ -355,6 +369,17 @@ impl AgentState {
                 prompt_guard,
             )
         };
+
+        // Cross-process write lease for this turn only (see `rag::lease`).
+        // Held until this function returns — success, error, or cancellation
+        // — via `_lease` staying in scope for the whole body, so an
+        // overlapping `session/prompt` on this session from *another*
+        // process is rejected immediately instead of racing history writes
+        // or generating against a context that's about to go stale. Merely
+        // loading/holding a session open never takes this lease — see
+        // `SessionState::prompt_lock`'s doc comment — only an in-flight turn
+        // does, in any process.
+        let _lease = self.rag.history.acquire_lease(&uuid)?;
 
         let (mut conversation, prompt_builder) = self.rag.prepare(
             Some(chat_id),
@@ -410,16 +435,8 @@ impl AgentState {
                     )));
                 }
                 StreamEvent::ThinkingContent { content } => {
-                    // Tunnel thinking through ContentBlock::Text using a meta tag so
-                    // it survives the ACP layer (ACP's ContentBlock has no Thinking variant).
-                    let mut meta = serde_json::Map::new();
-                    meta.insert(
-                        "kind".to_string(),
-                        serde_json::Value::String("thinking".to_string()),
-                    );
-                    let text = TextContent::new(content).meta(meta);
                     on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                        AcpContentBlock::Text(text),
+                        AcpContentBlock::Text(thinking_chunk(content)),
                     )));
                 }
                 StreamEvent::ToolCall {
@@ -495,7 +512,7 @@ impl AgentState {
         session_id: &str,
         cwd: PathBuf,
         mut on_update: F,
-    ) -> Result<()>
+    ) -> Result<AgentMode>
     where
         F: FnMut(SessionUpdate) + Send,
     {
@@ -533,27 +550,37 @@ impl AgentState {
             session_config.model = model.clone();
         }
 
-        let fresh = SessionState {
-            chat_id: uuid,
-            config: session_config,
-            cwd,
-            skills: conversation.meta.skills.clone(),
-            cancel: CancellationToken::new(),
-            approved_tools: HashMap::new(),
-            mode: AgentMode::Code,
-            prompt_lock: Arc::new(Mutex::new(())),
-            last_active: Instant::now(),
-        };
-        {
+        let mode = {
             let mut sessions = self.sessions.write().await;
             // A second connection attaching to an already-live session
             // must not replace its control state — a fresh `cancel` token
             // would orphan an in-flight turn, wiping `approved_tools` loses
             // remembered AllowAlways decisions, and a fresh `prompt_lock`
             // would let two turns overlap on one chat. The live entry (if
-            // any) is also newer than the disk snapshot above; the history
-            // replay below still streams to *this* connection either way.
-            if !insert_or_keep_live(&mut sessions, session_id, fresh) {
+            // any) is also newer than the disk snapshot above. Note the
+            // history replay below is a one-shot dump of what's on disk, not
+            // a live subscription — it never sees chunks from a turn that's
+            // still streaming, and this connection gets no further updates
+            // for that turn (only the connection that called `session/prompt`
+            // does). The in-flight check below rejects the load outright in
+            // that case rather than silently handing back a stale picture.
+            // No write lease is taken here — loading/attaching to a session
+            // doesn't touch history by itself, so it never contends with
+            // another process merely viewing (or even holding open) the same
+            // session; only an in-flight `session/prompt` turn does.
+            if !insert_or_keep_live(&mut sessions, session_id, || {
+                Ok(SessionState {
+                    chat_id: uuid,
+                    config: session_config,
+                    cwd,
+                    skills: conversation.meta.skills.clone(),
+                    cancel: CancellationToken::new(),
+                    approved_tools: HashMap::new(),
+                    mode: AgentMode::Code,
+                    prompt_lock: Arc::new(Mutex::new(())),
+                    last_active: Instant::now(),
+                })
+            })? {
                 tracing::debug!("session {session_id} is already live; keeping live control state");
             }
             evict_idle_sessions(
@@ -562,62 +589,133 @@ impl AgentState {
                 SESSION_IDLE_EVICTION_AFTER,
                 MAX_LIVE_SESSIONS,
             );
-        }
-
-        for msg in &conversation.messages {
-            match msg.role {
-                Role::User => {
-                    if let Some(text) = msg.text() {
-                        on_update(SessionUpdate::UserMessageChunk(ContentChunk::new(
-                            AcpContentBlock::from(text),
-                        )));
-                    }
-                }
-                Role::Assistant => {
-                    if let Some(text) = msg.text() {
-                        on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                            AcpContentBlock::from(text),
-                        )));
-                    }
-                    for tc in msg.tool_calls() {
-                        let raw_input = match serde_json::from_str(&tc.arguments) {
-                            Ok(v) => Some(v),
-                            Err(e) => {
-                                tracing::warn!(
-                                    tool_call_id = %tc.id,
-                                    tool_name = %tc.name,
-                                    "failed to parse tool call arguments: {e}"
-                                );
-                                None
-                            }
-                        };
-                        on_update(SessionUpdate::ToolCall(
-                            AcpToolCall::new(tc.id.clone(), &tc.name)
-                                .status(ToolCallStatus::InProgress)
-                                .raw_input(raw_input),
-                        ));
-                    }
-                }
-                Role::Tool => {
-                    if let Some(tr) = msg.tool_result_block() {
-                        let status = if tr.is_error {
-                            ToolCallStatus::Failed
-                        } else {
-                            ToolCallStatus::Completed
-                        };
-                        on_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                            tr.tool_call_id,
-                            ToolCallUpdateFields::new()
-                                .status(status)
-                                .raw_output(serde_json::Value::String(tr.content)),
-                        )));
-                    }
-                }
-                _ => {}
+            // The entry was just touched above (inserted or kept live), so it
+            // survives the idle sweep.
+            let live = sessions
+                .get(session_id)
+                .ok_or_else(|| Error::NotFound(format!("session not found: {session_id}")))?;
+            // A turn in flight on this session streams its updates only to
+            // the connection that called `session/prompt` (see comment
+            // above); reject the load instead of handing this connection a
+            // history snapshot that's already stale and will never catch up.
+            if prompt_in_flight(live) {
+                return Err(Error::Other(format!(
+                    "a prompt is already in flight for session {session_id}; retry once it completes"
+                )));
             }
-        }
+            // Read back the mode so the response reflects whatever
+            // `acp_prompt` is actually enforcing for it, not the
+            // fresh-session default.
+            live.mode
+        };
 
-        Ok(())
+        replay_history_messages(&conversation.messages, &mut on_update);
+
+        Ok(mode)
+    }
+}
+
+/// Wraps reasoning text in a plain text block tagged `_meta.kind == "thinking"`
+/// — the tunnel ACP uses for thinking content (ACP's own content model has no
+/// thinking variant; the `thinking` entry in the session metadata advertised
+/// by `initialize` documents this convention for clients).
+fn thinking_chunk(content: String) -> TextContent {
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "kind".to_string(),
+        serde_json::Value::String("thinking".to_string()),
+    );
+    TextContent::new(content).meta(meta)
+}
+
+/// Replays persisted history to a (re)attaching connection as the same
+/// stream of session updates a live turn would have produced, so a reloaded
+/// session renders identically to one that stayed open — including assistant
+/// thinking blocks, which lead the persisted content (`[Thinking?, Text?,
+/// ToolUse*]`) and are tunneled through `agent_message_chunk` with
+/// `content._meta.kind == "thinking"` exactly as the live streaming path
+/// does. Without this, thinking shown during a turn vanished on reload even
+/// though it was persisted.
+fn replay_history_messages<F>(messages: &[Message], on_update: &mut F)
+where
+    F: FnMut(SessionUpdate),
+{
+    for msg in messages {
+        match msg.role {
+            Role::User => {
+                // Iterate every persisted block in order (not just `msg.text()`,
+                // which only concatenates `Text` blocks) so an image attached
+                // to the prompt is restored alongside the text instead of
+                // silently dropped on reload.
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Text { text } => {
+                            on_update(SessionUpdate::UserMessageChunk(ContentChunk::new(
+                                AcpContentBlock::from(text.clone()),
+                            )));
+                        }
+                        ContentBlock::Image { data, mime_type } => {
+                            on_update(SessionUpdate::UserMessageChunk(ContentChunk::new(
+                                AcpContentBlock::Image(ImageContent::new(
+                                    data.clone(),
+                                    mime_type.clone(),
+                                )),
+                            )));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Role::Assistant => {
+                for block in &msg.content {
+                    if let ContentBlock::Thinking { thinking, .. } = block {
+                        on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                            AcpContentBlock::Text(thinking_chunk(thinking.clone())),
+                        )));
+                    }
+                }
+                if let Some(text) = msg.text() {
+                    on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                        AcpContentBlock::from(text),
+                    )));
+                }
+                for tc in msg.tool_calls() {
+                    let raw_input = match serde_json::from_str(&tc.arguments) {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            tracing::warn!(
+                                tool_call_id = %tc.id,
+                                tool_name = %tc.name,
+                                "failed to parse tool call arguments: {e}"
+                            );
+                            None
+                        }
+                    };
+                    on_update(SessionUpdate::ToolCall(
+                        AcpToolCall::new(tc.id.clone(), &tc.name)
+                            .kind(tool_kind_for(&tc.name))
+                            .status(ToolCallStatus::InProgress)
+                            .raw_input(raw_input),
+                    ));
+                }
+            }
+            Role::Tool => {
+                if let Some(tr) = msg.tool_result_block() {
+                    let status = if tr.is_error {
+                        ToolCallStatus::Failed
+                    } else {
+                        ToolCallStatus::Completed
+                    };
+                    on_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                        tr.tool_call_id,
+                        ToolCallUpdateFields::new()
+                            .status(status)
+                            .raw_output(serde_json::Value::String(tr.content)),
+                    )));
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -884,6 +982,13 @@ pub async fn serve(
                 if let Ok(val) = serde_json::to_value(state_init.executor.list_tools()) {
                     meta.insert("tools".to_string(), val);
                 }
+                // Resolved sandbox root, shared by every session this connection
+                // opens — not per-session, so `initialize` (not `session/new`)
+                // is the natural home for it.
+                meta.insert(
+                    "work_dir".to_string(),
+                    serde_json::Value::String(state_init.work_dir.display().to_string()),
+                );
                 // Advertise that thinking content arrives as AgentMessageChunk with
                 // content._meta.kind == "thinking" (ACP _meta extensibility).
                 meta.insert(
@@ -991,7 +1096,27 @@ pub async fn serve(
                         }
                         Err(e) => {
                             tracing::error!("agent loop error: {e}");
-                            responder.respond_with_internal_error(e.to_string())
+                            // SessionLocked carries structured fields a caller
+                            // needs to build a "busy, retry" UX instead of a
+                            // generic failure — encode them in the JSON-RPC
+                            // error's `data` so they survive the trip back to
+                            // the client instead of collapsing to `e.to_string()`.
+                            let acp_error = match &e {
+                                Error::SessionLocked {
+                                    session_id,
+                                    pid,
+                                    host,
+                                } => agent_client_protocol::Error::internal_error().data(
+                                    serde_json::json!({
+                                        "kind": "session_locked",
+                                        "session_id": session_id,
+                                        "pid": pid,
+                                        "host": host,
+                                    }),
+                                ),
+                                _ => internal_error(e.to_string()),
+                            };
+                            responder.respond_with_error(acp_error)
                         }
                     };
                     if let Err(e) = respond_result {
@@ -1027,9 +1152,8 @@ pub async fn serve(
                     .await;
 
                 match result {
-                    Ok(()) => responder.respond(
-                        LoadSessionResponse::new().modes(session_mode_state(AgentMode::Code)),
-                    ),
+                    Ok(mode) => responder
+                        .respond(LoadSessionResponse::new().modes(session_mode_state(mode))),
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
                 }
             },
@@ -1166,5 +1290,189 @@ mod prompt_block_tests {
             )),
         ))];
         assert!(convert_prompt_blocks(&blocks).is_err());
+    }
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+
+    fn agent_text_chunks(updates: &[SessionUpdate]) -> Vec<&ContentChunk> {
+        updates
+            .iter()
+            .filter_map(|u| match u {
+                SessionUpdate::AgentMessageChunk(chunk) => Some(chunk),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn replay_emits_thinking_before_text_for_assistant_messages() {
+        let messages = vec![
+            Message::user("hello"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "pondering".into(),
+                        signature: None,
+                    },
+                    ContentBlock::Text {
+                        text: "the answer".into(),
+                    },
+                ],
+            },
+        ];
+        let mut updates = Vec::new();
+        replay_history_messages(&messages, &mut |u| updates.push(u));
+
+        let chunks = agent_text_chunks(&updates);
+        assert_eq!(chunks.len(), 2);
+
+        match &chunks[0].content {
+            AcpContentBlock::Text(t) => {
+                assert_eq!(t.text, "pondering");
+                assert_eq!(
+                    t.meta.as_ref().and_then(|m| m.get("kind")),
+                    Some(&serde_json::json!("thinking"))
+                );
+            }
+            other => panic!("expected a text block, got {other:?}"),
+        }
+        match &chunks[1].content {
+            AcpContentBlock::Text(t) => {
+                assert_eq!(t.text, "the answer");
+                assert!(t.meta.is_none());
+            }
+            other => panic!("expected a text block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_still_emits_user_text_and_tool_calls() {
+        let messages = vec![
+            Message::user("hello"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"a.txt"}"#.into(),
+                }],
+            },
+            Message::tool_result("call_1", "read_file", "file content", false),
+        ];
+        let mut updates = Vec::new();
+        replay_history_messages(&messages, &mut |u| updates.push(u));
+
+        assert!(matches!(
+            &updates[0],
+            SessionUpdate::UserMessageChunk(c) if matches!(&c.content, AcpContentBlock::Text(t) if t.text == "hello")
+        ));
+        assert!(matches!(
+            &updates[1],
+            SessionUpdate::ToolCall(tc) if tc.raw_input.is_some()
+        ));
+        assert!(matches!(&updates[2], SessionUpdate::ToolCallUpdate(_)));
+    }
+
+    #[test]
+    fn replay_restores_user_text_and_image_blocks_in_order() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "check this out".into(),
+                },
+                ContentBlock::Image {
+                    data: "base64data".into(),
+                    mime_type: "image/png".into(),
+                },
+            ],
+        }];
+        let mut updates = Vec::new();
+        replay_history_messages(&messages, &mut |u| updates.push(u));
+
+        assert_eq!(updates.len(), 2);
+        assert!(matches!(
+            &updates[0],
+            SessionUpdate::UserMessageChunk(c) if matches!(&c.content, AcpContentBlock::Text(t) if t.text == "check this out")
+        ));
+        assert!(matches!(
+            &updates[1],
+            SessionUpdate::UserMessageChunk(c) if matches!(
+                &c.content,
+                AcpContentBlock::Image(img) if img.data == "base64data" && img.mime_type == "image/png"
+            )
+        ));
+    }
+}
+
+#[cfg(test)]
+mod prompt_lease_ordering_tests {
+    use super::*;
+    use crate::rag::history::HistoryManager;
+    use tempfile::tempdir;
+
+    fn sample_session_state(chat_id: Uuid) -> SessionState {
+        SessionState {
+            chat_id,
+            config: AgentConfig::new(
+                "mock".into(),
+                "https://example.com".into(),
+                "key".into(),
+                "mock-model".into(),
+                5,
+            ),
+            cwd: PathBuf::from("/tmp"),
+            skills: vec![],
+            cancel: CancellationToken::new(),
+            approved_tools: HashMap::new(),
+            mode: AgentMode::Code,
+            prompt_lock: Arc::new(Mutex::new(())),
+            last_active: Instant::now(),
+        }
+    }
+
+    // Regression test for the ordering `acp_prompt` relies on: the
+    // in-process `prompt_lock` must be acquired (and fail fast on an
+    // overlapping call) *before* the cross-process `SessionLease` is
+    // acquired. Getting this backwards let an overlapping, rejected
+    // `session/prompt` call create its own lease guard and then drop it
+    // (`SessionLease::drop` can't tell that apart from a legitimately
+    // superseded one) — deleting the still-running accepted turn's lockfile
+    // out from under it.
+    #[test]
+    fn overlapping_prompt_in_same_process_never_touches_the_accepted_turns_lease() {
+        let dir = tempdir().unwrap();
+        let history = HistoryManager::with_dir(dir.path().to_path_buf());
+        let chat_id = Uuid::new_v4();
+        let lock_path = dir.path().join(format!("{chat_id}.lock"));
+        let state = sample_session_state(chat_id);
+
+        // Turn A: accepted, in the same order `acp_prompt` now uses.
+        let _prompt_guard_a = state.try_acquire_prompt_lock("s1").unwrap();
+        let _lease_a = history.acquire_lease(&chat_id).unwrap();
+        assert!(lock_path.exists());
+
+        // Turn B: an overlapping `session/prompt` for the same session, same
+        // process. Must be rejected via the prompt lock...
+        let turn_b = state.try_acquire_prompt_lock("s1");
+        assert!(turn_b.is_err());
+
+        // ...which means it never got as far as calling `acquire_lease`, so
+        // there's no second `SessionLease` guard to drop here. Turn A's
+        // lease must still be on disk, untouched.
+        assert!(
+            lock_path.exists(),
+            "an overlapping, rejected prompt must not delete the accepted turn's lease"
+        );
+
+        drop(_lease_a);
+        assert!(
+            !lock_path.exists(),
+            "turn A's own lease still releases normally"
+        );
     }
 }

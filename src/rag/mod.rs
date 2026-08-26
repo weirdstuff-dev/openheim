@@ -1,11 +1,13 @@
 //! Conversation history and skill injection for agent prompts.
 
 pub mod history;
+mod lease;
 pub mod prompt;
 pub mod skills;
 pub mod system;
 
 pub use history::{Conversation, ConversationMeta, HistoryManager};
+pub use lease::SessionLease;
 pub use prompt::PromptBuilder;
 pub use skills::SkillsManager;
 pub use system::SystemLoader;

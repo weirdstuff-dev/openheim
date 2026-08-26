@@ -226,7 +226,7 @@ pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
 }
 
 async fn config_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
-    Json(state.app_config.to_public_json())
+    Json(state.app_config.to_public_json(&state.work_dir))
 }
 
 async fn models_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
