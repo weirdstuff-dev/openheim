@@ -155,23 +155,23 @@ where
 
         let tool_calls = choice.message.tool_calls();
         if !tool_calls.is_empty() {
-            let mut tool_results = Vec::new();
-
+            // Phase 1: announce each call and collect its permission decision,
+            // sequentially and in order. This keeps approval prompts (when the
+            // gate is interactive) appearing one at a time, and preserves the
+            // existing behaviour of aborting the whole turn immediately if
+            // cancellation lands while one is pending.
+            let mut decisions = Vec::with_capacity(tool_calls.len());
             for tool_call in &tool_calls {
                 if turn.cancel.is_cancelled() {
                     stop_reason = StopReason::Cancelled;
-                    break;
+                    break 'turn;
                 }
-
-                let id = &tool_call.id;
-                let tool_name = &tool_call.name;
-                let arguments = &tool_call.arguments;
 
                 if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::ToolCall {
-                        id: id.clone(),
-                        tool_name: tool_name.clone(),
-                        arguments: arguments.clone(),
+                        id: tool_call.id.clone(),
+                        tool_name: tool_call.name.clone(),
+                        arguments: tool_call.arguments.clone(),
                     });
                 }
 
@@ -184,34 +184,59 @@ where
                         stop_reason = StopReason::Cancelled;
                         break 'turn;
                     }
-                    decision = turn.permission_gate.check(id, tool_name, arguments) => decision,
+                    decision = turn.permission_gate.check(&tool_call.id, &tool_call.name, &tool_call.arguments) => decision,
                 };
-                let (result, is_error) = if decision.is_allowed() {
-                    match tool_executor.execute(tool_name, arguments, turn).await {
-                        Ok(r) => (r, false),
-                        Err(e) => (format!("Error: {e}"), true),
-                    }
-                } else {
-                    ("Permission denied by user.".to_string(), true)
-                };
+                decisions.push(decision);
+            }
 
+            // Phase 2: run every allowed call concurrently (denied ones
+            // short-circuit without touching the executor). This is what lets
+            // several `delegate_task` sub-agents — or any other independent
+            // tool calls the LLM batched into one turn — actually run in
+            // parallel instead of one after another.
+            let outcomes = futures::future::join_all(tool_calls.iter().zip(&decisions).map(
+                |(tool_call, decision)| async move {
+                    if decision.is_allowed() {
+                        match tool_executor
+                            .execute(&tool_call.name, &tool_call.arguments, turn)
+                            .await
+                        {
+                            Ok(r) => (r, false),
+                            Err(e) => (format!("Error: {e}"), true),
+                        }
+                    } else {
+                        ("Permission denied by user.".to_string(), true)
+                    }
+                },
+            ))
+            .await;
+
+            // Phase 3: replay results in original tool-call order, so the
+            // callback stream and message history stay deterministic
+            // regardless of which call actually finished first.
+            let mut tool_results = Vec::with_capacity(tool_calls.len());
+            for (tool_call, (result, is_error)) in tool_calls.iter().zip(outcomes) {
                 if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::ToolResult {
-                        id: id.clone(),
-                        tool_name: tool_name.clone(),
+                        id: tool_call.id.clone(),
+                        tool_name: tool_call.name.clone(),
                         result: result.clone(),
                         is_error,
                     });
                 }
 
                 tool_results.push(ToolExecutionResult {
-                    tool_name: tool_name.clone(),
-                    arguments: arguments.clone(),
+                    tool_name: tool_call.name.clone(),
+                    arguments: tool_call.arguments.clone(),
                     result: result.clone(),
                 });
 
-                let tool_result_message =
-                    Message::tool_result(tool_call.id.clone(), tool_name.clone(), result, is_error);
+                let tool_result_message = Message::tool_result(
+                    tool_call.id.clone(),
+                    tool_call.name.clone(),
+                    result,
+                    is_error,
+                );
                 if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::MessageAppended {
                         message: tool_result_message.clone(),
