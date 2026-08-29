@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
@@ -86,7 +88,11 @@ pub(super) struct App {
     theme_color: Color,
     theme_color_name: String,
     theme_selected: usize,
-    pending_permission: Option<PermissionRequest>,
+    /// A queue rather than a single slot — with tool calls now checked
+    /// concurrently (see agent.rs's Phase 1b), several requests can arrive
+    /// before the first is answered. Shown one at a time; the rest wait
+    /// their turn instead of overwriting (and orphaning) an earlier one.
+    pending_permissions: VecDeque<PermissionRequest>,
     permission_selected: usize,
 }
 
@@ -136,7 +142,7 @@ impl App {
             theme_color,
             theme_color_name: theme_name,
             theme_selected: 0,
-            pending_permission: None,
+            pending_permissions: VecDeque::new(),
             permission_selected: 0,
         }
     }
@@ -288,16 +294,23 @@ impl App {
     }
 
     pub(super) fn handle_permission_request(&mut self, request: PermissionRequest) {
-        self.permission_selected = 0;
-        self.pending_permission = Some(request);
-        self.push_screen(Screen::PermissionPrompt);
+        // Only the first arrival needs to switch screens (and remember what
+        // to return to) — later ones just join the queue behind it and
+        // surface once the ones ahead are resolved.
+        let already_showing = !self.pending_permissions.is_empty();
+        self.pending_permissions.push_back(request);
+        if !already_showing {
+            self.permission_selected = 0;
+            self.push_screen(Screen::PermissionPrompt);
+        }
     }
 
-    /// Answers the pending request (if any) and returns to the prior screen.
-    /// A dropped `respond_to` (send fails) means the agent task already gave
-    /// up waiting — nothing to do beyond discarding the request.
+    /// Answers the front-of-queue request (if any), then either advances to
+    /// the next queued one or returns to the prior screen once the queue is
+    /// empty. A dropped `respond_to` (send fails) means the agent task
+    /// already gave up waiting — nothing to do beyond discarding the request.
     fn resolve_permission(&mut self, decision: PermissionDecision) {
-        if let Some(request) = self.pending_permission.take() {
+        if let Some(request) = self.pending_permissions.pop_front() {
             let label = match decision {
                 PermissionDecision::AllowOnce => "allowed",
                 PermissionDecision::AllowAlways => "always allowed",
@@ -310,7 +323,11 @@ impl App {
             )));
             let _ = request.respond_to.send(decision);
         }
-        self.screen = self.pre_picker_screen;
+        if self.pending_permissions.is_empty() {
+            self.screen = self.pre_picker_screen;
+        } else {
+            self.permission_selected = 0;
+        }
     }
 
     fn handle_permission_prompt_key(&mut self, key: KeyEvent) {
@@ -834,7 +851,7 @@ impl App {
                 );
             }
             Screen::PermissionPrompt => {
-                if let Some(request) = &self.pending_permission {
+                if let Some(request) = self.pending_permissions.front() {
                     render::render_permission_prompt(
                         f,
                         area,

@@ -155,12 +155,10 @@ where
 
         let tool_calls = choice.message.tool_calls();
         if !tool_calls.is_empty() {
-            // Phase 1: announce each call and collect its permission decision,
-            // sequentially and in order. This keeps approval prompts (when the
-            // gate is interactive) appearing one at a time, and preserves the
-            // existing behaviour of aborting the whole turn immediately if
-            // cancellation lands while one is pending.
-            let mut decisions = Vec::with_capacity(tool_calls.len());
+            // Phase 1a: announce every call up front, before any permission
+            // check runs. Each is reported `Pending` (see the ACP mapping),
+            // which is accurate for all of them the moment the LLM asks —
+            // not just the one whose approval happens to be next in line.
             for tool_call in &tool_calls {
                 if turn.cancel.is_cancelled() {
                     stop_reason = StopReason::Cancelled;
@@ -174,20 +172,28 @@ where
                         arguments: tool_call.arguments.clone(),
                     });
                 }
-
-                let decision = tokio::select! {
-                    _ = turn.cancel.cancelled() => {
-                        // Dropping the `check` future here abandons the
-                        // pending approval prompt rather than blocking the
-                        // turn (and holding `prompt_lock`) until the user
-                        // responds.
-                        stop_reason = StopReason::Cancelled;
-                        break 'turn;
-                    }
-                    decision = turn.permission_gate.check(&tool_call.id, &tool_call.name, &tool_call.arguments) => decision,
-                };
-                decisions.push(decision);
             }
+
+            // Phase 1b: collect every call's permission decision
+            // concurrently, mirroring Phase 2's execution model — an
+            // interactive gate now sees every request up front instead of
+            // one at a time. The ACP gate can answer them independently and
+            // out of order; the TUI gate queues concurrent requests instead
+            // of dropping them (see `App::handle_permission_request`), so
+            // it still only *shows* one prompt at a time.
+            let decisions = tokio::select! {
+                _ = turn.cancel.cancelled() => {
+                    // Dropping the `join_all` here abandons every pending
+                    // approval prompt at once, rather than blocking the turn
+                    // (and holding `prompt_lock`) until the user responds to
+                    // each in turn.
+                    stop_reason = StopReason::Cancelled;
+                    break 'turn;
+                }
+                decisions = futures::future::join_all(tool_calls.iter().map(|tool_call| {
+                    turn.permission_gate.check(&tool_call.id, &tool_call.name, &tool_call.arguments)
+                })) => decisions,
+            };
 
             // Phase 2: run every allowed call concurrently (denied ones
             // short-circuit without touching the executor). This is what lets
