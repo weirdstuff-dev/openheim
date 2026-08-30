@@ -200,22 +200,30 @@ where
             // several `delegate_task` sub-agents — or any other independent
             // tool calls the LLM batched into one turn — actually run in
             // parallel instead of one after another.
-            let outcomes = futures::future::join_all(tool_calls.iter().zip(&decisions).map(
-                |(tool_call, decision)| async move {
-                    if decision.is_allowed() {
-                        match tool_executor
-                            .execute(&tool_call.name, &tool_call.arguments, turn)
-                            .await
-                        {
-                            Ok(r) => (r, false),
-                            Err(e) => (format!("Error: {e}"), true),
+            let outcomes = tokio::select! {
+                _ = turn.cancel.cancelled() => {
+                    // Dropping the `join_all` here abandons every in-flight
+                    // tool call at once, rather than blocking the turn until
+                    // all of them finish.
+                    stop_reason = StopReason::Cancelled;
+                    break 'turn;
+                }
+                outcomes = futures::future::join_all(tool_calls.iter().zip(&decisions).map(
+                    |(tool_call, decision)| async move {
+                        if decision.is_allowed() {
+                            match tool_executor
+                                .execute(&tool_call.name, &tool_call.arguments, turn)
+                                .await
+                            {
+                                Ok(r) => (r, false),
+                                Err(e) => (format!("Error: {e}"), true),
+                            }
+                        } else {
+                            ("Permission denied by user.".to_string(), true)
                         }
-                    } else {
-                        ("Permission denied by user.".to_string(), true)
-                    }
-                },
-            ))
-            .await;
+                    },
+                )) => outcomes,
+            };
 
             // Phase 3: replay results in original tool-call order, so the
             // callback stream and message history stay deterministic
@@ -787,6 +795,63 @@ mod tests {
         assert_eq!(result.final_response, "");
         assert_eq!(result.iterations_used, 1);
         assert_eq!(messages.len(), 1);
+        assert_eq!(result.stop_reason, StopReason::Cancelled);
+    }
+
+    /// ToolExecutor that never resolves; used to prove cancellation aborts an
+    /// in-flight tool call (Phase 2) instead of waiting for it to finish.
+    struct SlowToolExecutor;
+
+    #[async_trait]
+    impl ToolExecutor for SlowToolExecutor {
+        fn list_tools(&self) -> Vec<Tool> {
+            vec![]
+        }
+        async fn execute(
+            &self,
+            _name: &str,
+            _args: &str,
+            _turn: &TurnContext<'_>,
+        ) -> Result<String> {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            unreachable!("cancellation should abort this call before the sleep elapses");
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_in_flight_tool_call() {
+        let llm = Arc::new(MockLlm::new(vec![tool_call_choice("read_file", "{}")]));
+        let executor: Arc<dyn ToolExecutor> = Arc::new(SlowToolExecutor);
+        let config = make_config(10);
+        let mut messages = vec![Message::user("hi")];
+        let cancel = CancellationToken::new();
+        let cancel_signal = cancel.clone();
+
+        // Cancel right after the tool call is announced (Phase 1a), i.e.
+        // right before Phase 2 starts executing it.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_agent_streaming_with_history(
+                llm,
+                executor,
+                &config,
+                &mut messages,
+                None,
+                &TurnContext {
+                    cancel: &cancel,
+                    permission_gate: &allow_all(),
+                },
+                move |event| {
+                    if matches!(event, StreamEvent::ToolCall { .. }) {
+                        cancel_signal.cancel();
+                    }
+                },
+            ),
+        )
+        .await
+        .expect("run_agent_loop should abort the in-flight tool call instead of hanging")
+        .unwrap();
+
         assert_eq!(result.stop_reason, StopReason::Cancelled);
     }
 
