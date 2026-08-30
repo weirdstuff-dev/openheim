@@ -330,7 +330,27 @@ impl App {
         }
     }
 
+    /// Drops queued requests whose `respond_to` receiver is already gone —
+    /// the agent task gave up waiting (e.g. the turn was cancelled) before
+    /// the user ever answered. Restores the screen shown before the prompt
+    /// popped up if that empties the queue, instead of leaving a stale
+    /// prompt on screen with nothing left to resolve.
+    fn prune_stale_permissions(&mut self) {
+        let before = self.pending_permissions.len();
+        self.pending_permissions
+            .retain(|request| !request.respond_to.is_closed());
+        if self.pending_permissions.len() == before {
+            return;
+        }
+        if self.pending_permissions.is_empty() {
+            self.screen = self.pre_picker_screen;
+        } else {
+            self.permission_selected = 0;
+        }
+    }
+
     fn handle_permission_prompt_key(&mut self, key: KeyEvent) {
+        self.prune_stale_permissions();
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
@@ -762,6 +782,8 @@ impl App {
     }
 
     pub(super) fn draw(&mut self, f: &mut Frame) {
+        self.prune_stale_permissions();
+
         let area = f.area();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -909,5 +931,92 @@ impl App {
         let chat_inner = chat_block.inner(area);
         f.render_widget(chat_block, area);
         f.render_widget(Paragraph::new(visible), chat_inner);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use tokio::sync::oneshot;
+
+    use super::*;
+    use crate::config::AgentConfig;
+
+    fn test_app_config() -> AppConfig {
+        AppConfig {
+            default_provider: "mock".into(),
+            max_iterations: 10,
+            theme_color: None,
+            providers: BTreeMap::new(),
+            mcp_servers: BTreeMap::new(),
+            default_skills: vec![],
+            work_dir: None,
+            allow_shell: false,
+        }
+    }
+
+    fn test_app() -> App {
+        let (prompt_tx, _) = mpsc::unbounded_channel();
+        let (switch_model_tx, _) = mpsc::unbounded_channel();
+        let (switch_session_tx, _) = mpsc::unbounded_channel();
+        App::new(
+            AgentConfig::default(),
+            test_app_config(),
+            vec![],
+            prompt_tx,
+            switch_model_tx,
+            switch_session_tx,
+        )
+    }
+
+    fn permission_request() -> (PermissionRequest, oneshot::Receiver<PermissionDecision>) {
+        let (respond_to, rx) = oneshot::channel();
+        (
+            PermissionRequest {
+                tool_name: "read_file".into(),
+                arguments: "{}".into(),
+                respond_to,
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn prune_drops_requests_whose_receiver_is_gone() {
+        let mut app = test_app();
+        app.screen = Screen::Chat;
+
+        let (live_request, _live_rx) = permission_request();
+        let (dead_request, dead_rx) = permission_request();
+        drop(dead_rx); // agent task gave up waiting (e.g. turn cancelled)
+
+        app.handle_permission_request(dead_request);
+        app.handle_permission_request(live_request);
+        assert_eq!(app.screen, Screen::PermissionPrompt);
+
+        app.prune_stale_permissions();
+
+        assert_eq!(app.pending_permissions.len(), 1);
+        assert_eq!(app.pending_permissions[0].tool_name, "read_file");
+        // A live request remains, so the prompt stays up.
+        assert_eq!(app.screen, Screen::PermissionPrompt);
+    }
+
+    #[test]
+    fn prune_restores_prior_screen_once_queue_empties() {
+        let mut app = test_app();
+        app.screen = Screen::Chat;
+
+        let (dead_request, dead_rx) = permission_request();
+        drop(dead_rx);
+
+        app.handle_permission_request(dead_request);
+        assert_eq!(app.screen, Screen::PermissionPrompt);
+
+        app.prune_stale_permissions();
+
+        assert!(app.pending_permissions.is_empty());
+        assert_eq!(app.screen, Screen::Chat);
     }
 }
