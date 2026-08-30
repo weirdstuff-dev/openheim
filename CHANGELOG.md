@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Tool calls within a single LLM turn now run concurrently instead of one after another** — most usefully, multiple `delegate_task` subagents batched into one turn now execute in parallel, with permission checks and cancellation handled the same way. Message order in conversation history is unaffected.
+- **Tool-call results are now reported to the caller as soon as each one finishes, instead of after the whole batch completes** — in an ACP session, a fast tool call among several concurrent ones now shows as `Completed`/`Failed` right away instead of waiting behind a slower one. (The TUI's own tool-call list doesn't yet take advantage of this — it isn't wired to match a result back to its originating call by ID — so this mainly benefits ACP clients for now.)
+
 ## [0.8.0] - 2026-08-26
 
 ### Added
