@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
@@ -86,7 +88,11 @@ pub(super) struct App {
     theme_color: Color,
     theme_color_name: String,
     theme_selected: usize,
-    pending_permission: Option<PermissionRequest>,
+    /// A queue rather than a single slot — with tool calls now checked
+    /// concurrently (see agent.rs's Phase 1b), several requests can arrive
+    /// before the first is answered. Shown one at a time; the rest wait
+    /// their turn instead of overwriting (and orphaning) an earlier one.
+    pending_permissions: VecDeque<PermissionRequest>,
     permission_selected: usize,
 }
 
@@ -136,7 +142,7 @@ impl App {
             theme_color,
             theme_color_name: theme_name,
             theme_selected: 0,
-            pending_permission: None,
+            pending_permissions: VecDeque::new(),
             permission_selected: 0,
         }
     }
@@ -288,16 +294,23 @@ impl App {
     }
 
     pub(super) fn handle_permission_request(&mut self, request: PermissionRequest) {
-        self.permission_selected = 0;
-        self.pending_permission = Some(request);
-        self.push_screen(Screen::PermissionPrompt);
+        // Only the first arrival needs to switch screens (and remember what
+        // to return to) — later ones just join the queue behind it and
+        // surface once the ones ahead are resolved.
+        let already_showing = !self.pending_permissions.is_empty();
+        self.pending_permissions.push_back(request);
+        if !already_showing {
+            self.permission_selected = 0;
+            self.push_screen(Screen::PermissionPrompt);
+        }
     }
 
-    /// Answers the pending request (if any) and returns to the prior screen.
-    /// A dropped `respond_to` (send fails) means the agent task already gave
-    /// up waiting — nothing to do beyond discarding the request.
+    /// Answers the front-of-queue request (if any), then either advances to
+    /// the next queued one or returns to the prior screen once the queue is
+    /// empty. A dropped `respond_to` (send fails) means the agent task
+    /// already gave up waiting — nothing to do beyond discarding the request.
     fn resolve_permission(&mut self, decision: PermissionDecision) {
-        if let Some(request) = self.pending_permission.take() {
+        if let Some(request) = self.pending_permissions.pop_front() {
             let label = match decision {
                 PermissionDecision::AllowOnce => "allowed",
                 PermissionDecision::AllowAlways => "always allowed",
@@ -310,10 +323,34 @@ impl App {
             )));
             let _ = request.respond_to.send(decision);
         }
-        self.screen = self.pre_picker_screen;
+        if self.pending_permissions.is_empty() {
+            self.screen = self.pre_picker_screen;
+        } else {
+            self.permission_selected = 0;
+        }
+    }
+
+    /// Drops queued requests whose `respond_to` receiver is already gone —
+    /// the agent task gave up waiting (e.g. the turn was cancelled) before
+    /// the user ever answered. Restores the screen shown before the prompt
+    /// popped up if that empties the queue, instead of leaving a stale
+    /// prompt on screen with nothing left to resolve.
+    fn prune_stale_permissions(&mut self) {
+        let before = self.pending_permissions.len();
+        self.pending_permissions
+            .retain(|request| !request.respond_to.is_closed());
+        if self.pending_permissions.len() == before {
+            return;
+        }
+        if self.pending_permissions.is_empty() {
+            self.screen = self.pre_picker_screen;
+        } else {
+            self.permission_selected = 0;
+        }
     }
 
     fn handle_permission_prompt_key(&mut self, key: KeyEvent) {
+        self.prune_stale_permissions();
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
@@ -745,6 +782,8 @@ impl App {
     }
 
     pub(super) fn draw(&mut self, f: &mut Frame) {
+        self.prune_stale_permissions();
+
         let area = f.area();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -834,7 +873,7 @@ impl App {
                 );
             }
             Screen::PermissionPrompt => {
-                if let Some(request) = &self.pending_permission {
+                if let Some(request) = self.pending_permissions.front() {
                     render::render_permission_prompt(
                         f,
                         area,
@@ -892,5 +931,92 @@ impl App {
         let chat_inner = chat_block.inner(area);
         f.render_widget(chat_block, area);
         f.render_widget(Paragraph::new(visible), chat_inner);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use tokio::sync::oneshot;
+
+    use super::*;
+    use crate::config::AgentConfig;
+
+    fn test_app_config() -> AppConfig {
+        AppConfig {
+            default_provider: "mock".into(),
+            max_iterations: 10,
+            theme_color: None,
+            providers: BTreeMap::new(),
+            mcp_servers: BTreeMap::new(),
+            default_skills: vec![],
+            work_dir: None,
+            allow_shell: false,
+        }
+    }
+
+    fn test_app() -> App {
+        let (prompt_tx, _) = mpsc::unbounded_channel();
+        let (switch_model_tx, _) = mpsc::unbounded_channel();
+        let (switch_session_tx, _) = mpsc::unbounded_channel();
+        App::new(
+            AgentConfig::default(),
+            test_app_config(),
+            vec![],
+            prompt_tx,
+            switch_model_tx,
+            switch_session_tx,
+        )
+    }
+
+    fn permission_request() -> (PermissionRequest, oneshot::Receiver<PermissionDecision>) {
+        let (respond_to, rx) = oneshot::channel();
+        (
+            PermissionRequest {
+                tool_name: "read_file".into(),
+                arguments: "{}".into(),
+                respond_to,
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn prune_drops_requests_whose_receiver_is_gone() {
+        let mut app = test_app();
+        app.screen = Screen::Chat;
+
+        let (live_request, _live_rx) = permission_request();
+        let (dead_request, dead_rx) = permission_request();
+        drop(dead_rx); // agent task gave up waiting (e.g. turn cancelled)
+
+        app.handle_permission_request(dead_request);
+        app.handle_permission_request(live_request);
+        assert_eq!(app.screen, Screen::PermissionPrompt);
+
+        app.prune_stale_permissions();
+
+        assert_eq!(app.pending_permissions.len(), 1);
+        assert_eq!(app.pending_permissions[0].tool_name, "read_file");
+        // A live request remains, so the prompt stays up.
+        assert_eq!(app.screen, Screen::PermissionPrompt);
+    }
+
+    #[test]
+    fn prune_restores_prior_screen_once_queue_empties() {
+        let mut app = test_app();
+        app.screen = Screen::Chat;
+
+        let (dead_request, dead_rx) = permission_request();
+        drop(dead_rx);
+
+        app.handle_permission_request(dead_request);
+        assert_eq!(app.screen, Screen::PermissionPrompt);
+
+        app.prune_stale_permissions();
+
+        assert!(app.pending_permissions.is_empty());
+        assert_eq!(app.screen, Screen::Chat);
     }
 }
