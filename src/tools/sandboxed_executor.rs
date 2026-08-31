@@ -12,6 +12,7 @@ use crate::{
 use super::execute_command::{RunCommandOptions, run_command};
 use super::list_dir::list_dir;
 use super::read_file::read_file;
+use super::search::search;
 use super::write_file::write_file;
 use super::{ToolExecutor, sandbox::validate_path};
 
@@ -26,9 +27,10 @@ use super::{ToolExecutor, sandbox::validate_path};
 ///   `client_io` await is raced against `turn.cancel` so a slow or
 ///   unresponsive client can't block `session/cancel` from interrupting the
 ///   turn.
-/// - `list_dir`: same `work_dir` boundary as `read_file`/`write_file` (no
-///   `client_io` delegation — the ACP file-access protocol has no directory
-///   listing method), defaulting to `work_dir` itself when no path is given.
+/// - `list_dir` / `search`: same `work_dir` boundary as `read_file`/`write_file`
+///   (no `client_io` delegation — the ACP file-access protocol has neither a
+///   directory listing nor a search method), defaulting to `work_dir` itself
+///   when no path is given.
 /// - `execute_command`: when `allow_shell` is `false` the call is rejected
 ///   immediately. When `true` the command runs with its working directory set
 ///   to `work_dir` so relative paths behave correctly, and is bounded by the
@@ -123,6 +125,18 @@ impl ToolExecutor for SandboxedExecutor {
                 let path = args["path"].as_str().unwrap_or(".");
                 let validated = validate_path(path, &self.work_dir)?;
                 list_dir(&validated).await
+            }
+
+            "search" => {
+                let args: serde_json::Value = serde_json::from_str(args_json)
+                    .map_err(|e| Error::ParseError(format!("failed to parse arguments: {}", e)))?;
+                let pattern = args["pattern"]
+                    .as_str()
+                    .ok_or_else(|| Error::ParseError("missing 'pattern' argument".to_string()))?;
+                let path = args["path"].as_str().unwrap_or(".");
+                let case_insensitive = args["case_insensitive"].as_bool().unwrap_or(false);
+                let validated = validate_path(path, &self.work_dir)?;
+                search(pattern, &validated, case_insensitive).await
             }
 
             "execute_command" => {
@@ -387,6 +401,57 @@ mod tests {
         .await
         .expect("turn cancel should abort the running command");
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn search_finds_matches_within_work_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "needle here\n").unwrap();
+
+        let executor = SandboxedExecutor::new(
+            Arc::new(EmptyExecutor),
+            dir.path().to_path_buf(),
+            false,
+            Arc::new(NoClientIo),
+        );
+        let args = serde_json::json!({"pattern": "needle"}).to_string();
+        let harness = TurnHarness::new();
+        let result = executor
+            .execute("search", &args, &harness.turn())
+            .await
+            .unwrap();
+        assert!(
+            result.contains("needle here"),
+            "unexpected output: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_rejects_path_outside_work_dir() {
+        let work = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "needle\n").unwrap();
+
+        let executor = SandboxedExecutor::new(
+            Arc::new(EmptyExecutor),
+            work.path().to_path_buf(),
+            false,
+            Arc::new(NoClientIo),
+        );
+        let args = serde_json::json!({
+            "pattern": "needle",
+            "path": outside.path().to_str().unwrap(),
+        })
+        .to_string();
+        let harness = TurnHarness::new();
+        let err = executor
+            .execute("search", &args, &harness.turn())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("outside the work directory"),
+            "unexpected error: {err}"
+        );
     }
 
     /// End-to-end escape repro: `x` does not exist, so without normalization

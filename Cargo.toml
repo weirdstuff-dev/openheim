@@ -59,6 +59,8 @@ agent-client-protocol = { version = "0.11.1", features = ["unstable_session_mode
 agent-client-protocol-tokio = "0.11.1"
 tokio-util = { version = "0.7", features = ["compat"] }
 tower-http = { version = "0.6", features = ["cors"], optional = true }
+grep = "0.4.1"
+ignore = "0.4.33"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", default-features = false, features = ["signal"] }

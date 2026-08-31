@@ -3,7 +3,7 @@
 //!
 //! # Built-in tools
 //!
-//! Five tools are registered by default via [`SystemToolExecutor::register_builtins`]:
+//! Six tools are registered by default via [`SystemToolExecutor::register_builtins`]:
 //!
 //! | Name | Description |
 //! |------|-------------|
@@ -11,6 +11,7 @@
 //! | `read_file` | Read a file from disk |
 //! | `write_file` | Write a file to disk, creating parent directories as needed |
 //! | `list_dir` | List the immediate contents of a directory |
+//! | `search` | Regex search across files, ripgrep-style (built on ripgrep's own crates, `.gitignore`-aware) |
 //! | `web_fetch` | Fetch a public http(s) URL and return its content as text, with an SSRF guard and size/time caps |
 //!
 //! Additional tools are loaded from MCP servers and registered under the
@@ -85,6 +86,7 @@ mod read_file;
 pub mod sandbox;
 mod sandboxed_executor;
 mod scoped_executor;
+mod search;
 mod web_fetch;
 mod write_file;
 
@@ -172,13 +174,14 @@ impl SystemToolExecutor {
         (executor, statuses)
     }
 
-    /// Registers the five built-in tools: `execute_command`, `read_file`,
-    /// `write_file`, `list_dir`, `web_fetch`.
+    /// Registers the six built-in tools: `execute_command`, `read_file`,
+    /// `write_file`, `list_dir`, `search`, `web_fetch`.
     pub fn register_builtins(&mut self) {
         self.register(Box::new(execute_command::ExecuteCommandTool));
         self.register(Box::new(read_file::ReadFileTool));
         self.register(Box::new(write_file::WriteFileTool));
         self.register(Box::new(list_dir::ListDirTool));
+        self.register(Box::new(search::SearchTool));
         self.register(Box::new(web_fetch::WebFetchTool));
     }
 
@@ -281,8 +284,9 @@ mod tests {
         assert!(executor.handlers.contains_key("read_file"));
         assert!(executor.handlers.contains_key("write_file"));
         assert!(executor.handlers.contains_key("list_dir"));
+        assert!(executor.handlers.contains_key("search"));
         assert!(executor.handlers.contains_key("web_fetch"));
-        assert_eq!(executor.handlers.len(), 5);
+        assert_eq!(executor.handlers.len(), 6);
     }
 
     #[tokio::test]
