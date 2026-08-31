@@ -250,6 +250,25 @@ impl SessionHandle {
             .map(|_| ())
     }
 
+    /// Loads this session's persisted `ConversationMeta` (the source
+    /// [`Self::context_usage`] reads from), off the runtime thread since
+    /// it's synchronous file I/O.
+    async fn conversation_meta(&self) -> Result<crate::rag::ConversationMeta> {
+        let uuid = Uuid::parse_str(&self.id)
+            .map_err(|_| crate::error::Error::ParseError("invalid session id".to_string()))?;
+        let history = self.state.rag.history.clone();
+        let conversation =
+            tokio::task::spawn_blocking(move || history.load_conversation(&uuid)).await??;
+        Ok(conversation.meta)
+    }
+
+    /// Snapshot of the most recent turn's context size — the last LLM
+    /// call's usage, i.e. how full the context window is right now. `None`
+    /// if no turn has completed yet.
+    pub async fn context_usage(&self) -> Result<Option<crate::core::models::Usage>> {
+        Ok(self.conversation_meta().await?.context_usage)
+    }
+
     /// Cancels the turn currently in flight for this session, if any.
     /// No-op if no prompt is running.
     pub async fn cancel(&self) {

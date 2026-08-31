@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::config::config_dir;
-use crate::core::models::{Message, Role};
+use crate::core::models::{Message, Role, Usage};
 use crate::error::{Error, Result};
 use crate::rag::lease::{self, SessionLease};
 use std::path::PathBuf;
@@ -305,6 +305,7 @@ mod tests {
                 title: None,
                 skills: vec![],
                 cwd: None,
+                context_usage: None,
             },
             messages: vec![Message::user("from the old format")],
         };
@@ -374,6 +375,12 @@ pub struct ConversationMeta {
     pub skills: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cwd: Option<std::path::PathBuf>,
+    /// Snapshot of the most recent turn's context size — the last LLM
+    /// call's usage, i.e. how full the context window is right now.
+    /// Overwritten (not accumulated) each turn; `None` until the first turn
+    /// completes.
+    #[serde(default)]
+    pub context_usage: Option<Usage>,
 }
 
 /// A complete conversation: metadata plus the full ordered message list.
@@ -539,6 +546,7 @@ impl HistoryManager {
                 title: None,
                 skills,
                 cwd: None,
+                context_usage: None,
             },
             messages: Vec::new(),
         };
@@ -752,6 +760,7 @@ impl HistoryManager {
                             title: None,
                             skills,
                             cwd: None,
+                            context_usage: None,
                         },
                         messages: Vec::new(),
                     };
