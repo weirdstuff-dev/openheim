@@ -197,6 +197,93 @@ Returns all registered tool definitions (built-in + MCP). Each tool follows the 
   {
     "type": "function",
     "function": {
+      "name": "edit_file",
+      "description": "Edit a file by replacing an exact occurrence of old_string with new_string, without rewriting the whole file. old_string must match the file's existing content exactly (including whitespace/indentation) and must be unique in the file unless replace_all is set. Use write_file instead to create a new file or replace a file's entire contents.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The path to the file to edit"
+          },
+          "old_string": {
+            "type": "string",
+            "description": "The exact text to replace. Must be unique in the file unless replace_all is set."
+          },
+          "new_string": {
+            "type": "string",
+            "description": "The text to replace old_string with"
+          },
+          "replace_all": {
+            "type": "boolean",
+            "description": "Replace every occurrence of old_string instead of requiring exactly one. Defaults to false."
+          }
+        },
+        "required": ["path", "old_string", "new_string"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_dir",
+      "description": "List the immediate contents of a directory (not recursive). Directories are suffixed with '/' and symlinks are shown as 'name -> target'. Defaults to the current directory if no path is given.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The directory to list. Defaults to the current directory if omitted."
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "search",
+      "description": "Search files under a path for lines matching a regex pattern (ripgrep-style). Respects .gitignore and skips hidden and binary files. Returns matches as 'path:line: content', capped at 200 results.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "The regex pattern to search for"
+          },
+          "path": {
+            "type": "string",
+            "description": "The file or directory to search. Defaults to the current directory if omitted."
+          },
+          "case_insensitive": {
+            "type": "boolean",
+            "description": "Match case-insensitively. Defaults to false."
+          }
+        },
+        "required": ["pattern"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "web_fetch",
+      "description": "Fetch a web page or other text-like resource (HTML, plain text, JSON, XML) from a public http(s) URL and return its content as plain text. HTML is stripped of markup. Requests time out after 20 seconds, redirects are not followed automatically (the redirect target is reported instead), and content is truncated at 256 KiB. Only publicly-routable addresses can be fetched.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The http:// or https:// URL to fetch"
+          }
+        },
+        "required": ["url"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "filesystem__read_file",
       "description": "... (from MCP server)",
       "parameters": { "..." : "..." }
@@ -990,7 +1077,7 @@ pending → in_progress → completed
 
 ### 3.3 Filesystem Channel
 
-All filesystem operations are sent over the `fs` channel. The channel is sandboxed to the agent's configured `work_dir` (see [configuration.md](./configuration.md)) — the same boundary the agent's own `read_file`/`write_file` tools are held to. Relative paths resolve against `work_dir`; absolute paths must be within it. Symlinks are followed and canonicalized so they cannot escape the boundary.
+All filesystem operations are sent over the `fs` channel. The channel is sandboxed to the agent's configured `work_dir` (see [configuration.md](./configuration.md)) — the same boundary the agent's own `read_file`/`write_file`/`edit_file`/`list_dir`/`search` tools are held to. Relative paths resolve against `work_dir`; absolute paths must be within it. Symlinks are followed and canonicalized so they cannot escape the boundary.
 
 No `watch` call is required before file operations — every request is validated against `work_dir` directly.
 

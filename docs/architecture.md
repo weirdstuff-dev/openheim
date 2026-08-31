@@ -67,6 +67,10 @@ src/
 │   ├── execute_command.rs
 │   ├── read_file.rs
 │   ├── write_file.rs
+│   ├── edit_file.rs    Targeted string replacement, no whole-file rewrite
+│   ├── list_dir.rs     Immediate directory contents
+│   ├── search.rs       Regex search across files, ripgrep-style (ripgrep's own crates)
+│   ├── web_fetch.rs    Fetch a public http(s) URL as text (SSRF-guarded)
 │   ├── sandboxed_executor.rs  SandboxedExecutor — work_dir / allow_shell boundary
 │   ├── scoped_executor.rs     ScopedExecutor — tool-name allowlist wrapper
 │   └── delegate.rs            DelegateTool, with_delegation — delegate_task tool
@@ -167,9 +171,13 @@ User / Client
 │  OpenAiClient    │  │    execute_command   │
 │  GeminiClient    │  │    read_file         │
 │  OpenAiCompatible│  │    write_file        │
-│  (+ RetryClient) │  │    delegate_task     │
-│                  │  │  MCP tools:          │
-└──────────────────┘  │    {server}__{tool}  │
+│  (+ RetryClient) │  │    edit_file         │
+└──────────────────┘  │    list_dir          │
+                      │    search            │
+                      │    web_fetch         │
+                      │    delegate_task     │
+                      │  MCP tools:          │
+                      │    {server}__{tool}  │
                       │    (via rmcp)        │
                       └──────────────────────┘
 ```

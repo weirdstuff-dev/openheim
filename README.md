@@ -44,7 +44,7 @@ Openheim is built in Rust from the ground up:
 ## Features
 
 - **Multi-provider** — OpenAI, Anthropic Claude, Google Gemini, and any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.)
-- **Tool execution** — built-in shell, file read, file write, and subagent-delegation tools. Trait-based, so you can add your own.
+- **Tool execution** — built-in shell, file read/write/edit, directory listing, ripgrep-style search, web fetch, and subagent-delegation tools. Trait-based, so you can add your own.
 - **Subagents** — delegate a self-contained task to another agent (its own persona, model, and tools) via the always-on `delegate_task` tool. Named profiles live in `~/.openheim/agents/`; the orchestrator can also define inline, one-off subagents. See [docs/subagents.md](./docs/subagents.md).
 - **Agent sandboxing** — configurable work-directory boundary restricts file access to a directory tree. Shell execution is disabled by default and can be enabled via `allow_shell = true` in config or `.allow_shell(true)` in the builder.
 - **MCP (Model Context Protocol)** — connect external MCP servers (stdio or Streamable HTTP) and their tools are automatically exposed to the LLM as `{server_name}__{tool_name}`.
