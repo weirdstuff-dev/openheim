@@ -1,5 +1,6 @@
 //! Built-in tool: `list_dir` — lists the immediate contents of a directory.
 
+use std::collections::BinaryHeap;
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -27,7 +28,15 @@ const MAX_ENTRIES: usize = 500;
 pub(crate) async fn list_dir(path: &Path) -> Result<String> {
     let mut read_dir = fs::read_dir(path).await.map_err(Error::IoError)?;
 
-    let mut entries: Vec<(String, String)> = Vec::new();
+    // Keep only the `MAX_ENTRIES` alphabetically-first entries as we go, via a
+    // bounded max-heap: pushing past the cap and popping the greatest keeps
+    // the heap holding the smallest names seen so far. This avoids buffering
+    // every name and rendered label for directories with huge entry counts,
+    // while `total` still tracks the true count for the omitted-entries
+    // marker. Ord on the tuple compares the raw name first, so a `/` or
+    // ` -> target` suffix on the label never perturbs the ordering.
+    let mut entries: BinaryHeap<(String, String)> = BinaryHeap::with_capacity(MAX_ENTRIES + 1);
+    let mut total = 0usize;
     while let Some(entry) = read_dir.next_entry().await.map_err(Error::IoError)? {
         let name = entry.file_name().to_string_lossy().into_owned();
         let file_type = entry.file_type().await.map_err(Error::IoError)?;
@@ -41,20 +50,23 @@ pub(crate) async fn list_dir(path: &Path) -> Result<String> {
         } else {
             name.clone()
         };
+        total += 1;
         entries.push((name, label));
+        if entries.len() > MAX_ENTRIES {
+            entries.pop();
+        }
     }
 
-    if entries.is_empty() {
+    if total == 0 {
         return Ok("(empty directory)".to_string());
     }
 
-    // Sort by the raw name, not the formatted label, so a `/` or ` -> target`
-    // suffix never perturbs the ordering the model would expect from `ls`.
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    let total = entries.len();
-    let mut labels: Vec<String> = entries.into_iter().map(|(_, label)| label).collect();
+    let mut labels: Vec<String> = entries
+        .into_sorted_vec()
+        .into_iter()
+        .map(|(_, label)| label)
+        .collect();
     if total > MAX_ENTRIES {
-        labels.truncate(MAX_ENTRIES);
         labels.push(format!(
             "... [{} more entries omitted]",
             total - MAX_ENTRIES
