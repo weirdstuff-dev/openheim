@@ -343,7 +343,13 @@ Returns a list of all persisted conversation sessions, sorted newest-first by `u
     "model": "gpt-4-turbo",
     "provider": "openai",
     "skills": ["rust", "debugging"],
-    "cwd": "/home/user/my-project"
+    "cwd": "/home/user/my-project",
+    "context_usage": {
+      "input_tokens": 1820,
+      "output_tokens": 240,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 1024
+    }
   },
   {
     "id": "661f9511-f3ac-52e5-b827-557766551111",
@@ -368,6 +374,7 @@ Returns a list of all persisted conversation sessions, sorted newest-first by `u
 | `provider` | `string \| null` | Provider used in this session |
 | `skills` | `string[]` | Skills loaded for this session |
 | `cwd` | `string \| null` | Working directory — populated after the first prompt in the session |
+| `context_usage` | `Usage \| undefined` | Snapshot of the most recent turn's context size (the last LLM call's token usage) — how full the context window is *right now*, not a running total. Omitted until the first turn completes. See `Usage` in [§4 TypeScript Interfaces](#4-typescript-interfaces). |
 
 > Sessions are persisted to `~/.openheim/history/{uuid}.json` (metadata) and `~/.openheim/history/{uuid}.jsonl` (messages, appended incrementally as the conversation grows) and survive server restarts.
 
@@ -391,7 +398,13 @@ Returns the full conversation for a session, including all messages.
     "model": "gpt-4-turbo",
     "provider": "openai",
     "skills": ["rust"],
-    "cwd": "/home/user/my-project"
+    "cwd": "/home/user/my-project",
+    "context_usage": {
+      "input_tokens": 1820,
+      "output_tokens": 240,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 1024
+    }
   },
   "messages": [
     {
@@ -1499,6 +1512,16 @@ interface ConversationMeta {
   provider?: string | null;
   skills: string[];
   cwd?: string | null;  // populated after first prompt in the session
+  context_usage?: Usage; // omitted until the first turn completes
+}
+
+// Usage of the most recent LLM call — how full the context window is right
+// now, not a running total across the whole session.
+interface Usage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number; // tokens written to a prompt cache
+  cache_read_tokens: number;     // tokens served from a prompt cache
 }
 
 interface Message {
