@@ -10,13 +10,14 @@ use crate::{
 };
 
 use super::execute_command::{RunCommandOptions, run_command};
+use super::list_dir::list_dir;
 use super::read_file::read_file;
 use super::write_file::write_file;
 use super::{ToolExecutor, sandbox::validate_path};
 
 /// Wraps an inner [`ToolExecutor`] and enforces a work-directory boundary.
 ///
-/// The three built-in tools are intercepted:
+/// The built-in tools are intercepted:
 /// - `read_file` / `write_file`: the requested path is validated to be within
 ///   `work_dir` (following symlinks for existing paths); access outside the
 ///   boundary is rejected with an error the LLM can read and react to. The I/O
@@ -25,6 +26,9 @@ use super::{ToolExecutor, sandbox::validate_path};
 ///   `client_io` await is raced against `turn.cancel` so a slow or
 ///   unresponsive client can't block `session/cancel` from interrupting the
 ///   turn.
+/// - `list_dir`: same `work_dir` boundary as `read_file`/`write_file` (no
+///   `client_io` delegation — the ACP file-access protocol has no directory
+///   listing method), defaulting to `work_dir` itself when no path is given.
 /// - `execute_command`: when `allow_shell` is `false` the call is rejected
 ///   immediately. When `true` the command runs with its working directory set
 ///   to `work_dir` so relative paths behave correctly, and is bounded by the
@@ -111,6 +115,14 @@ impl ToolExecutor for SandboxedExecutor {
                         None => write_file(&validated, content).await,
                     },
                 }
+            }
+
+            "list_dir" => {
+                let args: serde_json::Value = serde_json::from_str(args_json)
+                    .map_err(|e| Error::ParseError(format!("failed to parse arguments: {}", e)))?;
+                let path = args["path"].as_str().unwrap_or(".");
+                let validated = validate_path(path, &self.work_dir)?;
+                list_dir(&validated).await
             }
 
             "execute_command" => {
