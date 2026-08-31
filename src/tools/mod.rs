@@ -3,13 +3,14 @@
 //!
 //! # Built-in tools
 //!
-//! Three tools are registered by default via [`SystemToolExecutor::register_builtins`]:
+//! Four tools are registered by default via [`SystemToolExecutor::register_builtins`]:
 //!
 //! | Name | Description |
 //! |------|-------------|
 //! | `execute_command` | Run a shell command (`sh -c` on Unix, `cmd /C` on Windows), with a hard timeout, cancellation, and output caps |
 //! | `read_file` | Read a file from disk |
 //! | `write_file` | Write a file to disk, creating parent directories as needed |
+//! | `web_fetch` | Fetch a public http(s) URL and return its content as text, with an SSRF guard and size/time caps |
 //!
 //! Additional tools are loaded from MCP servers and registered under the
 //! `{server_name}__{tool_name}` namespace.
@@ -82,6 +83,7 @@ mod read_file;
 pub mod sandbox;
 mod sandboxed_executor;
 mod scoped_executor;
+mod web_fetch;
 mod write_file;
 
 use std::collections::{BTreeMap, HashMap};
@@ -168,11 +170,12 @@ impl SystemToolExecutor {
         (executor, statuses)
     }
 
-    /// Registers the three built-in tools: `execute_command`, `read_file`, `write_file`.
+    /// Registers the four built-in tools: `execute_command`, `read_file`, `write_file`, `web_fetch`.
     pub fn register_builtins(&mut self) {
         self.register(Box::new(execute_command::ExecuteCommandTool));
         self.register(Box::new(read_file::ReadFileTool));
         self.register(Box::new(write_file::WriteFileTool));
+        self.register(Box::new(web_fetch::WebFetchTool));
     }
 
     /// Registers a single tool handler.
@@ -273,7 +276,8 @@ mod tests {
         assert!(executor.handlers.contains_key("execute_command"));
         assert!(executor.handlers.contains_key("read_file"));
         assert!(executor.handlers.contains_key("write_file"));
-        assert_eq!(executor.handlers.len(), 3);
+        assert!(executor.handlers.contains_key("web_fetch"));
+        assert_eq!(executor.handlers.len(), 4);
     }
 
     #[tokio::test]

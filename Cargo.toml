@@ -36,7 +36,7 @@ server = ["dep:axum", "dep:notify", "dep:tower-http", "dep:walkdir"]
 
 [dependencies]
 clap = { version = "4.5.54", features = ["derive"], optional = true }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
