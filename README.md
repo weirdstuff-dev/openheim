@@ -334,7 +334,7 @@ src/
       sse.rs          Shared Server-Sent Events decoder for streaming
       retry.rs        Automatic retry with exponential backoff
   tools/            Tool trait, registry, and built-in tools
-    execute_command.rs / read_file.rs / write_file.rs / web_fetch.rs
+    execute_command.rs / read_file.rs / write_file.rs / list_dir.rs / web_fetch.rs
     delegate.rs       DelegateTool, with_delegation — delegate_task tool
     sandbox.rs        Work-directory path validation
     sandboxed_executor.rs  Per-session executor wrapper enforcing work_dir and allow_shell
