@@ -203,7 +203,7 @@ impl App {
                 self.push(ChatItem::Err(e));
             }
             AgentUpdate::Usage(usage) => {
-                self.context_usage = Some(usage);
+                self.context_usage = usage;
             }
             AgentUpdate::ModelChanged { provider, model } => {
                 self.agent_config.provider_name = provider.clone();

@@ -85,7 +85,7 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                                         // usage snapshot to read back, but this
                                         // must never block reporting the turn as
                                         // done.
-                                        if let Ok(Some(usage)) = session.context_usage().await {
+                                        if let Ok(usage) = session.context_usage().await {
                                             let _ = update_tx.send(AgentUpdate::Usage(usage));
                                         }
                                         let _ = update_tx.send(AgentUpdate::Done);
@@ -119,8 +119,11 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                                         // Refreshes the footer's context size to
                                         // the restored session's own snapshot
                                         // instead of leaving the previous
-                                        // session's stale.
-                                        if let Ok(Some(usage)) = restored.context_usage().await {
+                                        // session's stale. `Ok(None)` is sent
+                                        // through too, explicitly clearing the
+                                        // footer rather than leaving it showing
+                                        // the prior session's usage.
+                                        if let Ok(usage) = restored.context_usage().await {
                                             let _ = update_tx.send(AgentUpdate::Usage(usage));
                                         }
                                         session = restored;

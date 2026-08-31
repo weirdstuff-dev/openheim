@@ -17,8 +17,9 @@ pub(crate) enum AgentUpdate {
         model: String,
     },
     /// Current context size (the most recent LLM call's usage), refreshed
-    /// after a completed turn or a session switch.
-    Usage(crate::core::models::Usage),
+    /// after a completed turn or a session switch. `None` clears the
+    /// footer — e.g. switching to a session with no completed turn yet.
+    Usage(Option<crate::core::models::Usage>),
 }
 
 #[derive(Debug, Clone)]
