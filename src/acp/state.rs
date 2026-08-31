@@ -296,7 +296,11 @@ impl AgentState {
             let base: Arc<dyn ToolExecutor> = if s.mode == AgentMode::Architect {
                 Arc::new(ScopedExecutor::new(
                     self.executor.clone(),
-                    vec!["read_file".to_string()],
+                    vec![
+                        "read_file".to_string(),
+                        "list_dir".to_string(),
+                        "search".to_string(),
+                    ],
                 ))
             } else {
                 self.executor.clone()
