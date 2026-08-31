@@ -3,13 +3,14 @@
 //!
 //! # Built-in tools
 //!
-//! Six tools are registered by default via [`SystemToolExecutor::register_builtins`]:
+//! Seven tools are registered by default via [`SystemToolExecutor::register_builtins`]:
 //!
 //! | Name | Description |
 //! |------|-------------|
 //! | `execute_command` | Run a shell command (`sh -c` on Unix, `cmd /C` on Windows), with a hard timeout, cancellation, and output caps |
 //! | `read_file` | Read a file from disk |
 //! | `write_file` | Write a file to disk, creating parent directories as needed |
+//! | `edit_file` | Replace an exact string in a file, without rewriting the whole thing |
 //! | `list_dir` | List the immediate contents of a directory |
 //! | `search` | Regex search across files, ripgrep-style (built on ripgrep's own crates, `.gitignore`-aware) |
 //! | `web_fetch` | Fetch a public http(s) URL and return its content as text, with an SSRF guard and size/time caps |
@@ -80,6 +81,7 @@
 //! going through the builder.
 
 pub mod delegate;
+mod edit_file;
 mod execute_command;
 mod list_dir;
 mod read_file;
@@ -174,12 +176,13 @@ impl SystemToolExecutor {
         (executor, statuses)
     }
 
-    /// Registers the six built-in tools: `execute_command`, `read_file`,
-    /// `write_file`, `list_dir`, `search`, `web_fetch`.
+    /// Registers the seven built-in tools: `execute_command`, `read_file`,
+    /// `write_file`, `edit_file`, `list_dir`, `search`, `web_fetch`.
     pub fn register_builtins(&mut self) {
         self.register(Box::new(execute_command::ExecuteCommandTool));
         self.register(Box::new(read_file::ReadFileTool));
         self.register(Box::new(write_file::WriteFileTool));
+        self.register(Box::new(edit_file::EditFileTool));
         self.register(Box::new(list_dir::ListDirTool));
         self.register(Box::new(search::SearchTool));
         self.register(Box::new(web_fetch::WebFetchTool));
@@ -283,10 +286,11 @@ mod tests {
         assert!(executor.handlers.contains_key("execute_command"));
         assert!(executor.handlers.contains_key("read_file"));
         assert!(executor.handlers.contains_key("write_file"));
+        assert!(executor.handlers.contains_key("edit_file"));
         assert!(executor.handlers.contains_key("list_dir"));
         assert!(executor.handlers.contains_key("search"));
         assert!(executor.handlers.contains_key("web_fetch"));
-        assert_eq!(executor.handlers.len(), 6);
+        assert_eq!(executor.handlers.len(), 7);
     }
 
     #[tokio::test]

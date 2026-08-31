@@ -9,6 +9,7 @@ use crate::{
     error::{Error, Result},
 };
 
+use super::edit_file::apply_edit;
 use super::execute_command::{RunCommandOptions, run_command};
 use super::list_dir::list_dir;
 use super::read_file::read_file;
@@ -27,6 +28,10 @@ use super::{ToolExecutor, sandbox::validate_path};
 ///   `client_io` await is raced against `turn.cancel` so a slow or
 ///   unresponsive client can't block `session/cancel` from interrupting the
 ///   turn.
+/// - `edit_file`: same `work_dir` boundary and `client_io` delegation as
+///   `read_file`/`write_file` (it's a read followed by a write, so both
+///   apply) — the current content is read first, [`apply_edit`] computes the
+///   result, and that result is written back the same way `write_file` would.
 /// - `list_dir` / `search`: same `work_dir` boundary as `read_file`/`write_file`
 ///   (no `client_io` delegation — the ACP file-access protocol has neither a
 ///   directory listing nor a search method), defaulting to `work_dir` itself
@@ -115,6 +120,51 @@ impl ToolExecutor for SandboxedExecutor {
                         Some(Ok(())) => Ok(format!("Successfully wrote to {}", validated.display())),
                         Some(Err(e)) => Err(e),
                         None => write_file(&validated, content).await,
+                    },
+                }
+            }
+
+            "edit_file" => {
+                let args: serde_json::Value = serde_json::from_str(args_json)
+                    .map_err(|e| Error::ParseError(format!("failed to parse arguments: {}", e)))?;
+                let path = args["path"]
+                    .as_str()
+                    .ok_or_else(|| Error::ParseError("missing 'path' argument".to_string()))?;
+                let old_string = args["old_string"].as_str().ok_or_else(|| {
+                    Error::ParseError("missing 'old_string' argument".to_string())
+                })?;
+                let new_string = args["new_string"].as_str().ok_or_else(|| {
+                    Error::ParseError("missing 'new_string' argument".to_string())
+                })?;
+                let replace_all = args["replace_all"].as_bool().unwrap_or(false);
+                let validated = validate_path(path, &self.work_dir)?;
+
+                let content = tokio::select! {
+                    _ = turn.cancel.cancelled() => return Err(Error::ToolExecutionError(
+                        "edit_file cancelled".to_string(),
+                    )),
+                    result = self.client_io.read_file(&validated) => match result {
+                        Some(result) => result?,
+                        None => read_file(&validated).await?,
+                    },
+                };
+                let (edited, count) = apply_edit(&content, old_string, new_string, replace_all)?;
+                let message = format!(
+                    "Successfully edited {} ({count} replacement{})",
+                    validated.display(),
+                    if count == 1 { "" } else { "s" }
+                );
+                tokio::select! {
+                    _ = turn.cancel.cancelled() => Err(Error::ToolExecutionError(
+                        "edit_file cancelled".to_string(),
+                    )),
+                    result = self.client_io.write_file(&validated, &edited) => match result {
+                        Some(Ok(())) => Ok(message),
+                        Some(Err(e)) => Err(e),
+                        None => {
+                            write_file(&validated, &edited).await?;
+                            Ok(message)
+                        }
                     },
                 }
             }
@@ -452,6 +502,96 @@ mod tests {
             err.to_string().contains("outside the work directory"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn edit_file_prefers_client_io_over_local_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "local content").unwrap();
+
+        let executor = SandboxedExecutor::new(
+            Arc::new(EmptyExecutor),
+            dir.path().to_path_buf(),
+            false,
+            Arc::new(FixedClientIo("client content")),
+        );
+        let args = serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "old_string": "client",
+            "new_string": "CLIENT",
+        })
+        .to_string();
+        let harness = TurnHarness::new();
+        let result = executor
+            .execute("edit_file", &args, &harness.turn())
+            .await
+            .unwrap();
+        assert!(result.contains("Successfully edited"), "{result}");
+        // FixedClientIo's write is a no-op that never touches local disk, so
+        // the file on disk still holds its original content unmodified —
+        // proof the edit went through client_io, not local fs.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "local content");
+    }
+
+    #[tokio::test]
+    async fn edit_file_falls_back_to_local_disk_when_client_io_defers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "fn main() { old() }").unwrap();
+
+        let executor = SandboxedExecutor::new(
+            Arc::new(EmptyExecutor),
+            dir.path().to_path_buf(),
+            false,
+            Arc::new(NoClientIo),
+        );
+        let args = serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "old_string": "old()",
+            "new_string": "new()",
+        })
+        .to_string();
+        let harness = TurnHarness::new();
+        executor
+            .execute("edit_file", &args, &harness.turn())
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "fn main() { new() }"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_path_outside_work_dir() {
+        let work = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("secret.txt");
+        std::fs::write(&target, "old").unwrap();
+
+        let executor = SandboxedExecutor::new(
+            Arc::new(EmptyExecutor),
+            work.path().to_path_buf(),
+            false,
+            Arc::new(NoClientIo),
+        );
+        let args = serde_json::json!({
+            "path": target.to_str().unwrap(),
+            "old_string": "old",
+            "new_string": "new",
+        })
+        .to_string();
+        let harness = TurnHarness::new();
+        let err = executor
+            .execute("edit_file", &args, &harness.turn())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("outside the work directory"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
     }
 
     /// End-to-end escape repro: `x` does not exist, so without normalization
