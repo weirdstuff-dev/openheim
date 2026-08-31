@@ -167,7 +167,35 @@ pub(super) fn tool_kind_for(tool_name: &str) -> ToolKind {
         "execute_command" => ToolKind::Execute,
         "read_file" => ToolKind::Read,
         "write_file" => ToolKind::Edit,
+        "edit_file" => ToolKind::Edit,
+        "list_dir" => ToolKind::Read,
+        "search" => ToolKind::Search,
+        "web_fetch" => ToolKind::Fetch,
         _ => ToolKind::Other,
+    }
+}
+
+#[cfg(test)]
+mod tool_kind_tests {
+    use super::*;
+
+    #[test]
+    fn maps_every_builtin_tool() {
+        assert_eq!(tool_kind_for("execute_command"), ToolKind::Execute);
+        assert_eq!(tool_kind_for("read_file"), ToolKind::Read);
+        assert_eq!(tool_kind_for("write_file"), ToolKind::Edit);
+        assert_eq!(tool_kind_for("edit_file"), ToolKind::Edit);
+        assert_eq!(tool_kind_for("list_dir"), ToolKind::Read);
+        assert_eq!(tool_kind_for("search"), ToolKind::Search);
+        assert_eq!(tool_kind_for("web_fetch"), ToolKind::Fetch);
+    }
+
+    #[test]
+    fn unknown_tool_falls_back_to_other() {
+        assert_eq!(
+            tool_kind_for("some_mcp_server__custom_tool"),
+            ToolKind::Other
+        );
     }
 }
 
