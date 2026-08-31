@@ -435,7 +435,10 @@ pub(super) async fn send_openai_style_streaming(
     // Asks OpenAI (and most OpenAI-compatible backends, which pass unknown
     // fields through) to emit one extra chunk at the end of the stream
     // carrying the same `usage` object the non-streaming response has.
-    // Backends that don't understand it just ignore the field.
+    // Backends that don't understand it just ignore the field — but a few
+    // OpenAI-compatible endpoints validate the request body strictly and
+    // reject the unknown field with a 400, so that specific case is retried
+    // once without it below rather than failing the whole call.
     body["stream_options"] = serde_json::json!({ "include_usage": true });
 
     let endpoint = format!("{}/chat/completions", api_base.trim_end_matches('/'));
@@ -448,6 +451,24 @@ pub(super) async fn send_openai_style_streaming(
         .send()
         .await
         .map_err(Error::ReqwestError)?;
+
+    if response.status().as_u16() == 400 {
+        let mut retry_body = body.clone();
+        if let Some(obj) = retry_body.as_object_mut() {
+            obj.remove("stream_options");
+        }
+        let retry_response = client
+            .post(&endpoint)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Content-Type", "application/json")
+            .json(&retry_body)
+            .send()
+            .await
+            .map_err(Error::ReqwestError)?;
+        if retry_response.status().is_success() {
+            response = retry_response;
+        }
+    }
 
     if !response.status().is_success() {
         let status = response.status().as_u16();
