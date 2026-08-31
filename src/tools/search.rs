@@ -77,7 +77,6 @@ fn search_blocking(pattern: &str, root: &Path, case_insensitive: bool) -> Result
         }
 
         let path = entry.path();
-        let path = entry.path();
         let relative = path.strip_prefix(root).unwrap_or(path);
         let display_path = if relative.as_os_str().is_empty() {
             path.display().to_string()
