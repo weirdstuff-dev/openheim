@@ -379,7 +379,7 @@ pub struct ConversationMeta {
     /// call's usage, i.e. how full the context window is right now.
     /// Overwritten (not accumulated) each turn; `None` until the first turn
     /// completes.
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub context_usage: Option<Usage>,
 }
 
