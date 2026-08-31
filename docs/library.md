@@ -246,7 +246,7 @@ session.prompt("What's my name?", |update| { /* prints "Alice" */ }).await?;
 
 ### Context usage
 
-`session.context_usage().await?` returns the token usage of the most recent LLM call — how full the context window is *right now*, not a running total across the session. `None` until a turn has completed.
+`session.context_usage().await?` returns the token usage of the most recent LLM call — how full the context window is *right now*, not a running total across the session. `None` until a provider has reported usage.
 
 ```rust
 if let Some(usage) = session.context_usage().await? {
