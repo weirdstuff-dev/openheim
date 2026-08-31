@@ -251,8 +251,8 @@ session.prompt("What's my name?", |update| { /* prints "Alice" */ }).await?;
 ```rust
 if let Some(usage) = session.context_usage().await? {
     println!(
-        "context: {} in / {} out ({} cached)",
-        usage.input_tokens, usage.output_tokens, usage.cache_read_tokens
+        "context: {} in / {} out ({} cache read / {} cache write)",
+        usage.input_tokens, usage.output_tokens, usage.cache_read_tokens, usage.cache_creation_tokens
     );
 }
 ```
