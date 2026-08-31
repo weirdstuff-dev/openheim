@@ -52,6 +52,7 @@ pub struct FunctionDefinition {
 pub struct Choice {
     pub message: Message,
     pub finish_reason: Option<FinishReason>,
+    pub usage: Option<Usage>,     // None if your provider doesn't report token usage
 }
 
 pub enum FinishReason {
@@ -59,6 +60,13 @@ pub enum FinishReason {
     ToolCalls,          // model wants to invoke tools
     MaxTokens,          // truncated at the token limit
     Other(String),      // provider-specific reason with no equivalent above
+}
+
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64, // tokens written to a prompt cache
+    pub cache_read_tokens: u64,     // tokens served from a prompt cache
 }
 ```
 
@@ -74,6 +82,8 @@ and constructors for building your own:
 - `Message::tool_result(tool_call_id, tool_name, content, is_error)` — single-`ToolResult`-block message
 
 The agent loop treats `finish_reason == Some(FinishReason::Stop)` as the signal to end the conversation. Any other finish reason with no tool calls also ends the loop (with a warning). If `message.tool_calls()` is non-empty, the loop executes them and continues.
+
+`usage` is optional — set it if your API returns token counts, otherwise leave it `None`. When present, it's surfaced to embedders as the session's current context-size snapshot (`SessionHandle::context_usage()` / `ConversationMeta.context_usage`); leaving it `None` just means that feature has nothing to report for this provider.
 
 ---
 
@@ -233,6 +243,10 @@ impl LlmClient for MyCustomProvider {
                 content,
             },
             finish_reason,
+            // This example's `ApiResponse` doesn't model a `usage` field —
+            // add one (following `core/llm/openai.rs`'s `OpenAiUsage`) and
+            // map it here if your API reports token counts.
+            usage: None,
         })
     }
 }

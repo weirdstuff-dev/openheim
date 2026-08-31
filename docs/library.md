@@ -244,6 +244,21 @@ session.prompt("My name is Alice", |_| {}).await?;
 session.prompt("What's my name?", |update| { /* prints "Alice" */ }).await?;
 ```
 
+### Context usage
+
+`session.context_usage().await?` returns the token usage of the most recent LLM call — how full the context window is *right now*, not a running total across the session. `None` until a provider has reported usage.
+
+```rust
+if let Some(usage) = session.context_usage().await? {
+    println!(
+        "context: {} in / {} out ({} cache read / {} cache write)",
+        usage.input_tokens, usage.output_tokens, usage.cache_read_tokens, usage.cache_creation_tokens
+    );
+}
+```
+
+It's also persisted on the conversation, so it's readable via `client.get_session(id)` (`conversation.meta.context_usage`) without an active `SessionHandle` — see [Get full conversation](#get-full-conversation-messages--metadata) below.
+
 ### Permission gate, cancellation, and client I/O
 
 By default a `SessionHandle` allows every tool call unconditionally (`AllowAll`) — the embedder is trusted to have already consented to the run. For an interactive embedder, supply your own [`PermissionGate`](../src/core/permission.rs) so the agent asks before running a tool call:
@@ -315,6 +330,8 @@ for msg in &conv.messages {
 ```
 
 `msg.content` is a `Vec<core::models::ContentBlock>` (`Text`/`Thinking`/`Image`/`ToolUse`/`ToolResult`) rather than a plain string — `msg.text()` concatenates the `Text` blocks. Use `msg.tool_calls()` / `msg.tool_result_block()` for the other block types; see `docs/custom-llm-provider.md` for the full `ContentBlock` shape.
+
+`conv.meta.context_usage` is an `Option<core::models::Usage>` — see [Context usage](#context-usage) above.
 
 ### Resume a session (load + continue prompting)
 

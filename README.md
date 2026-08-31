@@ -49,6 +49,7 @@ Openheim is built in Rust from the ground up:
 - **Agent sandboxing** — configurable work-directory boundary restricts file access to a directory tree. Shell execution is disabled by default and can be enabled via `allow_shell = true` in config or `.allow_shell(true)` in the builder.
 - **MCP (Model Context Protocol)** — connect external MCP servers (stdio or Streamable HTTP) and their tools are automatically exposed to the LLM as `{server_name}__{tool_name}`.
 - **Conversation memory** — conversations (including full tool call history) persist to disk and resume across sessions
+- **Context-size tracking** — each session's current context size (the last LLM call's token usage) is tracked, persisted, and shown live in the TUI footer; embedders can read it via `SessionHandle::context_usage()` or `GET /api/sessions/{id}`
 - **System identity** — edit `~/.openheim/system.md` to define how the agent presents itself. Required when preparing a session (created by `openheim init`).
 - **Skills** — drop a markdown file into `~/.openheim/skills/` and it's injected into the system prompt. Set `default_skills` in config to auto-load skills every session; pass `--skills` for per-session additions. ACP clients can also pass skills per-session via `_meta`.
 - **ACP transport** — implements the [Agent Client Protocol](https://github.com/block/agent-client-protocol) over stdio (for editor integrations) and WebSocket (for remote clients), with real-time streaming of message chunks and tool calls

@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool};
+use crate::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool, Usage};
 use crate::error::{Error, Result};
 
 use super::sse::SseDecoder;
@@ -369,6 +369,7 @@ impl LlmClient for AnthropicClient {
         let mut thinking_signature = String::new();
         let mut tool_calls: Vec<ContentBlock> = Vec::new();
         let mut stop_reason: Option<String> = None;
+        let mut usage = Usage::default();
 
         let mut response = response;
         while let Some(chunk) = response.chunk().await.map_err(Error::ReqwestError)? {
@@ -385,6 +386,15 @@ impl LlmClient for AnthropicClient {
                 };
 
                 match event["type"].as_str().unwrap_or("") {
+                    "message_start" => {
+                        let u = &event["message"]["usage"];
+                        usage.input_tokens = u["input_tokens"].as_u64().unwrap_or(0);
+                        usage.output_tokens = u["output_tokens"].as_u64().unwrap_or(0);
+                        usage.cache_creation_tokens =
+                            u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                        usage.cache_read_tokens =
+                            u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                    }
                     "content_block_start" => {
                         let block_type = event["content_block"]["type"]
                             .as_str()
@@ -446,6 +456,12 @@ impl LlmClient for AnthropicClient {
                         if let Some(reason) = event["delta"]["stop_reason"].as_str() {
                             stop_reason = Some(reason.to_string());
                         }
+                        // Anthropic reports `output_tokens` cumulatively on each
+                        // `message_delta`, not as a per-event delta — the last
+                        // value seen before the stream ends is the true total.
+                        if let Some(ot) = event["usage"]["output_tokens"].as_u64() {
+                            usage.output_tokens = ot;
+                        }
                     }
                     "error" => {
                         let msg = event["error"]["message"]
@@ -483,6 +499,7 @@ impl LlmClient for AnthropicClient {
                 content,
             },
             finish_reason,
+            usage: Some(usage),
         })
     }
 }

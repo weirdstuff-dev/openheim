@@ -431,6 +431,17 @@ impl AgentState {
         )
         .await;
 
+        // Folded into the conversation's context-size snapshot before the
+        // final checkpoint below, so it's persisted even for a turn that
+        // only partially completed (cancelled mid-turn still made LLM calls
+        // worth accounting for). A turn with no successful calls leaves the
+        // previous snapshot in place rather than clearing it.
+        if let Ok(r) = &run_result
+            && r.context_usage.is_some()
+        {
+            conversation.meta.context_usage = r.context_usage;
+        }
+
         // Final full checkpoint: reconciles whatever `append_message` calls
         // landed above into one consistent, complete log, and is the only
         // save at all for a turn that produced no messages (cancelled or
