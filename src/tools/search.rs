@@ -77,11 +77,13 @@ fn search_blocking(pattern: &str, root: &Path, case_insensitive: bool) -> Result
         }
 
         let path = entry.path();
-        let display_path = path
-            .strip_prefix(root)
-            .unwrap_or(path)
-            .display()
-            .to_string();
+        let path = entry.path();
+        let relative = path.strip_prefix(root).unwrap_or(path);
+        let display_path = if relative.as_os_str().is_empty() {
+            path.display().to_string()
+        } else {
+            relative.display().to_string()
+        };
 
         // Errors here are almost always "not readable as text" (permissions,
         // a binary file that slipped past detection, ...) — skip the file
