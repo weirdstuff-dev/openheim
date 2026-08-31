@@ -20,6 +20,17 @@ use super::permission::{PERMISSION_OPTIONS, PermissionRequest};
 use super::render;
 use super::types::{AgentUpdate, ChatItem, ConfigRow, Screen, Status};
 
+/// Formats a token count for the footer: exact below 1000, `k`-suffixed with
+/// one decimal place above it (`1.2k`, `84.0k`) so the label stays short
+/// enough to sit next to the provider/model name.
+fn format_token_count(tokens: u64) -> String {
+    if tokens < 1000 {
+        format!("{tokens} ctx")
+    } else {
+        format!("{:.1}k ctx", tokens as f64 / 1000.0)
+    }
+}
+
 fn save_theme_to_config(name: &str) -> crate::error::Result<()> {
     let path = crate::config::config_path()?;
     let contents = std::fs::read_to_string(&path)?;
@@ -94,6 +105,12 @@ pub(super) struct App {
     /// their turn instead of overwriting (and orphaning) an earlier one.
     pending_permissions: VecDeque<PermissionRequest>,
     permission_selected: usize,
+    /// Current context size: the most recent LLM call's usage, i.e. how
+    /// full the context window is right now — not a cumulative session
+    /// total. Refreshed after each completed turn and on session switch.
+    /// `None` until a turn has completed (never sent for a brand-new,
+    /// never-prompted session).
+    context_usage: Option<crate::core::models::Usage>,
 }
 
 impl App {
@@ -144,6 +161,7 @@ impl App {
             theme_selected: 0,
             pending_permissions: VecDeque::new(),
             permission_selected: 0,
+            context_usage: None,
         }
     }
 
@@ -183,6 +201,9 @@ impl App {
             AgentUpdate::Error(e) => {
                 self.status = Status::Idle;
                 self.push(ChatItem::Err(e));
+            }
+            AgentUpdate::Usage(usage) => {
+                self.context_usage = Some(usage);
             }
             AgentUpdate::ModelChanged { provider, model } => {
                 self.agent_config.provider_name = provider.clone();
@@ -818,10 +839,18 @@ impl App {
             Status::Thinking => Some(format!("{frame} thinking…")),
             Status::Streaming => Some(format!("{frame} streaming…")),
         };
-        let right_label = format!(
-            "{} · {}",
-            self.agent_config.provider_name, self.agent_config.model
-        );
+        let right_label = match &self.context_usage {
+            Some(usage) => format!(
+                "{} · {} · {}",
+                self.agent_config.provider_name,
+                self.agent_config.model,
+                format_token_count(usage.total())
+            ),
+            None => format!(
+                "{} · {}",
+                self.agent_config.provider_name, self.agent_config.model
+            ),
+        };
 
         let theme = self.theme_color;
         render::render_input_bar(

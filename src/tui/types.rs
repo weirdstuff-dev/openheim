@@ -2,11 +2,23 @@
 pub(crate) enum AgentUpdate {
     TextChunk(String),
     ThinkingChunk(String),
-    ToolCall { name: String, args: String },
-    ToolResult { result: String, is_error: bool },
+    ToolCall {
+        name: String,
+        args: String,
+    },
+    ToolResult {
+        result: String,
+        is_error: bool,
+    },
     Done,
     Error(String),
-    ModelChanged { provider: String, model: String },
+    ModelChanged {
+        provider: String,
+        model: String,
+    },
+    /// Current context size (the most recent LLM call's usage), refreshed
+    /// after a completed turn or a session switch.
+    Usage(crate::core::models::Usage),
 }
 
 #[derive(Debug, Clone)]
