@@ -197,7 +197,20 @@ fn is_disallowed_ip(ip: IpAddr) -> bool {
                 || v4.is_documentation()
         }
         IpAddr::V6(v6) => {
-            v6.is_loopback()
+            // IPv4-mapped (`::ffff:a.b.c.d`) and IPv4-compatible
+            // (`::a.b.c.d`) addresses embed an IPv4 address that the native
+            // IPv6 checks below wouldn't catch on their own — a request to
+            // `::ffff:169.254.169.254` would sail straight past them despite
+            // being cloud metadata. Run those embedded addresses back through
+            // the IPv4 checks too. `to_ipv4` also matches `::` and `::1`
+            // (as 0.0.0.0 and 0.0.0.1, neither of which is IPv4-loopback),
+            // so this is additive, not a replacement for the native checks.
+            #[allow(deprecated)]
+            let embeds_disallowed_ipv4 = v6
+                .to_ipv4()
+                .is_some_and(|v4| is_disallowed_ip(IpAddr::V4(v4)));
+            embeds_disallowed_ipv4
+                || v6.is_loopback()
                 || v6.is_unspecified()
                 || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique local, fc00::/7
                 || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local, fe80::/10
@@ -453,5 +466,22 @@ mod tests {
         assert!(is_disallowed_ip("fe80::1".parse().unwrap()));
         assert!(!is_disallowed_ip("8.8.8.8".parse().unwrap()));
         assert!(!is_disallowed_ip("1.1.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_disallowed_ip_flags_ipv4_embedded_in_ipv6() {
+        // IPv4-mapped (`::ffff:a.b.c.d`) must be checked against the same
+        // IPv4 ranges as the bare address.
+        assert!(is_disallowed_ip("::ffff:127.0.0.1".parse().unwrap()));
+        assert!(is_disallowed_ip("::ffff:169.254.169.254".parse().unwrap()));
+        assert!(is_disallowed_ip("::ffff:10.1.2.3".parse().unwrap()));
+        assert!(is_disallowed_ip("::ffff:172.16.0.1".parse().unwrap()));
+        assert!(is_disallowed_ip("::ffff:192.168.1.1".parse().unwrap()));
+        // IPv4-compatible (`::a.b.c.d`, deprecated form) likewise.
+        assert!(is_disallowed_ip("::127.0.0.1".parse().unwrap()));
+        assert!(is_disallowed_ip("::169.254.169.254".parse().unwrap()));
+        // A publicly routable address embedded either way stays allowed.
+        assert!(!is_disallowed_ip("::ffff:8.8.8.8".parse().unwrap()));
+        assert!(!is_disallowed_ip("::8.8.8.8".parse().unwrap()));
     }
 }
