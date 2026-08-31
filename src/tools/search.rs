@@ -104,7 +104,11 @@ fn search_blocking(pattern: &str, root: &Path, case_insensitive: bool) -> Result
     }
 
     if results.is_empty() {
-        return Ok("(no matches found)".to_string());
+        return Ok(if truncated {
+            format!("(no matches found; search stopped after {MAX_FILES_SCANNED} files)")
+        } else {
+            "(no matches found)".to_string()
+        });
     }
     let mut out = results.join("\n");
     if truncated {
