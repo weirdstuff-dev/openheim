@@ -76,6 +76,7 @@ where
     let mut steps = Vec::new();
     let mut final_response = String::new();
     let mut iterations_used = 0;
+    let mut context_usage: Option<Usage> = None;
     // Overwritten on every early exit; stays `MaxIterations` only if the
     // `for` loop below runs to completion without the LLM ever stopping.
     let mut stop_reason = StopReason::MaxIterations;
@@ -151,6 +152,15 @@ where
             cb(StreamEvent::MessageAppended {
                 message: choice.message.clone(),
             });
+        }
+        if let Some(usage) = choice.usage {
+            // Overwritten (not summed) every iteration: the latest call's
+            // usage is what "context size right now" means, since each call
+            // resends the full history as its prompt.
+            context_usage = Some(usage);
+            if let Some(cb) = callback.as_mut() {
+                cb(StreamEvent::Usage { usage });
+            }
         }
 
         let tool_calls = choice.message.tool_calls();
@@ -317,6 +327,7 @@ where
                     steps,
                     iterations_used: iter_num,
                     stop_reason: StopReason::EndTurn,
+                    context_usage,
                 });
             }
         } else {
@@ -341,6 +352,7 @@ where
         steps,
         iterations_used,
         stop_reason,
+        context_usage,
     })
 }
 
@@ -431,6 +443,7 @@ mod tests {
         Choice {
             message: Message::assistant(content),
             finish_reason: Some(FinishReason::Stop),
+            usage: None,
         }
     }
 
@@ -445,6 +458,7 @@ mod tests {
                 }],
             },
             finish_reason: Some(FinishReason::ToolCalls),
+            usage: None,
         }
     }
 
@@ -463,6 +477,7 @@ mod tests {
                     .collect(),
             },
             finish_reason: Some(FinishReason::ToolCalls),
+            usage: None,
         }
     }
 
@@ -1016,6 +1031,7 @@ mod tests {
                 content: vec![],
             },
             finish_reason: Some(FinishReason::Stop),
+            usage: None,
         };
         let llm = Arc::new(MockLlm::new(vec![empty_choice]));
         let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));

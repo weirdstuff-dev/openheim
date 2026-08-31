@@ -115,6 +115,7 @@ mod tests {
         Choice {
             message: Message::assistant(content),
             finish_reason: Some(FinishReason::Stop),
+            usage: None,
         }
     }
 

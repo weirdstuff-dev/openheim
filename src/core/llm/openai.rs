@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool};
+use crate::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool, Usage};
 use crate::error::{Error, Result};
 
 use super::sse::SseDecoder;
@@ -116,6 +116,42 @@ struct OpenAiFunctionDef {
 #[derive(Debug, Deserialize)]
 struct OpenAiResponseEnvelope {
     choices: Vec<OpenAiResponseChoice>,
+    #[serde(default)]
+    usage: Option<OpenAiUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+    #[serde(default)]
+    prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiPromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u64,
+}
+
+impl From<OpenAiUsage> for Usage {
+    fn from(u: OpenAiUsage) -> Self {
+        let cached = u
+            .prompt_tokens_details
+            .map(|d| d.cached_tokens)
+            .unwrap_or(0);
+        Usage {
+            // OpenAI's `prompt_tokens` already includes any cached tokens;
+            // subtract them so `input_tokens` means "newly processed", same
+            // as the Anthropic client.
+            input_tokens: u.prompt_tokens.saturating_sub(cached),
+            output_tokens: u.completion_tokens,
+            cache_creation_tokens: 0,
+            cache_read_tokens: cached,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -341,6 +377,7 @@ pub(super) async fn send_openai_style(
     }
 
     let envelope: OpenAiResponseEnvelope = response.json().await.map_err(Error::ReqwestError)?;
+    let usage = envelope.usage.map(Usage::from);
 
     let choice = envelope
         .choices
@@ -371,6 +408,7 @@ pub(super) async fn send_openai_style(
             content,
         },
         finish_reason: choice.finish_reason.as_deref().map(map_finish_reason),
+        usage,
     })
 }
 
@@ -394,6 +432,11 @@ pub(super) async fn send_openai_style_streaming(
 
     let mut body = serde_json::to_value(&request).map_err(|e| Error::ParseError(e.to_string()))?;
     body["stream"] = serde_json::Value::Bool(true);
+    // Asks OpenAI (and most OpenAI-compatible backends, which pass unknown
+    // fields through) to emit one extra chunk at the end of the stream
+    // carrying the same `usage` object the non-streaming response has.
+    // Backends that don't understand it just ignore the field.
+    body["stream_options"] = serde_json::json!({ "include_usage": true });
 
     let endpoint = format!("{}/chat/completions", api_base.trim_end_matches('/'));
 
@@ -428,6 +471,7 @@ pub(super) async fn send_openai_style_streaming(
     let mut reasoning_buf = String::new();
     let mut tool_acc: Vec<ToolCallAcc> = Vec::new();
     let mut finish_reason: Option<FinishReason> = None;
+    let mut usage: Option<Usage> = None;
     let mut decoder = SseDecoder::new();
     let mut done = false;
 
@@ -446,6 +490,15 @@ pub(super) async fn send_openai_style_streaming(
             let Ok(event) = serde_json::from_str::<serde_json::Value>(&data) else {
                 continue;
             };
+
+            // The `include_usage` final chunk carries `usage` alongside an
+            // empty `choices` array, so this is checked independently of the
+            // choice fields below rather than folded into that branch.
+            if !event["usage"].is_null()
+                && let Ok(u) = serde_json::from_value::<OpenAiUsage>(event["usage"].clone())
+            {
+                usage = Some(Usage::from(u));
+            }
 
             let choice = &event["choices"][0];
 
@@ -514,6 +567,7 @@ pub(super) async fn send_openai_style_streaming(
             content: assemble_content(Some(reasoning_buf), Some(text_buf), tool_uses),
         },
         finish_reason,
+        usage,
     })
 }
 

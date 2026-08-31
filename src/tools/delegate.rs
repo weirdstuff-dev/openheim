@@ -441,6 +441,7 @@ mod tests {
         Choice {
             message: Message::assistant(content),
             finish_reason: Some(FinishReason::Stop),
+            usage: None,
         }
     }
 
@@ -455,6 +456,7 @@ mod tests {
                 }],
             },
             finish_reason: Some(FinishReason::ToolCalls),
+            usage: None,
         }
     }
 

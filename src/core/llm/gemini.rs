@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool};
+use crate::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool, Usage};
 use crate::error::{Error, Result};
 
 use super::sse::SseDecoder;
@@ -111,8 +111,37 @@ struct GeminiFunctionDeclaration {
 // --- Gemini response types ---
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GeminiResponse {
     candidates: Vec<GeminiCandidate>,
+    #[serde(default)]
+    usage_metadata: Option<GeminiUsageMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiUsageMetadata {
+    #[serde(default)]
+    prompt_token_count: u64,
+    #[serde(default)]
+    candidates_token_count: u64,
+    #[serde(default)]
+    cached_content_token_count: u64,
+}
+
+impl From<GeminiUsageMetadata> for Usage {
+    fn from(u: GeminiUsageMetadata) -> Self {
+        Usage {
+            // Gemini's `promptTokenCount` already includes cached tokens; see
+            // the same normalization in the OpenAI client.
+            input_tokens: u
+                .prompt_token_count
+                .saturating_sub(u.cached_content_token_count),
+            output_tokens: u.candidates_token_count,
+            cache_creation_tokens: 0,
+            cache_read_tokens: u.cached_content_token_count,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,6 +282,7 @@ fn convert_tools(tools: &[Tool]) -> Vec<GeminiToolDeclaration> {
 }
 
 fn convert_response(resp: GeminiResponse) -> Result<Choice> {
+    let usage = resp.usage_metadata.map(Usage::from);
     let candidate = resp
         .candidates
         .into_iter()
@@ -284,6 +314,7 @@ fn convert_response(resp: GeminiResponse) -> Result<Choice> {
             content,
         },
         finish_reason,
+        usage,
     })
 }
 
@@ -409,6 +440,7 @@ impl LlmClient for GeminiClient {
         let mut text_buf = String::new();
         let mut tool_calls_accum: Vec<(String, String)> = Vec::new();
         let mut finish_reason: Option<FinishReason> = None;
+        let mut usage: Option<Usage> = None;
         let mut decoder = SseDecoder::new();
 
         while let Some(bytes) = response.chunk().await.map_err(Error::ReqwestError)? {
@@ -418,6 +450,12 @@ impl LlmClient for GeminiClient {
                 let Ok(event) = serde_json::from_str::<GeminiResponse>(&data) else {
                     continue;
                 };
+
+                // Each chunk's `usageMetadata` is cumulative, not a delta, so
+                // the last one seen before the stream ends is the true total.
+                if let Some(u) = event.usage_metadata {
+                    usage = Some(Usage::from(u));
+                }
 
                 let Some(candidate) = event.candidates.into_iter().next() else {
                     continue;
@@ -459,6 +497,7 @@ impl LlmClient for GeminiClient {
                 content,
             },
             finish_reason,
+            usage,
         })
     }
 }
@@ -603,6 +642,7 @@ mod tests {
                 },
                 finish_reason: Some("STOP".into()),
             }],
+            usage_metadata: None,
         };
         let choice = convert_response(resp).unwrap();
         assert_eq!(choice.message.text().as_deref(), Some("Hello!"));
@@ -626,6 +666,7 @@ mod tests {
                 },
                 finish_reason: Some("STOP".into()),
             }],
+            usage_metadata: None,
         };
         let choice = convert_response(resp).unwrap();
         assert!(choice.message.text().is_none());
@@ -649,6 +690,7 @@ mod tests {
                 },
                 finish_reason: Some("STOP".into()),
             }],
+            usage_metadata: None,
         };
         assert_eq!(
             convert_response(resp).unwrap().finish_reason,
@@ -667,6 +709,7 @@ mod tests {
                 },
                 finish_reason: Some("MAX_TOKENS".into()),
             }],
+            usage_metadata: None,
         };
         assert_eq!(
             convert_response(resp).unwrap().finish_reason,
@@ -676,7 +719,10 @@ mod tests {
 
     #[test]
     fn convert_response_errors_on_empty_candidates() {
-        let resp = GeminiResponse { candidates: vec![] };
+        let resp = GeminiResponse {
+            candidates: vec![],
+            usage_metadata: None,
+        };
         let result = convert_response(resp);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No candidates"));
