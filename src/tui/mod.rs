@@ -79,7 +79,17 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                                     .prompt(&prompt, move |update| convert_update(&tx_cb, update))
                                     .await;
                                 match result {
-                                    Ok(()) => { let _ = update_tx.send(AgentUpdate::Done); }
+                                    Ok(()) => {
+                                        // Best-effort: a session whose turn just
+                                        // succeeded should always have a context
+                                        // usage snapshot to read back, but this
+                                        // must never block reporting the turn as
+                                        // done.
+                                        if let Ok(usage) = session.context_usage().await {
+                                            let _ = update_tx.send(AgentUpdate::Usage(usage));
+                                        }
+                                        let _ = update_tx.send(AgentUpdate::Done);
+                                    }
                                     Err(e) => { let _ = update_tx.send(AgentUpdate::Error(e.to_string())); }
                                 }
                             }
@@ -105,7 +115,19 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                         match maybe_switch {
                             Some((session_id, cwd)) => {
                                 match session.restore(&session_id, cwd).await {
-                                    Ok(restored) => { session = restored; }
+                                    Ok(restored) => {
+                                        // Refreshes the footer's context size to
+                                        // the restored session's own snapshot
+                                        // instead of leaving the previous
+                                        // session's stale. `Ok(None)` is sent
+                                        // through too, explicitly clearing the
+                                        // footer rather than leaving it showing
+                                        // the prior session's usage.
+                                        if let Ok(usage) = restored.context_usage().await {
+                                            let _ = update_tx.send(AgentUpdate::Usage(usage));
+                                        }
+                                        session = restored;
+                                    }
                                     Err(e) => {
                                         let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
                                     }

@@ -44,10 +44,12 @@ Openheim is built in Rust from the ground up:
 ## Features
 
 - **Multi-provider** — OpenAI, Anthropic Claude, Google Gemini, and any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.)
-- **Tool execution** — built-in shell, file read, and file write tools. Trait-based, so you can add your own.
+- **Tool execution** — built-in shell, file read/write/edit, directory listing, ripgrep-style search, web fetch, and subagent-delegation tools. Trait-based, so you can add your own.
+- **Subagents** — delegate a self-contained task to another agent (its own persona, model, and tools) via the always-on `delegate_task` tool. Named profiles live in `~/.openheim/agents/`; the orchestrator can also define inline, one-off subagents. See [docs/subagents.md](./docs/subagents.md).
 - **Agent sandboxing** — configurable work-directory boundary restricts file access to a directory tree. Shell execution is disabled by default and can be enabled via `allow_shell = true` in config or `.allow_shell(true)` in the builder.
 - **MCP (Model Context Protocol)** — connect external MCP servers (stdio or Streamable HTTP) and their tools are automatically exposed to the LLM as `{server_name}__{tool_name}`.
 - **Conversation memory** — conversations (including full tool call history) persist to disk and resume across sessions
+- **Context-size tracking** — each session's current context size (the last LLM call's token usage) is tracked, persisted, and shown live in the TUI footer; embedders can read it via `SessionHandle::context_usage()` or `GET /api/sessions/{id}`
 - **System identity** — edit `~/.openheim/system.md` to define how the agent presents itself. Required when preparing a session (created by `openheim init`).
 - **Skills** — drop a markdown file into `~/.openheim/skills/` and it's injected into the system prompt. Set `default_skills` in config to auto-load skills every session; pass `--skills` for per-session additions. ACP clients can also pass skills per-session via `_meta`.
 - **ACP transport** — implements the [Agent Client Protocol](https://github.com/block/agent-client-protocol) over stdio (for editor integrations) and WebSocket (for remote clients), with real-time streaming of message chunks and tool calls
@@ -240,6 +242,7 @@ The server speaks the [Agent Client Protocol](https://github.com/block/agent-cli
 | Endpoint | Description |
 |---|---|
 | `WS /ws` | Single multiplexed connection carrying two channels via JSON envelopes: **agent** (ACP sessions, streaming, tool calls) and **fs** (file CRUD, live watching) |
+| `WS /acp` | Bare ACP-only endpoint — raw JSON-RPC over the socket, no envelope, no `fs` channel |
 
 Every message is wrapped in `{ "channel": "<agent|fs>", "data": <payload> }`. The **fs** channel is sandboxed to the agent's configured `work_dir` — the same boundary enforced for the agent's own file tools.
 
@@ -315,31 +318,51 @@ docker run -p 1217:1217 \
 src/
   main.rs           Entry point and subcommand dispatch
   lib.rs            Public API surface
+  client.rs         OpenheimClient / SessionHandle — library facade
   error.rs          Error types (with retryable classification for backoff)
   config/           Config loading, provider/model resolution, defaults
   core/
     agent.rs        Agent loop (streaming variant)
     models.rs       Message, Tool, Choice, and WebSocket envelope types
+    permission.rs   PermissionGate trait — embedder hook for tool-call approval
+    turn.rs         Cross-cutting turn controls (cancellation, etc.)
+    client_io.rs    Optional delegation of file I/O to the ACP client
     llm/            LLM client trait and provider implementations
       anthropic.rs    Anthropic Messages API client
       gemini.rs       Google Gemini API client
       openai.rs       OpenAI API client
       openai_compatible.rs  Generic OpenAI-compatible client (Ollama, etc.)
+      sse.rs          Shared Server-Sent Events decoder for streaming
       retry.rs        Automatic retry with exponential backoff
   tools/            Tool trait, registry, and built-in tools
-    execute_command.rs / read_file.rs / write_file.rs
+    execute_command.rs / read_file.rs / write_file.rs / edit_file.rs / list_dir.rs / search.rs / web_fetch.rs
+    delegate.rs       DelegateTool, with_delegation — delegate_task tool
     sandbox.rs        Work-directory path validation
     sandboxed_executor.rs  Per-session executor wrapper enforcing work_dir and allow_shell
+    scoped_executor.rs     Tool-name allowlist wrapper around any ToolExecutor
   mcp/              MCP (Model Context Protocol) client integration
     client.rs       MCP server connection (stdio + Streamable HTTP)
     tool_handler.rs  Adapts MCP tools to the ToolHandler trait
   rag/              Conversation history, prompt builder, skills manager, and system identity
-  acp/              ACP agent core — session state and protocol handling
+    lease.rs        Advisory per-session write lease (guards ~/.openheim/history/ across processes)
+  subagents/        Subagent profiles — delegated, isolated agent personas (~/.openheim/agents/)
+  acp/              Agent Client Protocol server implementation
+    session.rs      Live session map — state and eviction policy
+    state.rs        AgentState — shared handle, request handlers
+    serve.rs        Connection loop wiring transports to the agent-client-protocol crate
+    permission.rs   Adapts ACP session/request_permission to PermissionGate
+    client_io.rs    Adapts ACP fs/* requests to ClientIo
+    convert.rs      Maps ACP content blocks to core::models::ContentBlock
+    util.rs         Shared ACP vocabulary (session modes, stop reasons, history replay)
   transport/
     stdio.rs        ACP-over-stdio transport (for editor integrations)
     ws.rs           Multiplexed WebSocket server (axum) + REST API + filesystem channel
     run.rs          Headless single-prompt transport
   tui/              Interactive ratatui terminal UI
+    app.rs          App state, command dispatch (:models, :theme, …)
+    permission.rs   TUI permission prompt (Allow once/always, Reject)
+    render.rs       Frame rendering, theme colors, chat item layout
+    types.rs        ChatItem, AgentUpdate, Status, Screen enums
 ```
 
 ---

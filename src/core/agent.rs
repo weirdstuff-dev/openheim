@@ -76,6 +76,7 @@ where
     let mut steps = Vec::new();
     let mut final_response = String::new();
     let mut iterations_used = 0;
+    let mut context_usage: Option<Usage> = None;
     // Overwritten on every early exit; stays `MaxIterations` only if the
     // `for` loop below runs to completion without the LLM ever stopping.
     let mut stop_reason = StopReason::MaxIterations;
@@ -152,66 +153,135 @@ where
                 message: choice.message.clone(),
             });
         }
+        if let Some(usage) = choice.usage {
+            // Overwritten (not summed) every iteration: the latest call's
+            // usage is what "context size right now" means, since each call
+            // resends the full history as its prompt.
+            context_usage = Some(usage);
+            if let Some(cb) = callback.as_mut() {
+                cb(StreamEvent::Usage { usage });
+            }
+        }
 
         let tool_calls = choice.message.tool_calls();
         if !tool_calls.is_empty() {
-            let mut tool_results = Vec::new();
-
+            // Phase 1a: announce every call up front, before any permission
+            // check runs. Each is reported `Pending` (see the ACP mapping),
+            // which is accurate for all of them the moment the LLM asks —
+            // not just the one whose approval happens to be next in line.
             for tool_call in &tool_calls {
                 if turn.cancel.is_cancelled() {
                     stop_reason = StopReason::Cancelled;
-                    break;
+                    break 'turn;
                 }
-
-                let id = &tool_call.id;
-                let tool_name = &tool_call.name;
-                let arguments = &tool_call.arguments;
 
                 if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::ToolCall {
-                        id: id.clone(),
-                        tool_name: tool_name.clone(),
-                        arguments: arguments.clone(),
+                        id: tool_call.id.clone(),
+                        tool_name: tool_call.name.clone(),
+                        arguments: tool_call.arguments.clone(),
                     });
                 }
+            }
 
-                let decision = tokio::select! {
+            // Phase 1b: collect every call's permission decision
+            // concurrently, mirroring Phase 2's execution model — an
+            // interactive gate now sees every request up front instead of
+            // one at a time. The ACP gate can answer them independently and
+            // out of order; the TUI gate queues concurrent requests instead
+            // of dropping them (see `App::handle_permission_request`), so
+            // it still only *shows* one prompt at a time.
+            let decisions = tokio::select! {
+                _ = turn.cancel.cancelled() => {
+                    // Dropping the `join_all` here abandons every pending
+                    // approval prompt at once, rather than blocking the turn
+                    // (and holding `prompt_lock`) until the user responds to
+                    // each in turn.
+                    stop_reason = StopReason::Cancelled;
+                    break 'turn;
+                }
+                decisions = futures::future::join_all(tool_calls.iter().map(|tool_call| {
+                    turn.permission_gate.check(&tool_call.id, &tool_call.name, &tool_call.arguments)
+                })) => decisions,
+            };
+
+            // Phase 2: run every allowed call concurrently (denied ones
+            // short-circuit without touching the executor). This is what lets
+            // several `delegate_task` sub-agents — or any other independent
+            // tool calls the LLM batched into one turn — actually run in
+            // parallel instead of one after another. `ToolResult` is emitted
+            // as soon as each call finishes (completion order), so a caller
+            // watching the stream sees fast calls report back before slow
+            // ones instead of everything landing at once; message history in
+            // Phase 3 stays in original tool-call order regardless.
+            let mut pending: futures::stream::FuturesUnordered<_> = tool_calls
+                .iter()
+                .zip(&decisions)
+                .enumerate()
+                .map(|(index, (tool_call, decision))| async move {
+                    if decision.is_allowed() {
+                        match tool_executor
+                            .execute(&tool_call.name, &tool_call.arguments, turn)
+                            .await
+                        {
+                            Ok(r) => (index, r, false),
+                            Err(e) => (index, format!("Error: {e}"), true),
+                        }
+                    } else {
+                        (index, "Permission denied by user.".to_string(), true)
+                    }
+                })
+                .collect();
+
+            let mut outcomes: Vec<Option<(String, bool)>> = vec![None; tool_calls.len()];
+            loop {
+                tokio::select! {
                     _ = turn.cancel.cancelled() => {
-                        // Dropping the `check` future here abandons the
-                        // pending approval prompt rather than blocking the
-                        // turn (and holding `prompt_lock`) until the user
-                        // responds.
+                        // Dropping `pending` here abandons every in-flight
+                        // tool call at once, rather than blocking the turn
+                        // until all of them finish.
                         stop_reason = StopReason::Cancelled;
                         break 'turn;
                     }
-                    decision = turn.permission_gate.check(id, tool_name, arguments) => decision,
-                };
-                let (result, is_error) = if decision.is_allowed() {
-                    match tool_executor.execute(tool_name, arguments, turn).await {
-                        Ok(r) => (r, false),
-                        Err(e) => (format!("Error: {e}"), true),
+                    next = futures::StreamExt::next(&mut pending) => {
+                        let Some((index, result, is_error)) = next else {
+                            break;
+                        };
+                        let tool_call = &tool_calls[index];
+                        if let Some(cb) = callback.as_mut() {
+                            cb(StreamEvent::ToolResult {
+                                id: tool_call.id.clone(),
+                                tool_name: tool_call.name.clone(),
+                                result: result.clone(),
+                                is_error,
+                            });
+                        }
+                        outcomes[index] = Some((result, is_error));
                     }
-                } else {
-                    ("Permission denied by user.".to_string(), true)
-                };
-
-                if let Some(cb) = callback.as_mut() {
-                    cb(StreamEvent::ToolResult {
-                        id: id.clone(),
-                        tool_name: tool_name.clone(),
-                        result: result.clone(),
-                        is_error,
-                    });
                 }
+            }
+
+            // Phase 3: replay results in original tool-call order (every
+            // entry is `Some` here — the loop above only exits early via
+            // `break 'turn` on cancellation), so message history and the
+            // callback's `MessageAppended` stream stay deterministic
+            // regardless of which call actually finished first.
+            let mut tool_results = Vec::with_capacity(tool_calls.len());
+            for (tool_call, outcome) in tool_calls.iter().zip(outcomes) {
+                let (result, is_error) = outcome.expect("every outcome is filled before Phase 3");
 
                 tool_results.push(ToolExecutionResult {
-                    tool_name: tool_name.clone(),
-                    arguments: arguments.clone(),
+                    tool_name: tool_call.name.clone(),
+                    arguments: tool_call.arguments.clone(),
                     result: result.clone(),
                 });
 
-                let tool_result_message =
-                    Message::tool_result(tool_call.id.clone(), tool_name.clone(), result, is_error);
+                let tool_result_message = Message::tool_result(
+                    tool_call.id.clone(),
+                    tool_call.name.clone(),
+                    result,
+                    is_error,
+                );
                 if let Some(cb) = callback.as_mut() {
                     cb(StreamEvent::MessageAppended {
                         message: tool_result_message.clone(),
@@ -257,6 +327,7 @@ where
                     steps,
                     iterations_used: iter_num,
                     stop_reason: StopReason::EndTurn,
+                    context_usage,
                 });
             }
         } else {
@@ -281,6 +352,7 @@ where
         steps,
         iterations_used,
         stop_reason,
+        context_usage,
     })
 }
 
@@ -371,6 +443,7 @@ mod tests {
         Choice {
             message: Message::assistant(content),
             finish_reason: Some(FinishReason::Stop),
+            usage: None,
         }
     }
 
@@ -385,6 +458,26 @@ mod tests {
                 }],
             },
             finish_reason: Some(FinishReason::ToolCalls),
+            usage: None,
+        }
+    }
+
+    fn multi_tool_call_choice(calls: &[(&str, &str)]) -> Choice {
+        Choice {
+            message: Message {
+                role: Role::Assistant,
+                content: calls
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (name, args))| ContentBlock::ToolUse {
+                        id: format!("call_{i}"),
+                        name: (*name).into(),
+                        arguments: (*args).into(),
+                    })
+                    .collect(),
+            },
+            finish_reason: Some(FinishReason::ToolCalls),
+            usage: None,
         }
     }
 
@@ -448,6 +541,31 @@ mod tests {
                 .unwrap()
                 .push((name.into(), args_json.into()));
             Ok(self.result.clone())
+        }
+    }
+
+    /// ToolExecutor where each tool's completion is gated behind a
+    /// per-tool sleep, so a test can control which of several concurrent
+    /// calls finishes first (deterministic under `start_paused = true`).
+    struct DelayedToolExecutor {
+        delays: std::collections::HashMap<String, std::time::Duration>,
+    }
+
+    #[async_trait]
+    impl ToolExecutor for DelayedToolExecutor {
+        fn list_tools(&self) -> Vec<Tool> {
+            vec![]
+        }
+        async fn execute(
+            &self,
+            name: &str,
+            _args: &str,
+            _turn: &TurnContext<'_>,
+        ) -> Result<String> {
+            if let Some(delay) = self.delays.get(name) {
+                tokio::time::sleep(*delay).await;
+            }
+            Ok(format!("{name}-done"))
         }
     }
 
@@ -525,6 +643,55 @@ mod tests {
         let calls = executor.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "read_file");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tool_results_emit_in_completion_order_not_call_order() {
+        // The LLM batches a slow call and a fast call into one turn; the fast
+        // one should be reported to the caller as soon as it finishes,
+        // without waiting on the slow one — even though it was requested
+        // second.
+        let llm = Arc::new(MockLlm::new(vec![
+            multi_tool_call_choice(&[("slow", "{}"), ("fast", "{}")]),
+            text_choice("done"),
+        ]));
+        let delays = std::collections::HashMap::from([
+            ("slow".to_string(), std::time::Duration::from_secs(10)),
+            ("fast".to_string(), std::time::Duration::from_millis(1)),
+        ]);
+        let executor = Arc::new(DelayedToolExecutor { delays });
+        let config = make_config(10);
+        let mut messages = vec![Message::user("go")];
+        let completion_order = Arc::new(Mutex::new(Vec::new()));
+        let completion_order_cb = completion_order.clone();
+
+        run_agent_streaming_with_history(
+            llm,
+            executor,
+            &config,
+            &mut messages,
+            None,
+            &TurnContext {
+                cancel: &CancellationToken::new(),
+                permission_gate: &allow_all(),
+            },
+            move |event| {
+                if let StreamEvent::ToolResult { tool_name, .. } = event {
+                    completion_order_cb.lock().unwrap().push(tool_name);
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*completion_order.lock().unwrap(), vec!["fast", "slow"]);
+        // Message history still reflects the original tool-call order,
+        // regardless of completion order.
+        let tool_result_names: Vec<_> = messages
+            .iter()
+            .filter_map(|m| m.tool_result_block().map(|tr| tr.tool_name.clone()))
+            .collect();
+        assert_eq!(tool_result_names, vec!["slow", "fast"]);
     }
 
     #[tokio::test]
@@ -759,6 +926,63 @@ mod tests {
         assert_eq!(result.stop_reason, StopReason::Cancelled);
     }
 
+    /// ToolExecutor that never resolves; used to prove cancellation aborts an
+    /// in-flight tool call (Phase 2) instead of waiting for it to finish.
+    struct SlowToolExecutor;
+
+    #[async_trait]
+    impl ToolExecutor for SlowToolExecutor {
+        fn list_tools(&self) -> Vec<Tool> {
+            vec![]
+        }
+        async fn execute(
+            &self,
+            _name: &str,
+            _args: &str,
+            _turn: &TurnContext<'_>,
+        ) -> Result<String> {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            unreachable!("cancellation should abort this call before the sleep elapses");
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_in_flight_tool_call() {
+        let llm = Arc::new(MockLlm::new(vec![tool_call_choice("read_file", "{}")]));
+        let executor: Arc<dyn ToolExecutor> = Arc::new(SlowToolExecutor);
+        let config = make_config(10);
+        let mut messages = vec![Message::user("hi")];
+        let cancel = CancellationToken::new();
+        let cancel_signal = cancel.clone();
+
+        // Cancel right after the tool call is announced (Phase 1a), i.e.
+        // right before Phase 2 starts executing it.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_agent_streaming_with_history(
+                llm,
+                executor,
+                &config,
+                &mut messages,
+                None,
+                &TurnContext {
+                    cancel: &cancel,
+                    permission_gate: &allow_all(),
+                },
+                move |event| {
+                    if matches!(event, StreamEvent::ToolCall { .. }) {
+                        cancel_signal.cancel();
+                    }
+                },
+            ),
+        )
+        .await
+        .expect("run_agent_loop should abort the in-flight tool call instead of hanging")
+        .unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Cancelled);
+    }
+
     #[tokio::test]
     async fn cancel_aborts_in_flight_llm_call_non_streaming() {
         let llm = Arc::new(SlowLlm);
@@ -807,6 +1031,7 @@ mod tests {
                 content: vec![],
             },
             finish_reason: Some(FinishReason::Stop),
+            usage: None,
         };
         let llm = Arc::new(MockLlm::new(vec![empty_choice]));
         let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));

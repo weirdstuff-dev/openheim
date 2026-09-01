@@ -9,7 +9,7 @@ Openheim can be embedded directly in your Rust application. The library exposes 
 ```toml
 # Cargo.toml
 [dependencies]
-openheim = "0.6"
+openheim = "0.8"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -22,7 +22,7 @@ Embedders that drive the agent through `OpenheimClient` (or their own ACP
 wiring) usually don't need those:
 
 ```toml
-openheim = { version = "0.6", default-features = false }
+openheim = { version = "0.8", default-features = false }
 # optionally: features = ["server"]  # axum WS/REST server (openheim::transport::ws)
 # optionally: features = ["tui"]     # ratatui terminal UI (openheim::tui)
 ```
@@ -244,6 +244,21 @@ session.prompt("My name is Alice", |_| {}).await?;
 session.prompt("What's my name?", |update| { /* prints "Alice" */ }).await?;
 ```
 
+### Context usage
+
+`session.context_usage().await?` returns the token usage of the most recent LLM call — how full the context window is *right now*, not a running total across the session. `None` until a provider has reported usage.
+
+```rust
+if let Some(usage) = session.context_usage().await? {
+    println!(
+        "context: {} in / {} out ({} cache read / {} cache write)",
+        usage.input_tokens, usage.output_tokens, usage.cache_read_tokens, usage.cache_creation_tokens
+    );
+}
+```
+
+It's also persisted on the conversation, so it's readable via `client.get_session(id)` (`conversation.meta.context_usage`) without an active `SessionHandle` — see [Get full conversation](#get-full-conversation-messages--metadata) below.
+
 ### Permission gate, cancellation, and client I/O
 
 By default a `SessionHandle` allows every tool call unconditionally (`AllowAll`) — the embedder is trusted to have already consented to the run. For an interactive embedder, supply your own [`PermissionGate`](../src/core/permission.rs) so the agent asks before running a tool call:
@@ -277,7 +292,7 @@ let session = client
 
 `PermissionGate::check` is called once per tool call, before it executes — including tool calls made by a `delegate_task` subagent, which inherits the parent turn's gate rather than always-allowing.
 
-`.client_io(Arc<dyn ClientIo>)` similarly lets `read_file`/`write_file` be delegated to the embedder's own I/O (e.g. an editor's unsaved buffers) instead of local disk — see [`ClientIo`](../src/core/client_io.rs). Both `.permission_gate()` and `.client_io()` carry over automatically when a handle is reused via `.restore()`.
+`.client_io(Arc<dyn ClientIo>)` similarly lets `read_file`/`write_file`/`edit_file` be delegated to the embedder's own I/O (e.g. an editor's unsaved buffers) instead of local disk — see [`ClientIo`](../src/core/client_io.rs). `edit_file` uses it for both the read and the write, since an edit is a read followed by a write. Both `.permission_gate()` and `.client_io()` carry over automatically when a handle is reused via `.restore()`.
 
 `session.cancel().await` cancels the turn currently in flight for that session (no-op if none is running) — call it from another task while `prompt()` is awaiting.
 
@@ -315,6 +330,8 @@ for msg in &conv.messages {
 ```
 
 `msg.content` is a `Vec<core::models::ContentBlock>` (`Text`/`Thinking`/`Image`/`ToolUse`/`ToolResult`) rather than a plain string — `msg.text()` concatenates the `Text` blocks. Use `msg.tool_calls()` / `msg.tool_result_block()` for the other block types; see `docs/custom-llm-provider.md` for the full `ContentBlock` shape.
+
+`conv.meta.context_usage` is an `Option<core::models::Usage>` — see [Context usage](#context-usage) above.
 
 ### Resume a session (load + continue prompting)
 

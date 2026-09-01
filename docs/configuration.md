@@ -35,7 +35,9 @@ work_dir = "/home/user/projects/myproject"
 
 ### Security notes
 
-**`work_dir`** is enforced at the application layer for `read_file` and `write_file`, and for the `/ws` filesystem sidecar (all `fs`-channel operations are validated against the same boundary). Symlinks are followed and canonicalized so they cannot be used to escape the boundary. Shell commands (`execute_command`) are launched with `work_dir` as their working directory so relative paths resolve correctly, but absolute paths inside a shell command are not blocked — OS-level sandboxing (chroot, containers) is required for full shell isolation. Shell commands are additionally bounded: each runs in its own process group, is killed after a 120-second timeout (or on turn cancellation), and has stdout/stderr capped at 64 KiB per stream with a truncation marker.
+**`work_dir`** is enforced at the application layer for `read_file`, `write_file`, `edit_file`, `list_dir`, and `search`, and for the `/ws` filesystem sidecar (all `fs`-channel operations are validated against the same boundary). Symlinks are followed and canonicalized so they cannot be used to escape the boundary. Shell commands (`execute_command`) are launched with `work_dir` as their working directory so relative paths resolve correctly, but absolute paths inside a shell command are not blocked — OS-level sandboxing (chroot, containers) is required for full shell isolation. Shell commands are additionally bounded: each runs in its own process group, is killed after a 120-second timeout (or on turn cancellation), and has stdout/stderr capped at 64 KiB per stream with a truncation marker.
+
+`web_fetch` is not subject to `work_dir` — it fetches remote URLs, not local files. It's bounded instead by an SSRF guard (rejects loopback/private/link-local addresses, including cloud metadata endpoints), a 20-second timeout, a 256 KiB response cap, and no automatic redirect following.
 
 **`allow_shell`** gates whether `execute_command` appears in the tool list sent to the LLM. It defaults to `false` — the LLM never sees the tool and cannot request it. Set it to `true` to expose the tool (bounded as described above).
 

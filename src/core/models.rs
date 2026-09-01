@@ -219,6 +219,36 @@ pub enum FinishReason {
 pub struct Choice {
     pub message: Message,
     pub finish_reason: Option<FinishReason>,
+    /// Token usage for this call, when the provider reports it. `None` for
+    /// providers/backends that don't return usage data (e.g. an
+    /// OpenAI-compatible endpoint that ignores `stream_options`).
+    #[serde(default)]
+    pub usage: Option<Usage>,
+}
+
+/// Token usage for a single LLM call, normalized across providers'
+/// differing vocabularies (Anthropic's `input_tokens`/`cache_read_input_tokens`,
+/// OpenAI's `prompt_tokens`/`prompt_tokens_details.cached_tokens`, Gemini's
+/// `promptTokenCount`/`cachedContentTokenCount`).
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    /// Tokens in the request that were newly processed (not served from cache).
+    pub input_tokens: u64,
+    /// Tokens the model generated in its response.
+    pub output_tokens: u64,
+    /// Tokens written to a prompt cache for reuse by a later call.
+    #[serde(default)]
+    pub cache_creation_tokens: u64,
+    /// Tokens served from a prompt cache instead of being freshly processed.
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+}
+
+impl Usage {
+    /// Sum of every token type this call accounted for.
+    pub fn total(&self) -> u64 {
+        self.input_tokens + self.output_tokens + self.cache_creation_tokens + self.cache_read_tokens
+    }
 }
 
 /// One iteration of an agent run, including the LLM response and any tools invoked.
@@ -259,6 +289,11 @@ pub struct AgentResult {
     pub steps: Vec<AgentStep>,
     pub iterations_used: usize,
     pub stop_reason: StopReason,
+    /// Usage of the *most recent* LLM call this turn made — a snapshot of
+    /// how large the context is right now (that call's `input` + `output` +
+    /// cache tokens is exactly what the next call will resend as history).
+    /// `None` if no call in this turn reported usage.
+    pub context_usage: Option<Usage>,
 }
 
 /// Streaming event emitted during an agent run over a WebSocket connection.
@@ -291,6 +326,11 @@ pub enum StreamEvent {
     /// A chunk of the model's internal reasoning (extended thinking).
     #[serde(rename = "thinking_content")]
     ThinkingContent { content: String },
+    /// Token usage for the LLM call that just completed this iteration —
+    /// the current context size, not a running total (see
+    /// [`AgentResult::context_usage`]).
+    #[serde(rename = "usage")]
+    Usage { usage: Usage },
     /// The agent has finished; `final_response` is the complete answer.
     #[serde(rename = "finished")]
     Finished {
