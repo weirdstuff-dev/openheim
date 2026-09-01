@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-01
+
 ### Added
 
 - **Four new built-in tools: `web_fetch`, `list_dir`, `search`, `edit_file`.** `web_fetch` fetches a public http(s) URL and returns its content as text (HTML stripped of markup); it's hardened against SSRF (loopback/private/link-local/cloud-metadata addresses rejected, resolved address pinned against DNS rebinding), doesn't follow redirects automatically, and is bounded by a 20s timeout and a 256 KiB response cap. `list_dir` lists a directory's immediate contents, capped at 500 entries. `search` is a regex search across files, ripgrep-style — built on ripgrep's own crates (`grep-searcher`/`grep-regex`/`ignore`) rather than shelling out to an `rg` binary, so it works regardless of `allow_shell` and respects `.gitignore`; capped at 200 matches. `edit_file` replaces an exact string in a file without rewriting the whole thing (`old_string`/`new_string`, must be unique unless `replace_all` is set). `list_dir`, `search`, `edit_file` are sandboxed to `work_dir` the same way `read_file`/`write_file` are; `list_dir` and `search` were also added to `architect` mode's read-only allowlist alongside `read_file`. `read_file`/`write_file`/`edit_file` continue to delegate to an ACP client's `client_io` when available (`edit_file` uses it for both the read and the write). ACP clients now also get proper `ToolKind` hints for all four (`Read`/`Search`/`Fetch`/`Edit`) instead of falling back to `Other`.
