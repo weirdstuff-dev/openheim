@@ -52,12 +52,19 @@ src/
 ├── config/             Config loading, provider resolution, HTTP client
 ├── error.rs            Unified Error / Result types
 │
-├── rag/                Retrieval-Augmented Generation utilities
-│   ├── mod.rs          RagContext — history + skills + system identity
+├── memory/             Agent memory — sessions, skills, identity, prompt assembly
+│   ├── mod.rs          MemoryContext — history + skills + system identity
 │   ├── history.rs      HistoryManager — conversation persistence
+│   ├── lease.rs        Advisory cross-process write lease per conversation
 │   ├── skills.rs       SkillsManager — Markdown skill files
 │   ├── system.rs       SystemLoader — reads ~/.openheim/system.md
 │   └── prompt.rs       PromptBuilder — assembles structured system message
+│
+├── rag/                Long-term memory via tool calls (feature `rag`)
+│   ├── mod.rs          LongTermMemory — remember / search / forget facade
+│   ├── embedding/      EmbeddingClient trait, OpenAI-compatible + Gemini clients
+│   ├── store.rs        VectorStore — SQLite: FTS5 keyword index + sqlite-vec (vec0, cosine KNN)
+│   └── tool.rs         remember, search_memory, and forget tools
 │
 ├── subagents/          Subagent profiles — delegated, isolated agent personas
 │   └── mod.rs          AgentProfile, SubagentLoader — Markdown files in ~/.openheim/agents/
@@ -119,14 +126,15 @@ User / Client
 │  AgentState holds:                          │
 │  • llm       Arc<dyn LlmClient>             │
 │  • executor  Arc<dyn ToolExecutor>          │
-│  • rag       RagContext                     │
+│  • memory    MemoryContext                  │
+│  • long_term_memory Arc<LongTermMemory>     │
 │  • config    AgentConfig (model, iters, …)  │
 │  • sessions  HashMap<id, SessionState>      │
 └────────────────────┬────────────────────────┘
                      │ acp_prompt()
                      ▼
 ┌─────────────────────────────────────────────┐
-│            rag::RagContext::prepare         │
+│         memory::MemoryContext::prepare      │
 │                                             │
 │  1. Load conversation from disk (history)   │
 │  2. Load ~/.openheim/system.md (identity)   │
@@ -175,6 +183,9 @@ User / Client
 └──────────────────┘  │    list_dir          │
                       │    search            │
                       │    web_fetch         │
+                      │    remember          │
+                      │    search_memory     │
+                      │    forget            │
                       │    delegate_task     │
                       │  MCP tools:          │
                       │    {server}__{tool}  │
@@ -196,12 +207,19 @@ All persistence lives under `~/.openheim/` by default.
 │   ├── {uuid}.json          Conversation metadata (rewritten wholesale)
 │   ├── {uuid}.jsonl         Conversation messages (appended one per line)
 │   └── …
-└── skills/
-    ├── rust.md              Named skill files (Markdown)
-    └── …
+├── skills/
+│   ├── rust.md              Named skill files (Markdown)
+│   └── …
+└── memory.db                Long-term memory notes, FTS5 index, and (optionally) sqlite-vec vectors
 ```
 
-`SystemLoader` reads `system.md` on every `prepare()` call — missing file is a hard error (run `openheim init` to create it). `HistoryManager` reads and writes each conversation's metadata (`.json`) and message log (`.jsonl`) — see `src/rag/history.rs`'s doc comment for why they're split. `SkillsManager` reads `.md` files from the skills directory. Both history and skills paths are configurable at construction time, which is how the test suite uses temporary directories.
+`SystemLoader` reads `system.md` on every `prepare()` call — missing file is a hard error (run `openheim init` to create it). `HistoryManager` reads and writes each conversation's metadata (`.json`) and message log (`.jsonl`) — see `src/memory/history.rs`'s doc comment for why they're split. `SkillsManager` reads `.md` files from the skills directory. Both history and skills paths are configurable at construction time, which is how the test suite uses temporary directories.
+
+### Long-term memory
+
+`AgentState::new` always opens `memory.db` and registers three tools. `remember(content)` inserts a note into a `memories` table; an FTS5 external-content index (`memories_fts`) tracks it via triggers. `search_memory(query)` runs an FTS5 BM25 query (each word quoted and OR-ed, so user input can't inject query syntax) and returns the best notes with their date. `forget(id)` deletes a note. Nothing is stored or injected automatically: the model calls the tools when the user asks it to remember, recall, or drop something, or when it judges a stored preference relevant.
+
+When `[memory]` names an `embedding_provider` and `embedding_model`, the same store gains a `vec0` virtual table with cosine distance: `remember` embeds the note (OpenAI-compatible `/embeddings` or Gemini `batchEmbedContents`) and `search_memory` becomes a KNN `MATCH` over embeddings instead of keyword search. Notes written before embeddings were enabled are back-filled on the next call. The store records the embedding model and dimension; if either changes, the vectors are dropped and every note is re-embedded from its stored text, since vectors from different models aren't comparable.
 
 ---
 
@@ -209,7 +227,7 @@ All persistence lives under `~/.openheim/` by default.
 
 The `OpenheimClient` facade (`src/client.rs`) wraps the same `AgentState` the transports use, behind a simple Rust API. Internally it:
 
-1. Builds an `AgentState` (LLM client, tool executor, RAG context).
+1. Builds an `AgentState` (LLM client, tool executor, memory context, long-term memory).
 2. Calls its request handlers (`acp_prompt`, `acp_load_session`, `acp_cancel`, …) directly — no wire protocol, no background task. Streaming updates reach your callback through the same `SessionUpdate` events a transport would forward.
 
 The duplex-pipe + ACP-client wiring does exist — in `src/transport/run.rs`, where the headless `openheim run` mode drives `acp::serve` over `tokio::io::duplex`. Either way there is no separate "library mode" agent logic: the facade and every transport share the exact same session and agent-loop code path.
@@ -221,6 +239,7 @@ The duplex-pipe + ACP-client wiring does exist — in `src/transport/run.rs`, wh
 | What to extend | Where | How |
 |----------------|-------|-----|
 | Add a new LLM provider | `src/core/llm/` | Implement `LlmClient` |
+| Add an embeddings backend | `src/rag/embedding/` | Implement `EmbeddingClient`, pass to `LongTermMemory::new` |
 | Add a built-in tool | `src/tools/` | Implement `ToolHandler`, register in `register_builtins` |
 | Add a tool without touching source | any embedder | Implement `ToolHandler`, register via `OpenheimBuilder::tool()` |
 | Add an external tool source | `src/mcp/` | MCP servers via configuration or `McpClient` |

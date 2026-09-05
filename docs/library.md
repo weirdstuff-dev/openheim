@@ -22,9 +22,10 @@ Embedders that drive the agent through `OpenheimClient` (or their own ACP
 wiring) usually don't need those:
 
 ```toml
-openheim = { version = "0.8", default-features = false }
+openheim = { version = "0.10", default-features = false }
 # optionally: features = ["server"]  # axum WS/REST server (openheim::transport::ws)
 # optionally: features = ["tui"]     # ratatui terminal UI (openheim::tui)
+# optionally: features = ["rag"]     # remember/search_memory/forget long-term memory (rusqlite FTS5 + sqlite-vec)
 ```
 
 Everything else — the client facade, agent loop, providers, tools, MCP, ACP,
@@ -365,30 +366,50 @@ client.delete_session("550e8400-e29b-41d4-a716-446655440000").await?;
 
 ---
 
-## RAG — direct history and skills access
+## Memory — direct history and skills access
 
-`client.rag()` returns a `&RagContext` with direct access to the underlying `HistoryManager` and `SkillsManager`. This is useful for advanced use cases like building custom UIs, searching conversations, or managing skills programmatically.
+`client.memory()` returns a `&MemoryContext` with direct access to the underlying `HistoryManager` and `SkillsManager`. This is useful for advanced use cases like building custom UIs, searching conversations, or managing skills programmatically.
 
 ```rust
-let rag = client.rag();
+let memory = client.memory();
 
 // List all conversation metadata
-let metas = rag.history.list_conversations()?;
+let metas = memory.history.list_conversations()?;
 
 // Load a full conversation
-let conv = rag.history.load_conversation(&uuid)?;
+let conv = memory.history.load_conversation(&uuid)?;
 
 // Save a conversation (e.g. after external edits)
-rag.history.save_conversation(&conv)?;
+memory.history.save_conversation(&conv)?;
 
 // List available skills
-let skills = rag.skills.list_skills()?;
+let skills = memory.skills.list_skills()?;
 // → ["debugging", "rust", "tdd"]
 
 // Load skill content
-let content = rag.skills.load_skill("rust")?;
+let content = memory.skills.load_skill("rust")?;
 println!("{content}");
 ```
+
+---
+
+## Long-term memory
+
+With the `rag` feature, `client.long_term_memory()` returns the `LongTermMemory` behind the `remember` / `search_memory` / `forget` tools. It is keyword search (FTS5) unless the config's `[memory]` section names an embedding provider, in which case search is semantic. You can drive it directly, for example to seed memories or build a memory browser:
+
+```rust
+let memory = client.long_term_memory();
+let note = memory.remember("The user's staging cluster is eu-west-1.").await?;
+
+// Best match first; `hit.method` says whether the score is cosine similarity or a BM25 rank.
+for hit in memory.search("where is staging?", Some(3)).await? {
+    println!("#{} {} ({:?} {:.2})\n{}", hit.record.id, hit.record.created_at, hit.method, hit.score, hit.record.content);
+}
+
+memory.forget(note.id).await?;
+```
+
+To use a custom embeddings backend, implement `openheim::rag::EmbeddingClient` and build `LongTermMemory::new(VectorStore::open(path)?, Some(Arc::new(my_embedder)), top_k)` yourself; wrap it in `RememberTool` / `SearchMemoryTool` / `ForgetTool` and register them via `OpenheimBuilder::tool` if the agent should be able to call them.
 
 ---
 

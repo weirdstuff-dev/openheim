@@ -44,11 +44,12 @@ Openheim is built in Rust from the ground up:
 ## Features
 
 - **Multi-provider** — OpenAI, Anthropic Claude, Google Gemini, and any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.)
-- **Tool execution** — built-in shell, file read/write/edit, directory listing, ripgrep-style search, web fetch, and subagent-delegation tools. Trait-based, so you can add your own.
+- **Tool execution** — built-in shell, file read/write/edit, directory listing, ripgrep-style search, web fetch, long-term memory (`remember`/`search_memory`/`forget`), and subagent-delegation tools. Trait-based, so you can add your own.
 - **Subagents** — delegate a self-contained task to another agent (its own persona, model, and tools) via the always-on `delegate_task` tool. Named profiles live in `~/.openheim/agents/`; the orchestrator can also define inline, one-off subagents. See [docs/subagents.md](./docs/subagents.md).
 - **Agent sandboxing** — configurable work-directory boundary restricts file access to a directory tree. Shell execution is disabled by default and can be enabled via `allow_shell = true` in config or `.allow_shell(true)` in the builder.
 - **MCP (Model Context Protocol)** — connect external MCP servers (stdio or Streamable HTTP) and their tools are automatically exposed to the LLM as `{server_name}__{tool_name}`.
 - **Conversation memory** — conversations (including full tool call history) persist to disk and resume across sessions
+- **Long-term memory** — ask the agent to remember something and it saves a note via the `remember` tool; later sessions recall it with `search_memory`, and `forget` drops a note by id. Nothing is stored or injected automatically. Works out of the box with keyword search (SQLite FTS5, no network); add an embedding provider under `[memory]` (any OpenAI-compatible endpoint or Gemini) and search becomes semantic via [sqlite-vec](https://github.com/asg017/sqlite-vec).
 - **Context-size tracking** — each session's current context size (the last LLM call's token usage) is tracked, persisted, and shown live in the TUI footer; embedders can read it via `SessionHandle::context_usage()` or `GET /api/sessions/{id}`
 - **System identity** — edit `~/.openheim/system.md` to define how the agent presents itself. Required when preparing a session (created by `openheim init`).
 - **Skills** — drop a markdown file into `~/.openheim/skills/` and it's injected into the system prompt. Set `default_skills` in config to auto-load skills every session; pass `--skills` for per-session additions. ACP clients can also pass skills per-session via `_meta`.
@@ -343,8 +344,14 @@ src/
   mcp/              MCP (Model Context Protocol) client integration
     client.rs       MCP server connection (stdio + Streamable HTTP)
     tool_handler.rs  Adapts MCP tools to the ToolHandler trait
-  rag/              Conversation history, prompt builder, skills manager, and system identity
+  memory/           Agent memory — conversation history, prompt builder, skills manager, system identity
+    history.rs      HistoryManager — conversation persistence
     lease.rs        Advisory per-session write lease (guards ~/.openheim/history/ across processes)
+    skills.rs / system.rs / prompt.rs
+  rag/              Long-term memory via tool calls (feature `rag`)
+    embedding/      EmbeddingClient trait + OpenAI-compatible and Gemini clients
+    store.rs        VectorStore — SQLite schema, FTS5 keyword search, sqlite-vec KNN search
+    tool.rs         remember / search_memory / forget tools
   subagents/        Subagent profiles — delegated, isolated agent personas (~/.openheim/agents/)
   acp/              Agent Client Protocol server implementation
     session.rs      Live session map — state and eviction policy

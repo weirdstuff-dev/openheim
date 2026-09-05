@@ -120,7 +120,7 @@ use openheim::core::models::Message;
 use openheim::core::permission::{AllowAll, PermissionGate};
 use openheim::core::turn::TurnContext;
 use openheim::config::{AgentConfig, load_config};
-use openheim::rag::RagContext;
+use openheim::memory::MemoryContext;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 

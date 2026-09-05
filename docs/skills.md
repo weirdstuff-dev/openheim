@@ -150,7 +150,7 @@ curl http://localhost:1217/api/skills
 Via the Rust library:
 
 ```rust
-let skills = client.rag().skills.list_skills()?;
+let skills = client.memory().skills.list_skills()?;
 // → ["concise", "rust", "tdd"]
 ```
 
