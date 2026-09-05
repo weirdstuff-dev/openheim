@@ -982,6 +982,7 @@ mod tests {
             default_skills: vec![],
             work_dir: None,
             allow_shell: false,
+            memory: None,
         }
     }
 

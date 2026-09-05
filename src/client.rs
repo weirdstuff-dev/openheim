@@ -110,6 +110,13 @@ impl OpenheimClient {
         &self.state.memory
     }
 
+    /// The long-term memory behind the `remember` / `search_memory` / `forget`
+    /// tools. Keyword-only unless `[memory]` names an embedding provider.
+    #[cfg(feature = "rag")]
+    pub fn long_term_memory(&self) -> &Arc<crate::rag::LongTermMemory> {
+        &self.state.long_term_memory
+    }
+
     // ── Introspection ─────────────────────────────────────────────────────────
 
     /// All tool definitions available to the agent (built-in + MCP).
@@ -548,6 +555,7 @@ fn build_programmatic(
         default_skills,
         work_dir: None,
         allow_shell: false,
+        memory: None,
     };
 
     let agent_config = AgentConfig {

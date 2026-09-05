@@ -53,6 +53,10 @@ pub struct AgentState {
     pub config: AgentConfig,
     pub app_config: AppConfig,
     pub memory: MemoryContext,
+    /// Long-term memory behind the `remember` / `search_memory` / `forget`
+    /// tools (keyword-only unless `[memory]` names an embedding provider).
+    #[cfg(feature = "rag")]
+    pub long_term_memory: Arc<crate::rag::LongTermMemory>,
     pub mcp_statuses: Vec<crate::mcp::McpServerStatus>,
     /// Resolved work directory used as the sandbox boundary for every session.
     pub work_dir: PathBuf,
@@ -90,6 +94,15 @@ impl AgentState {
         for tool in custom_tools {
             sys_executor.register(tool);
         }
+        #[cfg(feature = "rag")]
+        let long_term_memory = Arc::new(crate::rag::LongTermMemory::from_config(&app_config)?);
+        #[cfg(feature = "rag")]
+        {
+            let m = &long_term_memory;
+            sys_executor.register(Box::new(crate::rag::RememberTool::new(m.clone())));
+            sys_executor.register(Box::new(crate::rag::SearchMemoryTool::new(m.clone())));
+            sys_executor.register(Box::new(crate::rag::ForgetTool::new(m.clone())));
+        }
         let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
 
         let profiles = SubagentLoader::new()?.load()?;
@@ -109,6 +122,8 @@ impl AgentState {
             config,
             app_config,
             memory,
+            #[cfg(feature = "rag")]
+            long_term_memory,
             mcp_statuses,
             work_dir,
             allow_shell,
@@ -300,6 +315,7 @@ impl AgentState {
                         "read_file".to_string(),
                         "list_dir".to_string(),
                         "search".to_string(),
+                        "search_memory".to_string(),
                     ],
                 ))
             } else {

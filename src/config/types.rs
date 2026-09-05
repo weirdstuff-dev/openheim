@@ -50,10 +50,68 @@ pub struct AppConfig {
     /// Defaults to `false`. Set to `true` to explicitly opt in to shell access.
     #[serde(default = "default_allow_shell")]
     pub allow_shell: bool,
+    /// Long-term memory (`remember` / `search_memory` / `forget` tools).
+    /// Optional: without it memory still works, keyword-only, in
+    /// `~/.openheim/memory.db`. Set `embedding_provider` / `embedding_model`
+    /// to make `search_memory` semantic.
+    #[serde(default)]
+    pub memory: Option<MemoryConfig>,
 }
 
 fn default_allow_shell() -> bool {
     false
+}
+
+/// The `[memory]` section: where long-term memory lives, how many notes a
+/// search returns, and (optionally) which embeddings endpoint makes search
+/// semantic. Every field is optional; so is the section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    /// Name of a `[providers.<name>]` entry whose `api_base` / API key serve
+    /// the embeddings endpoint. `"gemini"` speaks Gemini's `embedContent`
+    /// API; anything else is treated as OpenAI-compatible `/embeddings`
+    /// (OpenAI, Ollama, Together, …). Anthropic has no embeddings API.
+    /// Unset means keyword (FTS5) search only.
+    #[serde(default)]
+    pub embedding_provider: Option<String>,
+    /// Embedding model name (e.g. `text-embedding-3-small`,
+    /// `gemini-embedding-001`, `nomic-embed-text`). Required when
+    /// `embedding_provider` is set.
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+    /// SQLite file holding notes and vectors. Defaults to
+    /// `~/.openheim/memory.db`. Must be an absolute path (no `~` expansion).
+    #[serde(default)]
+    pub db_path: Option<PathBuf>,
+    /// Default number of notes a `search_memory` call returns (default 5).
+    #[serde(default = "default_top_k")]
+    pub top_k: usize,
+}
+
+fn default_top_k() -> usize {
+    5
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            embedding_provider: None,
+            embedding_model: None,
+            db_path: None,
+            top_k: default_top_k(),
+        }
+    }
+}
+
+/// Resolved embeddings endpoint, assembled from a [`MemoryConfig`] plus the
+/// provider entry it names (see `AppConfig::resolve_embedding`).
+#[derive(Debug, Clone)]
+pub struct EmbeddingConfig {
+    pub provider_name: String,
+    pub api_base: String,
+    pub api_key: String,
+    pub model: String,
+    pub timeout_secs: u64,
 }
 
 /// Configuration for a single MCP server connection.
@@ -395,5 +453,30 @@ mod tests {
         "#;
         let cfg: AppConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.max_iterations, 10);
+        assert!(cfg.memory.is_none());
+    }
+
+    #[test]
+    fn memory_section_deserializes_with_defaults() {
+        let toml_str = r#"
+            default_provider = "openai"
+            [memory]
+            embedding_provider = "openai"
+            embedding_model = "text-embedding-3-small"
+        "#;
+        let cfg: AppConfig = toml::from_str(toml_str).unwrap();
+        let memory = cfg.memory.unwrap();
+        assert_eq!(memory.embedding_provider.as_deref(), Some("openai"));
+        assert_eq!(
+            memory.embedding_model.as_deref(),
+            Some("text-embedding-3-small")
+        );
+        assert_eq!(memory.top_k, 5);
+        assert!(memory.db_path.is_none());
+
+        let bare: AppConfig = toml::from_str("default_provider = \"openai\"\n[memory]\n").unwrap();
+        let memory = bare.memory.unwrap();
+        assert!(memory.embedding_provider.is_none());
+        assert_eq!(memory.top_k, 5);
     }
 }

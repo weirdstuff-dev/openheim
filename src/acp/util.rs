@@ -20,8 +20,9 @@ pub enum AgentMode {
     /// Full tool access; tool calls go through the permission gate as normal.
     #[default]
     Code,
-    /// Read-only: only `read_file`, `list_dir`, and `search` are offered to
-    /// the LLM, so nothing mutating can run. All three still go through the
+    /// Read-only: only `read_file`, `list_dir`, `search` (and
+    /// `search_memory` with the `rag` feature) are offered to the LLM, so
+    /// nothing mutating can run. All of them still go through the
     /// permission gate and can trigger a `session/request_permission` prompt
     /// unless already approved.
     Architect,
@@ -170,6 +171,9 @@ pub(super) fn tool_kind_for(tool_name: &str) -> ToolKind {
         "edit_file" => ToolKind::Edit,
         "list_dir" => ToolKind::Read,
         "search" => ToolKind::Search,
+        "search_memory" => ToolKind::Search,
+        "remember" => ToolKind::Think,
+        "forget" => ToolKind::Delete,
         "web_fetch" => ToolKind::Fetch,
         _ => ToolKind::Other,
     }
@@ -187,6 +191,9 @@ mod tool_kind_tests {
         assert_eq!(tool_kind_for("edit_file"), ToolKind::Edit);
         assert_eq!(tool_kind_for("list_dir"), ToolKind::Read);
         assert_eq!(tool_kind_for("search"), ToolKind::Search);
+        assert_eq!(tool_kind_for("search_memory"), ToolKind::Search);
+        assert_eq!(tool_kind_for("remember"), ToolKind::Think);
+        assert_eq!(tool_kind_for("forget"), ToolKind::Delete);
         assert_eq!(tool_kind_for("web_fetch"), ToolKind::Fetch);
     }
 

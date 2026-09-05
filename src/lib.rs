@@ -51,6 +51,7 @@
 //! | `cli`    | ✓          | The `openheim` binary (CLI, TUI, `serve`). Implies `tui` + `server`. |
 //! | `tui`    | via `cli`  | The `tui` module (ratatui/crossterm terminal UI).    |
 //! | `server` | via `cli`  | The `transport::ws` WebSocket/REST server (axum).    |
+//! | `rag`    | via `cli`  | The `rag` module and `remember`/`search_memory`/`forget` tools (rusqlite with FTS5 + sqlite-vec). |
 //!
 //! Everything else — the client facade, agent loop, providers, tools, MCP,
 //! ACP, and config — is always available. Embedders that don't need the
@@ -65,6 +66,7 @@
 //! - [`SessionHandle`] — send prompts and receive streaming [`SessionUpdate`] events
 //! - [`LlmClient`] — implement to add a custom provider
 //! - [`MemoryContext`] — conversation history, skills, and system identity
+//! - [`rag::LongTermMemory`] — tool-driven long-term memory: FTS5 keyword search, optionally sqlite-vec semantic search (feature `rag`)
 //! - [`Error`] / [`Result`] — unified error type
 
 pub mod acp;
@@ -74,6 +76,8 @@ pub mod core;
 pub mod error;
 pub mod mcp;
 pub mod memory;
+#[cfg(feature = "rag")]
+pub mod rag;
 pub mod subagents;
 pub mod tools;
 pub mod transport;
@@ -93,6 +97,8 @@ pub use models::{
     AgentResult, AgentStep, Choice, FinishReason, FunctionDefinition, Message, Role, StopReason,
     StreamEvent, Tool, ToolExecutionResult, ToolResultBlock, ToolUseBlock,
 };
+#[cfg(feature = "rag")]
+pub use rag::LongTermMemory;
 
 // Library facade
 pub use client::{OpenheimBuilder, OpenheimClient, SessionBuilder, SessionHandle};

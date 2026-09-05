@@ -15,6 +15,9 @@
 //! | `search` | Regex search across files, ripgrep-style (built on ripgrep's own crates, `.gitignore`-aware) |
 //! | `web_fetch` | Fetch a public http(s) URL and return its content as text, with an SSRF guard and size/time caps |
 //!
+//! With the `rag` feature, `AgentState` also registers `remember`,
+//! `search_memory`, and `forget` (see `crate::rag::tool`).
+//!
 //! Additional tools are loaded from MCP servers and registered under the
 //! `{server_name}__{tool_name}` namespace.
 //!

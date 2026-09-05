@@ -1,4 +1,4 @@
-use super::types::{AgentConfig, AppConfig, ProviderConfig};
+use super::types::{AgentConfig, AppConfig, EmbeddingConfig, ProviderConfig};
 use crate::error::{Error, Result};
 
 fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<()> {
@@ -97,6 +97,45 @@ impl AppConfig {
         )))
     }
 
+    /// Resolves the embeddings endpoint named by `[memory]`'s
+    /// `embedding_provider`. Returns `Ok(None)` when none is configured
+    /// (keyword-only memory).
+    pub fn resolve_embedding(&self) -> Result<Option<EmbeddingConfig>> {
+        let Some(memory) = &self.memory else {
+            return Ok(None);
+        };
+        let Some(provider_name) = memory.embedding_provider.as_deref() else {
+            if memory.embedding_model.is_some() {
+                return Err(Error::config(
+                    "[memory] embedding_model is set but embedding_provider is not",
+                ));
+            }
+            return Ok(None);
+        };
+        let model = memory
+            .embedding_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .ok_or_else(|| {
+                Error::config("[memory] embedding_model is required when embedding_provider is set")
+            })?;
+        if provider_name == "anthropic" {
+            return Err(Error::config(
+                "[memory] embedding_provider 'anthropic' has no embeddings API; use an OpenAI-compatible provider or 'gemini'",
+            ));
+        }
+        let provider = self.get_provider(provider_name)?;
+        validate_provider(provider_name, provider)?;
+        Ok(Some(EmbeddingConfig {
+            provider_name: provider_name.to_string(),
+            api_base: provider.api_base.clone(),
+            api_key: provider.resolve_api_key(),
+            model: model.to_string(),
+            timeout_secs: provider.resolve_timeout_secs(),
+        }))
+    }
+
     fn provider_names(&self) -> String {
         self.providers
             .keys()
@@ -147,6 +186,7 @@ mod tests {
             default_skills: vec![],
             work_dir: None,
             allow_shell: true,
+            memory: None,
         }
     }
 
@@ -190,6 +230,7 @@ mod tests {
             default_skills: vec![],
             work_dir: None,
             allow_shell: true,
+            memory: None,
         };
         let err = config.resolve(None).unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
@@ -268,6 +309,62 @@ mod tests {
             .resolve_with_provider("openai", "gpt-3.5-turbo")
             .unwrap();
         assert_eq!(agent.model, "gpt-3.5-turbo");
+    }
+
+    #[test]
+    fn resolve_embedding_none_without_provider() {
+        let mut config = sample_config();
+        assert!(config.resolve_embedding().unwrap().is_none());
+        config.memory = Some(crate::config::MemoryConfig::default());
+        assert!(config.resolve_embedding().unwrap().is_none());
+    }
+
+    #[test]
+    fn resolve_embedding_uses_named_provider_credentials() {
+        let mut config = sample_config();
+        config.memory = Some(crate::config::MemoryConfig {
+            embedding_provider: Some("openai".into()),
+            embedding_model: Some("text-embedding-3-small".into()),
+            ..Default::default()
+        });
+        let emb = config.resolve_embedding().unwrap().unwrap();
+        assert_eq!(emb.provider_name, "openai");
+        assert_eq!(emb.api_key, "test-key");
+        assert_eq!(emb.api_base, "https://api.openai.com/v1");
+        assert_eq!(emb.model, "text-embedding-3-small");
+        assert_eq!(emb.timeout_secs, 60);
+    }
+
+    #[test]
+    fn resolve_embedding_rejects_bad_combinations() {
+        let mut config = sample_config();
+        let mut memory = crate::config::MemoryConfig {
+            embedding_provider: Some("nope".into()),
+            embedding_model: Some("m".into()),
+            ..Default::default()
+        };
+        config.memory = Some(memory.clone());
+        assert!(config.resolve_embedding().is_err());
+
+        memory.embedding_provider = Some("anthropic".into());
+        config.memory = Some(memory.clone());
+        assert!(
+            config
+                .resolve_embedding()
+                .unwrap_err()
+                .to_string()
+                .contains("embeddings API")
+        );
+
+        memory.embedding_provider = Some("openai".into());
+        memory.embedding_model = Some("  ".into());
+        config.memory = Some(memory.clone());
+        assert!(config.resolve_embedding().is_err());
+
+        memory.embedding_provider = None;
+        memory.embedding_model = Some("m".into());
+        config.memory = Some(memory);
+        assert!(config.resolve_embedding().is_err());
     }
 
     #[test]

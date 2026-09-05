@@ -47,6 +47,10 @@ pub enum Error {
     #[error("conversation {session_id} was modified by another process since it was loaded")]
     HistoryDiverged { session_id: String },
 
+    /// SQLite / sqlite-vec failure in the long-term memory store (feature `rag`).
+    #[error("Database error: {0}")]
+    DatabaseError(String),
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
@@ -79,6 +83,13 @@ impl Error {
             Error::ReqwestError(e) => e.is_timeout() || e.is_connect(),
             _ => false,
         }
+    }
+}
+
+#[cfg(feature = "rag")]
+impl From<rusqlite::Error> for Error {
+    fn from(e: rusqlite::Error) -> Self {
+        Error::DatabaseError(e.to_string())
     }
 }
 

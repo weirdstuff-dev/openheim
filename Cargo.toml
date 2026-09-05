@@ -28,11 +28,14 @@ required-features = ["cli"]
 # produce the full binary. Library embedders use `default-features = false`.
 default = ["cli"]
 # The `openheim` binary: CLI parsing + everything it can reach.
-cli = ["dep:clap", "dep:tracing-subscriber", "server", "tui"]
+cli = ["dep:clap", "dep:tracing-subscriber", "server", "tui", "rag"]
 # Terminal UI (`openheim::tui`).
 tui = ["dep:crossterm", "dep:ratatui"]
 # WebSocket/REST server (`openheim::transport::ws`).
 server = ["dep:axum", "dep:notify", "dep:tower-http", "dep:walkdir"]
+# Tool-driven long-term memory (`openheim::rag`: `remember`, `search_memory`,
+# `forget`): bundled SQLite with FTS5 + the sqlite-vec extension.
+rag = ["dep:rusqlite", "dep:sqlite-vec"]
 
 [dependencies]
 clap = { version = "4.5.54", features = ["derive"], optional = true }
@@ -61,6 +64,8 @@ tokio-util = { version = "0.7", features = ["compat"] }
 tower-http = { version = "0.6", features = ["cors"], optional = true }
 grep = "0.4.1"
 ignore = "0.4.33"
+rusqlite = { version = "0.37", features = ["bundled"], optional = true }
+sqlite-vec = { version = "0.1.9", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", default-features = false, features = ["signal"] }
