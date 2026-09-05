@@ -64,7 +64,7 @@
 //! - [`OpenheimClient`] / [`OpenheimBuilder`] — main entry point
 //! - [`SessionHandle`] — send prompts and receive streaming [`SessionUpdate`] events
 //! - [`LlmClient`] — implement to add a custom provider
-//! - [`RagContext`] — conversation history and skill injection
+//! - [`MemoryContext`] — conversation history, skills, and system identity
 //! - [`Error`] / [`Result`] — unified error type
 
 pub mod acp;
@@ -73,7 +73,7 @@ pub mod config;
 pub mod core;
 pub mod error;
 pub mod mcp;
-pub mod rag;
+pub mod memory;
 pub mod subagents;
 pub mod tools;
 pub mod transport;
@@ -88,11 +88,11 @@ pub use llm::{AnthropicClient, GeminiClient, LlmClient, OpenAiClient, OpenAiComp
 // `ContentBlock` is deliberately omitted here: `agent_client_protocol::schema::ContentBlock`
 // below is the one library users see at the crate root. Reach the core content-block
 // type via `openheim::core::models::ContentBlock` if needed.
+pub use memory::{Conversation, ConversationMeta, HistoryManager, MemoryContext, PromptBuilder};
 pub use models::{
     AgentResult, AgentStep, Choice, FinishReason, FunctionDefinition, Message, Role, StopReason,
     StreamEvent, Tool, ToolExecutionResult, ToolResultBlock, ToolUseBlock,
 };
-pub use rag::{Conversation, ConversationMeta, HistoryManager, PromptBuilder, RagContext};
 
 // Library facade
 pub use client::{OpenheimBuilder, OpenheimClient, SessionBuilder, SessionHandle};

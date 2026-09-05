@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use crate::{
     config::{AgentConfig, AppConfig},
     core::permission::PermissionDecision,
-    rag::{ConversationMeta, RagContext, SkillsManager},
+    memory::{ConversationMeta, MemoryContext, SkillsManager},
 };
 
 use super::permission::{PERMISSION_OPTIONS, PermissionRequest};
@@ -570,7 +570,7 @@ impl App {
                     .to_string(),
             )),
             "sessions" => {
-                match RagContext::new(vec![]).and_then(|r| r.history.list_conversations()) {
+                match MemoryContext::new(vec![]).and_then(|r| r.history.list_conversations()) {
                     Ok(metas) if metas.is_empty() => {
                         self.push(ChatItem::SystemInfo("no sessions yet".to_string()));
                     }
@@ -746,7 +746,7 @@ impl App {
         let title = meta.title.as_deref().unwrap_or("(untitled)");
         self.push(ChatItem::SystemInfo(format!("─── {title}")));
 
-        match RagContext::new(vec![]).and_then(|r| r.history.load_conversation(&meta.id)) {
+        match MemoryContext::new(vec![]).and_then(|r| r.history.load_conversation(&meta.id)) {
             Ok(conv) => {
                 for msg in &conv.messages {
                     match msg.role {

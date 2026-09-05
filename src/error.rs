@@ -27,7 +27,7 @@ pub enum Error {
     #[error("{0}")]
     NotFound(String),
 
-    /// A session's write lease (see `rag::lease`) is held by another,
+    /// A session's write lease (see `memory::lease`) is held by another,
     /// still-live process. Returned from activation-for-writing (creating or
     /// loading a session for prompting); reading/listing history never hits
     /// this. The GUI matches on this variant to offer a read-only fallback.

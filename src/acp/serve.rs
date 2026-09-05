@@ -60,7 +60,7 @@ pub async fn serve(
                 if let Ok(val) = serde_json::to_value(&state_init.mcp_statuses) {
                     meta.insert("mcp_servers".to_string(), val);
                 }
-                if let Ok(skills) = state_init.rag.skills.list_skills()
+                if let Ok(skills) = state_init.memory.skills.list_skills()
                     && let Ok(val) = serde_json::to_value(skills)
                 {
                     meta.insert("skills".to_string(), val);

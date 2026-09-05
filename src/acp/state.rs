@@ -28,7 +28,7 @@ use crate::{
     },
     error::{Error, Result},
     llm::LlmClient,
-    rag::{Conversation, RagContext},
+    memory::{Conversation, MemoryContext},
     subagents::SubagentLoader,
     tools::{
         SandboxedExecutor, ScopedExecutor, SystemToolExecutor, ToolExecutor, ToolHandler,
@@ -52,7 +52,7 @@ pub struct AgentState {
     pub executor: Arc<dyn ToolExecutor>,
     pub config: AgentConfig,
     pub app_config: AppConfig,
-    pub rag: RagContext,
+    pub memory: MemoryContext,
     pub mcp_statuses: Vec<crate::mcp::McpServerStatus>,
     /// Resolved work directory used as the sandbox boundary for every session.
     pub work_dir: PathBuf,
@@ -71,7 +71,7 @@ impl AgentState {
     pub async fn new(
         config: AgentConfig,
         app_config: AppConfig,
-        rag: RagContext,
+        memory: MemoryContext,
         custom_tools: Vec<Box<dyn ToolHandler>>,
     ) -> Result<Self> {
         let http_client = build_http_client(config.timeout_secs)?;
@@ -108,7 +108,7 @@ impl AgentState {
             executor,
             config,
             app_config,
-            rag,
+            memory,
             mcp_statuses,
             work_dir,
             allow_shell,
@@ -242,7 +242,7 @@ impl AgentState {
     /// `context` is folded into the warning log line to identify which of
     /// this method's call sites failed.
     async fn persist_conversation(&self, conv: &Conversation, context: &str) {
-        let history = self.rag.history.clone();
+        let history = self.memory.history.clone();
         let conv = conv.clone();
         if let Err(e) = tokio::task::spawn_blocking(move || history.save_conversation(&conv))
             .await
@@ -323,7 +323,7 @@ impl AgentState {
             )
         };
 
-        // Cross-process write lease for this turn only (see `rag::lease`).
+        // Cross-process write lease for this turn only (see `memory::lease`).
         // Held until this function returns — success, error, or cancellation
         // — via `_lease` staying in scope for the whole body, so an
         // overlapping `session/prompt` on this session from *another*
@@ -332,9 +332,9 @@ impl AgentState {
         // loading/holding a session open never takes this lease — see
         // `SessionState::prompt_lock`'s doc comment — only an in-flight turn
         // does, in any process.
-        let _lease = self.rag.history.acquire_lease(&uuid)?;
+        let _lease = self.memory.history.acquire_lease(&uuid)?;
 
-        let (mut conversation, prompt_builder) = self.rag.prepare(
+        let (mut conversation, prompt_builder) = self.memory.prepare(
             Some(chat_id),
             &skills,
             Some(config.model.clone()),
@@ -351,13 +351,13 @@ impl AgentState {
         // turn's new user message even if the turn crashes before producing
         // anything else, and — since `save_conversation` always rewrites the
         // message log from scratch — transparently upgrades a pre-split-
-        // format conversation (see `rag::history::HistoryManager`'s doc
+        // format conversation (see `memory::history::HistoryManager`'s doc
         // comment) so the `append_message` calls below have a `.jsonl` log
         // that already reflects everything up to this point to append onto.
         self.persist_conversation(&conversation, "persist conversation before turn start")
             .await;
 
-        let history_for_append = self.rag.history.clone();
+        let history_for_append = self.memory.history.clone();
         let turn = TurnContext {
             cancel: &cancel,
             permission_gate: &permission_gate,
@@ -453,7 +453,7 @@ impl AgentState {
     }
 
     pub async fn acp_list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<SessionInfo>> {
-        let history = self.rag.history.clone();
+        let history = self.memory.history.clone();
         let metas = tokio::task::spawn_blocking(move || history.list_conversations())
             .await
             .map_err(Error::from)??;
@@ -483,7 +483,7 @@ impl AgentState {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| Error::ParseError("invalid session id format".to_string()))?;
 
-        let history = self.rag.history.clone();
+        let history = self.memory.history.clone();
         let conversation = tokio::task::spawn_blocking(move || history.load_conversation(&uuid))
             .await
             .map_err(Error::from)??;
@@ -585,7 +585,7 @@ mod prompt_lease_ordering_tests {
 
     use tempfile::tempdir;
 
-    use crate::rag::history::HistoryManager;
+    use crate::memory::history::HistoryManager;
 
     use super::*;
 

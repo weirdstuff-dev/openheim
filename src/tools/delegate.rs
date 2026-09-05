@@ -25,7 +25,7 @@ use crate::core::llm::LlmClient;
 use crate::core::models::{FunctionDefinition, Message, StopReason, Tool};
 use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
-use crate::rag::PromptBuilder;
+use crate::memory::PromptBuilder;
 use crate::subagents::AgentProfile;
 
 use super::scoped_executor::ScopedExecutor;

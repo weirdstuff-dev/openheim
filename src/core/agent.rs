@@ -7,7 +7,7 @@ use crate::core::llm::{LlmChunk, LlmClient};
 use crate::core::models::*;
 use crate::core::turn::TurnContext;
 use crate::error::Result;
-use crate::rag::PromptBuilder;
+use crate::memory::PromptBuilder;
 use crate::tools::ToolExecutor;
 
 async fn call_llm(

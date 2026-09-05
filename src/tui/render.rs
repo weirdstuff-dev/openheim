@@ -420,7 +420,7 @@ pub(crate) fn render_model_picker(
 pub(crate) fn render_session_picker(
     f: &mut Frame,
     area: Rect,
-    items: &[crate::rag::ConversationMeta],
+    items: &[crate::memory::ConversationMeta],
     selected: usize,
     theme: Color,
 ) {

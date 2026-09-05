@@ -12,7 +12,7 @@ use agent_client_protocol_tokio::Stdio;
 use crate::{
     acp::{self, AgentState},
     config::load_config,
-    rag::RagContext,
+    memory::MemoryContext,
 };
 
 /// Loads configuration, initialises the agent runtime, and serves ACP over stdin/stdout.
@@ -21,8 +21,8 @@ use crate::{
 pub async fn run() -> crate::error::Result<()> {
     let app_config = load_config()?;
     let agent_config = app_config.resolve(None)?;
-    let rag = RagContext::new(app_config.default_skills.clone())?;
-    let state = Arc::new(AgentState::new(agent_config, app_config, rag, vec![]).await?);
+    let memory = MemoryContext::new(app_config.default_skills.clone())?;
+    let state = Arc::new(AgentState::new(agent_config, app_config, memory, vec![]).await?);
 
     acp::serve(Stdio::new(), state)
         .await

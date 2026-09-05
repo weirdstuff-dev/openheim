@@ -1,4 +1,17 @@
-//! Conversation history and skill injection for agent prompts.
+//! Agent memory: persisted conversation history, skill files, the system
+//! identity, and the prompt assembly that stitches them into an LLM request.
+//!
+//! This module is *not* retrieval-augmented generation — nothing here embeds
+//! or searches anything. It is the agent's record of its own sessions plus
+//! the static instructions it is given.
+//!
+//! | Submodule | Responsibility |
+//! |-----------|----------------|
+//! | [`history`] | `HistoryManager` — conversation persistence (`~/.openheim/history/`) |
+//! | `lease`     | Advisory cross-process write lease per conversation |
+//! | [`skills`]  | `SkillsManager` — Markdown skill files (`~/.openheim/skills/`) |
+//! | [`system`]  | `SystemLoader` — the `~/.openheim/system.md` identity |
+//! | [`prompt`]  | `PromptBuilder` — assembles the structured system message |
 
 pub mod history;
 mod lease;
@@ -17,7 +30,7 @@ use uuid::Uuid;
 
 /// Holds the conversation history store and skill definitions used to build agent prompts.
 #[derive(Clone)]
-pub struct RagContext {
+pub struct MemoryContext {
     /// Persisted conversation history.
     pub history: HistoryManager,
     /// Named skill files loaded from `~/.openheim/skills/`.
@@ -28,7 +41,7 @@ pub struct RagContext {
     default_skills: Vec<String>,
 }
 
-impl RagContext {
+impl MemoryContext {
     /// Initialise history, skills, and system identity from the default openheim data directory.
     ///
     /// `default_skills` are merged with any per-session skills on each new conversation.

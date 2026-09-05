@@ -21,7 +21,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use crate::{
     acp::{self, AgentState},
     config::load_config,
-    rag::RagContext,
+    memory::MemoryContext,
 };
 
 /// Runs the agent against `prompt` using an in-process ACP session and prints
@@ -32,8 +32,8 @@ use crate::{
 pub async fn run_headless(prompt: String, model: Option<String>) -> crate::error::Result<()> {
     let app_config = load_config()?;
     let agent_config = app_config.resolve(model.as_deref())?;
-    let rag = RagContext::new(app_config.default_skills.clone())?;
-    let state = Arc::new(AgentState::new(agent_config, app_config, rag, vec![]).await?);
+    let memory = MemoryContext::new(app_config.default_skills.clone())?;
+    let state = Arc::new(AgentState::new(agent_config, app_config, memory, vec![]).await?);
 
     let (server_half, client_half) = tokio::io::duplex(65536);
     let (server_read, server_write) = tokio::io::split(server_half);

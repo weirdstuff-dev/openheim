@@ -32,7 +32,7 @@ pub struct SessionState {
     /// Held for the duration of a `session/prompt` turn so a second, overlapping
     /// prompt on the same session (in this process) is rejected instead of
     /// racing the first one (both would otherwise reset `cancel` and clobber
-    /// the saved history). The cross-process write lease (`rag::lease`) is a
+    /// the saved history). The cross-process write lease (`memory::lease`) is a
     /// separate, turn-scoped guard acquired directly in `acp_prompt` — not
     /// stored here — so merely loading/viewing a session never locks it
     /// against other processes; only an in-flight turn does.

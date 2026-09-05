@@ -18,7 +18,7 @@ use crate::{
     },
     error::Result,
     mcp::McpServerStatus,
-    rag::{Conversation, ConversationMeta, RagContext},
+    memory::{Conversation, ConversationMeta, MemoryContext},
     tools::ToolHandler,
 };
 
@@ -85,13 +85,13 @@ impl OpenheimClient {
     pub async fn get_session(&self, session_id: &str) -> Result<Conversation> {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| crate::error::Error::ParseError("invalid session id".to_string()))?;
-        let history = self.state.rag.history.clone();
+        let history = self.state.memory.history.clone();
         tokio::task::spawn_blocking(move || history.load_conversation(&uuid)).await?
     }
 
     /// List all conversation metadata without loading messages.
     pub async fn list_all_sessions(&self) -> Result<Vec<ConversationMeta>> {
-        let history = self.state.rag.history.clone();
+        let history = self.state.memory.history.clone();
         tokio::task::spawn_blocking(move || history.list_conversations()).await?
     }
 
@@ -99,15 +99,15 @@ impl OpenheimClient {
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| crate::error::Error::ParseError("invalid session id".to_string()))?;
-        let history = self.state.rag.history.clone();
+        let history = self.state.memory.history.clone();
         tokio::task::spawn_blocking(move || history.delete_conversation(&uuid)).await?
     }
 
-    // ── RAG ───────────────────────────────────────────────────────────────────
+    // ── Memory ────────────────────────────────────────────────────────────────
 
-    /// Direct access to the RAG context (history + skills managers).
-    pub fn rag(&self) -> &RagContext {
-        &self.state.rag
+    /// Direct access to the agent memory (history + skills managers).
+    pub fn memory(&self) -> &MemoryContext {
+        &self.state.memory
     }
 
     // ── Introspection ─────────────────────────────────────────────────────────
@@ -255,10 +255,10 @@ impl SessionHandle {
     /// it's synchronous file I/O. `None` if the session hasn't been
     /// persisted yet — a brand-new session isn't written to disk until its
     /// first turn completes.
-    async fn conversation_meta(&self) -> Result<Option<crate::rag::ConversationMeta>> {
+    async fn conversation_meta(&self) -> Result<Option<crate::memory::ConversationMeta>> {
         let uuid = Uuid::parse_str(&self.id)
             .map_err(|_| crate::error::Error::ParseError("invalid session id".to_string()))?;
-        let history = self.state.rag.history.clone();
+        let history = self.state.memory.history.clone();
         match tokio::task::spawn_blocking(move || history.load_conversation(&uuid)).await? {
             Ok(conversation) => Ok(Some(conversation.meta)),
             Err(crate::error::Error::NotFound(_)) => Ok(None),
@@ -500,8 +500,8 @@ impl OpenheimBuilder {
             app_config.allow_shell = shell;
         }
 
-        let rag = RagContext::new(app_config.default_skills.clone())?;
-        let state = Arc::new(AgentState::new(agent_config, app_config, rag, self.tools).await?);
+        let memory = MemoryContext::new(app_config.default_skills.clone())?;
+        let state = Arc::new(AgentState::new(agent_config, app_config, memory, self.tools).await?);
         Ok(OpenheimClient { state })
     }
 }

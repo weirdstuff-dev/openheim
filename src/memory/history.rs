@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::config::config_dir;
 use crate::core::models::{Message, Role, Usage};
 use crate::error::{Error, Result};
-use crate::rag::lease::{self, SessionLease};
+use crate::memory::lease::{self, SessionLease};
 use std::path::PathBuf;
 
 #[cfg(test)]
@@ -454,7 +454,7 @@ impl HistoryManager {
     ///
     /// Returns [`Error::SessionLocked`] if another still-live process
     /// already holds it. A stale lease (its process has since exited or the
-    /// lock has aged past its TTL — see `rag::lease`) is taken over
+    /// lock has aged past its TTL — see `memory::lease`) is taken over
     /// automatically. Hold the returned [`SessionLease`] for exactly the
     /// span that actually writes — a single `session/prompt` turn
     /// (`acp::AgentState::acp_prompt` acquires and releases one per turn) —
