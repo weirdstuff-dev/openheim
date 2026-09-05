@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Tool-driven long-term memory (`openheim::rag`, feature `rag`, on by default for the binary).** The agent gets three always-available tools: `remember(content)` stores a note in a local SQLite file (`~/.openheim/memory.db`), `search_memory(query)` returns the best-matching notes, and `forget(id)` deletes one. Nothing is stored or injected automatically — the model calls the tools when the user asks it to remember, recall, or drop something. Out of the box search is keyword-based via SQLite FTS5 (BM25, no network, no config). An optional `[memory]` config section with `embedding_provider` (a `[providers.X]` entry supplying the endpoint and key) and `embedding_model` upgrades it to semantic search: notes are embedded and stored via the [sqlite-vec](https://github.com/asg017/sqlite-vec) extension and queried by cosine KNN; notes saved before embeddings were enabled are back-filled, and switching model re-embeds everything instead of mixing vector spaces. `[memory]` also takes optional `db_path` / `top_k`. A new `EmbeddingClient` trait ships with OpenAI-compatible (`/embeddings` — OpenAI, Ollama, Together, …) and Gemini (`batchEmbedContents`) implementations. `search_memory` is read-only and is included in `architect` mode's allowlist; `remember` and `forget` are not. Library users get `OpenheimClient::long_term_memory()` for direct `remember`/`search`/`forget` access.
+
+### Changed
+
+- **`rag` module renamed to `memory`; `RagContext` is now `MemoryContext`.** The old module held conversation history, the write lease, skills, the system identity, and the prompt builder — none of which is retrieval. They now live under `openheim::memory::{history, lease, skills, system, prompt}`, and `AgentState.rag` / `OpenheimClient::rag()` are `AgentState.memory` / `OpenheimClient::memory()`. This is a clean break with no deprecated aliases: `openheim::rag` now names the new RAG module, so code that imported `openheim::RagContext`, `client.rag()`, or `openheim::rag::{HistoryManager, SkillsManager, …}` must switch to `MemoryContext`, `client.memory()`, and `openheim::memory`.
+- New `Error::DatabaseError` variant for SQLite failures in the long-term memory store.
+
 ## [0.9.0] - 2026-09-01
 
 ### Added
