@@ -281,43 +281,6 @@ fn convert_tools(tools: &[Tool]) -> Vec<GeminiToolDeclaration> {
     }]
 }
 
-fn convert_response(resp: GeminiResponse) -> Result<Choice> {
-    let usage = resp.usage_metadata.map(Usage::from);
-    let candidate = resp
-        .candidates
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::ApiError("No candidates in Gemini response".to_string()))?;
-
-    let mut content = Vec::new();
-    let mut tool_call_count = 0usize;
-
-    for part in candidate.content.parts {
-        if let Some(text) = part.text {
-            content.push(ContentBlock::Text { text });
-        }
-        if let Some(fc) = part.function_call {
-            content.push(ContentBlock::ToolUse {
-                id: format!("call_{tool_call_count}"),
-                name: fc.name,
-                arguments: serde_json::to_string(&fc.args)?,
-            });
-            tool_call_count += 1;
-        }
-    }
-
-    let finish_reason = candidate.finish_reason.as_deref().map(map_finish_reason);
-
-    Ok(Choice {
-        message: Message {
-            role: Role::Assistant,
-            content,
-        },
-        finish_reason,
-        usage,
-    })
-}
-
 /// Maps Gemini's `finishReason` vocabulary onto the provider-agnostic
 /// [`FinishReason`]; anything without a known equivalent passes through as
 /// [`FinishReason::Other`] (lowercased, matching this function's prior
@@ -349,51 +312,29 @@ fn gemini_system_instruction(messages: &[Message]) -> Option<GeminiContent> {
     }
 }
 
-#[async_trait]
-impl LlmClient for GeminiClient {
-    async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
-        let system_instruction = gemini_system_instruction(messages);
-
-        let request = GeminiRequest {
+impl GeminiClient {
+    fn build_request(&self, messages: &[Message], tools: &[Tool]) -> Result<GeminiRequest> {
+        Ok(GeminiRequest {
             contents: convert_messages(messages)?,
             tools: convert_tools(tools),
             generation_config: self.max_tokens.map(|t| GeminiGenerationConfig {
                 max_output_tokens: t,
             }),
-            system_instruction,
-        };
+            system_instruction: gemini_system_instruction(messages),
+        })
+    }
+}
 
-        let endpoint = format!(
-            "{}/models/{}:generateContent",
-            self.api_base.trim_end_matches('/'),
-            self.model
-        );
-
-        let response = self
-            .client
-            .post(&endpoint)
-            // Key in header, not query: reqwest embeds the full URL (query
-            // included) in transport error strings, which would leak the key
-            // into logs on any timeout/connect failure.
-            .header("x-goog-api-key", &self.api_key)
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .map_err(Error::ReqwestError)?;
-
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to read error body>".into());
-            return Err(Error::HttpError { status, body });
-        }
-
-        let gemini_response: GeminiResponse = response.json().await.map_err(Error::ReqwestError)?;
-
-        convert_response(gemini_response)
+#[async_trait]
+impl LlmClient for GeminiClient {
+    /// Implemented in terms of [`Self::send_streaming`] with a discarded
+    /// channel — same rationale as `AnthropicClient::send`: one request-
+    /// building and response-parsing path instead of two that could drift
+    /// (Gemini's streaming and non-streaming responses carry the same
+    /// information).
+    async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
+        let (chunk_tx, _chunk_rx) = mpsc::unbounded_channel();
+        self.send_streaming(messages, tools, chunk_tx).await
     }
 
     async fn send_streaming(
@@ -402,40 +343,26 @@ impl LlmClient for GeminiClient {
         tools: &[Tool],
         chunk_tx: mpsc::UnboundedSender<LlmChunk>,
     ) -> Result<Choice> {
-        let request = GeminiRequest {
-            contents: convert_messages(messages)?,
-            tools: convert_tools(tools),
-            generation_config: self.max_tokens.map(|t| GeminiGenerationConfig {
-                max_output_tokens: t,
-            }),
-            system_instruction: gemini_system_instruction(messages),
-        };
+        let request = self.build_request(messages, tools)?;
 
+        // `alt=sse` is in the URL, not `.query()`, to keep the request
+        // builder entirely inside `post_json`; the key stays in a header,
+        // not a query param, since reqwest embeds the full URL (query
+        // included) in transport error strings, which would leak it into
+        // logs on any timeout/connect failure.
         let endpoint = format!(
-            "{}/models/{}:streamGenerateContent",
+            "{}/models/{}:streamGenerateContent?alt=sse",
             self.api_base.trim_end_matches('/'),
             self.model
         );
 
-        let mut response = self
-            .client
-            .post(&endpoint)
-            .query(&[("alt", "sse")])
-            .header("x-goog-api-key", &self.api_key)
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .map_err(Error::ReqwestError)?;
-
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to read error body>".into());
-            return Err(Error::HttpError { status, body });
-        }
+        let mut response = super::http::post_json(
+            &self.client,
+            &endpoint,
+            &[("x-goog-api-key", self.api_key.as_str())],
+            &request,
+        )
+        .await?;
 
         let mut text_buf = String::new();
         let mut tool_calls_accum: Vec<(String, String)> = Vec::new();
@@ -626,102 +553,23 @@ mod tests {
         assert!(result.is_empty());
     }
 
+    // `convert_response` (the non-streaming response → `Choice` conversion)
+    // was removed once `send` became `send_streaming` with a discarded
+    // channel, same as `AnthropicClient` — there's only one response-parsing
+    // path left, exercised chunk-by-chunk in the streaming loop, not against
+    // a single complete `GeminiResponse`. `map_finish_reason` is that path's
+    // one piece of standalone conversion logic worth testing directly.
     #[test]
-    fn convert_response_text_only() {
-        let resp = GeminiResponse {
-            candidates: vec![GeminiCandidate {
-                content: GeminiContent {
-                    role: "model".into(),
-                    parts: vec![GeminiPart {
-                        text: Some("Hello!".into()),
-                        ..Default::default()
-                    }],
-                },
-                finish_reason: Some("STOP".into()),
-            }],
-            usage_metadata: None,
-        };
-        let choice = convert_response(resp).unwrap();
-        assert_eq!(choice.message.text().as_deref(), Some("Hello!"));
-        assert!(choice.message.tool_calls().is_empty());
-        assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
+    fn map_finish_reason_translates_known_values() {
+        assert_eq!(map_finish_reason("STOP"), FinishReason::Stop);
+        assert_eq!(map_finish_reason("MAX_TOKENS"), FinishReason::MaxTokens);
     }
 
     #[test]
-    fn convert_response_function_call() {
-        let resp = GeminiResponse {
-            candidates: vec![GeminiCandidate {
-                content: GeminiContent {
-                    role: "model".into(),
-                    parts: vec![GeminiPart {
-                        function_call: Some(GeminiFunctionCall {
-                            name: "read_file".into(),
-                            args: json!({"path": "test.txt"}),
-                        }),
-                        ..Default::default()
-                    }],
-                },
-                finish_reason: Some("STOP".into()),
-            }],
-            usage_metadata: None,
-        };
-        let choice = convert_response(resp).unwrap();
-        assert!(choice.message.text().is_none());
-        let tool_calls = choice.message.tool_calls();
-        assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].name, "read_file");
-        assert_eq!(tool_calls[0].id, "call_0");
-    }
-
-    #[test]
-    fn convert_response_finish_reason_mapping() {
-        // STOP -> Stop
-        let resp = GeminiResponse {
-            candidates: vec![GeminiCandidate {
-                content: GeminiContent {
-                    role: "model".into(),
-                    parts: vec![GeminiPart {
-                        text: Some("x".into()),
-                        ..Default::default()
-                    }],
-                },
-                finish_reason: Some("STOP".into()),
-            }],
-            usage_metadata: None,
-        };
+    fn map_finish_reason_lowercases_unknown_values() {
         assert_eq!(
-            convert_response(resp).unwrap().finish_reason,
-            Some(FinishReason::Stop)
+            map_finish_reason("SAFETY"),
+            FinishReason::Other("safety".to_string())
         );
-
-        // MAX_TOKENS -> MaxTokens
-        let resp = GeminiResponse {
-            candidates: vec![GeminiCandidate {
-                content: GeminiContent {
-                    role: "model".into(),
-                    parts: vec![GeminiPart {
-                        text: Some("x".into()),
-                        ..Default::default()
-                    }],
-                },
-                finish_reason: Some("MAX_TOKENS".into()),
-            }],
-            usage_metadata: None,
-        };
-        assert_eq!(
-            convert_response(resp).unwrap().finish_reason,
-            Some(FinishReason::MaxTokens)
-        );
-    }
-
-    #[test]
-    fn convert_response_errors_on_empty_candidates() {
-        let resp = GeminiResponse {
-            candidates: vec![],
-            usage_metadata: None,
-        };
-        let result = convert_response(resp);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No candidates"));
     }
 }

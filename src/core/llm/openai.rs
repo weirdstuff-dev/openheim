@@ -185,6 +185,63 @@ struct OpenAiResponseFunctionCall {
     arguments: String,
 }
 
+// --- OpenAI streaming response types ---
+//
+// One SSE `data:` payload's shape (`choices[0].delta` carries only the
+// incremental piece of the message that arrived in this chunk). Typed the
+// same way as the non-streaming envelope above instead of indexing into a
+// raw `serde_json::Value`, so a malformed/unexpected field is caught by
+// `serde` up front rather than silently reading as `None`/`0` deep inside
+// the accumulation loop.
+
+#[derive(Debug, Deserialize, Default)]
+struct OpenAiStreamChunk {
+    #[serde(default)]
+    choices: Vec<OpenAiStreamChoice>,
+    /// Only present on the final chunk when `stream_options.include_usage`
+    /// was set — arrives alongside an empty `choices` array, so it's read
+    /// independently of the choice fields below rather than folded into
+    /// that branch.
+    #[serde(default)]
+    usage: Option<OpenAiUsage>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct OpenAiStreamChoice {
+    #[serde(default)]
+    delta: OpenAiStreamDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct OpenAiStreamDelta {
+    #[serde(default)]
+    content: Option<String>,
+    /// See `OpenAiResponseMessage::reasoning_content`.
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<OpenAiStreamToolCallDelta>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamToolCallDelta {
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<OpenAiStreamFunctionDelta>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct OpenAiStreamFunctionDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
 /// Maps OpenAI's `finish_reason` vocabulary onto the provider-agnostic
 /// [`FinishReason`]; anything without a known equivalent (e.g.
 /// `content_filter`, the legacy `function_call`) passes through as
@@ -196,6 +253,14 @@ fn map_finish_reason(reason: &str) -> FinishReason {
         "length" => FinishReason::MaxTokens,
         other => FinishReason::Other(other.to_string()),
     }
+}
+
+/// Whether a failed streaming request should be retried once without
+/// `stream_options` — only when the body actually names it as the problem,
+/// so an unrelated 400 (bad request, context too long, …) isn't retried for
+/// nothing and doesn't double its cost.
+fn should_retry_without_stream_options(status: u16, body: &str) -> bool {
+    status == 400 && body.to_lowercase().contains("stream_options")
 }
 
 // --- Conversions ---
@@ -357,24 +422,15 @@ pub(super) async fn send_openai_style(
     };
 
     let endpoint = format!("{}/chat/completions", api_base.trim_end_matches('/'));
+    let auth = format!("Bearer {api_key}");
 
-    let response = client
-        .post(&endpoint)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&request)
-        .send()
-        .await
-        .map_err(Error::ReqwestError)?;
-
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "<failed to read error body>".into());
-        return Err(Error::HttpError { status, body });
-    }
+    let response = super::http::post_json(
+        client,
+        &endpoint,
+        &[("Authorization", auth.as_str())],
+        &request,
+    )
+    .await?;
 
     let envelope: OpenAiResponseEnvelope = response.json().await.map_err(Error::ReqwestError)?;
     let usage = envelope.usage.map(Usage::from);
@@ -442,42 +498,27 @@ pub(super) async fn send_openai_style_streaming(
     body["stream_options"] = serde_json::json!({ "include_usage": true });
 
     let endpoint = format!("{}/chat/completions", api_base.trim_end_matches('/'));
+    let auth = format!("Bearer {api_key}");
+    let headers = [("Authorization", auth.as_str())];
 
-    let mut response = client
-        .post(&endpoint)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(Error::ReqwestError)?;
-
-    if response.status().as_u16() == 400 {
-        let mut retry_body = body.clone();
-        if let Some(obj) = retry_body.as_object_mut() {
-            obj.remove("stream_options");
+    let mut response = match super::http::post_json(client, &endpoint, &headers, &body).await {
+        Ok(response) => response,
+        // Only a 400 that actually complains about `stream_options` is
+        // retried without it — any other 400 (bad request, context too
+        // long, …) would otherwise be retried for nothing, doubling its
+        // cost, and return unchanged.
+        Err(Error::HttpError {
+            status,
+            body: err_body,
+        }) if should_retry_without_stream_options(status, &err_body) => {
+            let mut retry_body = body.clone();
+            if let Some(obj) = retry_body.as_object_mut() {
+                obj.remove("stream_options");
+            }
+            super::http::post_json(client, &endpoint, &headers, &retry_body).await?
         }
-        let retry_response = client
-            .post(&endpoint)
-            .header("Authorization", format!("Bearer {api_key}"))
-            .header("Content-Type", "application/json")
-            .json(&retry_body)
-            .send()
-            .await
-            .map_err(Error::ReqwestError)?;
-        if retry_response.status().is_success() {
-            response = retry_response;
-        }
-    }
-
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "<failed to read error body>".into());
-        return Err(Error::HttpError { status, body });
-    }
+        Err(e) => return Err(e),
+    };
 
     struct ToolCallAcc {
         id: String,
@@ -508,44 +549,42 @@ pub(super) async fn send_openai_style_streaming(
                 break;
             }
 
-            let Ok(event) = serde_json::from_str::<serde_json::Value>(&data) else {
+            let Ok(event) = serde_json::from_str::<OpenAiStreamChunk>(&data) else {
                 continue;
             };
 
             // The `include_usage` final chunk carries `usage` alongside an
             // empty `choices` array, so this is checked independently of the
             // choice fields below rather than folded into that branch.
-            if !event["usage"].is_null()
-                && let Ok(u) = serde_json::from_value::<OpenAiUsage>(event["usage"].clone())
-            {
+            if let Some(u) = event.usage {
                 usage = Some(Usage::from(u));
             }
 
-            let choice = &event["choices"][0];
+            let Some(choice) = event.choices.into_iter().next() else {
+                continue;
+            };
 
-            if let Some(fr) = choice["finish_reason"].as_str() {
-                finish_reason = Some(map_finish_reason(fr));
+            if let Some(fr) = choice.finish_reason {
+                finish_reason = Some(map_finish_reason(&fr));
             }
 
-            let delta = &choice["delta"];
-
-            if let Some(reasoning) = delta["reasoning_content"].as_str()
+            if let Some(reasoning) = choice.delta.reasoning_content
                 && !reasoning.is_empty()
             {
-                reasoning_buf.push_str(reasoning);
-                let _ = chunk_tx.send(LlmChunk::Thinking(reasoning.to_string()));
+                reasoning_buf.push_str(&reasoning);
+                let _ = chunk_tx.send(LlmChunk::Thinking(reasoning));
             }
 
-            if let Some(content) = delta["content"].as_str()
+            if let Some(content) = choice.delta.content
                 && !content.is_empty()
             {
-                text_buf.push_str(content);
-                let _ = chunk_tx.send(LlmChunk::Text(content.to_string()));
+                text_buf.push_str(&content);
+                let _ = chunk_tx.send(LlmChunk::Text(content));
             }
 
-            if let Some(tcs) = delta["tool_calls"].as_array() {
+            if let Some(tcs) = choice.delta.tool_calls {
                 for tc in tcs {
-                    let idx = tc["index"].as_u64().unwrap_or(0) as usize;
+                    let idx = tc.index;
                     while tool_acc.len() <= idx {
                         tool_acc.push(ToolCallAcc {
                             id: String::new(),
@@ -553,14 +592,16 @@ pub(super) async fn send_openai_style_streaming(
                             args: String::new(),
                         });
                     }
-                    if let Some(id) = tc["id"].as_str() {
-                        tool_acc[idx].id = id.to_string();
+                    if let Some(id) = tc.id {
+                        tool_acc[idx].id = id;
                     }
-                    if let Some(name) = tc["function"]["name"].as_str() {
-                        tool_acc[idx].name.push_str(name);
-                    }
-                    if let Some(args) = tc["function"]["arguments"].as_str() {
-                        tool_acc[idx].args.push_str(args);
+                    if let Some(function) = tc.function {
+                        if let Some(name) = function.name {
+                            tool_acc[idx].name.push_str(&name);
+                        }
+                        if let Some(args) = function.arguments {
+                            tool_acc[idx].args.push_str(&args);
+                        }
                     }
                 }
             }
@@ -791,5 +832,70 @@ mod tests {
     fn response_message_reasoning_content_defaults_to_none_when_absent() {
         let msg: OpenAiResponseMessage = serde_json::from_str(r#"{"content":"hi"}"#).unwrap();
         assert!(msg.reasoning_content.is_none());
+    }
+
+    #[test]
+    fn should_retry_without_stream_options_only_when_the_body_names_it() {
+        assert!(should_retry_without_stream_options(
+            400,
+            "Unrecognized request argument supplied: stream_options"
+        ));
+        // Case-insensitive: some backends echo the field name back differently.
+        assert!(should_retry_without_stream_options(
+            400,
+            "unknown field `Stream_Options`"
+        ));
+    }
+
+    #[test]
+    fn should_retry_without_stream_options_false_for_unrelated_400s() {
+        assert!(!should_retry_without_stream_options(
+            400,
+            "context length exceeded"
+        ));
+    }
+
+    #[test]
+    fn should_retry_without_stream_options_false_for_non_400_status() {
+        assert!(!should_retry_without_stream_options(
+            500,
+            "stream_options is not supported"
+        ));
+    }
+
+    #[test]
+    fn stream_chunk_deserializes_text_delta() {
+        let chunk: OpenAiStreamChunk = serde_json::from_str(
+            r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#,
+        )
+        .unwrap();
+        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hi"));
+        assert!(chunk.usage.is_none());
+    }
+
+    #[test]
+    fn stream_chunk_deserializes_final_usage_chunk_with_empty_choices() {
+        let chunk: OpenAiStreamChunk = serde_json::from_str(
+            r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+        )
+        .unwrap();
+        assert!(chunk.choices.is_empty());
+        let usage = chunk.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 5);
+    }
+
+    #[test]
+    fn stream_chunk_deserializes_tool_call_delta() {
+        let chunk: OpenAiStreamChunk = serde_json::from_str(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\""}}]}}]}"#,
+        )
+        .unwrap();
+        let tcs = chunk.choices[0].delta.tool_calls.as_ref().unwrap();
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].index, 0);
+        assert_eq!(tcs[0].id.as_deref(), Some("call_1"));
+        let function = tcs[0].function.as_ref().unwrap();
+        assert_eq!(function.name.as_deref(), Some("read_file"));
     }
 }

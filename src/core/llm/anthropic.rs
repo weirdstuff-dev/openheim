@@ -312,27 +312,16 @@ impl AnthropicClient {
     async fn post(&self, request: &AnthropicRequest) -> Result<reqwest::Response> {
         let endpoint = format!("{}/messages", self.api_base.trim_end_matches('/'));
 
-        let response = self
-            .client
-            .post(&endpoint)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("Content-Type", "application/json")
-            .json(request)
-            .send()
-            .await
-            .map_err(Error::ReqwestError)?;
-
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to read error body>".into());
-            return Err(Error::HttpError { status, body });
-        }
-
-        Ok(response)
+        super::http::post_json(
+            &self.client,
+            &endpoint,
+            &[
+                ("x-api-key", self.api_key.as_str()),
+                ("anthropic-version", ANTHROPIC_VERSION),
+            ],
+            request,
+        )
+        .await
     }
 }
 
