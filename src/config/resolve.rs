@@ -14,6 +14,14 @@ fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<()> {
             name, provider.api_base
         )));
     }
+    if provider.api_base.starts_with("http://") && !provider.resolve_api_key().is_empty() {
+        return Err(Error::config(format!(
+            "Provider '{}' api_base '{}' uses http:// but has an API key configured; \
+             credentials must not be sent over an unencrypted connection. Use https:// \
+             or drop the API key for keyless local endpoints",
+            name, provider.api_base
+        )));
+    }
     if !provider.models.is_empty() && !provider.models.contains(&provider.default_model) {
         return Err(Error::config(format!(
             "Provider '{}' default_model '{}' is not listed in models: [{}]",
@@ -260,6 +268,23 @@ mod tests {
         let p = provider_with_base("ftp://example.com");
         let err = validate_provider("test", &p).unwrap_err();
         assert!(err.to_string().contains("http://") || err.to_string().contains("https://"));
+    }
+
+    #[test]
+    fn validate_rejects_http_api_base_with_api_key() {
+        let p = provider_with_base("http://example.com/v1");
+        let err = validate_provider("test", &p).unwrap_err();
+        assert!(err.to_string().contains("http://"));
+        assert!(err.to_string().contains("API key"));
+    }
+
+    #[test]
+    fn validate_allows_http_api_base_without_api_key() {
+        // Keyless local endpoints (e.g. Ollama) have nothing to leak, so
+        // plain http:// is fine as long as no credential is configured.
+        let mut p = provider_with_base("http://localhost:11434/v1");
+        p.api_key = None;
+        assert!(validate_provider("test", &p).is_ok());
     }
 
     #[test]
