@@ -334,7 +334,14 @@ impl LlmClient for AnthropicClient {
     /// silently skip `thinking_config`, leaving thinking enabled only for
     /// streaming callers).
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
-        let (chunk_tx, _chunk_rx) = mpsc::unbounded_channel();
+        let (chunk_tx, chunk_rx) = mpsc::unbounded_channel();
+        // Dropped immediately, before any chunk is sent: an unbounded
+        // channel with a live receiver buffers every chunk in memory until
+        // something calls `recv()`, and nothing here ever will. Dropping it
+        // up front makes `chunk_tx.send()` fail fast (already ignored below
+        // and in `send_streaming`) instead of accumulating the whole
+        // response in the channel for the life of the request.
+        drop(chunk_rx);
         self.send_streaming(messages, tools, chunk_tx).await
     }
 
