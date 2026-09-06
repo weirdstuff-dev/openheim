@@ -186,6 +186,26 @@ pub struct Tool {
     pub function: FunctionDefinition,
 }
 
+impl Tool {
+    /// Builds a function-type [`Tool`] from its name, description, and JSON
+    /// Schema parameters — the shape every `ToolHandler::definition` impl
+    /// needs, without spelling out `tool_type`/`FunctionDefinition` by hand.
+    pub fn function(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: Value,
+    ) -> Self {
+        Self {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: name.into(),
+                description: description.into(),
+                parameters,
+            },
+        }
+    }
+}
+
 /// Metadata describing a callable tool function.
 #[derive(Debug, Serialize, Clone)]
 pub struct FunctionDefinition {
@@ -215,14 +235,13 @@ pub enum FinishReason {
 }
 
 /// A single completion choice returned by the provider.
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct Choice {
     pub message: Message,
     pub finish_reason: Option<FinishReason>,
     /// Token usage for this call, when the provider reports it. `None` for
     /// providers/backends that don't return usage data (e.g. an
     /// OpenAI-compatible endpoint that ignores `stream_options`).
-    #[serde(default)]
     pub usage: Option<Usage>,
 }
 
@@ -296,7 +315,11 @@ pub struct AgentResult {
     pub context_usage: Option<Usage>,
 }
 
-/// Streaming event emitted during an agent run over a WebSocket connection.
+/// Core streaming event emitted during an agent run — the one in-process
+/// event type produced by `run_agent_streaming_with_history` and passed
+/// through `AgentState::prompt` unmapped; ACP's `SessionUpdate` (the wire
+/// vocabulary transports actually send) is derived from it only at the ACP
+/// edge (`acp::util::stream_event_to_session_update`).
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "event_type")]
 pub enum StreamEvent {

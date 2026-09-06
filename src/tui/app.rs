@@ -12,8 +12,8 @@ use tokio::sync::mpsc;
 
 use crate::{
     config::{AgentConfig, AppConfig},
-    core::permission::PermissionDecision,
-    rag::{ConversationMeta, RagContext, SkillsManager},
+    core::{models::StreamEvent, permission::PermissionDecision},
+    memory::{ConversationMeta, SkillsManager},
 };
 
 use super::permission::{PERMISSION_OPTIONS, PermissionRequest};
@@ -29,43 +29,6 @@ fn format_token_count(tokens: u64) -> String {
     } else {
         format!("{:.1}k ctx", tokens as f64 / 1000.0)
     }
-}
-
-fn save_theme_to_config(name: &str) -> crate::error::Result<()> {
-    let path = crate::config::config_path()?;
-    let contents = std::fs::read_to_string(&path)?;
-    let new_line = format!("theme_color = \"{name}\"");
-    let has_theme = contents
-        .lines()
-        .any(|l| l.trim_start().starts_with("theme_color"));
-    let updated: String = if has_theme {
-        contents
-            .lines()
-            .map(|l| {
-                if l.trim_start().starts_with("theme_color") {
-                    new_line.clone()
-                } else {
-                    l.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else {
-        let mut lines: Vec<String> = contents.lines().map(String::from).collect();
-        let insert_pos = lines
-            .iter()
-            .rposition(|l| {
-                l.trim_start().starts_with("max_iterations")
-                    || l.trim_start().starts_with("default_provider")
-            })
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        lines.insert(insert_pos, new_line);
-        lines.join("\n")
-    };
-    let trailing = if contents.ends_with('\n') { "\n" } else { "" };
-    std::fs::write(&path, format!("{updated}{trailing}"))?;
-    Ok(())
 }
 
 pub(super) struct App {
@@ -88,6 +51,8 @@ pub(super) struct App {
     prompt_tx: mpsc::UnboundedSender<String>,
     switch_model_tx: mpsc::UnboundedSender<(String, String)>,
     switch_session_tx: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
+    list_sessions_tx: mpsc::UnboundedSender<()>,
+    new_session_tx: mpsc::UnboundedSender<()>,
     picker_items: Vec<(String, String)>,
     picker_selected: usize,
     config_rows: Vec<ConfigRow>,
@@ -114,6 +79,7 @@ pub(super) struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         agent_config: AgentConfig,
         app_config: AppConfig,
@@ -121,6 +87,8 @@ impl App {
         prompt_tx: mpsc::UnboundedSender<String>,
         switch_model_tx: mpsc::UnboundedSender<(String, String)>,
         switch_session_tx: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
+        list_sessions_tx: mpsc::UnboundedSender<()>,
+        new_session_tx: mpsc::UnboundedSender<()>,
     ) -> Self {
         let theme_name = app_config
             .theme_color
@@ -148,6 +116,8 @@ impl App {
             prompt_tx,
             switch_model_tx,
             switch_session_tx,
+            list_sessions_tx,
+            new_session_tx,
             picker_items: Vec::new(),
             picker_selected: 0,
             config_rows: Vec::new(),
@@ -172,32 +142,7 @@ impl App {
 
     pub(super) fn handle_update(&mut self, update: AgentUpdate) {
         match update {
-            AgentUpdate::TextChunk(text) => {
-                self.status = Status::Streaming;
-                match self.items.last_mut() {
-                    Some(ChatItem::AssistantMessage(existing)) => existing.push_str(&text),
-                    _ => self.items.push(ChatItem::AssistantMessage(text)),
-                }
-                self.cached_width = 0;
-            }
-            AgentUpdate::ThinkingChunk(text) => {
-                self.status = Status::Streaming;
-                match self.items.last_mut() {
-                    Some(ChatItem::Thinking(existing)) => existing.push_str(&text),
-                    _ => self.items.push(ChatItem::Thinking(text)),
-                }
-                self.cached_width = 0;
-            }
-            AgentUpdate::ToolCall { name, args } => {
-                self.status = Status::Thinking;
-                self.push(ChatItem::ToolCall { name, args });
-            }
-            AgentUpdate::ToolResult { result, is_error } => {
-                self.push(ChatItem::ToolResult { result, is_error });
-            }
-            AgentUpdate::Done => {
-                self.status = Status::Idle;
-            }
+            AgentUpdate::Stream(event) => self.handle_stream_event(event),
             AgentUpdate::Error(e) => {
                 self.status = Status::Idle;
                 self.push(ChatItem::Err(e));
@@ -212,6 +157,86 @@ impl App {
                     "switched to {provider} / {model}"
                 )));
             }
+            AgentUpdate::SessionList(metas) => {
+                if metas.is_empty() {
+                    self.push(ChatItem::SystemInfo("no sessions yet".to_string()));
+                } else {
+                    self.sessions = metas;
+                    self.picker_selected = 0;
+                    self.push_screen(Screen::SessionPicker);
+                }
+            }
+            // Appended, not replacing `self.items` — `open_session` already
+            // cleared the transcript and pushed the header/warning
+            // synchronously, so this is just the replayed message history
+            // (plus a trailing "restored" marker) arriving once the load
+            // completes.
+            AgentUpdate::History(items) => {
+                for item in items {
+                    self.push(item);
+                }
+            }
+            // Only now — creation confirmed — is it safe to drop the old
+            // session's transcript; see `start_new_session`.
+            AgentUpdate::NewSession(items) => {
+                self.items.clear();
+                self.scroll = 0;
+                self.pinned = true;
+                self.context_usage = None;
+                self.status = Status::Idle;
+                for item in items {
+                    self.push(item);
+                }
+            }
+        }
+    }
+
+    /// Handles one raw event from a live turn. `IterationStart` and
+    /// `MessageAppended` have no UI presence and are ignored.
+    fn handle_stream_event(&mut self, event: StreamEvent) {
+        match event {
+            StreamEvent::LlmResponse { content } => {
+                self.status = Status::Streaming;
+                match self.items.last_mut() {
+                    Some(ChatItem::AssistantMessage(existing)) => existing.push_str(&content),
+                    _ => self.items.push(ChatItem::AssistantMessage(content)),
+                }
+                self.cached_width = 0;
+            }
+            StreamEvent::ThinkingContent { content } => {
+                self.status = Status::Streaming;
+                match self.items.last_mut() {
+                    Some(ChatItem::Thinking(existing)) => existing.push_str(&content),
+                    _ => self.items.push(ChatItem::Thinking(content)),
+                }
+                self.cached_width = 0;
+            }
+            StreamEvent::ToolCall {
+                tool_name,
+                arguments,
+                ..
+            } => {
+                self.status = Status::Thinking;
+                self.push(ChatItem::ToolCall {
+                    name: tool_name,
+                    args: arguments,
+                });
+            }
+            StreamEvent::ToolResult {
+                result, is_error, ..
+            } => {
+                self.push(ChatItem::ToolResult { result, is_error });
+            }
+            // The current context size, refreshed live as each LLM call in
+            // the turn completes rather than once at the end, so the footer
+            // never needs a separate disk read after the turn finishes.
+            StreamEvent::Usage { usage } => {
+                self.context_usage = Some(usage);
+            }
+            StreamEvent::Finished { .. } => {
+                self.status = Status::Idle;
+            }
+            StreamEvent::IterationStart { .. } | StreamEvent::MessageAppended { .. } => {}
         }
     }
 
@@ -402,7 +427,7 @@ impl App {
         self.theme_color_name = name.to_string();
         self.cached_width = 0;
         self.app_config.theme_color = Some(name.to_string());
-        match save_theme_to_config(name) {
+        match crate::config::save_theme_to_config(name) {
             Ok(()) => self.push(ChatItem::SystemInfo(format!("theme set to {name}"))),
             Err(e) => self.push(ChatItem::SystemInfo(format!(
                 "theme set to {name} (could not save: {e})"
@@ -558,6 +583,7 @@ impl App {
             "help" => self.push(ChatItem::SystemInfo(
                 ":help              show this\n\
                  :q / :quit         exit\n\
+                 :new               start a new session\n\
                  :sessions          browse and restore saved sessions\n\
                  :config            current config\n\
                  :models            list available models\n\
@@ -569,18 +595,9 @@ impl App {
                  ↑/↓  scroll · PgUp/PgDn  page · Ctrl+C  quit"
                     .to_string(),
             )),
+            "new" => self.start_new_session(),
             "sessions" => {
-                match RagContext::new(vec![]).and_then(|r| r.history.list_conversations()) {
-                    Ok(metas) if metas.is_empty() => {
-                        self.push(ChatItem::SystemInfo("no sessions yet".to_string()));
-                    }
-                    Ok(metas) => {
-                        self.sessions = metas;
-                        self.picker_selected = 0;
-                        self.push_screen(Screen::SessionPicker);
-                    }
-                    Err(e) => self.push(ChatItem::Err(e.to_string())),
-                }
+                let _ = self.list_sessions_tx.send(());
             }
             "config" => {
                 let ac = &self.agent_config;
@@ -735,9 +752,34 @@ impl App {
         }
     }
 
-    fn open_session(&mut self, meta: &ConversationMeta) {
-        use crate::core::models::Role;
+    /// Asks the agent task to start a brand-new, unsaved session — the same
+    /// `SessionBuilder::start` path `run()` uses on startup, just triggered
+    /// mid-session instead. Deliberately leaves the current transcript and
+    /// `Status::Idle` check gates prompt submission (see the `KeyCode::Enter`
+    /// handler) until then, keeping the request transactional: if
+    /// `client.new_session().start()` fails, `mod.rs` reports it as a plain
+    /// `AgentUpdate::Error`, `Status` falls back to `Idle`, and the old
+    /// session — still live in the agent task — is exactly where it was.
+    fn start_new_session(&mut self) {
+        self.status = Status::Thinking;
+        if self.new_session_tx.send(()).is_err() {
+            self.status = Status::Idle;
+            self.push(ChatItem::Err(
+                "failed to start new session: agent task is gone".to_string(),
+            ));
+        }
+    }
 
+    /// Clears the transcript and requests the agent task load `meta`'s full
+    /// history via `SessionHandle::restore`'s `on_history` replay — which
+    /// goes through the same ACP-shaped replay a wire client's `session/load`
+    /// gets (see `replay_history_messages`), so thinking blocks and image
+    /// attachments show up instead of being silently dropped the way a raw
+    /// `Message`-block walk here used to. That also moves the history read
+    /// off the UI task and onto the agent task, where the rest of I/O
+    /// already lives — the actual message items arrive later as
+    /// `AgentUpdate::History` once the load completes.
+    fn open_session(&mut self, meta: &ConversationMeta) {
         self.items.clear();
         self.status = Status::Idle;
         self.scroll = 0;
@@ -745,41 +787,6 @@ impl App {
 
         let title = meta.title.as_deref().unwrap_or("(untitled)");
         self.push(ChatItem::SystemInfo(format!("─── {title}")));
-
-        match RagContext::new(vec![]).and_then(|r| r.history.load_conversation(&meta.id)) {
-            Ok(conv) => {
-                for msg in &conv.messages {
-                    match msg.role {
-                        Role::System => {}
-                        Role::User => {
-                            if let Some(content) = msg.text() {
-                                self.push(ChatItem::UserMessage(content));
-                            }
-                        }
-                        Role::Assistant => {
-                            if let Some(content) = msg.text() {
-                                self.push(ChatItem::AssistantMessage(content));
-                            }
-                            for tc in msg.tool_calls() {
-                                self.push(ChatItem::ToolCall {
-                                    name: tc.name,
-                                    args: tc.arguments,
-                                });
-                            }
-                        }
-                        Role::Tool => {
-                            if let Some(tr) = msg.tool_result_block() {
-                                self.push(ChatItem::ToolResult {
-                                    result: tr.content,
-                                    is_error: tr.is_error,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => self.push(ChatItem::Err(e.to_string())),
-        }
 
         if let Some(provider_name) = &meta.provider
             && !self
@@ -792,8 +799,6 @@ impl App {
                 provider_name
             )));
         }
-
-        self.push(ChatItem::SystemInfo("─── session restored".to_string()));
 
         let cwd = meta
             .cwd
@@ -982,6 +987,7 @@ mod tests {
             default_skills: vec![],
             work_dir: None,
             allow_shell: false,
+            memory: None,
         }
     }
 
@@ -989,6 +995,8 @@ mod tests {
         let (prompt_tx, _) = mpsc::unbounded_channel();
         let (switch_model_tx, _) = mpsc::unbounded_channel();
         let (switch_session_tx, _) = mpsc::unbounded_channel();
+        let (list_sessions_tx, _) = mpsc::unbounded_channel();
+        let (new_session_tx, _) = mpsc::unbounded_channel();
         App::new(
             AgentConfig::default(),
             test_app_config(),
@@ -996,6 +1004,8 @@ mod tests {
             prompt_tx,
             switch_model_tx,
             switch_session_tx,
+            list_sessions_tx,
+            new_session_tx,
         )
     }
 

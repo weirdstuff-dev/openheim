@@ -302,9 +302,12 @@ async fn main() -> openheim::Result<()> {
 
     let mut messages = vec![Message::user("Hello!")];
 
+    let work_dir = std::env::current_dir()?;
     let turn = TurnContext {
         cancel: &CancellationToken::new(),
         permission_gate: &(Arc::new(AllowAll) as Arc<dyn PermissionGate>),
+        work_dir: &work_dir,
+        client_io: &openheim::core::client_io::NoClientIo,
     };
 
     let result = run_agent_with_history(

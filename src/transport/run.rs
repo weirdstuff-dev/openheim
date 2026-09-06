@@ -5,7 +5,6 @@
 //! prints streamed text chunks to stdout as they arrive.
 
 use std::io::Write as _;
-use std::sync::Arc;
 
 use agent_client_protocol::{
     Agent, ByteStreams, Client, ConnectionTo, SessionMessage, on_receive_request,
@@ -18,11 +17,7 @@ use agent_client_protocol::{
 };
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use crate::{
-    acp::{self, AgentState},
-    config::load_config,
-    rag::RagContext,
-};
+use crate::{acp, client::OpenheimClient};
 
 /// Runs the agent against `prompt` using an in-process ACP session and prints
 /// the streamed response to stdout.
@@ -30,10 +25,12 @@ use crate::{
 /// `model` overrides the default model from the configuration file. If `None`,
 /// the provider's configured default is used.
 pub async fn run_headless(prompt: String, model: Option<String>) -> crate::error::Result<()> {
-    let app_config = load_config()?;
-    let agent_config = app_config.resolve(model.as_deref())?;
-    let rag = RagContext::new(app_config.default_skills.clone())?;
-    let state = Arc::new(AgentState::new(agent_config, app_config, rag, vec![]).await?);
+    let mut builder = OpenheimClient::builder();
+    if let Some(model) = model {
+        builder = builder.model(model);
+    }
+    let client = builder.build().await?;
+    let state = client.state().clone();
 
     let (server_half, client_half) = tokio::io::duplex(65536);
     let (server_read, server_write) = tokio::io::split(server_half);

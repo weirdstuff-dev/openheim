@@ -1,6 +1,6 @@
 //! [`AgentState`]: the process-wide, per-connection-shared state behind every
-//! ACP entry point — session bookkeeping plus the `acp_*` methods `serve()`
-//! dispatches into.
+//! entry point — session bookkeeping plus the methods `acp::serve()` and the
+//! other transports dispatch into.
 
 use std::{
     collections::HashMap,
@@ -11,13 +11,14 @@ use std::{
 
 use agent_client_protocol::schema::{
     ContentBlock as AcpContentBlock, ContentChunk, ModelInfo, SessionInfo, SessionModelState,
-    SessionUpdate, ToolCall as AcpToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    SessionUpdate,
 };
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
+    acp::{convert::convert_prompt_blocks, util::replay_history_messages},
     config::{AgentConfig, AppConfig, build_http_client, create_client},
     core::{
         agent::run_agent_streaming_with_history,
@@ -28,21 +29,17 @@ use crate::{
     },
     error::{Error, Result},
     llm::LlmClient,
-    rag::{Conversation, RagContext},
+    memory::{Conversation, MemoryContext},
     subagents::SubagentLoader,
-    tools::{
-        SandboxedExecutor, ScopedExecutor, SystemToolExecutor, ToolExecutor, ToolHandler,
-        with_delegation,
-    },
+    tools::{DelegateTool, ScopedExecutor, SystemToolExecutor, ToolExecutor, ToolHandler},
 };
 
 use super::{
-    convert::convert_prompt_blocks,
+    AgentMode,
     session::{
         MAX_LIVE_SESSIONS, SESSION_IDLE_EVICTION_AFTER, SessionState, evict_idle_sessions,
         insert_or_keep_live, prompt_in_flight,
     },
-    util::{AgentMode, replay_history_messages, thinking_chunk, tool_kind_for},
 };
 
 type Sessions = Arc<RwLock<HashMap<String, SessionState>>>;
@@ -52,26 +49,30 @@ pub struct AgentState {
     pub executor: Arc<dyn ToolExecutor>,
     pub config: AgentConfig,
     pub app_config: AppConfig,
-    pub rag: RagContext,
+    pub memory: MemoryContext,
+    /// Long-term memory behind the `remember` / `search_memory` / `forget`
+    /// tools (keyword-only unless `[memory]` names an embedding provider).
+    #[cfg(feature = "rag")]
+    pub long_term_memory: Arc<crate::rag::LongTermMemory>,
     pub mcp_statuses: Vec<crate::mcp::McpServerStatus>,
     /// Resolved work directory used as the sandbox boundary for every session.
     pub work_dir: PathBuf,
     /// Whether shell command execution is enabled for the LLM.
     pub allow_shell: bool,
-    /// Visible to the rest of `acp` (e.g. [`super::permission::AcpPermissionGate`]
-    /// reads remembered approvals directly) but not outside it.
-    pub(super) sessions: Sessions,
+    /// `pub(crate)` (not private) so `acp::AcpPermissionGate` — which lives
+    /// outside this module — can read remembered approvals directly.
+    pub(crate) sessions: Sessions,
 }
 
 impl AgentState {
     /// `custom_tools` are registered alongside the built-ins (`execute_command`,
-    /// `read_file`, `write_file`) and any MCP-sourced tools, before the
-    /// sandbox/delegation wrappers are applied — so custom tools are subject
-    /// to the same `work_dir`/`allow_shell` boundary as everything else.
+    /// `read_file`, `write_file`, …) and any MCP-sourced tools. Every handler
+    /// receives the turn's [`TurnContext`] — `work_dir`, cancel token, client
+    /// I/O — so custom tools can enforce the same boundary the built-ins do.
     pub async fn new(
         config: AgentConfig,
         app_config: AppConfig,
-        rag: RagContext,
+        memory: MemoryContext,
         custom_tools: Vec<Box<dyn ToolHandler>>,
     ) -> Result<Self> {
         let http_client = build_http_client(config.timeout_secs)?;
@@ -90,25 +91,40 @@ impl AgentState {
         for tool in custom_tools {
             sys_executor.register(tool);
         }
-        let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
+        #[cfg(feature = "rag")]
+        let long_term_memory = Arc::new(crate::rag::LongTermMemory::from_config(&app_config)?);
+        #[cfg(feature = "rag")]
+        {
+            let m = &long_term_memory;
+            sys_executor.register(Box::new(crate::rag::RememberTool::new(m.clone())));
+            sys_executor.register(Box::new(crate::rag::SearchMemoryTool::new(m.clone())));
+            sys_executor.register(Box::new(crate::rag::ForgetTool::new(m.clone())));
+        }
 
+        // `delegate_task` is always exposed — even with no configured
+        // profiles the orchestrator can define an ephemeral subagent inline.
+        // It's built from a snapshot of the registry taken *before* it
+        // registers itself, so subagents structurally never see
+        // `delegate_task` and can't delegate recursively.
         let profiles = SubagentLoader::new()?.load()?;
-        let executor = with_delegation(
-            executor,
-            work_dir.clone(),
-            allow_shell,
+        let base: Arc<dyn ToolExecutor> = Arc::new(sys_executor.clone());
+        sys_executor.register(Box::new(DelegateTool::new(
+            base,
             profiles,
             llm.clone(),
             app_config.clone(),
             config.clone(),
-        );
+        )));
+        let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
 
         Ok(Self {
             llm,
             executor,
             config,
             app_config,
-            rag,
+            memory,
+            #[cfg(feature = "rag")]
+            long_term_memory,
             mcp_statuses,
             work_dir,
             allow_shell,
@@ -116,7 +132,7 @@ impl AgentState {
         })
     }
 
-    pub async fn acp_new_session(
+    pub async fn new_session(
         &self,
         model: Option<&str>,
         skills: Vec<String>,
@@ -129,7 +145,7 @@ impl AgentState {
             .unwrap_or_else(|| self.config.clone());
         // No write lease taken here — merely creating/holding a session open
         // doesn't touch history, so it doesn't contend with other processes.
-        // The cross-process write lease is acquired per-turn in `acp_prompt`.
+        // The cross-process write lease is acquired per-turn in `Self::prompt`.
         {
             let mut sessions = self.sessions.write().await;
             sessions.insert(
@@ -187,7 +203,7 @@ impl AgentState {
         Ok((provider_name, model_name))
     }
 
-    pub async fn acp_update_session_model(
+    pub async fn switch_model(
         &self,
         session_id: &str,
         provider: &str,
@@ -197,7 +213,7 @@ impl AgentState {
         self.apply_session_config(session_id, new_config).await
     }
 
-    pub async fn acp_set_session_model(
+    pub async fn set_session_model(
         &self,
         session_id: &str,
         model_id: &str,
@@ -206,7 +222,7 @@ impl AgentState {
         self.apply_session_config(session_id, new_config).await
     }
 
-    pub async fn acp_set_session_mode(&self, session_id: &str, mode_id: &str) -> Result<()> {
+    pub async fn set_session_mode(&self, session_id: &str, mode_id: &str) -> Result<()> {
         let mode = AgentMode::parse(mode_id)?;
         let mut sessions = self.sessions.write().await;
         let s = sessions
@@ -242,7 +258,7 @@ impl AgentState {
     /// `context` is folded into the warning log line to identify which of
     /// this method's call sites failed.
     async fn persist_conversation(&self, conv: &Conversation, context: &str) {
-        let history = self.rag.history.clone();
+        let history = self.memory.history.clone();
         let conv = conv.clone();
         if let Err(e) = tokio::task::spawn_blocking(move || history.save_conversation(&conv))
             .await
@@ -256,7 +272,13 @@ impl AgentState {
     /// caller can map it to an ACP [`agent_client_protocol::schema::StopReason`]
     /// directly instead of having to reverse-engineer it (e.g. by polling
     /// session state for cancellation after the fact).
-    pub async fn acp_prompt<F>(
+    ///
+    /// `on_update` sees every [`StreamEvent`] the turn produces, including
+    /// ones with no ACP wire equivalent (`IterationStart`, `Usage`,
+    /// `Finished`, `MessageAppended`) — mapping onto ACP's `SessionUpdate` is
+    /// the caller's concern (see `acp::util::stream_event_to_session_update`),
+    /// not this runtime's.
+    pub async fn prompt<F>(
         &self,
         session_id: &str,
         prompt: Vec<AcpContentBlock>,
@@ -265,7 +287,7 @@ impl AgentState {
         mut on_update: F,
     ) -> Result<CoreStopReason>
     where
-        F: FnMut(SessionUpdate) + Send,
+        F: FnMut(StreamEvent) + Send,
     {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| Error::ParseError("invalid session id format".to_string()))?;
@@ -293,27 +315,22 @@ impl AgentState {
             s.cancel = CancellationToken::new();
             s.last_active = Instant::now();
             let llm = crate::config::client_for_config(&s.config, &self.config, &self.llm)?;
-            let base: Arc<dyn ToolExecutor> = if s.mode == AgentMode::Architect {
+            let executor: Arc<dyn ToolExecutor> = if s.mode == AgentMode::Architect {
                 Arc::new(ScopedExecutor::new(
                     self.executor.clone(),
                     vec![
                         "read_file".to_string(),
                         "list_dir".to_string(),
                         "search".to_string(),
+                        "search_memory".to_string(),
                     ],
                 ))
             } else {
                 self.executor.clone()
             };
-            let sandboxed = Arc::new(SandboxedExecutor::new(
-                base,
-                self.work_dir.clone(),
-                self.allow_shell,
-                client_io,
-            )) as Arc<dyn ToolExecutor>;
             (
                 llm,
-                sandboxed,
+                executor,
                 s.config.clone(),
                 s.chat_id,
                 s.skills.clone(),
@@ -323,7 +340,7 @@ impl AgentState {
             )
         };
 
-        // Cross-process write lease for this turn only (see `rag::lease`).
+        // Cross-process write lease for this turn only (see `memory::lease`).
         // Held until this function returns — success, error, or cancellation
         // — via `_lease` staying in scope for the whole body, so an
         // overlapping `session/prompt` on this session from *another*
@@ -332,9 +349,9 @@ impl AgentState {
         // loading/holding a session open never takes this lease — see
         // `SessionState::prompt_lock`'s doc comment — only an in-flight turn
         // does, in any process.
-        let _lease = self.rag.history.acquire_lease(&uuid)?;
+        let _lease = self.memory.history.acquire_lease(&uuid)?;
 
-        let (mut conversation, prompt_builder) = self.rag.prepare(
+        let (mut conversation, prompt_builder) = self.memory.prepare(
             Some(chat_id),
             &skills,
             Some(config.model.clone()),
@@ -351,16 +368,20 @@ impl AgentState {
         // turn's new user message even if the turn crashes before producing
         // anything else, and — since `save_conversation` always rewrites the
         // message log from scratch — transparently upgrades a pre-split-
-        // format conversation (see `rag::history::HistoryManager`'s doc
+        // format conversation (see `memory::history::HistoryManager`'s doc
         // comment) so the `append_message` calls below have a `.jsonl` log
         // that already reflects everything up to this point to append onto.
         self.persist_conversation(&conversation, "persist conversation before turn start")
             .await;
 
-        let history_for_append = self.rag.history.clone();
+        let history_for_append = self.memory.history.clone();
+        // The work-directory boundary and client I/O hook reach every tool
+        // through this context; there is no per-session executor wrapper.
         let turn = TurnContext {
             cancel: &cancel,
             permission_gate: &permission_gate,
+            work_dir: &self.work_dir,
+            client_io: &*client_io,
         };
         let run_result = run_agent_streaming_with_history(
             llm,
@@ -369,7 +390,7 @@ impl AgentState {
             &mut conversation.messages,
             Some(&prompt_builder),
             &turn,
-            move |event| match event {
+            move |event| {
                 // Blocking I/O called synchronously (not via `spawn_blocking`)
                 // deliberately: appends must land in the log in the same
                 // order messages are produced, and this closure already runs
@@ -377,56 +398,12 @@ impl AgentState {
                 // small, fast local-disk append here doesn't race anything —
                 // spawning it would only risk two concurrent appends landing
                 // out of order.
-                StreamEvent::MessageAppended { message } => {
-                    if let Err(e) = history_for_append.append_message(&chat_id, &message) {
-                        tracing::warn!("failed to append message to history: {e}");
-                    }
+                if let StreamEvent::MessageAppended { message } = &event
+                    && let Err(e) = history_for_append.append_message(&chat_id, message)
+                {
+                    tracing::warn!("failed to append message to history: {e}");
                 }
-                StreamEvent::LlmResponse { content } => {
-                    on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                        AcpContentBlock::from(content),
-                    )));
-                }
-                StreamEvent::ThinkingContent { content } => {
-                    on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                        AcpContentBlock::Text(thinking_chunk(content)),
-                    )));
-                }
-                StreamEvent::ToolCall {
-                    id,
-                    tool_name,
-                    arguments,
-                } => {
-                    // Pending, not InProgress: the permission gate (invoked by the
-                    // agent loop right after this event) hasn't authorized
-                    // execution yet at this point.
-                    let raw_input = serde_json::from_str(&arguments).ok();
-                    on_update(SessionUpdate::ToolCall(
-                        AcpToolCall::new(id, &*tool_name)
-                            .kind(tool_kind_for(&tool_name))
-                            .status(ToolCallStatus::Pending)
-                            .raw_input(raw_input),
-                    ));
-                }
-                StreamEvent::ToolResult {
-                    id,
-                    result,
-                    is_error,
-                    ..
-                } => {
-                    let status = if is_error {
-                        ToolCallStatus::Failed
-                    } else {
-                        ToolCallStatus::Completed
-                    };
-                    on_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                        id,
-                        ToolCallUpdateFields::new()
-                            .status(status)
-                            .raw_output(serde_json::Value::String(result)),
-                    )));
-                }
-                _ => {}
+                on_update(event);
             },
         )
         .await;
@@ -452,8 +429,8 @@ impl AgentState {
         run_result.map(|r| r.stop_reason)
     }
 
-    pub async fn acp_list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<SessionInfo>> {
-        let history = self.rag.history.clone();
+    pub async fn list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<SessionInfo>> {
+        let history = self.memory.history.clone();
         let metas = tokio::task::spawn_blocking(move || history.list_conversations())
             .await
             .map_err(Error::from)??;
@@ -471,7 +448,7 @@ impl AgentState {
             .collect())
     }
 
-    pub async fn acp_load_session<F>(
+    pub async fn load_session<F>(
         &self,
         session_id: &str,
         cwd: PathBuf,
@@ -483,7 +460,7 @@ impl AgentState {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| Error::ParseError("invalid session id format".to_string()))?;
 
-        let history = self.rag.history.clone();
+        let history = self.memory.history.clone();
         let conversation = tokio::task::spawn_blocking(move || history.load_conversation(&uuid))
             .await
             .map_err(Error::from)??;
@@ -563,12 +540,12 @@ impl AgentState {
             // above); reject the load instead of handing this connection a
             // history snapshot that's already stale and will never catch up.
             if prompt_in_flight(live) {
-                return Err(Error::Other(format!(
-                    "a prompt is already in flight for session {session_id}; retry once it completes"
-                )));
+                return Err(Error::SessionBusy {
+                    session_id: session_id.to_string(),
+                });
             }
             // Read back the mode so the response reflects whatever
-            // `acp_prompt` is actually enforcing for it, not the
+            // `Self::prompt` is actually enforcing for it, not the
             // fresh-session default.
             live.mode
         };
@@ -585,7 +562,7 @@ mod prompt_lease_ordering_tests {
 
     use tempfile::tempdir;
 
-    use crate::rag::history::HistoryManager;
+    use crate::memory::history::HistoryManager;
 
     use super::*;
 
@@ -609,7 +586,7 @@ mod prompt_lease_ordering_tests {
         }
     }
 
-    // Regression test for the ordering `acp_prompt` relies on: the
+    // Regression test for the ordering `Self::prompt` relies on: the
     // in-process `prompt_lock` must be acquired (and fail fast on an
     // overlapping call) *before* the cross-process `SessionLease` is
     // acquired. Getting this backwards let an overlapping, rejected
@@ -625,7 +602,7 @@ mod prompt_lease_ordering_tests {
         let lock_path = dir.path().join(format!("{chat_id}.lock"));
         let state = sample_session_state(chat_id);
 
-        // Turn A: accepted, in the same order `acp_prompt` now uses.
+        // Turn A: accepted, in the same order `Self::prompt` now uses.
         let _prompt_guard_a = state.try_acquire_prompt_lock("s1").unwrap();
         let _lease_a = history.acquire_lease(&chat_id).unwrap();
         assert!(lock_path.exists());

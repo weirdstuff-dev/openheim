@@ -1,4 +1,4 @@
-use reqwest::Client as ReqwestClient;
+use reqwest::{Client as ReqwestClient, redirect::Policy};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,11 +18,19 @@ use crate::error::Result;
 /// can't be replayed. Bounding only the connect phase and the gap between
 /// reads still detects dead connections while letting healthy slow streams
 /// run to completion as long as bytes keep arriving.
+///
+/// Redirects are disabled: reqwest's default policy strips the
+/// `Authorization` header when a redirect changes host, but not when it only
+/// downgrades `https://` to `http://` on the same host, which would send the
+/// provider's API key over an unencrypted connection. None of the supported
+/// providers redirect under normal operation, so refusing to follow one is
+/// safe and turns a silent credential leak into a visible error instead.
 pub fn build_http_client(timeout_secs: u64) -> Result<ReqwestClient> {
     let timeout = Duration::from_secs(timeout_secs);
     ReqwestClient::builder()
         .connect_timeout(timeout)
         .read_timeout(timeout)
+        .redirect(Policy::none())
         .build()
         .map_err(|e| crate::error::Error::Other(format!("failed to build HTTP client: {}", e)))
 }
@@ -68,7 +76,7 @@ pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<d
 ///
 /// This is the single source of truth for the "reuse the parent client unless
 /// the model/provider changed" pattern needed when a session switches models
-/// (`acp_prompt`) or a subagent runs under a different model
+/// (`AgentState::prompt`) or a subagent runs under a different model
 /// (`DelegateTool::resolve_runtime`).
 pub fn client_for_config(
     target: &AgentConfig,

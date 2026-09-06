@@ -312,27 +312,16 @@ impl AnthropicClient {
     async fn post(&self, request: &AnthropicRequest) -> Result<reqwest::Response> {
         let endpoint = format!("{}/messages", self.api_base.trim_end_matches('/'));
 
-        let response = self
-            .client
-            .post(&endpoint)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("Content-Type", "application/json")
-            .json(request)
-            .send()
-            .await
-            .map_err(Error::ReqwestError)?;
-
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to read error body>".into());
-            return Err(Error::HttpError { status, body });
-        }
-
-        Ok(response)
+        super::http::post_json(
+            &self.client,
+            &endpoint,
+            &[
+                ("x-api-key", self.api_key.as_str()),
+                ("anthropic-version", ANTHROPIC_VERSION),
+            ],
+            request,
+        )
+        .await
     }
 }
 
@@ -345,7 +334,14 @@ impl LlmClient for AnthropicClient {
     /// silently skip `thinking_config`, leaving thinking enabled only for
     /// streaming callers).
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
-        let (chunk_tx, _chunk_rx) = mpsc::unbounded_channel();
+        let (chunk_tx, chunk_rx) = mpsc::unbounded_channel();
+        // Dropped immediately, before any chunk is sent: an unbounded
+        // channel with a live receiver buffers every chunk in memory until
+        // something calls `recv()`, and nothing here ever will. Dropping it
+        // up front makes `chunk_tx.send()` fail fast (already ignored below
+        // and in `send_streaming`) instead of accumulating the whole
+        // response in the channel for the life of the request.
+        drop(chunk_rx);
         self.send_streaming(messages, tools, chunk_tx).await
     }
 
@@ -634,14 +630,11 @@ mod tests {
 
     #[test]
     fn convert_tools_maps_definitions() {
-        let tools = vec![Tool {
-            tool_type: "function".into(),
-            function: crate::core::models::FunctionDefinition {
-                name: "read_file".into(),
-                description: "Read a file".into(),
-                parameters: json!({"type": "object"}),
-            },
-        }];
+        let tools = vec![Tool::function(
+            "read_file",
+            "Read a file",
+            json!({"type": "object"}),
+        )];
         let result = convert_tools(&tools);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "read_file");

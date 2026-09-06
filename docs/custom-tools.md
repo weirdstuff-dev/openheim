@@ -15,32 +15,47 @@ pub trait ToolHandler: Send + Sync {
     fn definition(&self) -> Tool;
 
     /// Executes the tool with JSON-encoded arguments and returns the result as a string.
-    async fn execute(&self, args: &str) -> Result<String>;
+    async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String>;
 }
 ```
 
 The `definition` method runs once at startup to populate the list sent to the LLM. The `execute` method is called each time the LLM decides to use the tool.
 
+`turn` is the calling turn's `openheim::core::turn::TurnContext`. It carries everything the built-in tools use to behave well inside an agent session, and custom tools get exactly the same:
+
+| Field | Type | Use it for |
+|-------|------|-----------|
+| `turn.cancel` | `&CancellationToken` | Race long-running work against it (`tokio::select!`) so a `session/cancel` can interrupt your tool. |
+| `turn.work_dir` | `&Path` | The sandbox boundary. Validate any user- or LLM-supplied path with `openheim::tools::sandbox::validate_path(path, turn.work_dir)` before touching the filesystem; it resolves relative paths against `work_dir`, follows symlinks, and rejects anything outside. |
+| `turn.client_io` | `&dyn ClientIo` | Ask the client (e.g. an editor's unsaved buffers) to read/write a file before falling back to local I/O. Returns `None` when there is no client to ask. |
+| `turn.permission_gate` | `&Arc<dyn PermissionGate>` | Already consulted by the agent loop before your tool runs; only relevant if your tool spawns nested agent turns. |
+
+Ignore the fields you don't need — a tool that calls an HTTP API only cares about `turn.cancel`, if that.
+
+`openheim::tools::args` provides `parse_args(args)` and `require_str(&value, "key")`, which produce the same "failed to parse arguments" / "missing 'key' argument" errors the built-ins use, so the LLM sees consistent feedback.
+
 ---
 
 ## Step-by-step example
 
-The following implements a `fetch_url` tool that downloads a URL and returns its body.
+The following implements a `lookup` tool that queries a fixed third-party API and returns the response body.
 
 ### 1. Define the struct
 
 ```rust
 use async_trait::async_trait;
 use openheim::error::{Error, Result};
-use openheim::core::models::{FunctionDefinition, Tool};
+use openheim::core::models::Tool;
+use openheim::core::turn::TurnContext;
 use openheim::tools::ToolHandler;
+use openheim::tools::args::{parse_args, require_str};
 use serde_json::json;
 
-pub struct FetchUrlTool {
+pub struct LookupTool {
     client: reqwest::Client,
 }
 
-impl FetchUrlTool {
+impl LookupTool {
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -55,72 +70,103 @@ Return a `Tool` with a JSON Schema describing the arguments. The LLM uses the `d
 
 ```rust
 fn definition(&self) -> Tool {
-    Tool {
-        tool_type: "function".to_string(),
-        function: FunctionDefinition {
-            name: "fetch_url".to_string(),
-            description: "Download the content of a URL and return the response body as text. \
-                          Use for fetching documentation, APIs, or web pages.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "The URL to fetch"
-                    }
-                },
-                "required": ["url"]
-            }),
-        },
-    }
+    Tool::function(
+        "lookup",
+        "Query the example API for a term and return the result as text. \
+         Use for looking up documentation or reference entries.",
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The term to look up"
+                }
+            },
+            "required": ["query"]
+        }),
+    )
 }
 ```
 
 ### 3. Implement `execute`
 
-Parse the JSON arguments, run the operation, and return a `String`. Return `Err` only for infrastructure failures — for user-visible failures (e.g. HTTP 404), prefer returning a descriptive string so the LLM can react to the failure.
+Parse the JSON arguments, run the operation, and return a `String`. Return `Err` only for infrastructure failures — for user-visible failures (e.g. HTTP 404), prefer returning a descriptive string so the LLM can react to the failure. Racing the request against `turn.cancel` lets the user interrupt a slow fetch.
+
+**Don't hand an LLM-supplied URL straight to `client.get(url).send()`.** The model can be steered (directly or via prompt injection in fetched content) into requesting internal addresses — cloud metadata endpoints, loopback, RFC1918 ranges — turning the tool into an SSRF primitive. Openheim already ships a hardened `web_fetch` built-in (scheme allowlist, DNS-resolve-then-check with the checked address pinned for the actual connection so a second, rebound lookup can't bypass it, no automatic redirects, timeout, and a response size cap); prefer registering that instead of writing your own general-purpose fetcher. If your tool genuinely needs its own HTTP call, restrict it to a fixed, non-LLM-controlled endpoint rather than an arbitrary model-supplied URL:
 
 ```rust
-async fn execute(&self, args: &str) -> Result<String> {
-    let v: serde_json::Value = serde_json::from_str(args)
-        .map_err(|e| Error::ParseError(format!("invalid args: {e}")))?;
+const API_ENDPOINT: &str = "https://api.example.com/v1/lookup";
 
-    let url = v["url"]
-        .as_str()
-        .ok_or_else(|| Error::ParseError("missing 'url' argument".into()))?;
+async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
+    let v = parse_args(args)?;
+    let query = require_str(&v, "query")?; // used as a query param, never as the URL itself
 
-    let response = self.client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| Error::ToolExecutionError(format!("request failed: {e}")))?;
+    let request = async {
+        let response = self.client
+            .get(API_ENDPOINT)
+            .query(&[("q", query)])
+            .send()
+            .await
+            .map_err(|e| Error::ToolExecutionError(format!("request failed: {e}")))?;
 
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| Error::ToolExecutionError(format!("failed to read body: {e}")))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| Error::ToolExecutionError(format!("failed to read body: {e}")))?;
 
-    if !status.is_success() {
-        return Ok(format!("HTTP {status}: {body}"));
+        if !status.is_success() {
+            return Ok(format!("HTTP {status}: {body}"));
+        }
+
+        Ok(body)
+    };
+
+    tokio::select! {
+        _ = turn.cancel.cancelled() => Err(Error::ToolExecutionError("lookup cancelled".into())),
+        result = request => result,
     }
+}
+```
 
-    Ok(body)
+A tool that touches the filesystem should validate its path first, and prefer the client's view of the file when there is one:
+
+```rust
+use openheim::tools::sandbox::validate_path;
+
+async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
+    let v = parse_args(args)?;
+    let path = validate_path(require_str(&v, "path")?, turn.work_dir)?;
+    let content = match turn.client_io.read_file(&path).await {
+        Some(result) => result?,               // the client answered
+        None => tokio::fs::read_to_string(&path).await?, // no client: local disk
+    };
+    Ok(content.lines().count().to_string())
 }
 ```
 
 ### 4. Register the tool
 
-Use `SystemToolExecutor::register` before running the agent:
+The simplest path is the client builder, which wires the tool into a fully-configured runtime (sandbox, MCP servers, subagents, history):
+
+```rust
+let client = OpenheimClient::builder()
+    .tool(Box::new(FetchUrlTool::new()))
+    .build()
+    .await?;
+```
+
+If you're driving the agent loop yourself, use `SystemToolExecutor::register` and build the `TurnContext` by hand:
 
 ```rust
 use openheim::tools::SystemToolExecutor;
 use openheim::core::agent::run_agent_with_history;
+use openheim::core::client_io::NoClientIo;
 use openheim::core::models::Message;
 use openheim::core::permission::{AllowAll, PermissionGate};
 use openheim::core::turn::TurnContext;
 use openheim::config::{AgentConfig, load_config};
-use openheim::rag::RagContext;
+use std::path::Path;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -140,9 +186,12 @@ async fn main() -> openheim::Result<()> {
 
     let mut messages = vec![Message::user("Fetch https://example.com and summarise it.")];
 
+    let work_dir = std::env::current_dir()?;
     let turn = TurnContext {
         cancel: &CancellationToken::new(),
         permission_gate: &(Arc::new(AllowAll) as Arc<dyn PermissionGate>),
+        work_dir: &work_dir,   // sandbox boundary for the file tools
+        client_io: &NoClientIo, // no editor to delegate file I/O to
     };
 
     let result = run_agent_with_history(

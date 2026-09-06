@@ -5,24 +5,16 @@
 //! writes responses to stdout using the line-delimited JSON framing defined by
 //! the Agent Client Protocol.
 
-use std::sync::Arc;
-
 use agent_client_protocol_tokio::Stdio;
 
-use crate::{
-    acp::{self, AgentState},
-    config::load_config,
-    rag::RagContext,
-};
+use crate::{acp, client::OpenheimClient};
 
 /// Loads configuration, initialises the agent runtime, and serves ACP over stdin/stdout.
 ///
 /// Blocks until the client closes the connection (EOF on stdin).
 pub async fn run() -> crate::error::Result<()> {
-    let app_config = load_config()?;
-    let agent_config = app_config.resolve(None)?;
-    let rag = RagContext::new(app_config.default_skills.clone())?;
-    let state = Arc::new(AgentState::new(agent_config, app_config, rag, vec![]).await?);
+    let client = OpenheimClient::builder().build().await?;
+    let state = client.state().clone();
 
     acp::serve(Stdio::new(), state)
         .await

@@ -1,5 +1,6 @@
 //! Small pieces of ACP vocabulary shared across the `acp` submodules:
-//! session modes, stop-reason/tool-kind mapping, and history replay.
+//! session modes, stop-reason/tool-kind mapping, history replay, and the
+//! `StreamEvent → SessionUpdate` mapping for a live turn.
 
 use agent_client_protocol::schema::{
     ContentBlock as AcpContentBlock, ContentChunk, ImageContent, SessionMode, SessionModeState,
@@ -7,42 +8,10 @@ use agent_client_protocol::schema::{
     ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 
-use crate::{
-    core::models::{ContentBlock, Message, Role, StopReason as CoreStopReason},
-    error::{Error, Result},
+use crate::core::{
+    models::{ContentBlock, Message, Role, StopReason as CoreStopReason, StreamEvent},
+    runtime::AgentMode,
 };
-
-/// Which tool policy a session runs under, set via `session/set_mode`.
-/// [`Self::as_str`] gives the ACP wire-level mode id; [`Self::parse`] is the
-/// inverse, for the boundary where that id arrives as a `&str`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AgentMode {
-    /// Full tool access; tool calls go through the permission gate as normal.
-    #[default]
-    Code,
-    /// Read-only: only `read_file`, `list_dir`, and `search` are offered to
-    /// the LLM, so nothing mutating can run. All three still go through the
-    /// permission gate and can trigger a `session/request_permission` prompt
-    /// unless already approved.
-    Architect,
-}
-
-impl AgentMode {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            AgentMode::Code => "code",
-            AgentMode::Architect => "architect",
-        }
-    }
-
-    pub fn parse(mode_id: &str) -> Result<Self> {
-        match mode_id {
-            "code" => Ok(AgentMode::Code),
-            "architect" => Ok(AgentMode::Architect),
-            other => Err(Error::ParseError(format!("unknown session mode: {other}"))),
-        }
-    }
-}
 
 pub(super) fn session_mode_state(current_mode: AgentMode) -> SessionModeState {
     SessionModeState::new(
@@ -77,7 +46,7 @@ pub(super) fn thinking_chunk(content: String) -> TextContent {
 /// `content._meta.kind == "thinking"` exactly as the live streaming path
 /// does. Without this, thinking shown during a turn vanished on reload even
 /// though it was persisted.
-pub(super) fn replay_history_messages<F>(messages: &[Message], on_update: &mut F)
+pub(crate) fn replay_history_messages<F>(messages: &[Message], on_update: &mut F)
 where
     F: FnMut(SessionUpdate),
 {
@@ -170,6 +139,9 @@ pub(super) fn tool_kind_for(tool_name: &str) -> ToolKind {
         "edit_file" => ToolKind::Edit,
         "list_dir" => ToolKind::Read,
         "search" => ToolKind::Search,
+        "search_memory" => ToolKind::Search,
+        "remember" => ToolKind::Think,
+        "forget" => ToolKind::Delete,
         "web_fetch" => ToolKind::Fetch,
         _ => ToolKind::Other,
     }
@@ -187,6 +159,9 @@ mod tool_kind_tests {
         assert_eq!(tool_kind_for("edit_file"), ToolKind::Edit);
         assert_eq!(tool_kind_for("list_dir"), ToolKind::Read);
         assert_eq!(tool_kind_for("search"), ToolKind::Search);
+        assert_eq!(tool_kind_for("search_memory"), ToolKind::Search);
+        assert_eq!(tool_kind_for("remember"), ToolKind::Think);
+        assert_eq!(tool_kind_for("forget"), ToolKind::Delete);
         assert_eq!(tool_kind_for("web_fetch"), ToolKind::Fetch);
     }
 
@@ -196,6 +171,60 @@ mod tool_kind_tests {
             tool_kind_for("some_mcp_server__custom_tool"),
             ToolKind::Other
         );
+    }
+}
+
+/// Maps one core [`StreamEvent`] from a live turn onto the [`SessionUpdate`]
+/// it corresponds to, if any. `IterationStart`, `Usage`, `Finished`, and
+/// `MessageAppended` have no ACP wire equivalent — they're `AgentState`-
+/// internal or ACP-client-facing-nothing signals (history persistence,
+/// context-size bookkeeping, turn-done) — and map to `None`.
+pub(crate) fn stream_event_to_session_update(event: StreamEvent) -> Option<SessionUpdate> {
+    match event {
+        StreamEvent::LlmResponse { content } => Some(SessionUpdate::AgentMessageChunk(
+            ContentChunk::new(AcpContentBlock::from(content)),
+        )),
+        StreamEvent::ThinkingContent { content } => Some(SessionUpdate::AgentMessageChunk(
+            ContentChunk::new(AcpContentBlock::Text(thinking_chunk(content))),
+        )),
+        StreamEvent::ToolCall {
+            id,
+            tool_name,
+            arguments,
+        } => {
+            // Pending, not InProgress: the permission gate (invoked by the
+            // agent loop right after this event) hasn't authorized
+            // execution yet at this point.
+            let raw_input = serde_json::from_str(&arguments).ok();
+            Some(SessionUpdate::ToolCall(
+                AcpToolCall::new(id, &*tool_name)
+                    .kind(tool_kind_for(&tool_name))
+                    .status(ToolCallStatus::Pending)
+                    .raw_input(raw_input),
+            ))
+        }
+        StreamEvent::ToolResult {
+            id,
+            result,
+            is_error,
+            ..
+        } => {
+            let status = if is_error {
+                ToolCallStatus::Failed
+            } else {
+                ToolCallStatus::Completed
+            };
+            Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                id,
+                ToolCallUpdateFields::new()
+                    .status(status)
+                    .raw_output(serde_json::Value::String(result)),
+            )))
+        }
+        StreamEvent::IterationStart { .. }
+        | StreamEvent::Usage { .. }
+        | StreamEvent::Finished { .. }
+        | StreamEvent::MessageAppended { .. } => None,
     }
 }
 
@@ -324,5 +353,92 @@ mod replay_tests {
                 AcpContentBlock::Image(img) if img.data == "base64data" && img.mime_type == "image/png"
             )
         ));
+    }
+}
+
+#[cfg(test)]
+mod stream_event_tests {
+    use super::*;
+    use crate::core::models::Usage;
+
+    #[test]
+    fn llm_response_becomes_agent_message_chunk() {
+        let update = stream_event_to_session_update(StreamEvent::LlmResponse {
+            content: "hi".into(),
+        });
+        assert!(matches!(
+            update,
+            Some(SessionUpdate::AgentMessageChunk(c)) if matches!(&c.content, AcpContentBlock::Text(t) if t.text == "hi")
+        ));
+    }
+
+    #[test]
+    fn thinking_content_is_tagged_via_meta() {
+        let update = stream_event_to_session_update(StreamEvent::ThinkingContent {
+            content: "pondering".into(),
+        });
+        match update {
+            Some(SessionUpdate::AgentMessageChunk(c)) => match c.content {
+                AcpContentBlock::Text(t) => {
+                    assert_eq!(t.text, "pondering");
+                    assert_eq!(
+                        t.meta.as_ref().and_then(|m| m.get("kind")),
+                        Some(&serde_json::json!("thinking"))
+                    );
+                }
+                other => panic!("expected a text block, got {other:?}"),
+            },
+            other => panic!("expected an AgentMessageChunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_call_and_tool_result_map_to_their_acp_shapes() {
+        let call = stream_event_to_session_update(StreamEvent::ToolCall {
+            id: "call_1".into(),
+            tool_name: "read_file".into(),
+            arguments: r#"{"path":"a.txt"}"#.into(),
+        });
+        assert!(matches!(
+            call,
+            Some(SessionUpdate::ToolCall(tc)) if tc.raw_input.is_some()
+        ));
+
+        let result = stream_event_to_session_update(StreamEvent::ToolResult {
+            id: "call_1".into(),
+            tool_name: "read_file".into(),
+            result: "contents".into(),
+            is_error: false,
+        });
+        assert!(matches!(
+            result,
+            Some(SessionUpdate::ToolCallUpdate(u)) if u.fields.status == Some(ToolCallStatus::Completed)
+        ));
+    }
+
+    #[test]
+    fn events_with_no_acp_equivalent_map_to_none() {
+        assert!(
+            stream_event_to_session_update(StreamEvent::IterationStart { iteration: 1 }).is_none()
+        );
+        assert!(
+            stream_event_to_session_update(StreamEvent::Usage {
+                usage: Usage::default()
+            })
+            .is_none()
+        );
+        assert!(
+            stream_event_to_session_update(StreamEvent::Finished {
+                final_response: "done".into(),
+                iterations: 1,
+            })
+            .is_none()
+        );
+        assert!(
+            stream_event_to_session_update(StreamEvent::MessageAppended {
+                message: Message::user("hi"),
+            })
+            .is_none()
+        );
     }
 }

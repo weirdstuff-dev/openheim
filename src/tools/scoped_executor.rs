@@ -58,7 +58,6 @@ impl ToolExecutor for ScopedExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::models::FunctionDefinition;
     use crate::error::Error;
     use crate::tools::test_support::TurnHarness;
 
@@ -69,13 +68,12 @@ mod tests {
         fn list_tools(&self) -> Vec<Tool> {
             self.0
                 .iter()
-                .map(|name| Tool {
-                    tool_type: "function".to_string(),
-                    function: FunctionDefinition {
-                        name: name.to_string(),
-                        description: String::new(),
-                        parameters: serde_json::json!({"type": "object", "properties": {}}),
-                    },
+                .map(|name| {
+                    Tool::function(
+                        name.to_string(),
+                        String::new(),
+                        serde_json::json!({"type": "object", "properties": {}}),
+                    )
                 })
                 .collect()
         }

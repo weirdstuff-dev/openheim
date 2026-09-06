@@ -3,7 +3,7 @@
 //! (see [`crate::tools::delegate`]).
 //!
 //! A profile is a Markdown file in `~/.openheim/agents/{name}.md`, discovered the
-//! same way [`crate::rag::SkillsManager`] discovers skill files. The file may start
+//! same way [`crate::memory::SkillsManager`] discovers skill files. The file may start
 //! with a `+++`-delimited TOML frontmatter block describing the profile; the rest
 //! of the file is used verbatim as the subagent's system prompt.
 //!
@@ -63,7 +63,7 @@ struct AgentProfileMeta {
 
 /// Discovers and loads [`AgentProfile`]s from `~/.openheim/agents/`.
 ///
-/// Mirrors [`crate::rag::SkillsManager`]: a profile is named after its file
+/// Mirrors [`crate::memory::SkillsManager`]: a profile is named after its file
 /// (`{name}.md`), and the directory is created on first use if missing.
 #[derive(Clone)]
 pub struct SubagentLoader {

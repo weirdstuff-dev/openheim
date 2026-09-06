@@ -1,25 +1,32 @@
 #[derive(Debug, Clone)]
 pub(crate) enum AgentUpdate {
-    TextChunk(String),
-    ThinkingChunk(String),
-    ToolCall {
-        name: String,
-        args: String,
-    },
-    ToolResult {
-        result: String,
-        is_error: bool,
-    },
-    Done,
+    /// One raw event from a live turn — see
+    /// `App::handle_stream_event` for which variants the UI reacts to.
+    Stream(crate::core::models::StreamEvent),
     Error(String),
     ModelChanged {
         provider: String,
         model: String,
     },
-    /// Current context size (the most recent LLM call's usage), refreshed
-    /// after a completed turn or a session switch. `None` clears the
-    /// footer — e.g. switching to a session with no completed turn yet.
+    /// Current context size, refreshed on a session switch (a live turn's
+    /// footer instead updates from `StreamEvent::Usage` as it streams).
+    /// `None` clears the footer — e.g. switching to a session with no
+    /// completed turn yet.
     Usage(Option<crate::core::models::Usage>),
+    /// Answers a `:sessions` request — persisted conversation metadata,
+    /// loaded off the UI task by the agent task.
+    SessionList(Vec<crate::memory::ConversationMeta>),
+    /// A batch of chat items replayed from a restored session's history,
+    /// appended once the agent task's `SessionHandle::restore` finishes
+    /// loading it (see `App::open_session`).
+    History(Vec<ChatItem>),
+    /// Confirms a `:new` request actually replaced the session — the agent
+    /// task only sends this once `client.new_session().start()` succeeds
+    /// (see `mod.rs`'s `new_session_rx` arm), so `App::start_new_session`
+    /// can leave the current transcript and status alone until creation is
+    /// known to have worked, instead of clearing them speculatively before
+    /// the replacement is confirmed.
+    NewSession(Vec<ChatItem>),
 }
 
 #[derive(Debug, Clone)]

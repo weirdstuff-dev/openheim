@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 /// Public model info for a single provider (no credentials).
 #[derive(Debug, Clone, Serialize)]
@@ -15,16 +14,6 @@ pub struct ProviderModels {
 pub struct ModelsInfo {
     pub default_provider: String,
     pub providers: BTreeMap<String, ProviderModels>,
-}
-
-/// Public info for a single MCP server (no credentials or env vars).
-#[derive(Debug, Clone, Serialize)]
-pub struct McpServerInfo {
-    pub transport: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
 }
 
 /// Top-level configuration loaded from ~/.openheim/config.toml
@@ -50,10 +39,68 @@ pub struct AppConfig {
     /// Defaults to `false`. Set to `true` to explicitly opt in to shell access.
     #[serde(default = "default_allow_shell")]
     pub allow_shell: bool,
+    /// Long-term memory (`remember` / `search_memory` / `forget` tools).
+    /// Optional: without it memory still works, keyword-only, in
+    /// `~/.openheim/memory.db`. Set `embedding_provider` / `embedding_model`
+    /// to make `search_memory` semantic.
+    #[serde(default)]
+    pub memory: Option<MemoryConfig>,
 }
 
 fn default_allow_shell() -> bool {
     false
+}
+
+/// The `[memory]` section: where long-term memory lives, how many notes a
+/// search returns, and (optionally) which embeddings endpoint makes search
+/// semantic. Every field is optional; so is the section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    /// Name of a `[providers.<name>]` entry whose `api_base` / API key serve
+    /// the embeddings endpoint. `"gemini"` speaks Gemini's `embedContent`
+    /// API; anything else is treated as OpenAI-compatible `/embeddings`
+    /// (OpenAI, Ollama, Together, …). Anthropic has no embeddings API.
+    /// Unset means keyword (FTS5) search only.
+    #[serde(default)]
+    pub embedding_provider: Option<String>,
+    /// Embedding model name (e.g. `text-embedding-3-small`,
+    /// `gemini-embedding-001`, `nomic-embed-text`). Required when
+    /// `embedding_provider` is set.
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+    /// SQLite file holding notes and vectors. Defaults to
+    /// `~/.openheim/memory.db`. Must be an absolute path (no `~` expansion).
+    #[serde(default)]
+    pub db_path: Option<PathBuf>,
+    /// Default number of notes a `search_memory` call returns (default 5).
+    #[serde(default = "default_top_k")]
+    pub top_k: usize,
+}
+
+fn default_top_k() -> usize {
+    5
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            embedding_provider: None,
+            embedding_model: None,
+            db_path: None,
+            top_k: default_top_k(),
+        }
+    }
+}
+
+/// Resolved embeddings endpoint, assembled from a [`MemoryConfig`] plus the
+/// provider entry it names (see `AppConfig::resolve_embedding`).
+#[derive(Debug, Clone)]
+pub struct EmbeddingConfig {
+    pub provider_name: String,
+    pub api_base: String,
+    pub api_key: String,
+    pub model: String,
+    pub timeout_secs: u64,
 }
 
 /// Configuration for a single MCP server connection.
@@ -124,35 +171,10 @@ impl AppConfig {
                 }
             }
         }
+        if let Some(memory) = val.get_mut("memory").and_then(|v| v.as_object_mut()) {
+            memory.remove("db_path");
+        }
         val
-    }
-
-    pub fn mcp_servers_info(&self) -> BTreeMap<String, McpServerInfo> {
-        self.mcp_servers
-            .iter()
-            .map(|(name, cfg)| {
-                let info = if cfg.command.is_some() {
-                    McpServerInfo {
-                        transport: "stdio",
-                        command: cfg.command.clone(),
-                        url: None,
-                    }
-                } else if cfg.url.is_some() {
-                    McpServerInfo {
-                        transport: "http",
-                        command: None,
-                        url: cfg.url.clone(),
-                    }
-                } else {
-                    McpServerInfo {
-                        transport: "unknown",
-                        command: None,
-                        url: None,
-                    }
-                };
-                (name.clone(), info)
-            })
-            .collect()
     }
 }
 
@@ -235,14 +257,6 @@ impl AgentConfig {
         Self {
             max_iterations,
             ..self.clone()
-        }
-    }
-
-    pub fn arc_with_max_iterations(self: &Arc<Self>, max_iterations: usize) -> Arc<Self> {
-        if self.max_iterations == max_iterations {
-            Arc::clone(self)
-        } else {
-            Arc::new(self.with_max_iterations(max_iterations))
         }
     }
 }
@@ -353,33 +367,6 @@ mod tests {
     }
 
     #[test]
-    fn arc_with_max_iterations_reuses_arc_when_same() {
-        let cfg = Arc::new(AgentConfig::new(
-            "p".into(),
-            "b".into(),
-            "k".into(),
-            "m".into(),
-            10,
-        ));
-        let same = cfg.arc_with_max_iterations(10);
-        assert!(Arc::ptr_eq(&cfg, &same));
-    }
-
-    #[test]
-    fn arc_with_max_iterations_creates_new_when_different() {
-        let cfg = Arc::new(AgentConfig::new(
-            "p".into(),
-            "b".into(),
-            "k".into(),
-            "m".into(),
-            10,
-        ));
-        let different = cfg.arc_with_max_iterations(20);
-        assert!(!Arc::ptr_eq(&cfg, &different));
-        assert_eq!(different.max_iterations, 20);
-    }
-
-    #[test]
     fn agent_config_default_has_correct_values() {
         let cfg = AgentConfig::default();
         assert_eq!(cfg.max_iterations, 10);
@@ -395,5 +382,66 @@ mod tests {
         "#;
         let cfg: AppConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.max_iterations, 10);
+        assert!(cfg.memory.is_none());
+    }
+
+    #[test]
+    fn memory_section_deserializes_with_defaults() {
+        let toml_str = r#"
+            default_provider = "openai"
+            [memory]
+            embedding_provider = "openai"
+            embedding_model = "text-embedding-3-small"
+        "#;
+        let cfg: AppConfig = toml::from_str(toml_str).unwrap();
+        let memory = cfg.memory.unwrap();
+        assert_eq!(memory.embedding_provider.as_deref(), Some("openai"));
+        assert_eq!(
+            memory.embedding_model.as_deref(),
+            Some("text-embedding-3-small")
+        );
+        assert_eq!(memory.top_k, 5);
+        assert!(memory.db_path.is_none());
+
+        let bare: AppConfig = toml::from_str("default_provider = \"openai\"\n[memory]\n").unwrap();
+        let memory = bare.memory.unwrap();
+        assert!(memory.embedding_provider.is_none());
+        assert_eq!(memory.top_k, 5);
+    }
+
+    #[test]
+    fn to_public_json_redacts_secrets_and_local_paths() {
+        let toml_str = r#"
+            default_provider = "openai"
+            [providers.openai]
+            api_base = "https://api.openai.com/v1"
+            default_model = "gpt-4"
+            models = ["gpt-4"]
+            api_key = "sk-super-secret"
+
+            [mcp_servers.demo]
+            command = "npx"
+            env = { API_TOKEN = "also-secret" }
+
+            [memory]
+            embedding_provider = "openai"
+            embedding_model = "text-embedding-3-small"
+            db_path = "/Users/alice/.openheim/memory.db"
+            top_k = 7
+        "#;
+        let cfg: AppConfig = toml::from_str(toml_str).unwrap();
+
+        let val = cfg.to_public_json(std::path::Path::new("/work/dir"));
+
+        assert_eq!(val["work_dir"], "/work/dir");
+        assert!(val["providers"]["openai"].get("api_key").is_none());
+        assert_eq!(val["mcp_servers"]["demo"]["env"]["API_TOKEN"], "<redacted>");
+
+        // db_path is a local filesystem path, not a secret the client needs;
+        // it's stripped, while the rest of the [memory] section survives.
+        assert!(val["memory"].get("db_path").is_none());
+        assert_eq!(val["memory"]["embedding_provider"], "openai");
+        assert_eq!(val["memory"]["embedding_model"], "text-embedding-3-small");
+        assert_eq!(val["memory"]["top_k"], 7);
     }
 }

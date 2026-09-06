@@ -68,6 +68,19 @@ env_var = "ANTHROPIC_API_KEY"
 # default_model = "llama2"
 # models = ["llama2", "mistral", "codellama", "mixtral"]
 
+# --- Long-term memory ---
+# The agent always has `remember`, `search_memory`, and `forget` tools backed by
+# ~/.openheim/memory.db. Nothing is stored or retrieved unless the agent calls
+# them (e.g. when you ask it to remember or recall something). Out of the box
+# `search_memory` is keyword search (SQLite FTS5, no network). Set an embedding
+# provider to make it semantic (vectors stored via sqlite-vec).
+#
+# [memory]
+# embedding_provider = "openai"               # a [providers.X] entry; its api_base/key serve the embeddings endpoint
+# embedding_model = "text-embedding-3-small"  # Gemini: "gemini-embedding-001"; Ollama: "nomic-embed-text"
+# db_path = "/absolute/path.db"               # default: ~/.openheim/memory.db
+# top_k = 5                                   # notes returned per search
+
 # --- MCP Server Configuration (Model Context Protocol) ---
 # Tools are exposed to the LLM as "{server_name}__{tool_name}".
 #

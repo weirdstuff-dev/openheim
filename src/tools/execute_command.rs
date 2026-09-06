@@ -10,10 +10,12 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
-use crate::core::models::{FunctionDefinition, Tool};
+use crate::core::models::Tool;
+use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
 use super::ToolHandler;
+use super::args::{parse_args, require_str};
 
 /// Default hard wall-clock limit on a single command. Anything still running
 /// past this is killed (whole process group) and reported as an error, so a
@@ -34,8 +36,7 @@ const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) struct RunCommandOptions<'a> {
     pub cwd: Option<&'a Path>,
     /// Turn cancellation; when it fires the command is killed as on timeout.
-    /// `None` where no token is reachable (the bare `ToolHandler` path — the
-    /// trait has no turn context yet); the timeout still bounds execution.
+    /// `None` only in unit tests that exercise the timeout alone.
     pub cancel: Option<&'a CancellationToken>,
     pub timeout: Duration,
     pub max_output_bytes: usize,
@@ -56,9 +57,8 @@ impl Default for RunCommandOptions<'_> {
 /// Windows), optionally pinned to `cwd`. Returns stdout on success, or an
 /// error carrying the combined stdout+stderr diagnostic on a non-zero exit.
 ///
-/// Single source of truth for the `execute_command` behaviour, shared by
-/// [`ExecuteCommandTool`] and [`crate::tools::SandboxedExecutor`] (which passes
-/// the work directory as `cwd` so relative paths resolve inside the sandbox).
+/// [`ExecuteCommandTool`] passes the turn's work directory as `cwd` so
+/// relative paths resolve inside the sandbox.
 ///
 /// Hardening applied to every invocation:
 ///
@@ -257,52 +257,55 @@ async fn kill_and_reap(child: &mut tokio::process::Child) {
 /// Executes an arbitrary shell command and returns stdout on success, or a
 /// combined stdout+stderr diagnostic string on failure.
 ///
-/// Uses `sh -c` on Unix and `cmd /C` on Windows. Non-zero exit codes produce
-/// a descriptive string rather than an error so the LLM can interpret and react
-/// to the failure output.
+/// Uses `sh -c` on Unix and `cmd /C` on Windows, with the turn's work
+/// directory as the working directory. Non-zero exit codes produce a
+/// descriptive string rather than an error so the LLM can interpret and react
+/// to the failure output. The command is killed if the turn is cancelled.
+///
+/// Only registered when `allow_shell` is enabled (see
+/// [`super::SystemToolExecutor::build`]). Note that absolute paths inside the
+/// shell command are not blocked at the application layer — OS-level
+/// sandboxing is required for that.
 pub struct ExecuteCommandTool;
 
 #[async_trait]
 impl ToolHandler for ExecuteCommandTool {
     fn definition(&self) -> Tool {
-        Tool {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "execute_command".to_string(),
-                description: "Execute a shell command (e.g., ls, pwd, echo). Use this for listing directories and running system commands. Commands are killed after 120 seconds and output is truncated at 64 KiB per stream.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "The shell command to execute"
-                        }
-                    },
-                    "required": ["command"]
-                }),
-            },
-        }
+        Tool::function(
+            "execute_command",
+            "Execute a shell command (e.g., ls, pwd, echo). Use this for listing directories and running system commands. Commands are killed after 120 seconds and output is truncated at 64 KiB per stream.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute"
+                    }
+                },
+                "required": ["command"]
+            }),
+        )
     }
 
-    async fn execute(&self, args: &str) -> Result<String> {
-        let args: serde_json::Value = serde_json::from_str(args)
-            .map_err(|e| Error::ParseError(format!("Failed to parse tool arguments: {}", e)))?;
-
-        let command = args["command"]
-            .as_str()
-            .ok_or_else(|| Error::ParseError("Missing 'command' argument".to_string()))?;
-
-        // No cancellation token here: `ToolHandler::execute` has no turn
-        // context to take one from. The timeout, output cap, and process
-        // group handling still apply; wiring the token through belongs to
-        // threading `TurnContext` into the trait.
-        run_command(command, &RunCommandOptions::default()).await
+    async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
+        let args = parse_args(args)?;
+        let command = require_str(&args, "command")?;
+        run_command(
+            command,
+            &RunCommandOptions {
+                cwd: Some(turn.work_dir),
+                cancel: Some(turn.cancel),
+                ..Default::default()
+            },
+        )
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::test_support::TurnHarness;
 
     #[test]
     fn definition_has_correct_name() {
@@ -314,34 +317,75 @@ mod tests {
 
     #[tokio::test]
     async fn execute_runs_simple_command() {
-        let tool = ExecuteCommandTool;
-        let args = r#"{"command": "echo hello"}"#;
-        let result = tool.execute(args).await.unwrap();
+        let harness = TurnHarness::new();
+        let result = ExecuteCommandTool
+            .execute(r#"{"command": "echo hello"}"#, &harness.turn())
+            .await
+            .unwrap();
         assert_eq!(result.trim(), "hello");
+    }
+
+    #[cfg(target_family = "unix")]
+    #[tokio::test]
+    async fn execute_runs_in_work_dir() {
+        let harness = TurnHarness::new();
+        std::fs::write(harness.work_dir().join("marker.txt"), "x").unwrap();
+        let result = ExecuteCommandTool
+            .execute(r#"{"command": "ls"}"#, &harness.turn())
+            .await
+            .unwrap();
+        assert_eq!(result.trim(), "marker.txt");
     }
 
     #[tokio::test]
     async fn execute_errors_for_failing_command() {
-        let tool = ExecuteCommandTool;
-        let args = r#"{"command": "ls /nonexistent_dir_12345"}"#;
-        let result = tool.execute(args).await;
+        let harness = TurnHarness::new();
+        let result = ExecuteCommandTool
+            .execute(
+                r#"{"command": "ls /nonexistent_dir_12345"}"#,
+                &harness.turn(),
+            )
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Command failed:"));
     }
 
     #[tokio::test]
     async fn execute_errors_for_malformed_json() {
-        let tool = ExecuteCommandTool;
-        let result = tool.execute("bad json").await;
+        let harness = TurnHarness::new();
+        let result = ExecuteCommandTool
+            .execute("bad json", &harness.turn())
+            .await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn execute_errors_for_missing_command() {
-        let tool = ExecuteCommandTool;
-        let result = tool.execute(r#"{"other": "value"}"#).await;
+        let harness = TurnHarness::new();
+        let result = ExecuteCommandTool
+            .execute(r#"{"other": "value"}"#, &harness.turn())
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("command"));
+    }
+
+    #[cfg(target_family = "unix")]
+    #[tokio::test]
+    async fn execute_cancel_aborts_running_shell() {
+        let harness = TurnHarness::new();
+        let cancel = harness.cancel_handle();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel.cancel();
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            ExecuteCommandTool.execute(r#"{"command": "sleep 30"}"#, &harness.turn()),
+        )
+        .await
+        .expect("turn cancel should abort the running command");
+        assert!(result.is_err());
     }
 
     #[cfg(target_family = "unix")]

@@ -9,7 +9,7 @@ Openheim can be embedded directly in your Rust application. The library exposes 
 ```toml
 # Cargo.toml
 [dependencies]
-openheim = "0.8"
+openheim = "0.9"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -22,9 +22,10 @@ Embedders that drive the agent through `OpenheimClient` (or their own ACP
 wiring) usually don't need those:
 
 ```toml
-openheim = { version = "0.8", default-features = false }
+openheim = { version = "0.9", default-features = false }
 # optionally: features = ["server"]  # axum WS/REST server (openheim::transport::ws)
 # optionally: features = ["tui"]     # ratatui terminal UI (openheim::tui)
+# optionally: features = ["rag"]     # remember/search_memory/forget long-term memory (rusqlite FTS5 + sqlite-vec)
 ```
 
 Everything else — the client facade, agent loop, providers, tools, MCP, ACP,
@@ -78,6 +79,17 @@ let client = OpenheimClient::builder().build().await?;
 
 ```rust
 let client = OpenheimClient::from_config("/etc/myapp/openheim.toml")
+    .build()
+    .await?;
+```
+
+### Overriding just the model
+
+`.model()` alone (with no `.provider()`/`.api_key()`/`.api_base()`) doesn't switch to programmatic config — it still loads the config file, but resolves this model instead of the default one, the same as passing `--model` to `openheim run`:
+
+```rust
+let client = OpenheimClient::builder()
+    .model("claude-opus-4-7") // must be listed under some provider in the config file
     .build()
     .await?;
 ```
@@ -158,7 +170,7 @@ MCP servers defined in a config file are always loaded; builder `.mcp_server()` 
 
 ### With custom tools
 
-`.tool()` registers an in-process `ToolHandler` alongside the built-ins and any MCP-sourced tools, subject to the same `work_dir`/`allow_shell` sandbox boundary. See [custom-tools.md](./custom-tools.md) for how to implement `ToolHandler`.
+`.tool()` registers an in-process `ToolHandler` alongside the built-ins and any MCP-sourced tools. Each call receives the turn's `TurnContext` (cancel token, `work_dir`, client I/O), so a custom tool can enforce the same sandbox boundary the built-ins do. See [custom-tools.md](./custom-tools.md) for how to implement `ToolHandler`.
 
 ```rust
 let client = OpenheimClient::builder()
@@ -232,6 +244,28 @@ session
         vec![(data, "image/png".to_string())],
         |update| { /* same SessionUpdate events as `prompt` */ },
     )
+    .await?;
+```
+
+### Send a prompt (raw `StreamEvent`)
+
+`prompt`/`prompt_with_images` map every event onto ACP's `SessionUpdate` vocabulary, which has no room for some of what the agent loop actually produces. `prompt_events`/`prompt_events_with_images` hand you the raw [`StreamEvent`](https://docs.rs/openheim) instead — same turn, no ACP mapping in between — including `Usage` (context size, live per LLM call) and `Finished` (the turn is done) alongside the four `SessionUpdate` has equivalents for. They return the turn's `StopReason` (`EndTurn`/`MaxIterations`/`Cancelled`/`NoContent`) instead of `()`.
+
+```rust
+use openheim::StreamEvent;
+
+let stop_reason = session
+    .prompt_events("Refactor the auth module to use JWTs", |event| {
+        match event {
+            StreamEvent::LlmResponse { content } => print!("{content}"),
+            StreamEvent::ThinkingContent { content } => eprint!("{content}"),
+            StreamEvent::ToolCall { tool_name, .. } => println!("\n[tool] {tool_name} — running…"),
+            StreamEvent::ToolResult { tool_name, .. } => println!("[tool] {tool_name} — done"),
+            StreamEvent::Usage { usage } => { /* update a live context-size indicator */ let _ = usage; }
+            StreamEvent::Finished { .. } => { /* turn done */ }
+            _ => {}
+        }
+    })
     .await?;
 ```
 
@@ -365,30 +399,50 @@ client.delete_session("550e8400-e29b-41d4-a716-446655440000").await?;
 
 ---
 
-## RAG — direct history and skills access
+## Memory — direct history and skills access
 
-`client.rag()` returns a `&RagContext` with direct access to the underlying `HistoryManager` and `SkillsManager`. This is useful for advanced use cases like building custom UIs, searching conversations, or managing skills programmatically.
+`client.memory()` returns a `&MemoryContext` with direct access to the underlying `HistoryManager` and `SkillsManager`. This is useful for advanced use cases like building custom UIs, searching conversations, or managing skills programmatically.
 
 ```rust
-let rag = client.rag();
+let memory = client.memory();
 
 // List all conversation metadata
-let metas = rag.history.list_conversations()?;
+let metas = memory.history.list_conversations()?;
 
 // Load a full conversation
-let conv = rag.history.load_conversation(&uuid)?;
+let conv = memory.history.load_conversation(&uuid)?;
 
 // Save a conversation (e.g. after external edits)
-rag.history.save_conversation(&conv)?;
+memory.history.save_conversation(&conv)?;
 
 // List available skills
-let skills = rag.skills.list_skills()?;
+let skills = memory.skills.list_skills()?;
 // → ["debugging", "rust", "tdd"]
 
 // Load skill content
-let content = rag.skills.load_skill("rust")?;
+let content = memory.skills.load_skill("rust")?;
 println!("{content}");
 ```
+
+---
+
+## Long-term memory
+
+With the `rag` feature, `client.long_term_memory()` returns the `LongTermMemory` behind the `remember` / `search_memory` / `forget` tools. It is keyword search (FTS5) unless the config's `[memory]` section names an embedding provider, in which case search is semantic. You can drive it directly, for example to seed memories or build a memory browser:
+
+```rust
+let memory = client.long_term_memory();
+let note = memory.remember("The user's staging cluster is eu-west-1.").await?;
+
+// Best match first; `hit.method` says whether the score is cosine similarity or a BM25 rank.
+for hit in memory.search("where is staging?", Some(3)).await? {
+    println!("#{} {} ({:?} {:.2})\n{}", hit.record.id, hit.record.created_at, hit.method, hit.score, hit.record.content);
+}
+
+memory.forget(note.id).await?;
+```
+
+To use a custom embeddings backend, implement `openheim::rag::EmbeddingClient` and build `LongTermMemory::new(VectorStore::open(path)?, Some(Arc::new(my_embedder)), top_k)` yourself; wrap it in `RememberTool` / `SearchMemoryTool` / `ForgetTool` and register them via `OpenheimBuilder::tool` if the agent should be able to call them.
 
 ---
 

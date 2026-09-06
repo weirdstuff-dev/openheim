@@ -1,6 +1,6 @@
 //! Built-in tool: `web_fetch` — fetches a URL and returns its content as text.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -8,10 +8,12 @@ use futures::StreamExt;
 use reqwest::redirect::Policy;
 use serde_json::json;
 
-use crate::core::models::{FunctionDefinition, Tool};
+use crate::core::models::Tool;
+use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
 use super::ToolHandler;
+use super::args::{parse_args, require_str};
 
 /// Wall-clock limit for the whole request (connect + headers + body).
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
@@ -202,19 +204,37 @@ fn is_disallowed_ip(ip: IpAddr) -> bool {
             // IPv6 checks below wouldn't catch on their own — a request to
             // `::ffff:169.254.169.254` would sail straight past them despite
             // being cloud metadata. Run those embedded addresses back through
-            // the IPv4 checks too. `to_ipv4` also matches `::` and `::1`
-            // (as 0.0.0.0 and 0.0.0.1, neither of which is IPv4-loopback),
-            // so this is additive, not a replacement for the native checks.
-            #[allow(deprecated)]
-            let embeds_disallowed_ipv4 = v6
-                .to_ipv4()
-                .is_some_and(|v4| is_disallowed_ip(IpAddr::V4(v4)));
+            // the IPv4 checks too. `to_ipv4_mapped()` covers the first form;
+            // `ipv4_compatible` covers the second, deprecated (RFC 4291) one
+            // that `to_ipv4_mapped()` doesn't — between them, `::` and `::1`
+            // are still matched too (as 0.0.0.0 and 0.0.0.1, neither of which
+            // is IPv4-loopback), same as the old `to_ipv4()` did, so this is
+            // additive, not a replacement for the native checks below.
+            let embedded_v4 = v6.to_ipv4_mapped().or_else(|| ipv4_compatible(&v6));
+            let embeds_disallowed_ipv4 =
+                embedded_v4.is_some_and(|v4| is_disallowed_ip(IpAddr::V4(v4)));
             embeds_disallowed_ipv4
                 || v6.is_loopback()
                 || v6.is_unspecified()
                 || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique local, fc00::/7
                 || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local, fe80::/10
         }
+    }
+}
+
+/// The deprecated (RFC 4291) "IPv4-compatible" IPv6 form `::a.b.c.d`: the
+/// first 96 bits are zero and the last 32 embed the IPv4 address directly —
+/// distinct from the still-current "IPv4-mapped" form `::ffff:a.b.c.d`
+/// that [`Ipv6Addr::to_ipv4_mapped`] already recognizes.
+fn ipv4_compatible(v6: &Ipv6Addr) -> Option<Ipv4Addr> {
+    let segments = v6.segments();
+    if segments[0..6] == [0, 0, 0, 0, 0, 0] {
+        let octets = v6.octets();
+        Some(Ipv4Addr::new(
+            octets[12], octets[13], octets[14], octets[15],
+        ))
+    } else {
+        None
     }
 }
 
@@ -325,40 +345,41 @@ pub struct WebFetchTool;
 #[async_trait]
 impl ToolHandler for WebFetchTool {
     fn definition(&self) -> Tool {
-        Tool {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "web_fetch".to_string(),
-                description: "Fetch a web page or other text-like resource (HTML, plain text, JSON, XML) from a public http(s) URL and return its content as plain text. HTML is stripped of markup. Requests time out after 20 seconds, redirects are not followed automatically (the redirect target is reported instead), and content is truncated at 256 KiB. Only publicly-routable addresses can be fetched.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "url": {
-                            "type": "string",
-                            "description": "The http:// or https:// URL to fetch"
-                        }
-                    },
-                    "required": ["url"]
-                }),
-            },
-        }
+        Tool::function(
+            "web_fetch",
+            "Fetch a web page or other text-like resource (HTML, plain text, JSON, XML) from a public http(s) URL and return its content as plain text. HTML is stripped of markup. Requests time out after 20 seconds, redirects are not followed automatically (the redirect target is reported instead), and content is truncated at 256 KiB. Only publicly-routable addresses can be fetched.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The http:// or https:// URL to fetch"
+                    }
+                },
+                "required": ["url"]
+            }),
+        )
     }
 
-    async fn execute(&self, args: &str) -> Result<String> {
-        let args: serde_json::Value = serde_json::from_str(args)
-            .map_err(|e| Error::ParseError(format!("Failed to parse tool arguments: {}", e)))?;
-
-        let url = args["url"]
-            .as_str()
-            .ok_or_else(|| Error::ParseError("Missing 'url' argument".to_string()))?;
-
-        fetch_url(url).await
+    async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
+        let args = parse_args(args)?;
+        let url = require_str(&args, "url")?;
+        // The request already has its own timeout; racing it against the
+        // turn's cancel token additionally lets `session/cancel` drop a
+        // fetch that's still in flight.
+        tokio::select! {
+            _ = turn.cancel.cancelled() => Err(Error::ToolExecutionError(
+                "web_fetch cancelled".to_string(),
+            )),
+            result = fetch_url(url) => result,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::test_support::TurnHarness;
 
     #[test]
     fn definition_has_correct_name() {
@@ -370,15 +391,17 @@ mod tests {
 
     #[tokio::test]
     async fn execute_errors_for_malformed_json() {
-        let tool = WebFetchTool;
-        let result = tool.execute("not json").await;
+        let harness = TurnHarness::new();
+        let result = WebFetchTool.execute("not json", &harness.turn()).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn execute_errors_for_missing_url() {
-        let tool = WebFetchTool;
-        let result = tool.execute(r#"{"other": "value"}"#).await;
+        let harness = TurnHarness::new();
+        let result = WebFetchTool
+            .execute(r#"{"other": "value"}"#, &harness.turn())
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("url"));
     }

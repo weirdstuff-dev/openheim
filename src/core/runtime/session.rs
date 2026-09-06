@@ -6,9 +6,9 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::acp::AgentMode;
 use crate::config::AgentConfig;
 use crate::core::permission::PermissionDecision;
+use crate::core::runtime::AgentMode;
 use crate::error::{Error, Result};
 
 #[derive(Debug)]
@@ -32,9 +32,9 @@ pub struct SessionState {
     /// Held for the duration of a `session/prompt` turn so a second, overlapping
     /// prompt on the same session (in this process) is rejected instead of
     /// racing the first one (both would otherwise reset `cancel` and clobber
-    /// the saved history). The cross-process write lease (`rag::lease`) is a
-    /// separate, turn-scoped guard acquired directly in `acp_prompt` — not
-    /// stored here — so merely loading/viewing a session never locks it
+    /// the saved history). The cross-process write lease (`memory::lease`) is a
+    /// separate, turn-scoped guard acquired directly in `AgentState::prompt` —
+    /// not stored here — so merely loading/viewing a session never locks it
     /// against other processes; only an in-flight turn does.
     pub prompt_lock: Arc<Mutex<()>>,
     /// Last time this session was used (prompt, cancel, model/mode switch,
@@ -49,11 +49,12 @@ impl SessionState {
     /// the session in the error message; hold the returned guard for the
     /// duration of the turn — it releases automatically when dropped.
     pub fn try_acquire_prompt_lock(&self, session_id: &str) -> Result<OwnedMutexGuard<()>> {
-        self.prompt_lock.clone().try_lock_owned().map_err(|_| {
-            Error::Other(format!(
-                "a prompt is already in flight for session {session_id}"
-            ))
-        })
+        self.prompt_lock
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| Error::SessionBusy {
+                session_id: session_id.to_string(),
+            })
     }
 }
 
@@ -107,9 +108,9 @@ pub(crate) fn insert_or_keep_live(
 /// than `idle_after`, then — if the map still exceeds `max_sessions` — the
 /// least-recently-active ones until it fits. A session with a prompt in
 /// flight is never evicted. Must be called while holding the sessions map's
-/// *write* lock: `acp_prompt` acquires `prompt_lock` under that same lock, so
-/// a lock observed free here cannot be acquired by a new turn until the sweep
-/// finishes, and a running turn holds its lock for the whole turn.
+/// *write* lock: `AgentState::prompt` acquires `prompt_lock` under that same
+/// lock, so a lock observed free here cannot be acquired by a new turn until
+/// the sweep finishes, and a running turn holds its lock for the whole turn.
 pub(crate) fn evict_idle_sessions(
     sessions: &mut HashMap<String, SessionState>,
     now: Instant,

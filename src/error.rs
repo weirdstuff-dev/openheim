@@ -27,7 +27,7 @@ pub enum Error {
     #[error("{0}")]
     NotFound(String),
 
-    /// A session's write lease (see `rag::lease`) is held by another,
+    /// A session's write lease (see `memory::lease`) is held by another,
     /// still-live process. Returned from activation-for-writing (creating or
     /// loading a session for prompting); reading/listing history never hits
     /// this. The GUI matches on this variant to offer a read-only fallback.
@@ -38,6 +38,14 @@ pub enum Error {
         host: String,
     },
 
+    /// A `session/prompt`/`session/load` arrived while a turn was already in
+    /// flight for this session, in this process (see `SessionState::prompt_lock`).
+    /// Distinct from [`Error::SessionLocked`], which is cross-process; a
+    /// caller can retry once the in-flight turn completes instead of
+    /// treating this as a hard failure.
+    #[error("a prompt is already in flight for session {session_id}; retry once it completes")]
+    SessionBusy { session_id: String },
+
     /// `save_conversation` would have rewritten the on-disk message log with
     /// fewer messages than are already there — another writer (a second
     /// `openheim` process sharing the same history directory) appended to
@@ -46,6 +54,10 @@ pub enum Error {
     /// conversation and retry.
     #[error("conversation {session_id} was modified by another process since it was loaded")]
     HistoryDiverged { session_id: String },
+
+    /// SQLite / sqlite-vec failure in the long-term memory store (feature `rag`).
+    #[error("Database error: {0}")]
+    DatabaseError(String),
 
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
@@ -79,6 +91,13 @@ impl Error {
             Error::ReqwestError(e) => e.is_timeout() || e.is_connect(),
             _ => false,
         }
+    }
+}
+
+#[cfg(feature = "rag")]
+impl From<rusqlite::Error> for Error {
+    fn from(e: rusqlite::Error) -> Self {
+        Error::DatabaseError(e.to_string())
     }
 }
 

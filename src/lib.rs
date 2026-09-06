@@ -51,6 +51,7 @@
 //! | `cli`    | ✓          | The `openheim` binary (CLI, TUI, `serve`). Implies `tui` + `server`. |
 //! | `tui`    | via `cli`  | The `tui` module (ratatui/crossterm terminal UI).    |
 //! | `server` | via `cli`  | The `transport::ws` WebSocket/REST server (axum).    |
+//! | `rag`    | via `cli`  | The `rag` module and `remember`/`search_memory`/`forget` tools (rusqlite with FTS5 + sqlite-vec). |
 //!
 //! Everything else — the client facade, agent loop, providers, tools, MCP,
 //! ACP, and config — is always available. Embedders that don't need the
@@ -64,7 +65,8 @@
 //! - [`OpenheimClient`] / [`OpenheimBuilder`] — main entry point
 //! - [`SessionHandle`] — send prompts and receive streaming [`SessionUpdate`] events
 //! - [`LlmClient`] — implement to add a custom provider
-//! - [`RagContext`] — conversation history and skill injection
+//! - [`MemoryContext`] — conversation history, skills, and system identity
+//! - [`rag::LongTermMemory`] — tool-driven long-term memory: FTS5 keyword search, optionally sqlite-vec semantic search (feature `rag`)
 //! - [`Error`] / [`Result`] — unified error type
 
 pub mod acp;
@@ -73,6 +75,8 @@ pub mod config;
 pub mod core;
 pub mod error;
 pub mod mcp;
+pub mod memory;
+#[cfg(feature = "rag")]
 pub mod rag;
 pub mod subagents;
 pub mod tools;
@@ -88,11 +92,13 @@ pub use llm::{AnthropicClient, GeminiClient, LlmClient, OpenAiClient, OpenAiComp
 // `ContentBlock` is deliberately omitted here: `agent_client_protocol::schema::ContentBlock`
 // below is the one library users see at the crate root. Reach the core content-block
 // type via `openheim::core::models::ContentBlock` if needed.
+pub use memory::{Conversation, ConversationMeta, HistoryManager, MemoryContext, PromptBuilder};
 pub use models::{
     AgentResult, AgentStep, Choice, FinishReason, FunctionDefinition, Message, Role, StopReason,
     StreamEvent, Tool, ToolExecutionResult, ToolResultBlock, ToolUseBlock,
 };
-pub use rag::{Conversation, ConversationMeta, HistoryManager, PromptBuilder, RagContext};
+#[cfg(feature = "rag")]
+pub use rag::LongTermMemory;
 
 // Library facade
 pub use client::{OpenheimBuilder, OpenheimClient, SessionBuilder, SessionHandle};

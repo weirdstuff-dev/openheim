@@ -57,10 +57,7 @@ use walkdir::WalkDir;
 use agent_client_protocol::Lines;
 
 use crate::{
-    acp::{self, AgentState},
-    config::load_config,
-    error::Error as AppError,
-    rag::RagContext,
+    acp, client::OpenheimClient, core::runtime::AgentState, error::Error as AppError,
     tools::sandbox::validate_path,
 };
 
@@ -183,10 +180,8 @@ pub enum FsResponse {
 ///
 /// Blocks until a Ctrl-C signal is received, then shuts down gracefully.
 pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
-    let app_config = load_config()?;
-    let agent_config = app_config.resolve(None)?;
-    let rag = RagContext::new(app_config.default_skills.clone())?;
-    let state = Arc::new(AgentState::new(agent_config, app_config, rag, vec![]).await?);
+    let client = OpenheimClient::builder().build().await?;
+    let state = client.state().clone();
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -234,7 +229,7 @@ async fn models_handler(State(state): State<Arc<AgentState>>) -> impl IntoRespon
 }
 
 async fn skills_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
-    Json(state.rag.skills.list_skills().unwrap_or_default())
+    Json(state.memory.skills.list_skills().unwrap_or_default())
 }
 
 async fn tools_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
@@ -248,7 +243,7 @@ async fn mcp_servers_handler(State(state): State<Arc<AgentState>>) -> impl IntoR
 async fn sessions_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
     // History I/O is synchronous file access; run it off the runtime threads
     // (same as the ACP layer does) instead of blocking a worker.
-    let history = state.rag.history.clone();
+    let history = state.memory.history.clone();
     match tokio::task::spawn_blocking(move || history.list_conversations()).await {
         Ok(Ok(metas)) => Json(metas).into_response(),
         _ => (
@@ -273,7 +268,7 @@ async fn session_handler(
                 .into_response();
         }
     };
-    let history = state.rag.history.clone();
+    let history = state.memory.history.clone();
     match tokio::task::spawn_blocking(move || history.load_conversation(&uuid)).await {
         Ok(Ok(conv)) => Json(conv).into_response(),
         Ok(Err(AppError::NotFound(_))) => (

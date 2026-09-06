@@ -12,7 +12,6 @@
 //! orchestrator never sees the subagent's intermediate steps, exactly like
 //! Claude Code's `Task` subagents.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -20,16 +19,16 @@ use serde_json::json;
 
 use crate::config::{AgentConfig, AppConfig, client_for_config};
 use crate::core::agent::run_agent_with_history;
-use crate::core::client_io::NoClientIo;
 use crate::core::llm::LlmClient;
-use crate::core::models::{FunctionDefinition, Message, StopReason, Tool};
+use crate::core::models::{Message, StopReason, Tool};
 use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
-use crate::rag::PromptBuilder;
+use crate::memory::PromptBuilder;
 use crate::subagents::AgentProfile;
 
+use super::args::{parse_args, require_str};
 use super::scoped_executor::ScopedExecutor;
-use super::{SandboxedExecutor, ToolExecutor};
+use super::{ToolExecutor, ToolHandler};
 
 /// Name under which [`DelegateTool`] is exposed to the orchestrating LLM.
 pub const DELEGATE_TOOL_NAME: &str = "delegate_task";
@@ -37,15 +36,14 @@ pub const DELEGATE_TOOL_NAME: &str = "delegate_task";
 /// Routes `delegate_task` calls to a named [`AgentProfile`], running each as an
 /// isolated agent-loop turn.
 ///
-/// `base_executor` is deliberately the executor as it exists *before*
-/// `delegate_task` is added to it (see [`with_delegation`]): subagents are built
-/// from this delegate-free view, so `delegate_task` is structurally absent from
-/// their own tool list. This rules out recursive delegation by construction —
-/// no depth counters or runtime checks are needed.
+/// `base_executor` must be a snapshot of the tool registry taken *before*
+/// `delegate_task` is registered into it (see `AgentState::new`, which clones
+/// the [`super::SystemToolExecutor`] for exactly this purpose): subagents are
+/// built from this delegate-free view, so `delegate_task` is structurally
+/// absent from their own tool list. This rules out recursive delegation by
+/// construction — no depth counters or runtime checks are needed.
 pub struct DelegateTool {
     base_executor: Arc<dyn ToolExecutor>,
-    work_dir: PathBuf,
-    allow_shell: bool,
     profiles: Vec<AgentProfile>,
     llm: Arc<dyn LlmClient>,
     app_config: AppConfig,
@@ -55,8 +53,6 @@ pub struct DelegateTool {
 impl DelegateTool {
     pub fn new(
         base_executor: Arc<dyn ToolExecutor>,
-        work_dir: PathBuf,
-        allow_shell: bool,
         profiles: Vec<AgentProfile>,
         llm: Arc<dyn LlmClient>,
         app_config: AppConfig,
@@ -64,8 +60,6 @@ impl DelegateTool {
     ) -> Self {
         Self {
             base_executor,
-            work_dir,
-            allow_shell,
             profiles,
             llm,
             app_config,
@@ -80,8 +74,8 @@ impl DelegateTool {
     /// Resolves the [`AgentConfig`] and [`LlmClient`] a subagent run should use,
     /// honouring the profile's optional `model`/`provider`/`max_iterations`
     /// overrides. Reuses the parent's client when the resolved provider and model
-    /// match — otherwise builds a fresh one, mirroring the pattern `acp_prompt`
-    /// already uses for per-session model switches (see `src/acp/mod.rs`).
+    /// match — otherwise builds a fresh one, mirroring the pattern `AgentState::prompt`
+    /// already uses for per-session model switches (see `src/core/runtime/state.rs`).
     fn resolve_runtime(&self, profile: &AgentProfile) -> Result<(AgentConfig, Arc<dyn LlmClient>)> {
         let config = match (&profile.provider, &profile.model) {
             (Some(provider), Some(model)) => {
@@ -101,30 +95,23 @@ impl DelegateTool {
     }
 
     /// Builds the tool executor a subagent run should use: the shared,
-    /// delegate-free base executor, optionally narrowed to the profile's `tools`
-    /// allowlist, wrapped in the same sandbox boundary (`work_dir`/`allow_shell`)
-    /// as the parent so subagents cannot escalate privileges.
+    /// delegate-free base executor, optionally narrowed to the profile's
+    /// `tools` allowlist. The work-directory boundary needs no wrapper — it
+    /// travels in the [`TurnContext`] the subagent inherits from its parent.
     fn build_executor(&self, profile: &AgentProfile) -> Arc<dyn ToolExecutor> {
-        let scoped: Arc<dyn ToolExecutor> = match &profile.tools {
+        match &profile.tools {
             Some(allowed) => Arc::new(ScopedExecutor::new(
                 self.base_executor.clone(),
                 allowed.clone(),
             )),
             None => self.base_executor.clone(),
-        };
-        Arc::new(SandboxedExecutor::new(
-            scoped,
-            self.work_dir.clone(),
-            self.allow_shell,
-            Arc::new(NoClientIo),
-        ))
+        }
     }
+}
 
-    /// Not a [`ToolHandler`](super::ToolHandler): unlike ordinary tools,
-    /// `delegate_task` needs the calling turn's [`TurnContext`] to spawn its
-    /// subagent run (see [`Self::execute`]), so it's dispatched directly by
-    /// [`WithDelegate`] rather than registered into a [`super::SystemToolExecutor`].
-    pub fn definition(&self) -> Tool {
+#[async_trait]
+impl ToolHandler for DelegateTool {
+    fn definition(&self) -> Tool {
         let listing = if self.profiles.is_empty() {
             "\n(none configured — define one inline via `system_prompt`)".to_string()
         } else {
@@ -165,67 +152,60 @@ impl DelegateTool {
             agent_schema["enum"] = json!(names);
         }
 
-        Tool {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: DELEGATE_TOOL_NAME.to_string(),
-                description,
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "agent": agent_schema,
-                        "system_prompt": {
-                            "type": "string",
-                            "description": "System prompt for an ephemeral inline subagent — \
-                                            its persona and instructions. Mutually exclusive \
-                                            with `agent`."
-                        },
-                        "tools": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Inline subagent only: restrict it to this set of \
-                                            tool names. Omitted = it inherits your full tool set."
-                        },
-                        "model": {
-                            "type": "string",
-                            "description": "Inline subagent only: run it on this model instead \
-                                            of yours."
-                        },
-                        "provider": {
-                            "type": "string",
-                            "description": "Inline subagent only: provider for `model`. Only \
-                                            used when `model` is also set."
-                        },
-                        "max_iterations": {
-                            "type": "integer",
-                            "description": "Inline subagent only: cap its agent-loop iterations."
-                        },
-                        "task": {
-                            "type": "string",
-                            "description": "A complete, self-contained description of the task. \
-                                            Include all context the subagent needs — it cannot \
-                                            see your conversation history."
-                        }
+        Tool::function(
+            DELEGATE_TOOL_NAME,
+            description,
+            json!({
+                "type": "object",
+                "properties": {
+                    "agent": agent_schema,
+                    "system_prompt": {
+                        "type": "string",
+                        "description": "System prompt for an ephemeral inline subagent — \
+                                        its persona and instructions. Mutually exclusive \
+                                        with `agent`."
                     },
-                    "required": ["task"]
-                }),
-            },
-        }
+                    "tools": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Inline subagent only: restrict it to this set of \
+                                        tool names. Omitted = it inherits your full tool set."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Inline subagent only: run it on this model instead \
+                                        of yours."
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Inline subagent only: provider for `model`. Only \
+                                        used when `model` is also set."
+                    },
+                    "max_iterations": {
+                        "type": "integer",
+                        "description": "Inline subagent only: cap its agent-loop iterations."
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "A complete, self-contained description of the task. \
+                                        Include all context the subagent needs — it cannot \
+                                        see your conversation history."
+                    }
+                },
+                "required": ["task"]
+            }),
+        )
     }
 
-    /// Runs the delegated subagent turn, reusing `turn`'s cancellation token
-    /// and permission gate rather than manufacturing fresh ones: a
-    /// `session/cancel` on the orchestrating turn must stop the subagent too,
-    /// and there is no separate trust policy for subagent tool calls — they
-    /// go through the same approval flow (e.g. `session/request_permission`)
-    /// as the orchestrator's own.
-    pub async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
-        let v: serde_json::Value = serde_json::from_str(args)
-            .map_err(|e| Error::ParseError(format!("invalid arguments: {e}")))?;
-
-        let task = v["task"]
-            .as_str()
-            .ok_or_else(|| Error::ParseError("missing 'task' argument".to_string()))?;
+    /// Runs the delegated subagent turn under the *same* [`TurnContext`] as
+    /// the orchestrating turn rather than manufacturing a fresh one: a
+    /// `session/cancel` on the orchestrator must stop the subagent too, there
+    /// is no separate trust policy for subagent tool calls (they go through
+    /// the same approval flow, e.g. `session/request_permission`), and the
+    /// subagent is confined to the same work directory and client I/O.
+    async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
+        let v = parse_args(args)?;
+        let task = require_str(&v, "task")?;
 
         let profile = match (v["agent"].as_str(), v["system_prompt"].as_str()) {
             (Some(_), Some(_)) => {
@@ -276,10 +256,7 @@ impl DelegateTool {
             &config,
             &mut messages,
             Some(&prompt_builder),
-            &TurnContext {
-                cancel: turn.cancel,
-                permission_gate: turn.permission_gate,
-            },
+            turn,
         )
         .await?;
 
@@ -333,72 +310,16 @@ fn inline_profile(system_prompt: &str, v: &serde_json::Value) -> Result<AgentPro
     })
 }
 
-/// Composes a base [`ToolExecutor`] with [`DelegateTool`], surfacing
-/// `delegate_task` to the LLM alongside the base tools.
-///
-/// `inner` is the executor *as it exists before* this wrapper — exactly the view
-/// passed to [`DelegateTool::new`] as `base_executor` — so subagents are handed a
-/// tool list that structurally never contains `delegate_task`.
-struct WithDelegate {
-    inner: Arc<dyn ToolExecutor>,
-    delegate: Arc<DelegateTool>,
-}
-
-impl WithDelegate {
-    fn new(inner: Arc<dyn ToolExecutor>, delegate: Arc<DelegateTool>) -> Self {
-        Self { inner, delegate }
-    }
-}
-
-#[async_trait]
-impl ToolExecutor for WithDelegate {
-    fn list_tools(&self) -> Vec<Tool> {
-        let mut tools = self.inner.list_tools();
-        tools.push(self.delegate.definition());
-        tools
-    }
-
-    async fn execute(&self, name: &str, args_json: &str, turn: &TurnContext<'_>) -> Result<String> {
-        if name == DELEGATE_TOOL_NAME {
-            self.delegate.execute(args_json, turn).await
-        } else {
-            self.inner.execute(name, args_json, turn).await
-        }
-    }
-}
-
-/// Wraps `executor` with [`DelegateTool`] support. `delegate_task` is always
-/// exposed — even with no configured profiles the orchestrator can define an
-/// ephemeral subagent inline via `system_prompt`.
-#[allow(clippy::too_many_arguments)]
-pub fn with_delegation(
-    executor: Arc<dyn ToolExecutor>,
-    work_dir: PathBuf,
-    allow_shell: bool,
-    profiles: Vec<AgentProfile>,
-    llm: Arc<dyn LlmClient>,
-    app_config: AppConfig,
-    base_config: AgentConfig,
-) -> Arc<dyn ToolExecutor> {
-    let delegate = Arc::new(DelegateTool::new(
-        executor.clone(),
-        work_dir,
-        allow_shell,
-        profiles,
-        llm,
-        app_config,
-        base_config,
-    ));
-    Arc::new(WithDelegate::new(executor, delegate))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::client_io::NoClientIo;
     use crate::core::models::{Choice, ContentBlock, FinishReason, Role};
     use crate::core::permission::{AllowAll, PermissionDecision, PermissionGate};
+    use crate::tools::SystemToolExecutor;
     use crate::tools::test_support::TurnHarness;
     use std::collections::BTreeMap;
+    use std::path::Path;
     use std::sync::Mutex;
     use tokio_util::sync::CancellationToken;
 
@@ -412,6 +333,7 @@ mod tests {
             default_skills: vec![],
             work_dir: None,
             allow_shell: false,
+            memory: None,
         }
     }
 
@@ -507,8 +429,6 @@ mod tests {
     fn make_tool(profiles: Vec<AgentProfile>, llm: Arc<dyn LlmClient>) -> DelegateTool {
         DelegateTool::new(
             Arc::new(EmptyExecutor),
-            PathBuf::from("/tmp"),
-            false,
             profiles,
             llm,
             sample_app_config(),
@@ -603,6 +523,8 @@ mod tests {
         let turn = TurnContext {
             cancel: &cancel,
             permission_gate: &permission_gate,
+            work_dir: Path::new("."),
+            client_io: &NoClientIo,
         };
 
         let result = tool
@@ -647,6 +569,8 @@ mod tests {
         let turn = TurnContext {
             cancel: &cancel,
             permission_gate: &permission_gate,
+            work_dir: Path::new("."),
+            client_io: &NoClientIo,
         };
 
         let result = tool
@@ -660,28 +584,33 @@ mod tests {
         assert_eq!(result, "denied");
     }
 
+    /// Subagents are built from a snapshot of the registry taken before
+    /// `delegate_task` was added, so they can never delegate again. This is
+    /// the wiring `AgentState::new` relies on; keep it explicit here.
     #[test]
-    fn with_delegation_exposes_delegate_tool_even_without_profiles() {
-        // Inline subagents make delegate_task useful with zero configured
-        // profiles, so the wrapper is unconditional.
+    fn subagents_never_see_delegate_task() {
         let llm = Arc::new(MockLlm::new(vec![]));
-        let base: Arc<dyn ToolExecutor> = Arc::new(EmptyExecutor);
-        let executor = with_delegation(
-            base,
-            PathBuf::from("/tmp"),
-            false,
-            vec![],
+        let mut executor = SystemToolExecutor::new();
+        executor.register_builtins();
+        let base: Arc<dyn ToolExecutor> = Arc::new(executor.clone());
+        let tool = DelegateTool::new(
+            base.clone(),
+            vec![sample_profile("reviewer", "desc")],
             llm,
             sample_app_config(),
             sample_agent_config(),
         );
+        executor.register(Box::new(tool));
 
-        let names: Vec<_> = executor
-            .list_tools()
-            .into_iter()
-            .map(|t| t.function.name)
-            .collect();
-        assert!(names.contains(&DELEGATE_TOOL_NAME.to_string()));
+        let names = |e: &dyn ToolExecutor| -> Vec<String> {
+            e.list_tools()
+                .into_iter()
+                .map(|t| t.function.name)
+                .collect()
+        };
+        assert!(names(&executor).contains(&DELEGATE_TOOL_NAME.to_string()));
+        assert!(!names(&*base).contains(&DELEGATE_TOOL_NAME.to_string()));
+        assert!(names(&*base).contains(&"read_file".to_string()));
     }
 
     #[test]
@@ -802,25 +731,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_delegation_exposes_delegate_tool_alongside_base_tools() {
+    async fn registered_delegate_tool_dispatches_through_system_executor() {
         let llm = Arc::new(MockLlm::new(vec![text_choice("done")]));
-        let base: Arc<dyn ToolExecutor> = Arc::new(EmptyExecutor);
-        let executor = with_delegation(
+        let mut executor = SystemToolExecutor::new();
+        let base: Arc<dyn ToolExecutor> = Arc::new(executor.clone());
+        executor.register(Box::new(DelegateTool::new(
             base,
-            PathBuf::from("/tmp"),
-            false,
             vec![sample_profile("reviewer", "desc")],
             llm,
             sample_app_config(),
             sample_agent_config(),
-        );
-
-        let names: Vec<_> = executor
-            .list_tools()
-            .into_iter()
-            .map(|t| t.function.name)
-            .collect();
-        assert!(names.contains(&DELEGATE_TOOL_NAME.to_string()));
+        )));
 
         let harness = TurnHarness::new();
         let result = executor

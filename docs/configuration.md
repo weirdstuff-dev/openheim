@@ -125,6 +125,27 @@ The `name` key is sanitized when building tool names: hyphens and spaces become 
 
 ---
 
+## `[memory]`
+
+Optional, as is every field in it. The agent always has the `remember`, `search_memory`, and `forget` tools (with the `rag` cargo feature, on by default for the binary; library users with `default-features = false` add `features = ["rag"]`). Nothing is stored or retrieved unless the model calls them. Without an embedding provider, `search_memory` is keyword search over SQLite's FTS5 index — no network, no API key. Set `embedding_provider` and `embedding_model` to make it semantic.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `embedding_provider` | string | unset | A `[providers.<name>]` entry whose `api_base` and API key serve the embeddings endpoint. `"gemini"` speaks Gemini's `batchEmbedContents`; anything else is OpenAI-compatible `/embeddings` (OpenAI, Ollama, Together, …). `"anthropic"` is rejected — it has no embeddings API. Unset means keyword search. |
+| `embedding_model` | string | unset | Embedding model, e.g. `text-embedding-3-small`, `gemini-embedding-001`, `nomic-embed-text`. Required when `embedding_provider` is set. |
+| `db_path` | path | `~/.openheim/memory.db` | SQLite file holding notes, the FTS5 index, and vectors. Absolute path; `~` is not expanded. |
+| `top_k` | integer | `5` | Default number of notes a `search_memory` call returns (the model may ask for up to 20) |
+
+```toml
+[memory]
+embedding_provider = "openai"
+embedding_model = "text-embedding-3-small"
+```
+
+Notes are capped at 4000 characters each. Enabling embeddings later back-fills vectors for existing notes, and changing `embedding_model` (or a model returning a different vector size) re-embeds every note on the next tool call, so switching is safe. In `architect` mode only `search_memory` is available; `remember` and `forget` are treated as writes.
+
+---
+
 ## Complete example
 
 ```toml

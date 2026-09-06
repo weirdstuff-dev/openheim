@@ -1,5 +1,6 @@
 mod anthropic;
 mod gemini;
+mod http;
 mod openai;
 mod openai_compatible;
 mod retry;
