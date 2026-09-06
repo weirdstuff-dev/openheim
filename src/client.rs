@@ -8,11 +8,13 @@ use agent_client_protocol::schema::{ContentBlock, ImageContent, SessionInfo, Ses
 use uuid::Uuid;
 
 use crate::{
+    acp::util::stream_event_to_session_update,
     config::{
         AgentConfig, AppConfig, McpServerConfig, ProviderConfig, load_config, load_config_from,
     },
     core::{
         client_io::{ClientIo, NoClientIo},
+        models::StreamEvent,
         permission::{AllowAll, PermissionGate},
         runtime::AgentState,
     },
@@ -225,6 +227,11 @@ impl SessionHandle {
     /// - `SessionUpdate::AgentMessageChunk` — streaming text from the LLM
     /// - `SessionUpdate::ToolCall` — a tool the agent is about to invoke
     /// - `SessionUpdate::ToolCallUpdate` — result of the tool call
+    ///
+    /// Kept for compatibility with callers already speaking ACP's wire
+    /// vocabulary; [`Self::prompt_events`] gives the same turn's raw
+    /// [`crate::core::models::StreamEvent`]s instead, including ones with no
+    /// ACP equivalent (context-usage updates, the turn-finished signal).
     pub async fn prompt(
         &self,
         text: &str,
@@ -238,13 +245,43 @@ impl SessionHandle {
     /// Each image is `(base64_data, mime_type)` — e.g. the raw base64 payload
     /// of a `data:` URL and `"image/png"`. The text block (when non-empty)
     /// leads, followed by the images, matching the order a user composes them.
-    /// Streams the same `SessionUpdate` events as [`prompt`].
+    /// Streams the same `SessionUpdate` events as [`Self::prompt`].
     pub async fn prompt_with_images(
         &self,
         text: &str,
         images: Vec<(String, String)>,
-        on_update: impl FnMut(SessionUpdate) + Send,
+        mut on_update: impl FnMut(SessionUpdate) + Send,
     ) -> Result<()> {
+        self.prompt_events_with_images(text, images, move |event| {
+            if let Some(update) = stream_event_to_session_update(event) {
+                on_update(update);
+            }
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Send a prompt and stream the turn's raw [`StreamEvent`]s to `on_update`
+    /// — every event the agent loop produces, not just the ones ACP's
+    /// `SessionUpdate` has room for (also includes `IterationStart`, `Usage`,
+    /// `Finished`, `MessageAppended`). Returns why the turn stopped.
+    pub async fn prompt_events(
+        &self,
+        text: &str,
+        on_update: impl FnMut(StreamEvent) + Send,
+    ) -> Result<crate::core::models::StopReason> {
+        self.prompt_events_with_images(text, Vec::new(), on_update)
+            .await
+    }
+
+    /// [`Self::prompt_events`] with images — see [`Self::prompt_with_images`]
+    /// for the image argument shape.
+    pub async fn prompt_events_with_images(
+        &self,
+        text: &str,
+        images: Vec<(String, String)>,
+        on_update: impl FnMut(StreamEvent) + Send,
+    ) -> Result<crate::core::models::StopReason> {
         let mut blocks: Vec<ContentBlock> = Vec::new();
         if !text.is_empty() {
             blocks.push(ContentBlock::from(text));
@@ -261,7 +298,6 @@ impl SessionHandle {
                 on_update,
             )
             .await
-            .map(|_| ())
     }
 
     /// Loads this session's persisted `ConversationMeta` (the source

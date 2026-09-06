@@ -7,7 +7,6 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::schema::{ContentBlock, SessionUpdate, ToolCallStatus};
 use crossterm::{
     cursor::Show,
     event::{
@@ -75,22 +74,18 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                         match maybe_prompt {
                             Some(prompt) => {
                                 let tx_cb = update_tx.clone();
+                                // `StreamEvent::Finished`/`Usage` arrive as part of
+                                // this stream and drive the status/footer directly
+                                // (see `App::handle_stream_event`) — no separate
+                                // "done" signal or post-turn context-usage re-read
+                                // needed here.
                                 let result = session
-                                    .prompt(&prompt, move |update| convert_update(&tx_cb, update))
+                                    .prompt_events(&prompt, move |event| {
+                                        let _ = tx_cb.send(AgentUpdate::Stream(event));
+                                    })
                                     .await;
-                                match result {
-                                    Ok(()) => {
-                                        // Best-effort: a session whose turn just
-                                        // succeeded should always have a context
-                                        // usage snapshot to read back, but this
-                                        // must never block reporting the turn as
-                                        // done.
-                                        if let Ok(usage) = session.context_usage().await {
-                                            let _ = update_tx.send(AgentUpdate::Usage(usage));
-                                        }
-                                        let _ = update_tx.send(AgentUpdate::Done);
-                                    }
-                                    Err(e) => { let _ = update_tx.send(AgentUpdate::Error(e.to_string())); }
+                                if let Err(e) = result {
+                                    let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
                                 }
                             }
                             None => break,
@@ -220,50 +215,4 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
     let _ = agent_handle.await;
 
     Ok(())
-}
-
-fn convert_update(tx: &mpsc::UnboundedSender<AgentUpdate>, update: SessionUpdate) {
-    match update {
-        SessionUpdate::AgentMessageChunk(chunk) => {
-            if let ContentBlock::Text(t) = chunk.content {
-                let is_thinking = t
-                    .meta
-                    .as_ref()
-                    .and_then(|m| m.get("kind"))
-                    .and_then(|v| v.as_str())
-                    == Some("thinking");
-                if is_thinking {
-                    let _ = tx.send(AgentUpdate::ThinkingChunk(t.text));
-                } else {
-                    let _ = tx.send(AgentUpdate::TextChunk(t.text));
-                }
-            }
-        }
-        SessionUpdate::ToolCall(tc) => {
-            let args = tc
-                .raw_input
-                .as_ref()
-                .map(|v| v.to_string())
-                .unwrap_or_default();
-            let _ = tx.send(AgentUpdate::ToolCall {
-                name: tc.title.clone(),
-                args,
-            });
-        }
-        SessionUpdate::ToolCallUpdate(tcu) => {
-            if matches!(
-                tcu.fields.status,
-                Some(ToolCallStatus::Completed) | Some(ToolCallStatus::Failed)
-            ) {
-                let is_error = matches!(tcu.fields.status, Some(ToolCallStatus::Failed));
-                let result = match tcu.fields.raw_output {
-                    Some(serde_json::Value::String(s)) => s,
-                    Some(v) => v.to_string(),
-                    None => String::new(),
-                };
-                let _ = tx.send(AgentUpdate::ToolResult { result, is_error });
-            }
-        }
-        _ => {}
-    }
 }

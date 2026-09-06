@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     config::{AgentConfig, AppConfig},
-    core::permission::PermissionDecision,
+    core::{models::StreamEvent, permission::PermissionDecision},
     memory::{ConversationMeta, MemoryContext, SkillsManager},
 };
 
@@ -172,32 +172,7 @@ impl App {
 
     pub(super) fn handle_update(&mut self, update: AgentUpdate) {
         match update {
-            AgentUpdate::TextChunk(text) => {
-                self.status = Status::Streaming;
-                match self.items.last_mut() {
-                    Some(ChatItem::AssistantMessage(existing)) => existing.push_str(&text),
-                    _ => self.items.push(ChatItem::AssistantMessage(text)),
-                }
-                self.cached_width = 0;
-            }
-            AgentUpdate::ThinkingChunk(text) => {
-                self.status = Status::Streaming;
-                match self.items.last_mut() {
-                    Some(ChatItem::Thinking(existing)) => existing.push_str(&text),
-                    _ => self.items.push(ChatItem::Thinking(text)),
-                }
-                self.cached_width = 0;
-            }
-            AgentUpdate::ToolCall { name, args } => {
-                self.status = Status::Thinking;
-                self.push(ChatItem::ToolCall { name, args });
-            }
-            AgentUpdate::ToolResult { result, is_error } => {
-                self.push(ChatItem::ToolResult { result, is_error });
-            }
-            AgentUpdate::Done => {
-                self.status = Status::Idle;
-            }
+            AgentUpdate::Stream(event) => self.handle_stream_event(event),
             AgentUpdate::Error(e) => {
                 self.status = Status::Idle;
                 self.push(ChatItem::Err(e));
@@ -212,6 +187,55 @@ impl App {
                     "switched to {provider} / {model}"
                 )));
             }
+        }
+    }
+
+    /// Handles one raw event from a live turn. `IterationStart` and
+    /// `MessageAppended` have no UI presence and are ignored.
+    fn handle_stream_event(&mut self, event: StreamEvent) {
+        match event {
+            StreamEvent::LlmResponse { content } => {
+                self.status = Status::Streaming;
+                match self.items.last_mut() {
+                    Some(ChatItem::AssistantMessage(existing)) => existing.push_str(&content),
+                    _ => self.items.push(ChatItem::AssistantMessage(content)),
+                }
+                self.cached_width = 0;
+            }
+            StreamEvent::ThinkingContent { content } => {
+                self.status = Status::Streaming;
+                match self.items.last_mut() {
+                    Some(ChatItem::Thinking(existing)) => existing.push_str(&content),
+                    _ => self.items.push(ChatItem::Thinking(content)),
+                }
+                self.cached_width = 0;
+            }
+            StreamEvent::ToolCall {
+                tool_name,
+                arguments,
+                ..
+            } => {
+                self.status = Status::Thinking;
+                self.push(ChatItem::ToolCall {
+                    name: tool_name,
+                    args: arguments,
+                });
+            }
+            StreamEvent::ToolResult {
+                result, is_error, ..
+            } => {
+                self.push(ChatItem::ToolResult { result, is_error });
+            }
+            // The current context size, live as each LLM call in the turn
+            // completes — the footer no longer waits for the whole turn to
+            // finish and re-read it back from disk.
+            StreamEvent::Usage { usage } => {
+                self.context_usage = Some(usage);
+            }
+            StreamEvent::Finished { .. } => {
+                self.status = Status::Idle;
+            }
+            StreamEvent::IterationStart { .. } | StreamEvent::MessageAppended { .. } => {}
         }
     }
 

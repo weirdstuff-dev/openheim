@@ -11,17 +11,14 @@ use std::{
 
 use agent_client_protocol::schema::{
     ContentBlock as AcpContentBlock, ContentChunk, ModelInfo, SessionInfo, SessionModelState,
-    SessionUpdate, ToolCall as AcpToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    SessionUpdate,
 };
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    acp::{
-        convert::convert_prompt_blocks,
-        util::{replay_history_messages, thinking_chunk, tool_kind_for},
-    },
+    acp::{convert::convert_prompt_blocks, util::replay_history_messages},
     config::{AgentConfig, AppConfig, build_http_client, create_client},
     core::{
         agent::run_agent_streaming_with_history,
@@ -275,6 +272,12 @@ impl AgentState {
     /// caller can map it to an ACP [`agent_client_protocol::schema::StopReason`]
     /// directly instead of having to reverse-engineer it (e.g. by polling
     /// session state for cancellation after the fact).
+    ///
+    /// `on_update` sees every [`StreamEvent`] the turn produces, including
+    /// ones with no ACP wire equivalent (`IterationStart`, `Usage`,
+    /// `Finished`, `MessageAppended`) — mapping onto ACP's `SessionUpdate` is
+    /// the caller's concern (see `acp::util::stream_event_to_session_update`),
+    /// not this runtime's.
     pub async fn prompt<F>(
         &self,
         session_id: &str,
@@ -284,7 +287,7 @@ impl AgentState {
         mut on_update: F,
     ) -> Result<CoreStopReason>
     where
-        F: FnMut(SessionUpdate) + Send,
+        F: FnMut(StreamEvent) + Send,
     {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| Error::ParseError("invalid session id format".to_string()))?;
@@ -387,7 +390,7 @@ impl AgentState {
             &mut conversation.messages,
             Some(&prompt_builder),
             &turn,
-            move |event| match event {
+            move |event| {
                 // Blocking I/O called synchronously (not via `spawn_blocking`)
                 // deliberately: appends must land in the log in the same
                 // order messages are produced, and this closure already runs
@@ -395,56 +398,12 @@ impl AgentState {
                 // small, fast local-disk append here doesn't race anything —
                 // spawning it would only risk two concurrent appends landing
                 // out of order.
-                StreamEvent::MessageAppended { message } => {
-                    if let Err(e) = history_for_append.append_message(&chat_id, &message) {
-                        tracing::warn!("failed to append message to history: {e}");
-                    }
+                if let StreamEvent::MessageAppended { message } = &event
+                    && let Err(e) = history_for_append.append_message(&chat_id, message)
+                {
+                    tracing::warn!("failed to append message to history: {e}");
                 }
-                StreamEvent::LlmResponse { content } => {
-                    on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                        AcpContentBlock::from(content),
-                    )));
-                }
-                StreamEvent::ThinkingContent { content } => {
-                    on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                        AcpContentBlock::Text(thinking_chunk(content)),
-                    )));
-                }
-                StreamEvent::ToolCall {
-                    id,
-                    tool_name,
-                    arguments,
-                } => {
-                    // Pending, not InProgress: the permission gate (invoked by the
-                    // agent loop right after this event) hasn't authorized
-                    // execution yet at this point.
-                    let raw_input = serde_json::from_str(&arguments).ok();
-                    on_update(SessionUpdate::ToolCall(
-                        AcpToolCall::new(id, &*tool_name)
-                            .kind(tool_kind_for(&tool_name))
-                            .status(ToolCallStatus::Pending)
-                            .raw_input(raw_input),
-                    ));
-                }
-                StreamEvent::ToolResult {
-                    id,
-                    result,
-                    is_error,
-                    ..
-                } => {
-                    let status = if is_error {
-                        ToolCallStatus::Failed
-                    } else {
-                        ToolCallStatus::Completed
-                    };
-                    on_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                        id,
-                        ToolCallUpdateFields::new()
-                            .status(status)
-                            .raw_output(serde_json::Value::String(result)),
-                    )));
-                }
-                _ => {}
+                on_update(event);
             },
         )
         .await;

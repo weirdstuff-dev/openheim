@@ -28,7 +28,7 @@ use crate::{
 use super::{
     client_io::AcpClientIo,
     permission::AcpPermissionGate,
-    util::{map_stop_reason, session_mode_state},
+    util::{map_stop_reason, session_mode_state, stream_event_to_session_update},
 };
 
 pub async fn serve(
@@ -168,11 +168,13 @@ pub async fn serve(
                             prompt_blocks,
                             permission_gate,
                             client_io,
-                            move |update| {
-                                let _ = cx_cb.send_notification(SessionNotification::new(
-                                    session_id_cb.clone(),
-                                    update,
-                                ));
+                            move |event| {
+                                if let Some(update) = stream_event_to_session_update(event) {
+                                    let _ = cx_cb.send_notification(SessionNotification::new(
+                                        session_id_cb.clone(),
+                                        update,
+                                    ));
+                                }
                             },
                         )
                         .await;

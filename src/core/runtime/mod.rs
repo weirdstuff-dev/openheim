@@ -4,11 +4,17 @@
 //! session map's own state and eviction policy; [`AgentMode`] controls which
 //! tools a session's turns are offered.
 //!
-//! `AgentState::prompt`/`load_session` still speak ACP's `SessionUpdate` and
-//! reach into `crate::acp::util` for the thinking/tool-kind/replay helpers
-//! that build it — collapsing that down to `core::models::StreamEvent`
-//! end-to-end, so this module has no ACP dependency at all, is tracked
-//! separately (PLAN.md item 5).
+//! `AgentState::prompt` speaks `core::models::StreamEvent` end-to-end — ACP
+//! mapping onto `SessionUpdate` lives entirely at the ACP edge
+//! (`acp::util::stream_event_to_session_update`, called from `acp::serve` and
+//! from the library facade's own `SessionHandle::prompt`). `AgentState`
+//! still reaches into `crate::acp::{convert, util}` for two one-shot, ACP-
+//! shaped conversions that have no `StreamEvent` equivalent to speak
+//! instead: `prompt`'s input (`convert_prompt_blocks`, turning the caller's
+//! ACP content blocks into `core::models::ContentBlock`s) and
+//! `load_session`'s history replay (`replay_history_messages`, reconstructing
+//! `SessionUpdate`s from persisted `Message`s rather than a live event
+//! stream).
 
 pub mod session;
 
