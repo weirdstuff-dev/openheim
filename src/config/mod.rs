@@ -135,7 +135,18 @@ pub fn load_config() -> Result<AppConfig> {
 /// if there isn't one yet — inserts a new one right after `max_iterations`/
 /// `default_provider` (matching the shipped template's field order), so it
 /// can't corrupt a `[table]` or an unrelated key.
+///
+/// `name` is interpolated into a TOML basic string rather than run through a
+/// full TOML encoder, so quotes, backslashes, and newlines are rejected
+/// outright instead of being escaped — a caller passing one of those through
+/// (this is `pub`, so an embedder could pass anything) can't break out of
+/// the string and inject arbitrary lines into the config file.
 pub fn save_theme_to_config_at(path: &std::path::Path, name: &str) -> Result<()> {
+    if name.contains(['"', '\\', '\n', '\r']) {
+        return Err(Error::config(format!(
+            "invalid theme name {name:?}: quotes, backslashes, and newlines are not allowed"
+        )));
+    }
     let contents = std::fs::read_to_string(path)?;
     let new_line = format!("theme_color = \"{name}\"");
     let has_theme = contents
@@ -291,5 +302,28 @@ mod tests {
             contents,
             "default_provider = \"openai\"\ntheme_color = \"blue\""
         );
+    }
+
+    #[test]
+    fn save_theme_to_config_at_rejects_names_that_would_break_out_of_the_toml_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "default_provider = \"openai\"\n").unwrap();
+
+        for bad_name in [
+            "blue\"\ninjected = true",
+            "blue\\",
+            "blue\nred",
+            "blue\r\nred",
+        ] {
+            assert!(
+                save_theme_to_config_at(&path, bad_name).is_err(),
+                "expected {bad_name:?} to be rejected"
+            );
+        }
+
+        // Rejected names must not have modified the file.
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "default_provider = \"openai\"\n");
     }
 }
