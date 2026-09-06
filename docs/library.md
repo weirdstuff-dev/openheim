@@ -247,6 +247,28 @@ session
     .await?;
 ```
 
+### Send a prompt (raw `StreamEvent`)
+
+`prompt`/`prompt_with_images` map every event onto ACP's `SessionUpdate` vocabulary, which has no room for some of what the agent loop actually produces. `prompt_events`/`prompt_events_with_images` hand you the raw [`StreamEvent`](https://docs.rs/openheim) instead — same turn, no ACP mapping in between — including `Usage` (context size, live per LLM call) and `Finished` (the turn is done) alongside the four `SessionUpdate` has equivalents for. They return the turn's `StopReason` (`EndTurn`/`MaxIterations`/`Cancelled`/`NoContent`) instead of `()`.
+
+```rust
+use openheim::StreamEvent;
+
+let stop_reason = session
+    .prompt_events("Refactor the auth module to use JWTs", |event| {
+        match event {
+            StreamEvent::LlmResponse { content } => print!("{content}"),
+            StreamEvent::ThinkingContent { content } => eprint!("{content}"),
+            StreamEvent::ToolCall { tool_name, .. } => println!("\n[tool] {tool_name} — running…"),
+            StreamEvent::ToolResult { tool_name, .. } => println!("[tool] {tool_name} — done"),
+            StreamEvent::Usage { usage } => { /* update a live context-size indicator */ let _ = usage; }
+            StreamEvent::Finished { .. } => { /* turn done */ }
+            _ => {}
+        }
+    })
+    .await?;
+```
+
 ### Multi-turn conversation
 
 Call `prompt` multiple times on the same handle. The agent accumulates history on disk automatically.
