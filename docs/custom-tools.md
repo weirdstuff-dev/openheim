@@ -45,7 +45,7 @@ The following implements a `fetch_url` tool that downloads a URL and returns its
 ```rust
 use async_trait::async_trait;
 use openheim::error::{Error, Result};
-use openheim::core::models::{FunctionDefinition, Tool};
+use openheim::core::models::Tool;
 use openheim::core::turn::TurnContext;
 use openheim::tools::ToolHandler;
 use openheim::tools::args::{parse_args, require_str};
@@ -70,24 +70,21 @@ Return a `Tool` with a JSON Schema describing the arguments. The LLM uses the `d
 
 ```rust
 fn definition(&self) -> Tool {
-    Tool {
-        tool_type: "function".to_string(),
-        function: FunctionDefinition {
-            name: "fetch_url".to_string(),
-            description: "Download the content of a URL and return the response body as text. \
-                          Use for fetching documentation, APIs, or web pages.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "The URL to fetch"
-                    }
-                },
-                "required": ["url"]
-            }),
-        },
-    }
+    Tool::function(
+        "fetch_url",
+        "Download the content of a URL and return the response body as text. \
+         Use for fetching documentation, APIs, or web pages.",
+        json!({
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The URL to fetch"
+                }
+            },
+            "required": ["url"]
+        }),
+    )
 }
 ```
 
