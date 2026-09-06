@@ -171,6 +171,9 @@ impl AppConfig {
                 }
             }
         }
+        if let Some(memory) = val.get_mut("memory").and_then(|v| v.as_object_mut()) {
+            memory.remove("db_path");
+        }
         val
     }
 }
@@ -404,5 +407,41 @@ mod tests {
         let memory = bare.memory.unwrap();
         assert!(memory.embedding_provider.is_none());
         assert_eq!(memory.top_k, 5);
+    }
+
+    #[test]
+    fn to_public_json_redacts_secrets_and_local_paths() {
+        let toml_str = r#"
+            default_provider = "openai"
+            [providers.openai]
+            api_base = "https://api.openai.com/v1"
+            default_model = "gpt-4"
+            models = ["gpt-4"]
+            api_key = "sk-super-secret"
+
+            [mcp_servers.demo]
+            command = "npx"
+            env = { API_TOKEN = "also-secret" }
+
+            [memory]
+            embedding_provider = "openai"
+            embedding_model = "text-embedding-3-small"
+            db_path = "/Users/alice/.openheim/memory.db"
+            top_k = 7
+        "#;
+        let cfg: AppConfig = toml::from_str(toml_str).unwrap();
+
+        let val = cfg.to_public_json(std::path::Path::new("/work/dir"));
+
+        assert_eq!(val["work_dir"], "/work/dir");
+        assert!(val["providers"]["openai"].get("api_key").is_none());
+        assert_eq!(val["mcp_servers"]["demo"]["env"]["API_TOKEN"], "<redacted>");
+
+        // db_path is a local filesystem path, not a secret the client needs;
+        // it's stripped, while the rest of the [memory] section survives.
+        assert!(val["memory"].get("db_path").is_none());
+        assert_eq!(val["memory"]["embedding_provider"], "openai");
+        assert_eq!(val["memory"]["embedding_model"], "text-embedding-3-small");
+        assert_eq!(val["memory"]["top_k"], 7);
     }
 }
