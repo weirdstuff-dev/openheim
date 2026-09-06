@@ -38,7 +38,7 @@ Ignore the fields you don't need — a tool that calls an HTTP API only cares ab
 
 ## Step-by-step example
 
-The following implements a `fetch_url` tool that downloads a URL and returns its body.
+The following implements a `lookup` tool that queries a fixed third-party API and returns the response body.
 
 ### 1. Define the struct
 
@@ -51,11 +51,11 @@ use openheim::tools::ToolHandler;
 use openheim::tools::args::{parse_args, require_str};
 use serde_json::json;
 
-pub struct FetchUrlTool {
+pub struct LookupTool {
     client: reqwest::Client,
 }
 
-impl FetchUrlTool {
+impl LookupTool {
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -71,18 +71,18 @@ Return a `Tool` with a JSON Schema describing the arguments. The LLM uses the `d
 ```rust
 fn definition(&self) -> Tool {
     Tool::function(
-        "fetch_url",
-        "Download the content of a URL and return the response body as text. \
-         Use for fetching documentation, APIs, or web pages.",
+        "lookup",
+        "Query the example API for a term and return the result as text. \
+         Use for looking up documentation or reference entries.",
         json!({
             "type": "object",
             "properties": {
-                "url": {
+                "query": {
                     "type": "string",
-                    "description": "The URL to fetch"
+                    "description": "The term to look up"
                 }
             },
-            "required": ["url"]
+            "required": ["query"]
         }),
     )
 }
@@ -92,14 +92,19 @@ fn definition(&self) -> Tool {
 
 Parse the JSON arguments, run the operation, and return a `String`. Return `Err` only for infrastructure failures — for user-visible failures (e.g. HTTP 404), prefer returning a descriptive string so the LLM can react to the failure. Racing the request against `turn.cancel` lets the user interrupt a slow fetch.
 
+**Don't hand an LLM-supplied URL straight to `client.get(url).send()`.** The model can be steered (directly or via prompt injection in fetched content) into requesting internal addresses — cloud metadata endpoints, loopback, RFC1918 ranges — turning the tool into an SSRF primitive. Openheim already ships a hardened `web_fetch` built-in (scheme allowlist, DNS-resolve-then-check with the checked address pinned for the actual connection so a second, rebound lookup can't bypass it, no automatic redirects, timeout, and a response size cap); prefer registering that instead of writing your own general-purpose fetcher. If your tool genuinely needs its own HTTP call, restrict it to a fixed, non-LLM-controlled endpoint rather than an arbitrary model-supplied URL:
+
 ```rust
+const API_ENDPOINT: &str = "https://api.example.com/v1/lookup";
+
 async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
     let v = parse_args(args)?;
-    let url = require_str(&v, "url")?;
+    let query = require_str(&v, "query")?; // used as a query param, never as the URL itself
 
     let request = async {
         let response = self.client
-            .get(url)
+            .get(API_ENDPOINT)
+            .query(&[("q", query)])
             .send()
             .await
             .map_err(|e| Error::ToolExecutionError(format!("request failed: {e}")))?;
@@ -118,7 +123,7 @@ async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
     };
 
     tokio::select! {
-        _ = turn.cancel.cancelled() => Err(Error::ToolExecutionError("fetch_url cancelled".into())),
+        _ = turn.cancel.cancelled() => Err(Error::ToolExecutionError("lookup cancelled".into())),
         result = request => result,
     }
 }
