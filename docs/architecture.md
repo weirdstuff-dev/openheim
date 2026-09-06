@@ -71,6 +71,8 @@ src/
 │
 ├── tools/              Tool abstraction and built-in implementations
 │   ├── mod.rs          ToolHandler / ToolExecutor traits, SystemToolExecutor
+│   ├── args.rs         parse_args / require_str — shared argument decoding
+│   ├── sandbox.rs      validate_path — work_dir boundary used by every file tool
 │   ├── execute_command.rs
 │   ├── read_file.rs
 │   ├── write_file.rs
@@ -78,9 +80,8 @@ src/
 │   ├── list_dir.rs     Immediate directory contents
 │   ├── search.rs       Regex search across files, ripgrep-style (ripgrep's own crates)
 │   ├── web_fetch.rs    Fetch a public http(s) URL as text (SSRF-guarded)
-│   ├── sandboxed_executor.rs  SandboxedExecutor — work_dir / allow_shell boundary
 │   ├── scoped_executor.rs     ScopedExecutor — tool-name allowlist wrapper
-│   └── delegate.rs            DelegateTool, with_delegation — delegate_task tool
+│   └── delegate.rs            DelegateTool — delegate_task tool (subagents)
 │
 ├── mcp/                Model Context Protocol client
 │   ├── mod.rs          load_mcp_tools(), McpServerStatus

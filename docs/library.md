@@ -159,7 +159,7 @@ MCP servers defined in a config file are always loaded; builder `.mcp_server()` 
 
 ### With custom tools
 
-`.tool()` registers an in-process `ToolHandler` alongside the built-ins and any MCP-sourced tools, subject to the same `work_dir`/`allow_shell` sandbox boundary. See [custom-tools.md](./custom-tools.md) for how to implement `ToolHandler`.
+`.tool()` registers an in-process `ToolHandler` alongside the built-ins and any MCP-sourced tools. Each call receives the turn's `TurnContext` (cancel token, `work_dir`, client I/O), so a custom tool can enforce the same sandbox boundary the built-ins do. See [custom-tools.md](./custom-tools.md) for how to implement `ToolHandler`.
 
 ```rust
 let client = OpenheimClient::builder()

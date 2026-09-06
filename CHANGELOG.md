@@ -8,8 +8,18 @@
 
 ### Changed
 
+- **Tools receive the turn context directly; the per-session sandbox wrapper is gone.** `ToolHandler::execute` now takes `turn: &TurnContext<'_>`, and `TurnContext` gained `work_dir: &Path` and `client_io: &dyn ClientIo` alongside the existing cancel token and permission gate. Each built-in enforces its own boundary — `read_file`/`write_file`/`edit_file`/`list_dir`/`search` validate their path against `turn.work_dir` via `tools::sandbox::validate_path`, the file tools delegate to `turn.client_io` before falling back to local disk (raced against `turn.cancel`), `execute_command` runs in `turn.work_dir` and is killed on cancel, and `web_fetch` aborts on cancel. Previously `SandboxedExecutor` intercepted six built-ins by name, re-parsed their arguments, and the registered handlers' own `execute` bodies never ran in production; custom tools got neither cancellation nor the work-directory boundary. Now every handler — built-in, MCP, `rag`, or registered via `OpenheimBuilder::tool` — sees the same context. `allow_shell` is enforced in exactly one place (`SystemToolExecutor::build` omits `execute_command`). A new `tools::args` module (`parse_args`, `require_str`) replaces fourteen hand-rolled copies of the argument-parsing errors.
+- **`delegate_task` is an ordinary `ToolHandler`.** `DelegateTool` implements `ToolHandler` and is registered into the `SystemToolExecutor` like every other tool; the `WithDelegate` wrapper and `with_delegation()` are removed. The no-recursion guarantee is unchanged: `SystemToolExecutor` is now `Clone` (a cheap registry snapshot), and `AgentState::new` hands `DelegateTool` a clone taken *before* it registers itself, so subagents structurally never see `delegate_task` (covered by a test). Subagents now inherit the parent turn's `client_io` too, so inside an editor-hosted session a subagent reads the same unsaved buffers the orchestrator does (previously they always went to local disk).
 - **`rag` module renamed to `memory`; `RagContext` is now `MemoryContext`.** The old module held conversation history, the write lease, skills, the system identity, and the prompt builder — none of which is retrieval. They now live under `openheim::memory::{history, lease, skills, system, prompt}`, and `AgentState.rag` / `OpenheimClient::rag()` are `AgentState.memory` / `OpenheimClient::memory()`. This is a clean break with no deprecated aliases: `openheim::rag` now names the new RAG module, so code that imported `openheim::RagContext`, `client.rag()`, or `openheim::rag::{HistoryManager, SkillsManager, …}` must switch to `MemoryContext`, `client.memory()`, and `openheim::memory`.
 - New `Error::DatabaseError` variant for SQLite failures in the long-term memory store.
+
+### Breaking changes (library)
+
+- **`tools::ToolHandler::execute` gained a `turn: &TurnContext<'_>` parameter**; custom tools must accept it (ignore it with `_turn` if unused).
+- **`core::turn::TurnContext` gained `work_dir: &Path` and `client_io: &dyn ClientIo`** — code constructing it by hand (e.g. calling `run_agent_with_history` directly) must supply both; use `&NoClientIo` when there is no client. See `docs/custom-tools.md`.
+- **`tools::SandboxedExecutor` is removed** — the boundary now travels in `TurnContext`. `tools::ScopedExecutor` is unchanged.
+- **`tools::with_delegation` is removed and `DelegateTool::new` no longer takes `work_dir`/`allow_shell`** — register `DelegateTool` into a `SystemToolExecutor` instead, passing a clone of the executor taken before registration as `base_executor`.
+- `list_dir` and `search` default to the turn's `work_dir` (not the process's current directory) when `path` is omitted.
 
 ## [0.9.0] - 2026-09-01
 

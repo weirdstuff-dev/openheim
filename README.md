@@ -337,9 +337,9 @@ src/
       retry.rs        Automatic retry with exponential backoff
   tools/            Tool trait, registry, and built-in tools
     execute_command.rs / read_file.rs / write_file.rs / edit_file.rs / list_dir.rs / search.rs / web_fetch.rs
-    delegate.rs       DelegateTool, with_delegation — delegate_task tool
-    sandbox.rs        Work-directory path validation
-    sandboxed_executor.rs  Per-session executor wrapper enforcing work_dir and allow_shell
+    delegate.rs       DelegateTool — delegate_task tool (subagents)
+    args.rs           Shared tool-argument decoding
+    sandbox.rs        Work-directory path validation (used by every file tool)
     scoped_executor.rs     Tool-name allowlist wrapper around any ToolExecutor
   mcp/              MCP (Model Context Protocol) client integration
     client.rs       MCP server connection (stdio + Streamable HTTP)
