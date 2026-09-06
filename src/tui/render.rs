@@ -5,6 +5,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use super::types::{ChatItem, ConfigRow};
 
@@ -335,18 +337,13 @@ pub(crate) fn render_input_bar(
     // the tail just renders past the edge of the terminal and disappears —
     // the cursor then clamps to the last visible column and appears stuck
     // while the (invisible) text keeps growing behind it. Scroll the
-    // *displayed* slice of `input` instead, keeping the cursor's char always
-    // inside the visible window, the way a normal line editor does.
-    let cursor_chars = input[..cursor].chars().count();
-    let visible_width = inner
-        .width
-        .saturating_sub(prompt_prefix.chars().count() as u16) as usize;
-    let offset = cursor_chars.saturating_sub(visible_width.saturating_sub(1));
-    let visible: String = input
-        .chars()
-        .skip(offset)
-        .take(visible_width.max(1))
-        .collect();
+    // *displayed* slice of `input` instead, keeping the cursor's terminal
+    // column always inside the visible window, the way a normal line editor
+    // does. Done in terminal cells rather than chars/bytes so wide (CJK,
+    // emoji) and combining characters land in the right column instead of
+    // just being counted as one cell each.
+    let visible_width = inner.width.saturating_sub(prompt_prefix.width() as u16) as usize;
+    let (visible, cursor_col_offset) = scroll_input_line(input, cursor, visible_width);
 
     f.render_widget(
         Paragraph::new(format!("{prompt_prefix}{visible}"))
@@ -356,13 +353,62 @@ pub(crate) fn render_input_bar(
 
     if show_cursor {
         let cursor_col = inner.x
-            + prompt_prefix.chars().count() as u16
-            + (cursor_chars - offset).min(u16::MAX as usize) as u16;
+            + prompt_prefix.width() as u16
+            + cursor_col_offset.min(u16::MAX as usize) as u16;
         f.set_cursor_position((
             cursor_col.min(inner.x + inner.width.saturating_sub(1)),
             inner.y,
         ));
     }
+}
+
+/// Picks the scrolled, grapheme-safe slice of `input` that fits within
+/// `visible_width` terminal cells while keeping the cursor (a byte offset
+/// into `input`) visible, plus the cursor's cell column within that slice.
+///
+/// Works in grapheme clusters (never splitting a base character from its
+/// combining marks) and terminal cell widths (so wide characters like CJK or
+/// emoji — which occupy two columns — scroll and place the cursor correctly)
+/// rather than `char`/byte counts, which both undercount wide characters and
+/// can split a cluster mid-character.
+fn scroll_input_line(input: &str, cursor: usize, visible_width: usize) -> (String, usize) {
+    let graphemes: Vec<&str> = input.graphemes(true).collect();
+    // `cursor` is a byte offset that always lands on a grapheme boundary
+    // (see `App`'s cursor-movement code), so counting clusters whose start
+    // byte precedes it gives the cluster index right after the cursor.
+    let cursor_idx = input
+        .grapheme_indices(true)
+        .take_while(|(byte_idx, _)| *byte_idx < cursor)
+        .count();
+
+    // Walk backwards from the cursor, accumulating cell width, to find the
+    // earliest cluster that still fits in `visible_width - 1` cells (the
+    // last column is reserved for the cursor itself) — this both scrolls
+    // the line and gives the cursor's column within the scrolled slice.
+    let budget = visible_width.saturating_sub(1);
+    let mut start_idx = cursor_idx;
+    let mut cursor_col = 0usize;
+    while start_idx > 0 {
+        let w = graphemes[start_idx - 1].width();
+        if cursor_col + w > budget {
+            break;
+        }
+        cursor_col += w;
+        start_idx -= 1;
+    }
+
+    let mut visible = String::new();
+    let mut used = 0usize;
+    for g in &graphemes[start_idx..] {
+        let w = g.width();
+        if used + w > visible_width.max(1) {
+            break;
+        }
+        visible.push_str(g);
+        used += w;
+    }
+
+    (visible, cursor_col)
 }
 
 pub(crate) fn render_model_picker(
@@ -884,4 +930,68 @@ fn word_wrap(text: &str, width: usize) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod input_scroll_tests {
+    use super::scroll_input_line;
+
+    #[test]
+    fn ascii_fits_without_scrolling() {
+        let (visible, cursor_col) = scroll_input_line("hello", 5, 20);
+        assert_eq!(visible, "hello");
+        assert_eq!(cursor_col, 5);
+    }
+
+    #[test]
+    fn ascii_scrolls_to_keep_cursor_visible() {
+        // Cursor at the end of a line wider than the visible window: the
+        // window should scroll so the cursor lands on the last column.
+        let input = "0123456789";
+        let (visible, cursor_col) = scroll_input_line(input, input.len(), 5);
+        assert_eq!(visible, "6789");
+        assert_eq!(cursor_col, 4);
+    }
+
+    #[test]
+    fn wide_characters_take_two_cells() {
+        // Each CJK character is 2 cells wide, so 3 of them need 6 columns —
+        // a byte/char-counting version would (wrongly) fit all 3 in a
+        // 4-column window and place the cursor one column past its edge.
+        let input = "中文字";
+        let (visible, cursor_col) = scroll_input_line(input, input.len(), 4);
+        // The window reserves its last column for the cursor (budget = 3
+        // cells), so only "字" (2 cells) fits before it; "中文" scroll off.
+        assert_eq!(visible, "字");
+        assert_eq!(cursor_col, 2);
+    }
+
+    #[test]
+    fn wide_character_not_split_when_window_too_narrow() {
+        // A visible width of 1 can't fit a 2-wide character at all; the
+        // slice must stay empty rather than emit half a character.
+        let (visible, _) = scroll_input_line("中", 0, 1);
+        assert_eq!(visible, "");
+    }
+
+    #[test]
+    fn combining_characters_stay_with_their_base() {
+        // "e" + combining acute accent (U+0301) is one grapheme cluster
+        // occupying a single cell; the cursor sitting after it must count
+        // as one column, not two.
+        let input = "e\u{0301}"; // é as two chars, one grapheme
+        let (visible, cursor_col) = scroll_input_line(input, input.len(), 20);
+        assert_eq!(visible, input);
+        assert_eq!(cursor_col, 1);
+    }
+
+    #[test]
+    fn cursor_in_middle_of_wide_text() {
+        let input = "中文";
+        // Cursor right after the first (2-cell-wide) character.
+        let cursor = "中".len();
+        let (visible, cursor_col) = scroll_input_line(input, cursor, 20);
+        assert_eq!(visible, input);
+        assert_eq!(cursor_col, 2);
+    }
 }
