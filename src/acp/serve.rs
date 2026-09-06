@@ -18,10 +18,14 @@ use agent_client_protocol::{
 };
 use tokio::sync::RwLock;
 
-use crate::{core::client_io::ClientIo, core::permission::PermissionGate, error::Error};
+use crate::{
+    core::client_io::ClientIo,
+    core::permission::PermissionGate,
+    core::runtime::{AgentMode, AgentState},
+    error::Error,
+};
 
 use super::{
-    AgentMode, AgentState,
     client_io::AcpClientIo,
     permission::AcpPermissionGate,
     util::{map_stop_reason, session_mode_state},
@@ -119,7 +123,7 @@ pub async fn serve(
                 let model_state = state_session.session_model_state(&current_model);
 
                 match state_session
-                    .acp_new_session(model.as_deref(), skills, req.cwd)
+                    .new_session(model.as_deref(), skills, req.cwd)
                     .await
                 {
                     Ok(session_key) => responder.respond(
@@ -159,7 +163,7 @@ pub async fn serve(
                 // inside the spawned task once the turn actually finishes.
                 cx.spawn(async move {
                     let result = state
-                        .acp_prompt(
+                        .prompt(
                             &session_key,
                             prompt_blocks,
                             permission_gate,
@@ -215,7 +219,7 @@ pub async fn serve(
         )
         .on_receive_request(
             async move |req: ListSessionsRequest, responder, _cx: ConnectionTo<Client>| {
-                match state_list.acp_list_sessions(req.cwd.as_deref()).await {
+                match state_list.list_sessions(req.cwd.as_deref()).await {
                     Ok(sessions) => responder.respond(ListSessionsResponse::new(sessions)),
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
                 }
@@ -229,7 +233,7 @@ pub async fn serve(
                 let session_id_cb = req.session_id.clone();
 
                 let result = state_load
-                    .acp_load_session(&session_id_str, req.cwd.clone(), move |update| {
+                    .load_session(&session_id_str, req.cwd.clone(), move |update| {
                         let _ = cx_cb.send_notification(SessionNotification::new(
                             session_id_cb.clone(),
                             update,
@@ -250,7 +254,7 @@ pub async fn serve(
                 let session_id = req.session_id.0.as_ref().to_string();
                 let model_id = req.model_id.0.as_ref();
                 match state_set_model
-                    .acp_set_session_model(&session_id, model_id)
+                    .set_session_model(&session_id, model_id)
                     .await
                 {
                     Ok(_) => responder.respond(SetSessionModelResponse::new()),
@@ -263,10 +267,7 @@ pub async fn serve(
             async move |req: SetSessionModeRequest, responder, _cx: ConnectionTo<Client>| {
                 let session_id = req.session_id.0.as_ref().to_string();
                 let mode_id = req.mode_id.0.as_ref();
-                match state_set_mode
-                    .acp_set_session_mode(&session_id, mode_id)
-                    .await
-                {
+                match state_set_mode.set_session_mode(&session_id, mode_id).await {
                     Ok(()) => responder.respond(SetSessionModeResponse::new()),
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
                 }

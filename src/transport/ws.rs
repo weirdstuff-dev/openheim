@@ -57,11 +57,8 @@ use walkdir::WalkDir;
 use agent_client_protocol::Lines;
 
 use crate::{
-    acp::{self, AgentState},
-    config::load_config,
-    error::Error as AppError,
-    memory::MemoryContext,
-    tools::sandbox::validate_path,
+    acp, config::load_config, core::runtime::AgentState, error::Error as AppError,
+    memory::MemoryContext, tools::sandbox::validate_path,
 };
 
 #[derive(Deserialize)]

@@ -9,11 +9,7 @@ use std::sync::Arc;
 
 use agent_client_protocol_tokio::Stdio;
 
-use crate::{
-    acp::{self, AgentState},
-    config::load_config,
-    memory::MemoryContext,
-};
+use crate::{acp, config::load_config, core::runtime::AgentState, memory::MemoryContext};
 
 /// Loads configuration, initialises the agent runtime, and serves ACP over stdin/stdout.
 ///

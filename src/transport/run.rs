@@ -18,11 +18,7 @@ use agent_client_protocol::{
 };
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use crate::{
-    acp::{self, AgentState},
-    config::load_config,
-    memory::MemoryContext,
-};
+use crate::{acp, config::load_config, core::runtime::AgentState, memory::MemoryContext};
 
 /// Runs the agent against `prompt` using an in-process ACP session and prints
 /// the streamed response to stdout.

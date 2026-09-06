@@ -68,7 +68,7 @@ pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<d
 ///
 /// This is the single source of truth for the "reuse the parent client unless
 /// the model/provider changed" pattern needed when a session switches models
-/// (`acp_prompt`) or a subagent runs under a different model
+/// (`AgentState::prompt`) or a subagent runs under a different model
 /// (`DelegateTool::resolve_runtime`).
 pub fn client_for_config(
     target: &AgentConfig,

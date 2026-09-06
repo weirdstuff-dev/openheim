@@ -10,9 +10,12 @@ use agent_client_protocol::{
     },
 };
 
-use crate::core::permission::{PermissionDecision, PermissionGate, approval_key};
+use crate::core::{
+    permission::{PermissionDecision, PermissionGate, approval_key},
+    runtime::AgentState,
+};
 
-use super::{AgentState, util::tool_kind_for};
+use super::util::tool_kind_for;
 
 /// Lives here (not in `core`) because it depends on the live client connection.
 pub(super) struct AcpPermissionGate {

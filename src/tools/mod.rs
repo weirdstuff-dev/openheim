@@ -88,7 +88,7 @@
 //!
 //! `SystemToolExecutor::register` (shown below) is the lower-level entry
 //! point `OpenheimBuilder::tool` uses internally — reach for it directly only
-//! if you're constructing an [`crate::acp::AgentState`] yourself instead of
+//! if you're constructing an [`crate::core::runtime::AgentState`] yourself instead of
 //! going through the builder.
 
 pub mod args;

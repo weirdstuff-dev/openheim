@@ -8,13 +8,13 @@ use agent_client_protocol::schema::{ContentBlock, ImageContent, SessionInfo, Ses
 use uuid::Uuid;
 
 use crate::{
-    acp::AgentState,
     config::{
         AgentConfig, AppConfig, McpServerConfig, ProviderConfig, load_config, load_config_from,
     },
     core::{
         client_io::{ClientIo, NoClientIo},
         permission::{AllowAll, PermissionGate},
+        runtime::AgentState,
     },
     error::Result,
     mcp::McpServerStatus,
@@ -58,7 +58,7 @@ impl OpenheimClient {
 
     /// List persisted sessions (all or filtered by cwd).
     pub async fn list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<SessionInfo>> {
-        self.state.acp_list_sessions(cwd).await
+        self.state.list_sessions(cwd).await
     }
 
     /// Load a persisted session into a live `SessionHandle`.
@@ -72,9 +72,7 @@ impl OpenheimClient {
         cwd: PathBuf,
         on_history: impl FnMut(SessionUpdate) + Send,
     ) -> Result<SessionHandle> {
-        self.state
-            .acp_load_session(session_id, cwd, on_history)
-            .await?;
+        self.state.load_session(session_id, cwd, on_history).await?;
         Ok(SessionHandle::new(
             session_id.to_string(),
             self.state.clone(),
@@ -168,7 +166,7 @@ impl<'a> SessionBuilder<'a> {
     pub async fn start(self) -> Result<SessionHandle> {
         let id = self
             .state
-            .acp_new_session(self.model.as_deref(), self.skills, self.cwd)
+            .new_session(self.model.as_deref(), self.skills, self.cwd)
             .await?;
         Ok(SessionHandle::new(id, self.state.clone()))
     }
@@ -246,7 +244,7 @@ impl SessionHandle {
             blocks.push(ContentBlock::Image(ImageContent::new(data, mime_type)));
         }
         self.state
-            .acp_prompt(
+            .prompt(
                 &self.id,
                 blocks,
                 self.permission_gate.clone(),
@@ -295,9 +293,7 @@ impl SessionHandle {
     /// `(provider_name, model_name)` on success; the next prompt will use
     /// the new model while preserving conversation history.
     pub async fn switch_model(&self, provider: &str, model: &str) -> Result<(String, String)> {
-        self.state
-            .acp_update_session_model(&self.id, provider, model)
-            .await
+        self.state.switch_model(&self.id, provider, model).await
     }
 
     /// Restore a persisted session as the active session for this handle.
@@ -311,7 +307,7 @@ impl SessionHandle {
         session_id: &str,
         cwd: std::path::PathBuf,
     ) -> Result<SessionHandle> {
-        self.state.acp_load_session(session_id, cwd, |_| {}).await?;
+        self.state.load_session(session_id, cwd, |_| {}).await?;
         Ok(SessionHandle {
             id: session_id.to_string(),
             state: Arc::clone(&self.state),

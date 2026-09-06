@@ -7,43 +7,10 @@ use agent_client_protocol::schema::{
     ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 
-use crate::{
-    core::models::{ContentBlock, Message, Role, StopReason as CoreStopReason},
-    error::{Error, Result},
+use crate::core::{
+    models::{ContentBlock, Message, Role, StopReason as CoreStopReason},
+    runtime::AgentMode,
 };
-
-/// Which tool policy a session runs under, set via `session/set_mode`.
-/// [`Self::as_str`] gives the ACP wire-level mode id; [`Self::parse`] is the
-/// inverse, for the boundary where that id arrives as a `&str`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AgentMode {
-    /// Full tool access; tool calls go through the permission gate as normal.
-    #[default]
-    Code,
-    /// Read-only: only `read_file`, `list_dir`, `search` (and
-    /// `search_memory` with the `rag` feature) are offered to the LLM, so
-    /// nothing mutating can run. All of them still go through the
-    /// permission gate and can trigger a `session/request_permission` prompt
-    /// unless already approved.
-    Architect,
-}
-
-impl AgentMode {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            AgentMode::Code => "code",
-            AgentMode::Architect => "architect",
-        }
-    }
-
-    pub fn parse(mode_id: &str) -> Result<Self> {
-        match mode_id {
-            "code" => Ok(AgentMode::Code),
-            "architect" => Ok(AgentMode::Architect),
-            other => Err(Error::ParseError(format!("unknown session mode: {other}"))),
-        }
-    }
-}
 
 pub(super) fn session_mode_state(current_mode: AgentMode) -> SessionModeState {
     SessionModeState::new(
@@ -61,7 +28,7 @@ pub(super) fn session_mode_state(current_mode: AgentMode) -> SessionModeState {
 /// — the tunnel ACP uses for thinking content (ACP's own content model has no
 /// thinking variant; the `thinking` entry in the session metadata advertised
 /// by `initialize` documents this convention for clients).
-pub(super) fn thinking_chunk(content: String) -> TextContent {
+pub(crate) fn thinking_chunk(content: String) -> TextContent {
     let mut meta = serde_json::Map::new();
     meta.insert(
         "kind".to_string(),
@@ -78,7 +45,7 @@ pub(super) fn thinking_chunk(content: String) -> TextContent {
 /// `content._meta.kind == "thinking"` exactly as the live streaming path
 /// does. Without this, thinking shown during a turn vanished on reload even
 /// though it was persisted.
-pub(super) fn replay_history_messages<F>(messages: &[Message], on_update: &mut F)
+pub(crate) fn replay_history_messages<F>(messages: &[Message], on_update: &mut F)
 where
     F: FnMut(SessionUpdate),
 {
@@ -163,7 +130,7 @@ where
 
 /// Maps a builtin/MCP tool name to the closest ACP [`ToolKind`], purely for
 /// client UI treatment (icons etc.) — has no bearing on execution.
-pub(super) fn tool_kind_for(tool_name: &str) -> ToolKind {
+pub(crate) fn tool_kind_for(tool_name: &str) -> ToolKind {
     match tool_name {
         "execute_command" => ToolKind::Execute,
         "read_file" => ToolKind::Read,

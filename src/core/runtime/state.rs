@@ -1,6 +1,6 @@
 //! [`AgentState`]: the process-wide, per-connection-shared state behind every
-//! ACP entry point — session bookkeeping plus the `acp_*` methods `serve()`
-//! dispatches into.
+//! entry point — session bookkeeping plus the methods `acp::serve()` and the
+//! other transports dispatch into.
 
 use std::{
     collections::HashMap,
@@ -18,6 +18,10 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
+    acp::{
+        convert::convert_prompt_blocks,
+        util::{replay_history_messages, thinking_chunk, tool_kind_for},
+    },
     config::{AgentConfig, AppConfig, build_http_client, create_client},
     core::{
         agent::run_agent_streaming_with_history,
@@ -34,12 +38,11 @@ use crate::{
 };
 
 use super::{
-    convert::convert_prompt_blocks,
+    AgentMode,
     session::{
         MAX_LIVE_SESSIONS, SESSION_IDLE_EVICTION_AFTER, SessionState, evict_idle_sessions,
         insert_or_keep_live, prompt_in_flight,
     },
-    util::{AgentMode, replay_history_messages, thinking_chunk, tool_kind_for},
 };
 
 type Sessions = Arc<RwLock<HashMap<String, SessionState>>>;
@@ -59,9 +62,9 @@ pub struct AgentState {
     pub work_dir: PathBuf,
     /// Whether shell command execution is enabled for the LLM.
     pub allow_shell: bool,
-    /// Visible to the rest of `acp` (e.g. [`super::permission::AcpPermissionGate`]
-    /// reads remembered approvals directly) but not outside it.
-    pub(super) sessions: Sessions,
+    /// `pub(crate)` (not private) so `acp::AcpPermissionGate` — which lives
+    /// outside this module — can read remembered approvals directly.
+    pub(crate) sessions: Sessions,
 }
 
 impl AgentState {
@@ -132,7 +135,7 @@ impl AgentState {
         })
     }
 
-    pub async fn acp_new_session(
+    pub async fn new_session(
         &self,
         model: Option<&str>,
         skills: Vec<String>,
@@ -145,7 +148,7 @@ impl AgentState {
             .unwrap_or_else(|| self.config.clone());
         // No write lease taken here — merely creating/holding a session open
         // doesn't touch history, so it doesn't contend with other processes.
-        // The cross-process write lease is acquired per-turn in `acp_prompt`.
+        // The cross-process write lease is acquired per-turn in `Self::prompt`.
         {
             let mut sessions = self.sessions.write().await;
             sessions.insert(
@@ -203,7 +206,7 @@ impl AgentState {
         Ok((provider_name, model_name))
     }
 
-    pub async fn acp_update_session_model(
+    pub async fn switch_model(
         &self,
         session_id: &str,
         provider: &str,
@@ -213,7 +216,7 @@ impl AgentState {
         self.apply_session_config(session_id, new_config).await
     }
 
-    pub async fn acp_set_session_model(
+    pub async fn set_session_model(
         &self,
         session_id: &str,
         model_id: &str,
@@ -222,7 +225,7 @@ impl AgentState {
         self.apply_session_config(session_id, new_config).await
     }
 
-    pub async fn acp_set_session_mode(&self, session_id: &str, mode_id: &str) -> Result<()> {
+    pub async fn set_session_mode(&self, session_id: &str, mode_id: &str) -> Result<()> {
         let mode = AgentMode::parse(mode_id)?;
         let mut sessions = self.sessions.write().await;
         let s = sessions
@@ -272,7 +275,7 @@ impl AgentState {
     /// caller can map it to an ACP [`agent_client_protocol::schema::StopReason`]
     /// directly instead of having to reverse-engineer it (e.g. by polling
     /// session state for cancellation after the fact).
-    pub async fn acp_prompt<F>(
+    pub async fn prompt<F>(
         &self,
         session_id: &str,
         prompt: Vec<AcpContentBlock>,
@@ -467,7 +470,7 @@ impl AgentState {
         run_result.map(|r| r.stop_reason)
     }
 
-    pub async fn acp_list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<SessionInfo>> {
+    pub async fn list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<SessionInfo>> {
         let history = self.memory.history.clone();
         let metas = tokio::task::spawn_blocking(move || history.list_conversations())
             .await
@@ -486,7 +489,7 @@ impl AgentState {
             .collect())
     }
 
-    pub async fn acp_load_session<F>(
+    pub async fn load_session<F>(
         &self,
         session_id: &str,
         cwd: PathBuf,
@@ -583,7 +586,7 @@ impl AgentState {
                 )));
             }
             // Read back the mode so the response reflects whatever
-            // `acp_prompt` is actually enforcing for it, not the
+            // `Self::prompt` is actually enforcing for it, not the
             // fresh-session default.
             live.mode
         };
@@ -624,7 +627,7 @@ mod prompt_lease_ordering_tests {
         }
     }
 
-    // Regression test for the ordering `acp_prompt` relies on: the
+    // Regression test for the ordering `Self::prompt` relies on: the
     // in-process `prompt_lock` must be acquired (and fail fast on an
     // overlapping call) *before* the cross-process `SessionLease` is
     // acquired. Getting this backwards let an overlapping, rejected
@@ -640,7 +643,7 @@ mod prompt_lease_ordering_tests {
         let lock_path = dir.path().join(format!("{chat_id}.lock"));
         let state = sample_session_state(chat_id);
 
-        // Turn A: accepted, in the same order `acp_prompt` now uses.
+        // Turn A: accepted, in the same order `Self::prompt` now uses.
         let _prompt_guard_a = state.try_acquire_prompt_lock("s1").unwrap();
         let _lease_a = history.acquire_lease(&chat_id).unwrap();
         assert!(lock_path.exists());

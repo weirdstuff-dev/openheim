@@ -457,7 +457,7 @@ impl HistoryManager {
     /// lock has aged past its TTL — see `memory::lease`) is taken over
     /// automatically. Hold the returned [`SessionLease`] for exactly the
     /// span that actually writes — a single `session/prompt` turn
-    /// (`acp::AgentState::acp_prompt` acquires and releases one per turn) —
+    /// (`core::runtime::AgentState::prompt` acquires and releases one per turn) —
     /// not for as long as the session merely stays loaded/live; it releases
     /// on drop.
     ///

@@ -18,7 +18,7 @@ use crate::{
 /// `Resource` blocks (and anything the `#[non_exhaustive]` enum might add
 /// later) aren't supported at all: reject loudly instead of silently
 /// dropping part of the user's input.
-pub(super) fn convert_prompt_blocks(blocks: &[AcpContentBlock]) -> Result<Vec<ContentBlock>> {
+pub(crate) fn convert_prompt_blocks(blocks: &[AcpContentBlock]) -> Result<Vec<ContentBlock>> {
     let mut out = Vec::new();
     for block in blocks {
         match block {
