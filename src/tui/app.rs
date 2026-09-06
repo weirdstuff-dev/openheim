@@ -52,6 +52,7 @@ pub(super) struct App {
     switch_model_tx: mpsc::UnboundedSender<(String, String)>,
     switch_session_tx: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
     list_sessions_tx: mpsc::UnboundedSender<()>,
+    new_session_tx: mpsc::UnboundedSender<()>,
     picker_items: Vec<(String, String)>,
     picker_selected: usize,
     config_rows: Vec<ConfigRow>,
@@ -78,6 +79,7 @@ pub(super) struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         agent_config: AgentConfig,
         app_config: AppConfig,
@@ -86,6 +88,7 @@ impl App {
         switch_model_tx: mpsc::UnboundedSender<(String, String)>,
         switch_session_tx: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
         list_sessions_tx: mpsc::UnboundedSender<()>,
+        new_session_tx: mpsc::UnboundedSender<()>,
     ) -> Self {
         let theme_name = app_config
             .theme_color
@@ -114,6 +117,7 @@ impl App {
             switch_model_tx,
             switch_session_tx,
             list_sessions_tx,
+            new_session_tx,
             picker_items: Vec::new(),
             picker_selected: 0,
             config_rows: Vec::new(),
@@ -168,6 +172,18 @@ impl App {
             // (plus a trailing "restored" marker) arriving once the load
             // completes.
             AgentUpdate::History(items) => {
+                for item in items {
+                    self.push(item);
+                }
+            }
+            // Only now — creation confirmed — is it safe to drop the old
+            // session's transcript; see `start_new_session`.
+            AgentUpdate::NewSession(items) => {
+                self.items.clear();
+                self.scroll = 0;
+                self.pinned = true;
+                self.context_usage = None;
+                self.status = Status::Idle;
                 for item in items {
                     self.push(item);
                 }
@@ -567,6 +583,7 @@ impl App {
             "help" => self.push(ChatItem::SystemInfo(
                 ":help              show this\n\
                  :q / :quit         exit\n\
+                 :new               start a new session\n\
                  :sessions          browse and restore saved sessions\n\
                  :config            current config\n\
                  :models            list available models\n\
@@ -578,6 +595,7 @@ impl App {
                  ↑/↓  scroll · PgUp/PgDn  page · Ctrl+C  quit"
                     .to_string(),
             )),
+            "new" => self.start_new_session(),
             "sessions" => {
                 let _ = self.list_sessions_tx.send(());
             }
@@ -731,6 +749,24 @@ impl App {
             unknown => self.push(ChatItem::SystemInfo(format!(
                 ":{unknown}: unknown command  (try :help)"
             ))),
+        }
+    }
+
+    /// Asks the agent task to start a brand-new, unsaved session — the same
+    /// `SessionBuilder::start` path `run()` uses on startup, just triggered
+    /// mid-session instead. Deliberately leaves the current transcript and
+    /// `Status::Idle` check gates prompt submission (see the `KeyCode::Enter`
+    /// handler) until then, keeping the request transactional: if
+    /// `client.new_session().start()` fails, `mod.rs` reports it as a plain
+    /// `AgentUpdate::Error`, `Status` falls back to `Idle`, and the old
+    /// session — still live in the agent task — is exactly where it was.
+    fn start_new_session(&mut self) {
+        self.status = Status::Thinking;
+        if self.new_session_tx.send(()).is_err() {
+            self.status = Status::Idle;
+            self.push(ChatItem::Err(
+                "failed to start new session: agent task is gone".to_string(),
+            ));
         }
     }
 
@@ -960,6 +996,7 @@ mod tests {
         let (switch_model_tx, _) = mpsc::unbounded_channel();
         let (switch_session_tx, _) = mpsc::unbounded_channel();
         let (list_sessions_tx, _) = mpsc::unbounded_channel();
+        let (new_session_tx, _) = mpsc::unbounded_channel();
         App::new(
             AgentConfig::default(),
             test_app_config(),
@@ -968,6 +1005,7 @@ mod tests {
             switch_model_tx,
             switch_session_tx,
             list_sessions_tx,
+            new_session_tx,
         )
     }
 

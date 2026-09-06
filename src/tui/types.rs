@@ -20,6 +20,13 @@ pub(crate) enum AgentUpdate {
     /// appended once the agent task's `SessionHandle::restore` finishes
     /// loading it (see `App::open_session`).
     History(Vec<ChatItem>),
+    /// Confirms a `:new` request actually replaced the session — the agent
+    /// task only sends this once `client.new_session().start()` succeeds
+    /// (see `mod.rs`'s `new_session_rx` arm), so `App::start_new_session`
+    /// can leave the current transcript and status alone until creation is
+    /// known to have worked, instead of clearing them speculatively before
+    /// the replacement is confirmed.
+    NewSession(Vec<ChatItem>),
 }
 
 #[derive(Debug, Clone)]

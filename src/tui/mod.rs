@@ -59,7 +59,7 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
         .skills(skills.clone())
         .start()
         .await?
-        .permission_gate(permission_gate);
+        .permission_gate(permission_gate.clone());
 
     let (update_tx, mut update_rx) = mpsc::unbounded_channel::<AgentUpdate>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<String>();
@@ -67,11 +67,25 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
     let (switch_session_tx, mut switch_session_rx) =
         mpsc::unbounded_channel::<(String, std::path::PathBuf)>();
     let (list_sessions_tx, mut list_sessions_rx) = mpsc::unbounded_channel::<()>();
+    let (new_session_tx, mut new_session_rx) = mpsc::unbounded_channel::<()>();
 
     let agent_handle = {
         let update_tx = update_tx.clone();
+        // Captured separately from the `skills` moved into `App::new` below —
+        // this copy lives inside the agent task so a `:new` command can spin
+        // up another session with the same skills, same as startup did.
+        let session_skills = skills.clone();
+        // `client.new_session()` always starts from the client's original
+        // default config (see `AgentState::new_session`'s fallback), not
+        // whatever `:model`/`:models` had switched this session to — tracked
+        // here so a `:new` replacement can re-apply it instead of silently
+        // regressing to the default.
+        let default_provider = agent_config.provider_name.clone();
+        let default_model = agent_config.model.clone();
         tokio::spawn(async move {
             let mut session = session;
+            let mut current_provider = default_provider.clone();
+            let mut current_model = default_model.clone();
             loop {
                 tokio::select! {
                     maybe_prompt = prompt_rx.recv() => {
@@ -100,6 +114,8 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                             Some((provider, model)) => {
                                 match session.switch_model(&provider, &model).await {
                                     Ok((provider, model)) => {
+                                        current_provider = provider.clone();
+                                        current_model = model.clone();
                                         let _ = update_tx.send(AgentUpdate::ModelChanged { provider, model });
                                     }
                                     Err(e) => {
@@ -149,6 +165,48 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                             None => break,
                         }
                     }
+                    maybe_new = new_session_rx.recv() => {
+                        match maybe_new {
+                            Some(()) => {
+                                match client
+                                    .new_session()
+                                    .skills(session_skills.clone())
+                                    .start()
+                                    .await
+                                {
+                                    Ok(new_session) => {
+                                        let new_session =
+                                            new_session.permission_gate(permission_gate.clone());
+                                        // Re-apply the active model on top of the
+                                        // fresh session's default. If it's no
+                                        // longer valid (e.g. removed from the
+                                        // config file since startup), fall back to
+                                        // the default and let the UI know so the
+                                        // footer doesn't keep showing the stale one.
+                                        match new_session.switch_model(&current_provider, &current_model).await {
+                                            Ok(_) => {}
+                                            Err(_) => {
+                                                current_provider = default_provider.clone();
+                                                current_model = default_model.clone();
+                                                let _ = update_tx.send(AgentUpdate::ModelChanged {
+                                                    provider: default_provider.clone(),
+                                                    model: default_model.clone(),
+                                                });
+                                            }
+                                        }
+                                        session = new_session;
+                                        let _ = update_tx.send(AgentUpdate::NewSession(vec![
+                                            ChatItem::SystemInfo("─── new session".to_string()),
+                                        ]));
+                                    }
+                                    Err(e) => {
+                                        let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
+                                    }
+                                }
+                            }
+                            None => break,
+                        }
+                    }
                     maybe_list = list_sessions_rx.recv() => {
                         match maybe_list {
                             Some(()) => {
@@ -177,6 +235,7 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
         switch_model_tx,
         switch_session_tx,
         list_sessions_tx,
+        new_session_tx,
     );
 
     enable_raw_mode()?;
