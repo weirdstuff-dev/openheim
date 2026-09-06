@@ -331,14 +331,33 @@ pub(crate) fn render_input_bar(
     f.render_widget(block, area);
 
     let prompt_prefix = "  › ";
+    // `Paragraph` doesn't wrap here, so once `input` is wider than `inner`
+    // the tail just renders past the edge of the terminal and disappears —
+    // the cursor then clamps to the last visible column and appears stuck
+    // while the (invisible) text keeps growing behind it. Scroll the
+    // *displayed* slice of `input` instead, keeping the cursor's char always
+    // inside the visible window, the way a normal line editor does.
+    let cursor_chars = input[..cursor].chars().count();
+    let visible_width = inner
+        .width
+        .saturating_sub(prompt_prefix.chars().count() as u16) as usize;
+    let offset = cursor_chars.saturating_sub(visible_width.saturating_sub(1));
+    let visible: String = input
+        .chars()
+        .skip(offset)
+        .take(visible_width.max(1))
+        .collect();
+
     f.render_widget(
-        Paragraph::new(format!("{prompt_prefix}{input}")).style(Style::default().fg(Color::White)),
+        Paragraph::new(format!("{prompt_prefix}{visible}"))
+            .style(Style::default().fg(Color::White)),
         inner,
     );
 
     if show_cursor {
-        let cursor_col =
-            inner.x + prompt_prefix.chars().count() as u16 + input[..cursor].chars().count() as u16;
+        let cursor_col = inner.x
+            + prompt_prefix.chars().count() as u16
+            + (cursor_chars - offset).min(u16::MAX as usize) as u16;
         f.set_cursor_position((
             cursor_col.min(inner.x + inner.width.saturating_sub(1)),
             inner.y,
