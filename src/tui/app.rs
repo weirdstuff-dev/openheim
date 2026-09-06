@@ -176,6 +176,18 @@ impl App {
                     self.push(item);
                 }
             }
+            // Only now — creation confirmed — is it safe to drop the old
+            // session's transcript; see `start_new_session`.
+            AgentUpdate::NewSession(items) => {
+                self.items.clear();
+                self.scroll = 0;
+                self.pinned = true;
+                self.context_usage = None;
+                self.status = Status::Idle;
+                for item in items {
+                    self.push(item);
+                }
+            }
         }
     }
 
@@ -740,21 +752,22 @@ impl App {
         }
     }
 
-    /// Clears the transcript and asks the agent task to start a brand-new,
-    /// unsaved session — the same `SessionBuilder::start` path `run()` uses
-    /// on startup, just triggered mid-session instead. Unlike
-    /// `open_session`, there's no history to replay, so the agent task's
-    /// confirmation arrives as an empty-ish `AgentUpdate::History` (see
-    /// `mod.rs`'s `new_session_rx` arm) plus an `AgentUpdate::Usage(None)`
-    /// to reset the footer's context size.
+    /// Asks the agent task to start a brand-new, unsaved session — the same
+    /// `SessionBuilder::start` path `run()` uses on startup, just triggered
+    /// mid-session instead. Deliberately leaves the current transcript and
+    /// `Status::Idle` check gates prompt submission (see the `KeyCode::Enter`
+    /// handler) until then, keeping the request transactional: if
+    /// `client.new_session().start()` fails, `mod.rs` reports it as a plain
+    /// `AgentUpdate::Error`, `Status` falls back to `Idle`, and the old
+    /// session — still live in the agent task — is exactly where it was.
     fn start_new_session(&mut self) {
-        self.items.clear();
-        self.status = Status::Idle;
-        self.scroll = 0;
-        self.pinned = true;
-        self.context_usage = None;
-        self.push(ChatItem::SystemInfo("─── new session".to_string()));
-        let _ = self.new_session_tx.send(());
+        self.status = Status::Thinking;
+        if self.new_session_tx.send(()).is_err() {
+            self.status = Status::Idle;
+            self.push(ChatItem::Err(
+                "failed to start new session: agent task is gone".to_string(),
+            ));
+        }
     }
 
     /// Clears the transcript and requests the agent task load `meta`'s full

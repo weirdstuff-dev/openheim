@@ -165,10 +165,9 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                                 {
                                     Ok(new_session) => {
                                         session = new_session.permission_gate(permission_gate.clone());
-                                        let _ = update_tx.send(AgentUpdate::History(vec![
-                                            ChatItem::SystemInfo("─── session started".to_string()),
+                                        let _ = update_tx.send(AgentUpdate::NewSession(vec![
+                                            ChatItem::SystemInfo("─── new session".to_string()),
                                         ]));
-                                        let _ = update_tx.send(AgentUpdate::Usage(None));
                                     }
                                     Err(e) => {
                                         let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
