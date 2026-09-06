@@ -83,6 +83,17 @@ let client = OpenheimClient::from_config("/etc/myapp/openheim.toml")
     .await?;
 ```
 
+### Overriding just the model
+
+`.model()` alone (with no `.provider()`/`.api_key()`/`.api_base()`) doesn't switch to programmatic config — it still loads the config file, but resolves this model instead of the default one, the same as passing `--model` to `openheim run`:
+
+```rust
+let client = OpenheimClient::builder()
+    .model("claude-opus-4-7") // must be listed under some provider in the config file
+    .build()
+    .await?;
+```
+
 ### Programmatic config (no file needed)
 
 ```rust

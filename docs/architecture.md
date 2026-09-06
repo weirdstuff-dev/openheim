@@ -235,6 +235,8 @@ The `OpenheimClient` facade (`src/client.rs`) wraps the same `core::runtime::Age
 
 The duplex-pipe + ACP-client wiring does exist — in `src/transport/run.rs`, where the headless `openheim run` mode drives `acp::serve` over `tokio::io::duplex`. Either way there is no separate "library mode" agent logic: the facade and every transport share the exact same session and agent-loop code path.
 
+Every transport (`stdio`, `ws`, `run`) builds its `AgentState` the same way: `OpenheimClient::builder().build().await?` followed by `OpenheimClient::state()` (`pub(crate)`, so only reachable from inside this crate) to get the `Arc<AgentState>` `acp::serve` wants. That's the same load-config → resolve → `MemoryContext::new` → `AgentState::new` sequence the builder already does for library users, so there's exactly one place that canonicalizes `work_dir`, merges builder-registered MCP servers, and registers custom tools — a hand-rolled sequence in a transport would silently skip all of that.
+
 ---
 
 ## Key extension points
@@ -246,7 +248,7 @@ The duplex-pipe + ACP-client wiring does exist — in `src/transport/run.rs`, wh
 | Add a built-in tool | `src/tools/` | Implement `ToolHandler`, register in `register_builtins` |
 | Add a tool without touching source | any embedder | Implement `ToolHandler`, register via `OpenheimBuilder::tool()` |
 | Add an external tool source | `src/mcp/` | MCP servers via configuration or `McpClient` |
-| Add a new transport | `src/transport/` | Call `acp::serve(your_transport, state)` |
+| Add a new transport | `src/transport/` | Build via `OpenheimClient::builder().build()`, then call `acp::serve(your_transport, client.state().clone())` |
 | Gate tool calls on user approval | any embedder | Implement `PermissionGate`, set via `SessionHandle::permission_gate()` |
 
 See [custom-tools.md](./custom-tools.md) and [custom-llm-provider.md](./custom-llm-provider.md) for step-by-step guides.
