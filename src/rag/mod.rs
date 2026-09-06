@@ -91,7 +91,12 @@ impl LongTermMemory {
             }
             None => None,
         };
-        let top_k = memory.map_or(DEFAULT_TOP_K, |m| m.top_k);
+        // `top_k = 0` is presumably a misconfiguration, not "never return
+        // results" — treat it the same as leaving `top_k` unset rather than
+        // silently making `search_memory` useless.
+        let top_k = memory.map_or(DEFAULT_TOP_K, |m| {
+            if m.top_k == 0 { DEFAULT_TOP_K } else { m.top_k }
+        });
         let store = VectorStore::open(&db_path)?;
         Ok(Self::new(store, embedder, top_k))
     }
@@ -302,5 +307,51 @@ mod tests {
         .unwrap();
         assert!(config.resolve_embedding().unwrap().is_none());
         assert_eq!(config.memory.as_ref().map_or(DEFAULT_TOP_K, |m| m.top_k), 5);
+    }
+
+    #[test]
+    fn from_config_clamps_explicit_zero_top_k_to_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("memory.db");
+        let config: AppConfig = toml::from_str(&format!(
+            r#"
+            default_provider = "openai"
+            [providers.openai]
+            api_base = "https://api.openai.com/v1"
+            default_model = "gpt-4o"
+            models = ["gpt-4o"]
+            [memory]
+            db_path = "{}"
+            top_k = 0
+        "#,
+            db_path.display()
+        ))
+        .unwrap();
+
+        let memory = LongTermMemory::from_config(&config).unwrap();
+        assert_eq!(memory.top_k, DEFAULT_TOP_K);
+    }
+
+    #[test]
+    fn from_config_preserves_a_configured_positive_top_k() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("memory.db");
+        let config: AppConfig = toml::from_str(&format!(
+            r#"
+            default_provider = "openai"
+            [providers.openai]
+            api_base = "https://api.openai.com/v1"
+            default_model = "gpt-4o"
+            models = ["gpt-4o"]
+            [memory]
+            db_path = "{}"
+            top_k = 7
+        "#,
+            db_path.display()
+        ))
+        .unwrap();
+
+        let memory = LongTermMemory::from_config(&config).unwrap();
+        assert_eq!(memory.top_k, 7);
     }
 }
