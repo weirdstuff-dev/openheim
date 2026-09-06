@@ -44,6 +44,15 @@ impl OpenheimClient {
         }
     }
 
+    /// The shared runtime handle behind this client. `pub(crate)` — for the
+    /// transports (`transport::{run,stdio,ws}`), which need the raw
+    /// `AgentState` to hand to `acp::serve`, so every entry point builds it
+    /// the same way (config load, resolve, `MemoryContext::new`, custom
+    /// tools) instead of each hand-rolling that sequence.
+    pub(crate) fn state(&self) -> &Arc<AgentState> {
+        &self.state
+    }
+
     // ── Sessions ──────────────────────────────────────────────────────────────
 
     /// Create a new session. Returns a builder to set model, skills, and cwd.
@@ -322,16 +331,24 @@ impl SessionHandle {
 /// Builder for `OpenheimClient`.
 ///
 /// Supports two modes:
-/// 1. **Programmatic** — set `.provider()`, `.api_key()`, `.model()` directly.
+/// 1. **Programmatic** — set `.provider()`, `.api_key()`, or `.api_base()`
+///    directly, building the whole config from scratch.
 /// 2. **File-based** — call `OpenheimClient::from_config(path)` or leave
 ///    everything unset to load from `~/.openheim/config.toml`.
+///
+/// `.model()` works in either mode: in file-based mode it overrides which
+/// configured model gets resolved (same as the config file's model with a
+/// different name picked); in programmatic mode it's the model of the
+/// from-scratch provider.
 ///
 /// MCP servers can be added in either mode with `.mcp_server()`.
 #[derive(Default)]
 pub struct OpenheimBuilder {
     // file-based path (None = ~/.openheim/config.toml)
     config_path: Option<PathBuf>,
-    // programmatic fields — if any of these are set we skip the config file
+    // programmatic fields — if any of these (besides `model`) are set we
+    // skip the config file entirely; `model` alone is just a resolve()
+    // override on top of file-based config.
     provider: Option<String>,
     api_key: Option<String>,
     model: Option<String>,
@@ -436,38 +453,35 @@ impl OpenheimBuilder {
 
     /// Build the client, connecting to MCP servers and initialising the agent state.
     pub async fn build(self) -> Result<OpenheimClient> {
-        let (agent_config, mut app_config) = if self.provider.is_some()
-            || self.api_key.is_some()
-            || self.model.is_some()
-            || self.api_base.is_some()
-        {
-            build_programmatic(
-                self.provider,
-                self.api_key,
-                self.model,
-                self.api_base,
-                self.max_iterations,
-                self.timeout_secs,
-                self.max_tokens,
-                self.default_skills.clone(),
-            )
-        } else {
-            let app_config = match self.config_path {
-                Some(ref path) => load_config_from(path)?,
-                None => load_config()?,
+        let (agent_config, mut app_config) =
+            if self.provider.is_some() || self.api_key.is_some() || self.api_base.is_some() {
+                build_programmatic(
+                    self.provider,
+                    self.api_key,
+                    self.model,
+                    self.api_base,
+                    self.max_iterations,
+                    self.timeout_secs,
+                    self.max_tokens,
+                    self.default_skills.clone(),
+                )
+            } else {
+                let app_config = match self.config_path {
+                    Some(ref path) => load_config_from(path)?,
+                    None => load_config()?,
+                };
+                let mut agent_config = app_config.resolve(self.model.as_deref())?;
+                if let Some(n) = self.max_iterations {
+                    agent_config.max_iterations = n;
+                }
+                if let Some(s) = self.timeout_secs {
+                    agent_config.timeout_secs = s;
+                }
+                if let Some(t) = self.max_tokens {
+                    agent_config.max_tokens = Some(t);
+                }
+                (agent_config, app_config)
             };
-            let mut agent_config = app_config.resolve(None)?;
-            if let Some(n) = self.max_iterations {
-                agent_config.max_iterations = n;
-            }
-            if let Some(s) = self.timeout_secs {
-                agent_config.timeout_secs = s;
-            }
-            if let Some(t) = self.max_tokens {
-                agent_config.max_tokens = Some(t);
-            }
-            (agent_config, app_config)
-        };
 
         // Merge any extra MCP servers from the builder
         for (name, cfg) in self.mcp_servers {

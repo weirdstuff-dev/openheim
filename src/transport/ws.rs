@@ -57,8 +57,8 @@ use walkdir::WalkDir;
 use agent_client_protocol::Lines;
 
 use crate::{
-    acp, config::load_config, core::runtime::AgentState, error::Error as AppError,
-    memory::MemoryContext, tools::sandbox::validate_path,
+    acp, client::OpenheimClient, core::runtime::AgentState, error::Error as AppError,
+    tools::sandbox::validate_path,
 };
 
 #[derive(Deserialize)]
@@ -180,10 +180,8 @@ pub enum FsResponse {
 ///
 /// Blocks until a Ctrl-C signal is received, then shuts down gracefully.
 pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
-    let app_config = load_config()?;
-    let agent_config = app_config.resolve(None)?;
-    let memory = MemoryContext::new(app_config.default_skills.clone())?;
-    let state = Arc::new(AgentState::new(agent_config, app_config, memory, vec![]).await?);
+    let client = OpenheimClient::builder().build().await?;
+    let state = client.state().clone();
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
