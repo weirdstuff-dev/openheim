@@ -1,6 +1,6 @@
 //! Built-in tool: `web_fetch` — fetches a URL and returns its content as text.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -204,19 +204,37 @@ fn is_disallowed_ip(ip: IpAddr) -> bool {
             // IPv6 checks below wouldn't catch on their own — a request to
             // `::ffff:169.254.169.254` would sail straight past them despite
             // being cloud metadata. Run those embedded addresses back through
-            // the IPv4 checks too. `to_ipv4` also matches `::` and `::1`
-            // (as 0.0.0.0 and 0.0.0.1, neither of which is IPv4-loopback),
-            // so this is additive, not a replacement for the native checks.
-            #[allow(deprecated)]
-            let embeds_disallowed_ipv4 = v6
-                .to_ipv4()
-                .is_some_and(|v4| is_disallowed_ip(IpAddr::V4(v4)));
+            // the IPv4 checks too. `to_ipv4_mapped()` covers the first form;
+            // `ipv4_compatible` covers the second, deprecated (RFC 4291) one
+            // that `to_ipv4_mapped()` doesn't — between them, `::` and `::1`
+            // are still matched too (as 0.0.0.0 and 0.0.0.1, neither of which
+            // is IPv4-loopback), same as the old `to_ipv4()` did, so this is
+            // additive, not a replacement for the native checks below.
+            let embedded_v4 = v6.to_ipv4_mapped().or_else(|| ipv4_compatible(&v6));
+            let embeds_disallowed_ipv4 =
+                embedded_v4.is_some_and(|v4| is_disallowed_ip(IpAddr::V4(v4)));
             embeds_disallowed_ipv4
                 || v6.is_loopback()
                 || v6.is_unspecified()
                 || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique local, fc00::/7
                 || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local, fe80::/10
         }
+    }
+}
+
+/// The deprecated (RFC 4291) "IPv4-compatible" IPv6 form `::a.b.c.d`: the
+/// first 96 bits are zero and the last 32 embed the IPv4 address directly —
+/// distinct from the still-current "IPv4-mapped" form `::ffff:a.b.c.d`
+/// that [`Ipv6Addr::to_ipv4_mapped`] already recognizes.
+fn ipv4_compatible(v6: &Ipv6Addr) -> Option<Ipv4Addr> {
+    let segments = v6.segments();
+    if segments[0..6] == [0, 0, 0, 0, 0, 0] {
+        let octets = v6.octets();
+        Some(Ipv4Addr::new(
+            octets[12], octets[13], octets[14], octets[15],
+        ))
+    } else {
+        None
     }
 }
 

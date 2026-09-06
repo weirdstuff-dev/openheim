@@ -540,9 +540,9 @@ impl AgentState {
             // above); reject the load instead of handing this connection a
             // history snapshot that's already stale and will never catch up.
             if prompt_in_flight(live) {
-                return Err(Error::Other(format!(
-                    "a prompt is already in flight for session {session_id}; retry once it completes"
-                )));
+                return Err(Error::SessionBusy {
+                    session_id: session_id.to_string(),
+                });
             }
             // Read back the mode so the response reflects whatever
             // `Self::prompt` is actually enforcing for it, not the

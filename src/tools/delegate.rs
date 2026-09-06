@@ -75,7 +75,7 @@ impl DelegateTool {
     /// honouring the profile's optional `model`/`provider`/`max_iterations`
     /// overrides. Reuses the parent's client when the resolved provider and model
     /// match — otherwise builds a fresh one, mirroring the pattern `AgentState::prompt`
-    /// already uses for per-session model switches (see `src/acp/mod.rs`).
+    /// already uses for per-session model switches (see `src/core/runtime/state.rs`).
     fn resolve_runtime(&self, profile: &AgentProfile) -> Result<(AgentConfig, Arc<dyn LlmClient>)> {
         let config = match (&profile.provider, &profile.model) {
             (Some(provider), Some(model)) => {

@@ -8,349 +8,6 @@ use crate::error::{Error, Result};
 use crate::memory::lease::{self, SessionLease};
 use std::path::PathBuf;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    fn make_manager() -> (HistoryManager, tempfile::TempDir) {
-        let dir = tempdir().unwrap();
-        let mgr = HistoryManager::with_dir(dir.path().to_path_buf());
-        (mgr, dir)
-    }
-
-    #[test]
-    fn create_and_load_conversation_roundtrip() {
-        let (mgr, _dir) = make_manager();
-        let conv = mgr
-            .create_conversation(Some("gpt-4".into()), Some("openai".into()), vec![])
-            .unwrap();
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert_eq!(loaded.meta.id, conv.meta.id);
-        assert_eq!(loaded.meta.model.as_deref(), Some("gpt-4"));
-        assert_eq!(loaded.meta.provider.as_deref(), Some("openai"));
-        assert!(loaded.messages.is_empty());
-    }
-
-    #[test]
-    fn load_nonexistent_conversation_errors() {
-        let (mgr, _dir) = make_manager();
-        let id = Uuid::new_v4();
-        let err = mgr.load_conversation(&id).unwrap_err();
-        assert!(matches!(err, Error::NotFound(_)));
-        assert!(err.to_string().contains(&id.to_string()));
-    }
-
-    #[test]
-    fn save_sets_title_from_first_user_message() {
-        let (mgr, _dir) = make_manager();
-        let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
-        conv.messages.push(Message::user("hello world"));
-        mgr.save_conversation(&conv).unwrap();
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert_eq!(loaded.meta.title.as_deref(), Some("hello world"));
-    }
-
-    #[test]
-    fn save_truncates_long_title() {
-        let (mgr, _dir) = make_manager();
-        let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
-        let long_msg: String = "a".repeat(100);
-        conv.messages.push(Message::user(long_msg));
-        mgr.save_conversation(&conv).unwrap();
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert_eq!(loaded.meta.title.as_ref().map(|t| t.len()), Some(80));
-    }
-
-    #[test]
-    fn list_conversations_returns_most_recent_first() {
-        let (mgr, _dir) = make_manager();
-        mgr.create_conversation(None, None, vec![]).unwrap();
-        mgr.create_conversation(None, None, vec![]).unwrap();
-        let list = mgr.list_conversations().unwrap();
-        assert_eq!(list.len(), 2);
-        assert!(list[0].updated_at >= list[1].updated_at);
-    }
-
-    #[test]
-    fn list_conversations_empty_dir() {
-        let (mgr, _dir) = make_manager();
-        let list = mgr.list_conversations().unwrap();
-        assert!(list.is_empty());
-    }
-
-    #[test]
-    fn get_last_conversation_returns_none_when_empty() {
-        let (mgr, _dir) = make_manager();
-        let result = mgr.get_last_conversation().unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn get_last_conversation_returns_most_recent() {
-        let (mgr, _dir) = make_manager();
-        mgr.create_conversation(None, None, vec![]).unwrap();
-        let second = mgr.create_conversation(None, None, vec![]).unwrap();
-        // Save second with a message so its updated_at is newer
-        let mut conv = second.clone();
-        conv.messages.push(Message::user("latest"));
-        mgr.save_conversation(&conv).unwrap();
-        let last = mgr.get_last_conversation().unwrap().unwrap();
-        assert_eq!(last.meta.id, conv.meta.id);
-    }
-
-    #[test]
-    fn resolve_conversation_loads_existing_by_id() {
-        let (mgr, _dir) = make_manager();
-        let existing = mgr
-            .create_conversation(Some("gpt-4".into()), None, vec![])
-            .unwrap();
-        let resolved = mgr
-            .resolve_conversation(Some(existing.meta.id), None, None, vec![])
-            .unwrap();
-        assert_eq!(resolved.meta.id, existing.meta.id);
-        assert_eq!(resolved.meta.model.as_deref(), Some("gpt-4"));
-    }
-
-    #[test]
-    fn resolve_conversation_creates_new_for_unknown_id() {
-        let (mgr, _dir) = make_manager();
-        let new_id = Uuid::new_v4();
-        let resolved = mgr
-            .resolve_conversation(Some(new_id), Some("claude".into()), None, vec![])
-            .unwrap();
-        assert_eq!(resolved.meta.id, new_id);
-        assert_eq!(resolved.meta.model.as_deref(), Some("claude"));
-    }
-
-    #[test]
-    fn resolve_conversation_creates_fresh_when_no_id() {
-        let (mgr, _dir) = make_manager();
-        let resolved = mgr.resolve_conversation(None, None, None, vec![]).unwrap();
-        assert!(resolved.messages.is_empty());
-        // Verify it was persisted
-        mgr.load_conversation(&resolved.meta.id).unwrap();
-    }
-
-    #[test]
-    fn conversation_skills_are_persisted() {
-        let (mgr, _dir) = make_manager();
-        let conv = mgr
-            .create_conversation(None, None, vec!["coding".into(), "rust".into()])
-            .unwrap();
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert_eq!(loaded.meta.skills, vec!["coding", "rust"]);
-    }
-
-    /// The actual regression test for this durability item: messages
-    /// persisted only via `append_message` (never `save_conversation`) must
-    /// still be there on load — this is what a crash before the end-of-turn
-    /// save would leave behind.
-    #[test]
-    fn append_message_persists_without_a_full_save() {
-        let (mgr, _dir) = make_manager();
-        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
-
-        mgr.append_message(&conv.meta.id, &Message::user("first"))
-            .unwrap();
-        mgr.append_message(&conv.meta.id, &Message::assistant("second"))
-            .unwrap();
-
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert_eq!(loaded.messages.len(), 2);
-        assert_eq!(loaded.messages[0].text().as_deref(), Some("first"));
-        assert_eq!(loaded.messages[1].text().as_deref(), Some("second"));
-    }
-
-    #[test]
-    fn append_message_updates_timestamp_and_derives_title() {
-        let (mgr, _dir) = make_manager();
-        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
-        let created_updated_at = conv.meta.updated_at;
-
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        mgr.append_message(&conv.meta.id, &Message::user("hello there"))
-            .unwrap();
-
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert!(loaded.meta.updated_at > created_updated_at);
-        assert_eq!(loaded.meta.title.as_deref(), Some("hello there"));
-    }
-
-    #[test]
-    fn save_conversation_after_appends_reconciles_the_log() {
-        // save_conversation always rewrites the log from its own `messages`
-        // argument; it must not end up with both the appended messages and
-        // a second copy from the save.
-        let (mgr, _dir) = make_manager();
-        let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
-
-        mgr.append_message(&conv.meta.id, &Message::user("first"))
-            .unwrap();
-        conv.messages.push(Message::user("first"));
-        mgr.save_conversation(&conv).unwrap();
-
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert_eq!(loaded.messages.len(), 1);
-    }
-
-    #[test]
-    fn save_conversation_refuses_when_another_writer_appended_more_than_we_know_of() {
-        // Simulates two processes sharing a session: this process loads the
-        // conversation with 0 messages, then a foreign process appends
-        // directly to the log (bypassing this process's in-memory `conv`).
-        // A stale full save must not clobber the foreign line.
-        let (mgr, _dir) = make_manager();
-        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
-
-        mgr.append_message(&conv.meta.id, &Message::user("from another process"))
-            .unwrap();
-
-        // `conv` is still the stale, pre-append in-memory view (0 messages).
-        let err = mgr.save_conversation(&conv).unwrap_err();
-        assert!(matches!(err, Error::HistoryDiverged { .. }));
-
-        // The foreign message must still be there — the refusal didn't corrupt it.
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert_eq!(loaded.messages.len(), 1);
-        assert_eq!(
-            loaded.messages[0].text().as_deref(),
-            Some("from another process")
-        );
-    }
-
-    #[test]
-    fn save_conversation_succeeds_when_conv_already_reflects_its_own_appends() {
-        // The normal single-process pattern (see the `acp` turn loop):
-        // `append_message` is called as each message is produced, and the
-        // same message is also pushed onto `conv.messages`, so by the time
-        // the end-of-turn full save runs, `conv.messages` is a superset of
-        // (here, exactly equal to) what's already on disk. This must not be
-        // mistaken for a foreign writer.
-        let (mgr, _dir) = make_manager();
-        let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
-
-        let msg = Message::user("first");
-        mgr.append_message(&conv.meta.id, &msg).unwrap();
-        conv.messages.push(msg);
-
-        mgr.save_conversation(&conv).unwrap();
-
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert_eq!(loaded.messages.len(), 1);
-    }
-
-    #[test]
-    fn save_conversation_refuses_when_a_shared_message_was_overwritten_in_place() {
-        // Same scenario as the "more than we know of" case, but the foreign
-        // writer's append lands at the same index this process's stale
-        // `conv` already occupies with a *different* message — so a naive
-        // length-only check would miss it and silently clobber the foreign
-        // line with `conv`'s version.
-        let (mgr, _dir) = make_manager();
-        let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
-
-        mgr.append_message(&conv.meta.id, &Message::user("from another process"))
-            .unwrap();
-        // Stale in-memory view: same length as disk, but disagrees on content.
-        conv.messages.push(Message::user("from this process"));
-
-        let err = mgr.save_conversation(&conv).unwrap_err();
-        assert!(matches!(err, Error::HistoryDiverged { .. }));
-
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert_eq!(
-            loaded.messages[0].text().as_deref(),
-            Some("from another process")
-        );
-    }
-
-    #[test]
-    fn a_truncated_trailing_log_line_does_not_lose_earlier_messages() {
-        let (mgr, dir) = make_manager();
-        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
-        mgr.append_message(&conv.meta.id, &Message::user("intact"))
-            .unwrap();
-
-        // Simulate a crash mid-write: append a partial, unparseable JSON
-        // line directly, bypassing `append_message`.
-        let log_path = dir.path().join(format!("{}.jsonl", conv.meta.id));
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&log_path)
-            .unwrap();
-        write!(file, "{{\"role\":\"user\",\"conte").unwrap();
-
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert_eq!(loaded.messages.len(), 1);
-        assert_eq!(loaded.messages[0].text().as_deref(), Some("intact"));
-    }
-
-    #[test]
-    fn pre_split_format_conversation_still_loads() {
-        // A conversation written before message logs were split into a
-        // `.jsonl` sidecar: a single `{id}.json` containing both `meta` and
-        // the full `messages` array, no `.jsonl` sibling.
-        let (mgr, dir) = make_manager();
-        let id = Uuid::new_v4();
-        let now = Utc::now();
-        let legacy = Conversation {
-            meta: ConversationMeta {
-                id,
-                created_at: now,
-                updated_at: now,
-                model: None,
-                provider: None,
-                title: None,
-                skills: vec![],
-                cwd: None,
-                context_usage: None,
-            },
-            messages: vec![Message::user("from the old format")],
-        };
-        std::fs::write(
-            dir.path().join(format!("{id}.json")),
-            serde_json::to_string_pretty(&legacy).unwrap(),
-        )
-        .unwrap();
-
-        let loaded = mgr.load_conversation(&id).unwrap();
-        assert_eq!(loaded.messages.len(), 1);
-        assert_eq!(
-            loaded.messages[0].text().as_deref(),
-            Some("from the old format")
-        );
-    }
-
-    #[test]
-    fn delete_conversation_removes_the_message_log_too() {
-        let (mgr, dir) = make_manager();
-        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
-        mgr.append_message(&conv.meta.id, &Message::user("hi"))
-            .unwrap();
-
-        mgr.delete_conversation(&conv.meta.id).unwrap();
-
-        assert!(!dir.path().join(format!("{}.json", conv.meta.id)).exists());
-        assert!(!dir.path().join(format!("{}.jsonl", conv.meta.id)).exists());
-    }
-
-    #[test]
-    fn delete_conversation_removes_the_lease_lockfile_too() {
-        let (mgr, dir) = make_manager();
-        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
-        let lease = mgr.acquire_lease(&conv.meta.id).unwrap();
-        assert!(dir.path().join(format!("{}.lock", conv.meta.id)).exists());
-
-        mgr.delete_conversation(&conv.meta.id).unwrap();
-
-        assert!(!dir.path().join(format!("{}.lock", conv.meta.id)).exists());
-        drop(lease); // held past the delete on purpose: must not resurrect the file
-        assert!(!dir.path().join(format!("{}.lock", conv.meta.id)).exists());
-    }
-}
-
 /// Persistent metadata for a conversation session.
 ///
 /// Stored in the `meta` field of each conversation's `.json` file. Does not
@@ -714,17 +371,6 @@ impl HistoryManager {
         Ok(metas)
     }
 
-    /// Returns the most-recently-updated conversation, or `None` if none exist.
-    ///
-    /// Loads the full conversation (messages + metadata) for the most recent entry.
-    pub fn get_last_conversation(&self) -> Result<Option<Conversation>> {
-        let metas = self.list_conversations()?;
-        match metas.first() {
-            Some(meta) => Ok(Some(self.load_conversation(&meta.id)?)),
-            None => Ok(None),
-        }
-    }
-
     #[cfg(test)]
     pub fn with_dir(dir: std::path::PathBuf) -> Self {
         Self { history_dir: dir }
@@ -770,5 +416,328 @@ impl HistoryManager {
             }
             None => self.create_conversation(model, provider, skills),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn make_manager() -> (HistoryManager, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let mgr = HistoryManager::with_dir(dir.path().to_path_buf());
+        (mgr, dir)
+    }
+
+    #[test]
+    fn create_and_load_conversation_roundtrip() {
+        let (mgr, _dir) = make_manager();
+        let conv = mgr
+            .create_conversation(Some("gpt-4".into()), Some("openai".into()), vec![])
+            .unwrap();
+        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
+        assert_eq!(loaded.meta.id, conv.meta.id);
+        assert_eq!(loaded.meta.model.as_deref(), Some("gpt-4"));
+        assert_eq!(loaded.meta.provider.as_deref(), Some("openai"));
+        assert!(loaded.messages.is_empty());
+    }
+
+    #[test]
+    fn load_nonexistent_conversation_errors() {
+        let (mgr, _dir) = make_manager();
+        let id = Uuid::new_v4();
+        let err = mgr.load_conversation(&id).unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)));
+        assert!(err.to_string().contains(&id.to_string()));
+    }
+
+    #[test]
+    fn save_sets_title_from_first_user_message() {
+        let (mgr, _dir) = make_manager();
+        let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
+        conv.messages.push(Message::user("hello world"));
+        mgr.save_conversation(&conv).unwrap();
+        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
+        assert_eq!(loaded.meta.title.as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn save_truncates_long_title() {
+        let (mgr, _dir) = make_manager();
+        let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
+        let long_msg: String = "a".repeat(100);
+        conv.messages.push(Message::user(long_msg));
+        mgr.save_conversation(&conv).unwrap();
+        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
+        assert_eq!(loaded.meta.title.as_ref().map(|t| t.len()), Some(80));
+    }
+
+    #[test]
+    fn list_conversations_returns_most_recent_first() {
+        let (mgr, _dir) = make_manager();
+        mgr.create_conversation(None, None, vec![]).unwrap();
+        mgr.create_conversation(None, None, vec![]).unwrap();
+        let list = mgr.list_conversations().unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list[0].updated_at >= list[1].updated_at);
+    }
+
+    #[test]
+    fn list_conversations_empty_dir() {
+        let (mgr, _dir) = make_manager();
+        let list = mgr.list_conversations().unwrap();
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn resolve_conversation_loads_existing_by_id() {
+        let (mgr, _dir) = make_manager();
+        let existing = mgr
+            .create_conversation(Some("gpt-4".into()), None, vec![])
+            .unwrap();
+        let resolved = mgr
+            .resolve_conversation(Some(existing.meta.id), None, None, vec![])
+            .unwrap();
+        assert_eq!(resolved.meta.id, existing.meta.id);
+        assert_eq!(resolved.meta.model.as_deref(), Some("gpt-4"));
+    }
+
+    #[test]
+    fn resolve_conversation_creates_new_for_unknown_id() {
+        let (mgr, _dir) = make_manager();
+        let new_id = Uuid::new_v4();
+        let resolved = mgr
+            .resolve_conversation(Some(new_id), Some("claude".into()), None, vec![])
+            .unwrap();
+        assert_eq!(resolved.meta.id, new_id);
+        assert_eq!(resolved.meta.model.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn resolve_conversation_creates_fresh_when_no_id() {
+        let (mgr, _dir) = make_manager();
+        let resolved = mgr.resolve_conversation(None, None, None, vec![]).unwrap();
+        assert!(resolved.messages.is_empty());
+        // Verify it was persisted
+        mgr.load_conversation(&resolved.meta.id).unwrap();
+    }
+
+    #[test]
+    fn conversation_skills_are_persisted() {
+        let (mgr, _dir) = make_manager();
+        let conv = mgr
+            .create_conversation(None, None, vec!["coding".into(), "rust".into()])
+            .unwrap();
+        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
+        assert_eq!(loaded.meta.skills, vec!["coding", "rust"]);
+    }
+
+    /// The actual regression test for this durability item: messages
+    /// persisted only via `append_message` (never `save_conversation`) must
+    /// still be there on load — this is what a crash before the end-of-turn
+    /// save would leave behind.
+    #[test]
+    fn append_message_persists_without_a_full_save() {
+        let (mgr, _dir) = make_manager();
+        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
+
+        mgr.append_message(&conv.meta.id, &Message::user("first"))
+            .unwrap();
+        mgr.append_message(&conv.meta.id, &Message::assistant("second"))
+            .unwrap();
+
+        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.messages[0].text().as_deref(), Some("first"));
+        assert_eq!(loaded.messages[1].text().as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn append_message_updates_timestamp_and_derives_title() {
+        let (mgr, _dir) = make_manager();
+        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
+        let created_updated_at = conv.meta.updated_at;
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        mgr.append_message(&conv.meta.id, &Message::user("hello there"))
+            .unwrap();
+
+        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
+        assert!(loaded.meta.updated_at > created_updated_at);
+        assert_eq!(loaded.meta.title.as_deref(), Some("hello there"));
+    }
+
+    #[test]
+    fn save_conversation_after_appends_reconciles_the_log() {
+        // save_conversation always rewrites the log from its own `messages`
+        // argument; it must not end up with both the appended messages and
+        // a second copy from the save.
+        let (mgr, _dir) = make_manager();
+        let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
+
+        mgr.append_message(&conv.meta.id, &Message::user("first"))
+            .unwrap();
+        conv.messages.push(Message::user("first"));
+        mgr.save_conversation(&conv).unwrap();
+
+        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+    }
+
+    #[test]
+    fn save_conversation_refuses_when_another_writer_appended_more_than_we_know_of() {
+        // Simulates two processes sharing a session: this process loads the
+        // conversation with 0 messages, then a foreign process appends
+        // directly to the log (bypassing this process's in-memory `conv`).
+        // A stale full save must not clobber the foreign line.
+        let (mgr, _dir) = make_manager();
+        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
+
+        mgr.append_message(&conv.meta.id, &Message::user("from another process"))
+            .unwrap();
+
+        // `conv` is still the stale, pre-append in-memory view (0 messages).
+        let err = mgr.save_conversation(&conv).unwrap_err();
+        assert!(matches!(err, Error::HistoryDiverged { .. }));
+
+        // The foreign message must still be there — the refusal didn't corrupt it.
+        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(
+            loaded.messages[0].text().as_deref(),
+            Some("from another process")
+        );
+    }
+
+    #[test]
+    fn save_conversation_succeeds_when_conv_already_reflects_its_own_appends() {
+        // The normal single-process pattern (see the `acp` turn loop):
+        // `append_message` is called as each message is produced, and the
+        // same message is also pushed onto `conv.messages`, so by the time
+        // the end-of-turn full save runs, `conv.messages` is a superset of
+        // (here, exactly equal to) what's already on disk. This must not be
+        // mistaken for a foreign writer.
+        let (mgr, _dir) = make_manager();
+        let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
+
+        let msg = Message::user("first");
+        mgr.append_message(&conv.meta.id, &msg).unwrap();
+        conv.messages.push(msg);
+
+        mgr.save_conversation(&conv).unwrap();
+
+        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+    }
+
+    #[test]
+    fn save_conversation_refuses_when_a_shared_message_was_overwritten_in_place() {
+        // Same scenario as the "more than we know of" case, but the foreign
+        // writer's append lands at the same index this process's stale
+        // `conv` already occupies with a *different* message — so a naive
+        // length-only check would miss it and silently clobber the foreign
+        // line with `conv`'s version.
+        let (mgr, _dir) = make_manager();
+        let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
+
+        mgr.append_message(&conv.meta.id, &Message::user("from another process"))
+            .unwrap();
+        // Stale in-memory view: same length as disk, but disagrees on content.
+        conv.messages.push(Message::user("from this process"));
+
+        let err = mgr.save_conversation(&conv).unwrap_err();
+        assert!(matches!(err, Error::HistoryDiverged { .. }));
+
+        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
+        assert_eq!(
+            loaded.messages[0].text().as_deref(),
+            Some("from another process")
+        );
+    }
+
+    #[test]
+    fn a_truncated_trailing_log_line_does_not_lose_earlier_messages() {
+        let (mgr, dir) = make_manager();
+        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
+        mgr.append_message(&conv.meta.id, &Message::user("intact"))
+            .unwrap();
+
+        // Simulate a crash mid-write: append a partial, unparseable JSON
+        // line directly, bypassing `append_message`.
+        let log_path = dir.path().join(format!("{}.jsonl", conv.meta.id));
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .unwrap();
+        write!(file, "{{\"role\":\"user\",\"conte").unwrap();
+
+        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages[0].text().as_deref(), Some("intact"));
+    }
+
+    #[test]
+    fn pre_split_format_conversation_still_loads() {
+        // A conversation written before message logs were split into a
+        // `.jsonl` sidecar: a single `{id}.json` containing both `meta` and
+        // the full `messages` array, no `.jsonl` sibling.
+        let (mgr, dir) = make_manager();
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let legacy = Conversation {
+            meta: ConversationMeta {
+                id,
+                created_at: now,
+                updated_at: now,
+                model: None,
+                provider: None,
+                title: None,
+                skills: vec![],
+                cwd: None,
+                context_usage: None,
+            },
+            messages: vec![Message::user("from the old format")],
+        };
+        std::fs::write(
+            dir.path().join(format!("{id}.json")),
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = mgr.load_conversation(&id).unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(
+            loaded.messages[0].text().as_deref(),
+            Some("from the old format")
+        );
+    }
+
+    #[test]
+    fn delete_conversation_removes_the_message_log_too() {
+        let (mgr, dir) = make_manager();
+        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
+        mgr.append_message(&conv.meta.id, &Message::user("hi"))
+            .unwrap();
+
+        mgr.delete_conversation(&conv.meta.id).unwrap();
+
+        assert!(!dir.path().join(format!("{}.json", conv.meta.id)).exists());
+        assert!(!dir.path().join(format!("{}.jsonl", conv.meta.id)).exists());
+    }
+
+    #[test]
+    fn delete_conversation_removes_the_lease_lockfile_too() {
+        let (mgr, dir) = make_manager();
+        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
+        let lease = mgr.acquire_lease(&conv.meta.id).unwrap();
+        assert!(dir.path().join(format!("{}.lock", conv.meta.id)).exists());
+
+        mgr.delete_conversation(&conv.meta.id).unwrap();
+
+        assert!(!dir.path().join(format!("{}.lock", conv.meta.id)).exists());
+        drop(lease); // held past the delete on purpose: must not resurrect the file
+        assert!(!dir.path().join(format!("{}.lock", conv.meta.id)).exists());
     }
 }

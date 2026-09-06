@@ -49,11 +49,12 @@ impl SessionState {
     /// the session in the error message; hold the returned guard for the
     /// duration of the turn — it releases automatically when dropped.
     pub fn try_acquire_prompt_lock(&self, session_id: &str) -> Result<OwnedMutexGuard<()>> {
-        self.prompt_lock.clone().try_lock_owned().map_err(|_| {
-            Error::Other(format!(
-                "a prompt is already in flight for session {session_id}"
-            ))
-        })
+        self.prompt_lock
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| Error::SessionBusy {
+                session_id: session_id.to_string(),
+            })
     }
 }
 

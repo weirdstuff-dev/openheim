@@ -188,27 +188,7 @@ pub async fn serve(
                         }
                         Err(e) => {
                             tracing::error!("agent loop error: {e}");
-                            // SessionLocked carries structured fields a caller
-                            // needs to build a "busy, retry" UX instead of a
-                            // generic failure — encode them in the JSON-RPC
-                            // error's `data` so they survive the trip back to
-                            // the client instead of collapsing to `e.to_string()`.
-                            let acp_error = match &e {
-                                Error::SessionLocked {
-                                    session_id,
-                                    pid,
-                                    host,
-                                } => agent_client_protocol::Error::internal_error().data(
-                                    serde_json::json!({
-                                        "kind": "session_locked",
-                                        "session_id": session_id,
-                                        "pid": pid,
-                                        "host": host,
-                                    }),
-                                ),
-                                _ => internal_error(e.to_string()),
-                            };
-                            responder.respond_with_error(acp_error)
+                            responder.respond_with_error(to_acp_error(&e))
                         }
                     };
                     if let Err(e) = respond_result {
@@ -246,7 +226,7 @@ pub async fn serve(
                 match result {
                     Ok(mode) => responder
                         .respond(LoadSessionResponse::new().modes(session_mode_state(mode))),
-                    Err(e) => responder.respond_with_internal_error(e.to_string()),
+                    Err(e) => responder.respond_with_error(to_acp_error(&e)),
                 }
             },
             on_receive_request!(),
@@ -308,4 +288,77 @@ pub async fn serve(
         )
         .connect_to(transport)
         .await
+}
+
+/// Maps an `Error` onto the ACP JSON-RPC error to send back. `SessionLocked`/
+/// `SessionBusy` carry structured fields a caller needs to build a "busy,
+/// retry" UX instead of a generic failure — encoded into the error's `data`
+/// so they survive the trip back to the client instead of collapsing to
+/// `e.to_string()`. Shared by `PromptRequest` and `LoadSessionRequest`, the
+/// two handlers either error can come from.
+fn to_acp_error(e: &Error) -> agent_client_protocol::Error {
+    match e {
+        Error::SessionLocked {
+            session_id,
+            pid,
+            host,
+        } => agent_client_protocol::Error::internal_error().data(serde_json::json!({
+            "kind": "session_locked",
+            "session_id": session_id,
+            "pid": pid,
+            "host": host,
+        })),
+        Error::SessionBusy { session_id } => {
+            agent_client_protocol::Error::internal_error().data(serde_json::json!({
+                "kind": "session_busy",
+                "session_id": session_id,
+            }))
+        }
+        _ => internal_error(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod to_acp_error_tests {
+    use super::*;
+
+    #[test]
+    fn session_busy_carries_structured_data() {
+        let e = Error::SessionBusy {
+            session_id: "abc".to_string(),
+        };
+        let acp_error = to_acp_error(&e);
+        assert_eq!(
+            acp_error.data,
+            Some(serde_json::json!({ "kind": "session_busy", "session_id": "abc" }))
+        );
+    }
+
+    #[test]
+    fn session_locked_carries_structured_data() {
+        let e = Error::SessionLocked {
+            session_id: "abc".to_string(),
+            pid: 42,
+            host: "host1".to_string(),
+        };
+        let acp_error = to_acp_error(&e);
+        assert_eq!(
+            acp_error.data,
+            Some(serde_json::json!({
+                "kind": "session_locked",
+                "session_id": "abc",
+                "pid": 42,
+                "host": "host1",
+            }))
+        );
+    }
+
+    #[test]
+    fn other_errors_fall_back_to_the_display_string() {
+        let e = Error::NotFound("session not found: abc".to_string());
+        let acp_error = to_acp_error(&e);
+        // `util::internal_error` puts the message in `data` (as a plain
+        // string, not the structured objects the two cases above use).
+        assert_eq!(acp_error.data, Some(serde_json::json!(e.to_string())));
+    }
 }

@@ -553,12 +553,11 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    // `convert_response` (the non-streaming response → `Choice` conversion)
-    // was removed once `send` became `send_streaming` with a discarded
-    // channel, same as `AnthropicClient` — there's only one response-parsing
-    // path left, exercised chunk-by-chunk in the streaming loop, not against
-    // a single complete `GeminiResponse`. `map_finish_reason` is that path's
-    // one piece of standalone conversion logic worth testing directly.
+    // `send` builds its response from the streaming loop's chunk-by-chunk
+    // accumulation, not from a single complete `GeminiResponse` — so there's
+    // no standalone response-conversion function to test here beyond
+    // `map_finish_reason`, the one piece of that path's logic worth testing
+    // directly.
     #[test]
     fn map_finish_reason_translates_known_values() {
         assert_eq!(map_finish_reason("STOP"), FinishReason::Stop);

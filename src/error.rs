@@ -38,6 +38,14 @@ pub enum Error {
         host: String,
     },
 
+    /// A `session/prompt`/`session/load` arrived while a turn was already in
+    /// flight for this session, in this process (see `SessionState::prompt_lock`).
+    /// Distinct from [`Error::SessionLocked`], which is cross-process; a
+    /// caller can retry once the in-flight turn completes instead of
+    /// treating this as a hard failure.
+    #[error("a prompt is already in flight for session {session_id}; retry once it completes")]
+    SessionBusy { session_id: String },
+
     /// `save_conversation` would have rewritten the on-disk message log with
     /// fewer messages than are already there — another writer (a second
     /// `openheim` process sharing the same history directory) appended to

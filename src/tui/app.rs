@@ -211,9 +211,9 @@ impl App {
             } => {
                 self.push(ChatItem::ToolResult { result, is_error });
             }
-            // The current context size, live as each LLM call in the turn
-            // completes — the footer no longer waits for the whole turn to
-            // finish and re-read it back from disk.
+            // The current context size, refreshed live as each LLM call in
+            // the turn completes rather than once at the end, so the footer
+            // never needs a separate disk read after the turn finishes.
             StreamEvent::Usage { usage } => {
                 self.context_usage = Some(usage);
             }

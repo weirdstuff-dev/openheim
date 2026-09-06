@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 /// Public model info for a single provider (no credentials).
 #[derive(Debug, Clone, Serialize)]
@@ -15,16 +14,6 @@ pub struct ProviderModels {
 pub struct ModelsInfo {
     pub default_provider: String,
     pub providers: BTreeMap<String, ProviderModels>,
-}
-
-/// Public info for a single MCP server (no credentials or env vars).
-#[derive(Debug, Clone, Serialize)]
-pub struct McpServerInfo {
-    pub transport: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
 }
 
 /// Top-level configuration loaded from ~/.openheim/config.toml
@@ -184,34 +173,6 @@ impl AppConfig {
         }
         val
     }
-
-    pub fn mcp_servers_info(&self) -> BTreeMap<String, McpServerInfo> {
-        self.mcp_servers
-            .iter()
-            .map(|(name, cfg)| {
-                let info = if cfg.command.is_some() {
-                    McpServerInfo {
-                        transport: "stdio",
-                        command: cfg.command.clone(),
-                        url: None,
-                    }
-                } else if cfg.url.is_some() {
-                    McpServerInfo {
-                        transport: "http",
-                        command: None,
-                        url: cfg.url.clone(),
-                    }
-                } else {
-                    McpServerInfo {
-                        transport: "unknown",
-                        command: None,
-                        url: None,
-                    }
-                };
-                (name.clone(), info)
-            })
-            .collect()
-    }
 }
 
 /// Per-provider configuration
@@ -293,14 +254,6 @@ impl AgentConfig {
         Self {
             max_iterations,
             ..self.clone()
-        }
-    }
-
-    pub fn arc_with_max_iterations(self: &Arc<Self>, max_iterations: usize) -> Arc<Self> {
-        if self.max_iterations == max_iterations {
-            Arc::clone(self)
-        } else {
-            Arc::new(self.with_max_iterations(max_iterations))
         }
     }
 }
@@ -408,33 +361,6 @@ mod tests {
         let updated = cfg.with_max_iterations(20);
         assert_eq!(updated.max_iterations, 20);
         assert_eq!(updated.provider_name, "p");
-    }
-
-    #[test]
-    fn arc_with_max_iterations_reuses_arc_when_same() {
-        let cfg = Arc::new(AgentConfig::new(
-            "p".into(),
-            "b".into(),
-            "k".into(),
-            "m".into(),
-            10,
-        ));
-        let same = cfg.arc_with_max_iterations(10);
-        assert!(Arc::ptr_eq(&cfg, &same));
-    }
-
-    #[test]
-    fn arc_with_max_iterations_creates_new_when_different() {
-        let cfg = Arc::new(AgentConfig::new(
-            "p".into(),
-            "b".into(),
-            "k".into(),
-            "m".into(),
-            10,
-        ));
-        let different = cfg.arc_with_max_iterations(20);
-        assert!(!Arc::ptr_eq(&cfg, &different));
-        assert_eq!(different.max_iterations, 20);
     }
 
     #[test]
