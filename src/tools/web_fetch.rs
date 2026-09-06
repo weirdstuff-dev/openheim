@@ -9,9 +9,11 @@ use reqwest::redirect::Policy;
 use serde_json::json;
 
 use crate::core::models::{FunctionDefinition, Tool};
+use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
 use super::ToolHandler;
+use super::args::{parse_args, require_str};
 
 /// Wall-clock limit for the whole request (connect + headers + body).
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
@@ -344,21 +346,25 @@ impl ToolHandler for WebFetchTool {
         }
     }
 
-    async fn execute(&self, args: &str) -> Result<String> {
-        let args: serde_json::Value = serde_json::from_str(args)
-            .map_err(|e| Error::ParseError(format!("Failed to parse tool arguments: {}", e)))?;
-
-        let url = args["url"]
-            .as_str()
-            .ok_or_else(|| Error::ParseError("Missing 'url' argument".to_string()))?;
-
-        fetch_url(url).await
+    async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
+        let args = parse_args(args)?;
+        let url = require_str(&args, "url")?;
+        // The request already has its own timeout; racing it against the
+        // turn's cancel token additionally lets `session/cancel` drop a
+        // fetch that's still in flight.
+        tokio::select! {
+            _ = turn.cancel.cancelled() => Err(Error::ToolExecutionError(
+                "web_fetch cancelled".to_string(),
+            )),
+            result = fetch_url(url) => result,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::test_support::TurnHarness;
 
     #[test]
     fn definition_has_correct_name() {
@@ -370,15 +376,17 @@ mod tests {
 
     #[tokio::test]
     async fn execute_errors_for_malformed_json() {
-        let tool = WebFetchTool;
-        let result = tool.execute("not json").await;
+        let harness = TurnHarness::new();
+        let result = WebFetchTool.execute("not json", &harness.turn()).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn execute_errors_for_missing_url() {
-        let tool = WebFetchTool;
-        let result = tool.execute(r#"{"other": "value"}"#).await;
+        let harness = TurnHarness::new();
+        let result = WebFetchTool
+            .execute(r#"{"other": "value"}"#, &harness.turn())
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("url"));
     }

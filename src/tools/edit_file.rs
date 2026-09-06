@@ -7,11 +7,14 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::core::models::{FunctionDefinition, Tool};
+use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
 use super::ToolHandler;
-use super::read_file::read_file;
-use super::write_file::write_file;
+use super::args::{parse_args, require_str};
+use super::read_file::read_text;
+use super::sandbox::validate_path;
+use super::write_file::write_text;
 
 /// Applies a find-and-replace edit to `content`, returning the edited text
 /// and how many occurrences were replaced.
@@ -20,10 +23,8 @@ use super::write_file::write_file;
 /// is set it must occur *exactly* once, so a call can't silently touch more
 /// of the file than the caller intended to.
 ///
-/// Pure and I/O-free — the single source of truth for the `edit_file`
-/// behaviour, shared by [`EditFileTool`] and [`crate::tools::SandboxedExecutor`]
-/// (which supplies the current content via `client_io`/local disk and writes
-/// the result back the same way).
+/// Pure and I/O-free; [`EditFileTool`] supplies the current content via
+/// `client_io`/local disk and writes the result back the same way.
 pub(crate) fn apply_edit(
     content: &str,
     old_string: &str,
@@ -62,7 +63,6 @@ pub(crate) fn apply_edit(
     Ok((edited, count))
 }
 
-/// Formats the success message shared by both the plain and sandboxed paths.
 fn success_message(path: &Path, count: usize) -> String {
     format!(
         "Successfully edited {} ({count} replacement{})",
@@ -76,7 +76,9 @@ fn success_message(path: &Path, count: usize) -> String {
 ///
 /// `old_string` must match the file's existing content exactly (including
 /// whitespace/indentation) and must be unique in the file unless
-/// `replace_all` is set.
+/// `replace_all` is set. It's a read followed by a write, so both go through
+/// `client_io` when the client provides one, and the path must be inside the
+/// work directory.
 pub struct EditFileTool;
 
 #[async_trait]
@@ -113,32 +115,27 @@ impl ToolHandler for EditFileTool {
         }
     }
 
-    async fn execute(&self, args: &str) -> Result<String> {
-        let args: serde_json::Value = serde_json::from_str(args)
-            .map_err(|e| Error::ParseError(format!("Failed to parse tool arguments: {}", e)))?;
-
-        let path = args["path"]
-            .as_str()
-            .ok_or_else(|| Error::ParseError("Missing 'path' argument".to_string()))?;
-        let old_string = args["old_string"]
-            .as_str()
-            .ok_or_else(|| Error::ParseError("Missing 'old_string' argument".to_string()))?;
-        let new_string = args["new_string"]
-            .as_str()
-            .ok_or_else(|| Error::ParseError("Missing 'new_string' argument".to_string()))?;
+    async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
+        let args = parse_args(args)?;
+        let path = require_str(&args, "path")?;
+        let old_string = require_str(&args, "old_string")?;
+        let new_string = require_str(&args, "new_string")?;
         let replace_all = args["replace_all"].as_bool().unwrap_or(false);
+        let validated = validate_path(path, turn.work_dir)?;
 
-        let path = Path::new(path);
-        let content = read_file(path).await?;
+        let content = read_text(&validated, turn).await?;
         let (edited, count) = apply_edit(&content, old_string, new_string, replace_all)?;
-        write_file(path, &edited).await?;
-        Ok(success_message(path, count))
+        write_text(&validated, &edited, turn).await?;
+        Ok(success_message(&validated, count))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::tools::test_support::{FixedClientIo, TurnHarness};
 
     #[test]
     fn definition_has_correct_name() {
@@ -188,43 +185,42 @@ mod tests {
 
     #[tokio::test]
     async fn execute_edits_file_on_disk() {
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        use std::io::Write;
-        write!(tmp, "fn main() {{ old_code() }}").unwrap();
-        let path = tmp.path().to_str().unwrap();
+        let harness = TurnHarness::new();
+        let path = harness.work_dir().join("main.rs");
+        std::fs::write(&path, "fn main() { old_code() }").unwrap();
 
-        let tool = EditFileTool;
         let args = serde_json::json!({
-            "path": path,
+            "path": path.to_str().unwrap(),
             "old_string": "old_code()",
             "new_string": "new_code()",
         })
         .to_string();
-        let result = tool.execute(&args).await.unwrap();
+        let result = EditFileTool.execute(&args, &harness.turn()).await.unwrap();
         assert!(result.contains("Successfully edited"), "{result}");
-
-        let content = std::fs::read_to_string(path).unwrap();
-        assert_eq!(content, "fn main() { new_code() }");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "fn main() { new_code() }"
+        );
     }
 
     #[tokio::test]
     async fn execute_errors_for_nonexistent_file() {
-        let tool = EditFileTool;
+        let harness = TurnHarness::new();
         let args = serde_json::json!({
-            "path": "/tmp/openheim_nonexistent_edit_target_12345.txt",
+            "path": "missing.txt",
             "old_string": "a",
             "new_string": "b",
         })
         .to_string();
-        let result = tool.execute(&args).await;
+        let result = EditFileTool.execute(&args, &harness.turn()).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn execute_errors_for_missing_old_string() {
-        let tool = EditFileTool;
-        let result = tool
-            .execute(r#"{"path": "/tmp/x", "new_string": "b"}"#)
+        let harness = TurnHarness::new();
+        let result = EditFileTool
+            .execute(r#"{"path": "x", "new_string": "b"}"#, &harness.turn())
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("old_string"));
@@ -232,8 +228,71 @@ mod tests {
 
     #[tokio::test]
     async fn execute_errors_for_malformed_json() {
-        let tool = EditFileTool;
-        let result = tool.execute("bad json").await;
+        let harness = TurnHarness::new();
+        let result = EditFileTool.execute("bad json", &harness.turn()).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn edit_file_prefers_client_io_over_local_disk() {
+        let harness = TurnHarness::new().with_client_io(Arc::new(FixedClientIo("client content")));
+        let path = harness.work_dir().join("a.txt");
+        std::fs::write(&path, "local content").unwrap();
+
+        let args = serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "old_string": "client",
+            "new_string": "CLIENT",
+        })
+        .to_string();
+        let result = EditFileTool.execute(&args, &harness.turn()).await.unwrap();
+        assert!(result.contains("Successfully edited"), "{result}");
+        // FixedClientIo's write is a no-op that never touches local disk, so
+        // the file on disk still holds its original content unmodified —
+        // proof the edit went through client_io, not local fs.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "local content");
+    }
+
+    #[tokio::test]
+    async fn edit_file_falls_back_to_local_disk_when_client_io_defers() {
+        let harness = TurnHarness::new();
+        let path = harness.work_dir().join("a.txt");
+        std::fs::write(&path, "fn main() { old() }").unwrap();
+
+        let args = serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "old_string": "old()",
+            "new_string": "new()",
+        })
+        .to_string();
+        EditFileTool.execute(&args, &harness.turn()).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "fn main() { new() }"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_path_outside_work_dir() {
+        let harness = TurnHarness::new();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("secret.txt");
+        std::fs::write(&target, "old").unwrap();
+
+        let args = serde_json::json!({
+            "path": target.to_str().unwrap(),
+            "old_string": "old",
+            "new_string": "new",
+        })
+        .to_string();
+        let err = EditFileTool
+            .execute(&args, &harness.turn())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("outside the work directory"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
     }
 }

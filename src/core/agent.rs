@@ -421,6 +421,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::client_io::NoClientIo;
     use crate::core::permission::{AllowAll, PermissionDecision, PermissionGate};
     use crate::error::Error;
     use async_trait::async_trait;
@@ -602,6 +603,8 @@ mod tests {
             &TurnContext {
                 cancel: &CancellationToken::new(),
                 permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
         )
         .await
@@ -632,6 +635,8 @@ mod tests {
             &TurnContext {
                 cancel: &CancellationToken::new(),
                 permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
         )
         .await
@@ -674,6 +679,8 @@ mod tests {
             &TurnContext {
                 cancel: &CancellationToken::new(),
                 permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
             move |event| {
                 if let StreamEvent::ToolResult { tool_name, .. } = event {
@@ -715,6 +722,8 @@ mod tests {
             &TurnContext {
                 cancel: &CancellationToken::new(),
                 permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
         )
         .await
@@ -744,6 +753,8 @@ mod tests {
             &TurnContext {
                 cancel: &CancellationToken::new(),
                 permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
             |event| events.push(event),
         )
@@ -813,6 +824,8 @@ mod tests {
             &TurnContext {
                 cancel: &CancellationToken::new(),
                 permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
         )
         .await
@@ -856,6 +869,8 @@ mod tests {
             &TurnContext {
                 cancel: &cancel,
                 permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
             move |event| {
                 if matches!(event, StreamEvent::ToolResult { .. }) {
@@ -908,6 +923,8 @@ mod tests {
                 &TurnContext {
                     cancel: &cancel,
                     permission_gate: &allow_all(),
+                    work_dir: std::path::Path::new("."),
+                    client_io: &NoClientIo,
                 },
                 move |event| {
                     if matches!(event, StreamEvent::IterationStart { .. }) {
@@ -968,6 +985,8 @@ mod tests {
                 &TurnContext {
                     cancel: &cancel,
                     permission_gate: &allow_all(),
+                    work_dir: std::path::Path::new("."),
+                    client_io: &NoClientIo,
                 },
                 move |event| {
                     if matches!(event, StreamEvent::ToolCall { .. }) {
@@ -1008,6 +1027,8 @@ mod tests {
                 &TurnContext {
                     cancel: &cancel,
                     permission_gate: &allow_all(),
+                    work_dir: std::path::Path::new("."),
+                    client_io: &NoClientIo,
                 },
             ),
         )
@@ -1047,6 +1068,8 @@ mod tests {
             &TurnContext {
                 cancel: &CancellationToken::new(),
                 permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
         )
         .await
@@ -1101,6 +1124,8 @@ mod tests {
                 &TurnContext {
                     cancel: &cancel,
                     permission_gate: &gate,
+                    work_dir: std::path::Path::new("."),
+                    client_io: &NoClientIo,
                 },
             ),
         )
@@ -1144,6 +1169,8 @@ mod tests {
             &TurnContext {
                 cancel: &CancellationToken::new(),
                 permission_gate: &(Arc::new(RejectPermissionGate) as Arc<dyn PermissionGate>),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
         )
         .await

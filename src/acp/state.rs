@@ -30,10 +30,7 @@ use crate::{
     llm::LlmClient,
     memory::{Conversation, MemoryContext},
     subagents::SubagentLoader,
-    tools::{
-        SandboxedExecutor, ScopedExecutor, SystemToolExecutor, ToolExecutor, ToolHandler,
-        with_delegation,
-    },
+    tools::{DelegateTool, ScopedExecutor, SystemToolExecutor, ToolExecutor, ToolHandler},
 };
 
 use super::{
@@ -69,9 +66,9 @@ pub struct AgentState {
 
 impl AgentState {
     /// `custom_tools` are registered alongside the built-ins (`execute_command`,
-    /// `read_file`, `write_file`) and any MCP-sourced tools, before the
-    /// sandbox/delegation wrappers are applied — so custom tools are subject
-    /// to the same `work_dir`/`allow_shell` boundary as everything else.
+    /// `read_file`, `write_file`, …) and any MCP-sourced tools. Every handler
+    /// receives the turn's [`TurnContext`] — `work_dir`, cancel token, client
+    /// I/O — so custom tools can enforce the same boundary the built-ins do.
     pub async fn new(
         config: AgentConfig,
         app_config: AppConfig,
@@ -103,18 +100,22 @@ impl AgentState {
             sys_executor.register(Box::new(crate::rag::SearchMemoryTool::new(m.clone())));
             sys_executor.register(Box::new(crate::rag::ForgetTool::new(m.clone())));
         }
-        let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
 
+        // `delegate_task` is always exposed — even with no configured
+        // profiles the orchestrator can define an ephemeral subagent inline.
+        // It's built from a snapshot of the registry taken *before* it
+        // registers itself, so subagents structurally never see
+        // `delegate_task` and can't delegate recursively.
         let profiles = SubagentLoader::new()?.load()?;
-        let executor = with_delegation(
-            executor,
-            work_dir.clone(),
-            allow_shell,
+        let base: Arc<dyn ToolExecutor> = Arc::new(sys_executor.clone());
+        sys_executor.register(Box::new(DelegateTool::new(
+            base,
             profiles,
             llm.clone(),
             app_config.clone(),
             config.clone(),
-        );
+        )));
+        let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
 
         Ok(Self {
             llm,
@@ -308,7 +309,7 @@ impl AgentState {
             s.cancel = CancellationToken::new();
             s.last_active = Instant::now();
             let llm = crate::config::client_for_config(&s.config, &self.config, &self.llm)?;
-            let base: Arc<dyn ToolExecutor> = if s.mode == AgentMode::Architect {
+            let executor: Arc<dyn ToolExecutor> = if s.mode == AgentMode::Architect {
                 Arc::new(ScopedExecutor::new(
                     self.executor.clone(),
                     vec![
@@ -321,15 +322,9 @@ impl AgentState {
             } else {
                 self.executor.clone()
             };
-            let sandboxed = Arc::new(SandboxedExecutor::new(
-                base,
-                self.work_dir.clone(),
-                self.allow_shell,
-                client_io,
-            )) as Arc<dyn ToolExecutor>;
             (
                 llm,
-                sandboxed,
+                executor,
                 s.config.clone(),
                 s.chat_id,
                 s.skills.clone(),
@@ -374,9 +369,13 @@ impl AgentState {
             .await;
 
         let history_for_append = self.memory.history.clone();
+        // The work-directory boundary and client I/O hook reach every tool
+        // through this context; there is no per-session executor wrapper.
         let turn = TurnContext {
             cancel: &cancel,
             permission_gate: &permission_gate,
+            work_dir: &self.work_dir,
+            client_io: &*client_io,
         };
         let run_result = run_agent_streaming_with_history(
             llm,

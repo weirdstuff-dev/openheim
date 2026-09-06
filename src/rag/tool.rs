@@ -8,8 +8,10 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::core::models::{FunctionDefinition, Tool};
+use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 use crate::tools::ToolHandler;
+use crate::tools::args::parse_args;
 
 use super::LongTermMemory;
 use super::store::SearchMethod;
@@ -25,11 +27,6 @@ const MAX_TOP_K: usize = 20;
 /// Longest note accepted, in characters. Memory is for facts and
 /// preferences, not documents.
 const MAX_NOTE_CHARS: usize = 4000;
-
-fn parse_args(args: &str) -> Result<serde_json::Value> {
-    serde_json::from_str(args)
-        .map_err(|e| Error::ParseError(format!("Failed to parse tool arguments: {e}")))
-}
 
 /// Stores a note in long-term memory.
 pub struct RememberTool {
@@ -69,7 +66,7 @@ impl ToolHandler for RememberTool {
         }
     }
 
-    async fn execute(&self, args: &str) -> Result<String> {
+    async fn execute(&self, args: &str, _turn: &TurnContext<'_>) -> Result<String> {
         let args = parse_args(args)?;
         let content = args["content"]
             .as_str()
@@ -135,7 +132,7 @@ impl ToolHandler for SearchMemoryTool {
         }
     }
 
-    async fn execute(&self, args: &str) -> Result<String> {
+    async fn execute(&self, args: &str, _turn: &TurnContext<'_>) -> Result<String> {
         let args = parse_args(args)?;
         let query = args["query"]
             .as_str()
@@ -209,7 +206,7 @@ impl ToolHandler for ForgetTool {
         }
     }
 
-    async fn execute(&self, args: &str) -> Result<String> {
+    async fn execute(&self, args: &str, _turn: &TurnContext<'_>) -> Result<String> {
         let args = parse_args(args)?;
         let id = args["id"]
             .as_i64()
@@ -227,6 +224,7 @@ mod tests {
     use super::*;
     use crate::rag::embedding::test_support::HashEmbedder;
     use crate::rag::store::VectorStore;
+    use crate::tools::test_support::TurnHarness;
 
     fn semantic() -> Arc<LongTermMemory> {
         Arc::new(LongTermMemory::new(
@@ -264,28 +262,38 @@ mod tests {
 
     #[tokio::test]
     async fn empty_memory_says_so() {
+        let harness = TurnHarness::new();
+        let turn = harness.turn();
         let tool = SearchMemoryTool::new(keyword());
-        let out = tool.execute(r#"{"query":"anything"}"#).await.unwrap();
+        let out = tool
+            .execute(r#"{"query":"anything"}"#, &turn)
+            .await
+            .unwrap();
         assert!(out.contains("empty"), "{out}");
     }
 
     #[tokio::test]
     async fn remember_then_search_round_trip_semantic() {
+        let harness = TurnHarness::new();
+        let turn = harness.turn();
         let m = semantic();
         let remember = RememberTool::new(m.clone());
         let out = remember
-            .execute(r#"{"content":"The user prefers tabs over spaces in Go code."}"#)
+            .execute(
+                r#"{"content":"The user prefers tabs over spaces in Go code."}"#,
+                &turn,
+            )
             .await
             .unwrap();
         assert!(out.starts_with("Remembered as memory #"), "{out}");
         remember
-            .execute(r#"{"content":"Deploys happen on Tuesdays."}"#)
+            .execute(r#"{"content":"Deploys happen on Tuesdays."}"#, &turn)
             .await
             .unwrap();
 
         let search = SearchMemoryTool::new(m);
         let out = search
-            .execute(r#"{"query":"tabs or spaces preference","top_k":1}"#)
+            .execute(r#"{"query":"tabs or spaces preference","top_k":1}"#, &turn)
             .await
             .unwrap();
         assert!(out.starts_with("Found 1 memory"), "{out}");
@@ -296,13 +304,18 @@ mod tests {
 
     #[tokio::test]
     async fn remember_then_search_round_trip_keyword() {
+        let harness = TurnHarness::new();
+        let turn = harness.turn();
         let m = keyword();
         RememberTool::new(m.clone())
-            .execute(r#"{"content":"The staging cluster is in eu-west-1."}"#)
+            .execute(
+                r#"{"content":"The staging cluster is in eu-west-1."}"#,
+                &turn,
+            )
             .await
             .unwrap();
         let out = SearchMemoryTool::new(m)
-            .execute(r#"{"query":"staging cluster region"}"#)
+            .execute(r#"{"query":"staging cluster region"}"#, &turn)
             .await
             .unwrap();
         assert!(out.contains("eu-west-1"), "{out}");
@@ -311,26 +324,32 @@ mod tests {
 
     #[tokio::test]
     async fn remember_rejects_blank_and_oversized_notes() {
+        let harness = TurnHarness::new();
+        let turn = harness.turn();
         let tool = RememberTool::new(keyword());
-        assert!(tool.execute(r#"{}"#).await.is_err());
-        assert!(tool.execute(r#"{"content":"   "}"#).await.is_err());
+        assert!(tool.execute(r#"{}"#, &turn).await.is_err());
+        assert!(tool.execute(r#"{"content":"   "}"#, &turn).await.is_err());
         let huge = json!({ "content": "x".repeat(MAX_NOTE_CHARS + 1) }).to_string();
-        assert!(tool.execute(&huge).await.is_err());
-        assert!(tool.execute("nope").await.is_err());
+        assert!(tool.execute(&huge, &turn).await.is_err());
+        assert!(tool.execute("nope", &turn).await.is_err());
     }
 
     #[tokio::test]
     async fn search_rejects_missing_query() {
+        let harness = TurnHarness::new();
+        let turn = harness.turn();
         let tool = SearchMemoryTool::new(keyword());
-        assert!(tool.execute(r#"{}"#).await.is_err());
-        assert!(tool.execute(r#"{"query":""}"#).await.is_err());
+        assert!(tool.execute(r#"{}"#, &turn).await.is_err());
+        assert!(tool.execute(r#"{"query":""}"#, &turn).await.is_err());
     }
 
     #[tokio::test]
     async fn forget_deletes_by_id_and_reports_unknown_ids() {
+        let harness = TurnHarness::new();
+        let turn = harness.turn();
         let m = keyword();
         let out = RememberTool::new(m.clone())
-            .execute(r#"{"content":"Temporary fact."}"#)
+            .execute(r#"{"content":"Temporary fact."}"#, &turn)
             .await
             .unwrap();
         let id: i64 = out
@@ -342,19 +361,19 @@ mod tests {
         let forget = ForgetTool::new(m.clone());
         let args = json!({ "id": id }).to_string();
         assert_eq!(
-            forget.execute(&args).await.unwrap(),
+            forget.execute(&args, &turn).await.unwrap(),
             format!("Forgot memory #{id}.")
         );
         assert!(
             forget
-                .execute(&args)
+                .execute(&args, &turn)
                 .await
                 .unwrap()
                 .contains("nothing to forget")
         );
         assert_eq!(m.stats().await.unwrap().memories, 0);
 
-        assert!(forget.execute(r#"{}"#).await.is_err());
-        assert!(forget.execute(r#"{"id":"seven"}"#).await.is_err());
+        assert!(forget.execute(r#"{}"#, &turn).await.is_err());
+        assert!(forget.execute(r#"{"id":"seven"}"#, &turn).await.is_err());
     }
 }
