@@ -14,7 +14,7 @@ use grep::searcher::{BinaryDetection, SearcherBuilder};
 use ignore::WalkBuilder;
 use serde_json::json;
 
-use crate::core::models::{FunctionDefinition, Tool};
+use crate::core::models::Tool;
 use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
@@ -128,31 +128,28 @@ pub struct SearchTool;
 #[async_trait]
 impl ToolHandler for SearchTool {
     fn definition(&self) -> Tool {
-        Tool {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "search".to_string(),
-                description: "Search files under a path for lines matching a regex pattern (ripgrep-style). Respects .gitignore and skips hidden and binary files. Returns matches as 'path:line: content', capped at 200 results.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "pattern": {
-                            "type": "string",
-                            "description": "The regex pattern to search for"
-                        },
-                        "path": {
-                            "type": "string",
-                            "description": "The file or directory to search. Defaults to the work directory if omitted."
-                        },
-                        "case_insensitive": {
-                            "type": "boolean",
-                            "description": "Match case-insensitively. Defaults to false."
-                        }
+        Tool::function(
+            "search",
+            "Search files under a path for lines matching a regex pattern (ripgrep-style). Respects .gitignore and skips hidden and binary files. Returns matches as 'path:line: content', capped at 200 results.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "The regex pattern to search for"
                     },
-                    "required": ["pattern"]
-                }),
-            },
-        }
+                    "path": {
+                        "type": "string",
+                        "description": "The file or directory to search. Defaults to the work directory if omitted."
+                    },
+                    "case_insensitive": {
+                        "type": "boolean",
+                        "description": "Match case-insensitively. Defaults to false."
+                    }
+                },
+                "required": ["pattern"]
+            }),
+        )
     }
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {

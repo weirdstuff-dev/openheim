@@ -186,6 +186,26 @@ pub struct Tool {
     pub function: FunctionDefinition,
 }
 
+impl Tool {
+    /// Builds a function-type [`Tool`] from its name, description, and JSON
+    /// Schema parameters — the shape every `ToolHandler::definition` impl
+    /// needs, without spelling out `tool_type`/`FunctionDefinition` by hand.
+    pub fn function(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: Value,
+    ) -> Self {
+        Self {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: name.into(),
+                description: description.into(),
+                parameters,
+            },
+        }
+    }
+}
+
 /// Metadata describing a callable tool function.
 #[derive(Debug, Serialize, Clone)]
 pub struct FunctionDefinition {

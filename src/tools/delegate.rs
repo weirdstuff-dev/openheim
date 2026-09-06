@@ -20,7 +20,7 @@ use serde_json::json;
 use crate::config::{AgentConfig, AppConfig, client_for_config};
 use crate::core::agent::run_agent_with_history;
 use crate::core::llm::LlmClient;
-use crate::core::models::{FunctionDefinition, Message, StopReason, Tool};
+use crate::core::models::{Message, StopReason, Tool};
 use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 use crate::memory::PromptBuilder;
@@ -152,52 +152,49 @@ impl ToolHandler for DelegateTool {
             agent_schema["enum"] = json!(names);
         }
 
-        Tool {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: DELEGATE_TOOL_NAME.to_string(),
-                description,
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "agent": agent_schema,
-                        "system_prompt": {
-                            "type": "string",
-                            "description": "System prompt for an ephemeral inline subagent — \
-                                            its persona and instructions. Mutually exclusive \
-                                            with `agent`."
-                        },
-                        "tools": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Inline subagent only: restrict it to this set of \
-                                            tool names. Omitted = it inherits your full tool set."
-                        },
-                        "model": {
-                            "type": "string",
-                            "description": "Inline subagent only: run it on this model instead \
-                                            of yours."
-                        },
-                        "provider": {
-                            "type": "string",
-                            "description": "Inline subagent only: provider for `model`. Only \
-                                            used when `model` is also set."
-                        },
-                        "max_iterations": {
-                            "type": "integer",
-                            "description": "Inline subagent only: cap its agent-loop iterations."
-                        },
-                        "task": {
-                            "type": "string",
-                            "description": "A complete, self-contained description of the task. \
-                                            Include all context the subagent needs — it cannot \
-                                            see your conversation history."
-                        }
+        Tool::function(
+            DELEGATE_TOOL_NAME,
+            description,
+            json!({
+                "type": "object",
+                "properties": {
+                    "agent": agent_schema,
+                    "system_prompt": {
+                        "type": "string",
+                        "description": "System prompt for an ephemeral inline subagent — \
+                                        its persona and instructions. Mutually exclusive \
+                                        with `agent`."
                     },
-                    "required": ["task"]
-                }),
-            },
-        }
+                    "tools": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Inline subagent only: restrict it to this set of \
+                                        tool names. Omitted = it inherits your full tool set."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Inline subagent only: run it on this model instead \
+                                        of yours."
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Inline subagent only: provider for `model`. Only \
+                                        used when `model` is also set."
+                    },
+                    "max_iterations": {
+                        "type": "integer",
+                        "description": "Inline subagent only: cap its agent-loop iterations."
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "A complete, self-contained description of the task. \
+                                        Include all context the subagent needs — it cannot \
+                                        see your conversation history."
+                    }
+                },
+                "required": ["task"]
+            }),
+        )
     }
 
     /// Runs the delegated subagent turn under the *same* [`TurnContext`] as

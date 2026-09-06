@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio::fs;
 
-use crate::core::models::{FunctionDefinition, Tool};
+use crate::core::models::Tool;
 use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
@@ -51,27 +51,24 @@ pub struct WriteFileTool;
 #[async_trait]
 impl ToolHandler for WriteFileTool {
     fn definition(&self) -> Tool {
-        Tool {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "write_file".to_string(),
-                description: "Write content to a file at the specified path. Creates the file if it doesn't exist.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The path to the file to write"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "The content to write to the file"
-                        }
+        Tool::function(
+            "write_file",
+            "Write content to a file at the specified path. Creates the file if it doesn't exist.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The path to the file to write"
                     },
-                    "required": ["path", "content"]
-                }),
-            },
-        }
+                    "content": {
+                        "type": "string",
+                        "description": "The content to write to the file"
+                    }
+                },
+                "required": ["path", "content"]
+            }),
+        )
     }
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {

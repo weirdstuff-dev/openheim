@@ -609,14 +609,11 @@ mod tests {
 
     #[test]
     fn convert_tools_wraps_in_declaration() {
-        let tools = vec![Tool {
-            tool_type: "function".into(),
-            function: crate::core::models::FunctionDefinition {
-                name: "test_tool".into(),
-                description: "A test tool".into(),
-                parameters: json!({"type": "object"}),
-            },
-        }];
+        let tools = vec![Tool::function(
+            "test_tool",
+            "A test tool",
+            json!({"type": "object"}),
+        )];
         let result = convert_tools(&tools);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].function_declarations.len(), 1);

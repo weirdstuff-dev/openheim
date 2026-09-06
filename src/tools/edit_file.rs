@@ -6,7 +6,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::core::models::{FunctionDefinition, Tool};
+use crate::core::models::Tool;
 use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
@@ -84,35 +84,32 @@ pub struct EditFileTool;
 #[async_trait]
 impl ToolHandler for EditFileTool {
     fn definition(&self) -> Tool {
-        Tool {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "edit_file".to_string(),
-                description: "Edit a file by replacing an exact occurrence of old_string with new_string, without rewriting the whole file. old_string must match the file's existing content exactly (including whitespace/indentation) and must be unique in the file unless replace_all is set. Use write_file instead to create a new file or replace a file's entire contents.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The path to the file to edit"
-                        },
-                        "old_string": {
-                            "type": "string",
-                            "description": "The exact text to replace. Must be unique in the file unless replace_all is set."
-                        },
-                        "new_string": {
-                            "type": "string",
-                            "description": "The text to replace old_string with"
-                        },
-                        "replace_all": {
-                            "type": "boolean",
-                            "description": "Replace every occurrence of old_string instead of requiring exactly one. Defaults to false."
-                        }
+        Tool::function(
+            "edit_file",
+            "Edit a file by replacing an exact occurrence of old_string with new_string, without rewriting the whole file. old_string must match the file's existing content exactly (including whitespace/indentation) and must be unique in the file unless replace_all is set. Use write_file instead to create a new file or replace a file's entire contents.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The path to the file to edit"
                     },
-                    "required": ["path", "old_string", "new_string"]
-                }),
-            },
-        }
+                    "old_string": {
+                        "type": "string",
+                        "description": "The exact text to replace. Must be unique in the file unless replace_all is set."
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "The text to replace old_string with"
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Replace every occurrence of old_string instead of requiring exactly one. Defaults to false."
+                    }
+                },
+                "required": ["path", "old_string", "new_string"]
+            }),
+        )
     }
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {

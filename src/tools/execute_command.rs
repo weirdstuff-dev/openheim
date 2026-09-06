@@ -10,7 +10,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
-use crate::core::models::{FunctionDefinition, Tool};
+use crate::core::models::Tool;
 use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
@@ -271,23 +271,20 @@ pub struct ExecuteCommandTool;
 #[async_trait]
 impl ToolHandler for ExecuteCommandTool {
     fn definition(&self) -> Tool {
-        Tool {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "execute_command".to_string(),
-                description: "Execute a shell command (e.g., ls, pwd, echo). Use this for listing directories and running system commands. Commands are killed after 120 seconds and output is truncated at 64 KiB per stream.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "The shell command to execute"
-                        }
-                    },
-                    "required": ["command"]
-                }),
-            },
-        }
+        Tool::function(
+            "execute_command",
+            "Execute a shell command (e.g., ls, pwd, echo). Use this for listing directories and running system commands. Commands are killed after 120 seconds and output is truncated at 64 KiB per stream.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute"
+                    }
+                },
+                "required": ["command"]
+            }),
+        )
     }
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {

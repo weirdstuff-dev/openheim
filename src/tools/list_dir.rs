@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio::fs;
 
-use crate::core::models::{FunctionDefinition, Tool};
+use crate::core::models::Tool;
 use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
@@ -84,22 +84,19 @@ pub struct ListDirTool;
 #[async_trait]
 impl ToolHandler for ListDirTool {
     fn definition(&self) -> Tool {
-        Tool {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "list_dir".to_string(),
-                description: "List the immediate contents of a directory (not recursive). Directories are suffixed with '/' and symlinks are shown as 'name -> target'. Defaults to the work directory if no path is given.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The directory to list. Defaults to the work directory if omitted."
-                        }
+        Tool::function(
+            "list_dir",
+            "List the immediate contents of a directory (not recursive). Directories are suffixed with '/' and symlinks are shown as 'name -> target'. Defaults to the work directory if no path is given.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The directory to list. Defaults to the work directory if omitted."
                     }
-                }),
-            },
-        }
+                }
+            }),
+        )
     }
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {

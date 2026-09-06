@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::core::models::{FunctionDefinition, Tool};
+use crate::core::models::Tool;
 use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 use crate::tools::ToolHandler;
@@ -42,28 +42,24 @@ impl RememberTool {
 #[async_trait]
 impl ToolHandler for RememberTool {
     fn definition(&self) -> Tool {
-        Tool {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: REMEMBER_TOOL_NAME.to_string(),
-                description: "Save a fact, preference, decision, or piece of context to long-term \
-                              memory so it can be recalled in future sessions with `search_memory`. \
-                              Use it when the user asks you to remember something, or states \
-                              something clearly worth keeping. Write one self-contained note per \
-                              call, in plain prose, including enough context to make sense on its own."
-                    .to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "content": {
-                            "type": "string",
-                            "description": format!("The note to remember (max {MAX_NOTE_CHARS} characters)")
-                        }
-                    },
-                    "required": ["content"]
-                }),
-            },
-        }
+        Tool::function(
+            REMEMBER_TOOL_NAME,
+            "Save a fact, preference, decision, or piece of context to long-term \
+             memory so it can be recalled in future sessions with `search_memory`. \
+             Use it when the user asks you to remember something, or states \
+             something clearly worth keeping. Write one self-contained note per \
+             call, in plain prose, including enough context to make sense on its own.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": format!("The note to remember (max {MAX_NOTE_CHARS} characters)")
+                    }
+                },
+                "required": ["content"]
+            }),
+        )
     }
 
     async fn execute(&self, args: &str, _turn: &TurnContext<'_>) -> Result<String> {
@@ -102,34 +98,31 @@ impl ToolHandler for SearchMemoryTool {
         } else {
             "Search is keyword-based: use the distinctive words the note is likely to contain."
         };
-        Tool {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: SEARCH_MEMORY_TOOL_NAME.to_string(),
-                description: format!(
-                    "Search notes previously saved with `remember`. Use it when the user refers \
-                     to something from an earlier session, asks what you remember, or when a \
-                     stored preference or decision would change your answer. Returns the most \
-                     relevant notes with their id and date. {how}"
-                ),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "What to recall"
-                        },
-                        "top_k": {
-                            "type": "integer",
-                            "description": format!("Number of notes to return (default from config, max {MAX_TOP_K})"),
-                            "minimum": 1,
-                            "maximum": MAX_TOP_K
-                        }
+        Tool::function(
+            SEARCH_MEMORY_TOOL_NAME,
+            format!(
+                "Search notes previously saved with `remember`. Use it when the user refers \
+                 to something from an earlier session, asks what you remember, or when a \
+                 stored preference or decision would change your answer. Returns the most \
+                 relevant notes with their id and date. {how}"
+            ),
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What to recall"
                     },
-                    "required": ["query"]
-                }),
-            },
-        }
+                    "top_k": {
+                        "type": "integer",
+                        "description": format!("Number of notes to return (default from config, max {MAX_TOP_K})"),
+                        "minimum": 1,
+                        "maximum": MAX_TOP_K
+                    }
+                },
+                "required": ["query"]
+            }),
+        )
     }
 
     async fn execute(&self, args: &str, _turn: &TurnContext<'_>) -> Result<String> {
@@ -183,27 +176,23 @@ impl ForgetTool {
 #[async_trait]
 impl ToolHandler for ForgetTool {
     fn definition(&self) -> Tool {
-        Tool {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: FORGET_TOOL_NAME.to_string(),
-                description: "Permanently delete a note from long-term memory by its id (the \
-                              `#N` shown by `search_memory` or returned by `remember`). Use it \
-                              when the user asks you to forget something or when a note is \
-                              outdated and being replaced. Search first if you don't know the id."
-                    .to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {
-                            "type": "integer",
-                            "description": "Id of the memory to delete"
-                        }
-                    },
-                    "required": ["id"]
-                }),
-            },
-        }
+        Tool::function(
+            FORGET_TOOL_NAME,
+            "Permanently delete a note from long-term memory by its id (the \
+             `#N` shown by `search_memory` or returned by `remember`). Use it \
+             when the user asks you to forget something or when a note is \
+             outdated and being replaced. Search first if you don't know the id.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "integer",
+                        "description": "Id of the memory to delete"
+                    }
+                },
+                "required": ["id"]
+            }),
+        )
     }
 
     async fn execute(&self, args: &str, _turn: &TurnContext<'_>) -> Result<String> {

@@ -634,14 +634,11 @@ mod tests {
 
     #[test]
     fn convert_tools_maps_definitions() {
-        let tools = vec![Tool {
-            tool_type: "function".into(),
-            function: crate::core::models::FunctionDefinition {
-                name: "read_file".into(),
-                description: "Read a file".into(),
-                parameters: json!({"type": "object"}),
-            },
-        }];
+        let tools = vec![Tool::function(
+            "read_file",
+            "Read a file",
+            json!({"type": "object"}),
+        )];
         let result = convert_tools(&tools);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "read_file");

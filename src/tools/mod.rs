@@ -37,24 +37,21 @@
 //!
 //! # use openheim::tools::ToolHandler;
 //! # use openheim::tools::args::{parse_args, require_str};
-//! # use openheim::core::models::{Tool, FunctionDefinition};
+//! # use openheim::core::models::Tool;
 //! # use openheim::core::turn::TurnContext;
 //! # use openheim::error::Result;
 //! #[async_trait]
 //! impl ToolHandler for GreetTool {
 //!     fn definition(&self) -> Tool {
-//!         Tool {
-//!             tool_type: "function".to_string(),
-//!             function: FunctionDefinition {
-//!                 name: "greet".to_string(),
-//!                 description: "Greet someone by name.".to_string(),
-//!                 parameters: json!({
-//!                     "type": "object",
-//!                     "properties": { "name": { "type": "string" } },
-//!                     "required": ["name"]
-//!                 }),
-//!             },
-//!         }
+//!         Tool::function(
+//!             "greet",
+//!             "Greet someone by name.",
+//!             json!({
+//!                 "type": "object",
+//!                 "properties": { "name": { "type": "string" } },
+//!                 "required": ["name"]
+//!             }),
+//!         )
 //!     }
 //!
 //!     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
@@ -341,7 +338,6 @@ mod tests {
 
     use super::test_support::TurnHarness;
     use super::*;
-    use crate::core::models::FunctionDefinition;
 
     #[test]
     fn new_executor_is_empty() {
@@ -399,14 +395,11 @@ mod tests {
     #[async_trait]
     impl ToolHandler for ContextEchoTool {
         fn definition(&self) -> Tool {
-            Tool {
-                tool_type: "function".to_string(),
-                function: FunctionDefinition {
-                    name: "context_echo".to_string(),
-                    description: String::new(),
-                    parameters: serde_json::json!({"type": "object", "properties": {}}),
-                },
-            }
+            Tool::function(
+                "context_echo",
+                "",
+                serde_json::json!({"type": "object", "properties": {}}),
+            )
         }
 
         async fn execute(&self, _args: &str, turn: &TurnContext<'_>) -> Result<String> {

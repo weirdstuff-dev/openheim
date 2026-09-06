@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio::fs;
 
-use crate::core::models::{FunctionDefinition, Tool};
+use crate::core::models::Tool;
 use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
@@ -43,23 +43,20 @@ pub struct ReadFileTool;
 #[async_trait]
 impl ToolHandler for ReadFileTool {
     fn definition(&self) -> Tool {
-        Tool {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "read_file".to_string(),
-                description: "Read the contents of a file at the specified path.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The path to the file to read"
-                        }
-                    },
-                    "required": ["path"]
-                }),
-            },
-        }
+        Tool::function(
+            "read_file",
+            "Read the contents of a file at the specified path.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The path to the file to read"
+                    }
+                },
+                "required": ["path"]
+            }),
+        )
     }
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
