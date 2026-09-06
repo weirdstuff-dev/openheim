@@ -328,6 +328,10 @@ src/
     permission.rs   PermissionGate trait — embedder hook for tool-call approval
     turn.rs         Cross-cutting turn controls (cancellation, etc.)
     client_io.rs    Optional delegation of file I/O to the ACP client
+    runtime/        The runtime core — used by acp, the other transports, and the library facade
+      state.rs      AgentState — shared handle, request handlers
+      session.rs    Live session map — state and eviction policy
+      mod.rs        AgentMode (session tool policy)
     llm/            LLM client trait and provider implementations
       anthropic.rs    Anthropic Messages API client
       gemini.rs       Google Gemini API client
@@ -353,9 +357,7 @@ src/
     store.rs        VectorStore — SQLite schema, FTS5 keyword search, sqlite-vec KNN search
     tool.rs         remember / search_memory / forget tools
   subagents/        Subagent profiles — delegated, isolated agent personas (~/.openheim/agents/)
-  acp/              Agent Client Protocol server implementation
-    session.rs      Live session map — state and eviction policy
-    state.rs        AgentState — shared handle, request handlers
+  acp/              Agent Client Protocol wire adapter
     serve.rs        Connection loop wiring transports to the agent-client-protocol crate
     permission.rs   Adapts ACP session/request_permission to PermissionGate
     client_io.rs    Adapts ACP fs/* requests to ClientIo

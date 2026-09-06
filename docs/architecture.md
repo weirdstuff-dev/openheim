@@ -13,7 +13,7 @@ Openheim can be used in two ways:
 | **Library** | `OpenheimClient` in `src/client.rs` | Embedded in a Rust application |
 | **Server** | `src/main.rs` subcommands | Standalone process driven by a client over a transport |
 
-Both modes share the same agent logic. Transports speak the ACP wire protocol to `acp::serve`; the library facade calls the same `AgentState` request handlers directly, and the headless `run` mode connects an ACP client to `acp::serve` over an in-memory duplex pipe.
+Both modes share the same agent logic. Transports speak the ACP wire protocol to `acp::serve`; the library facade calls the same `core::runtime::AgentState` request handlers directly, and the headless `run` mode connects an ACP client to `acp::serve` over an in-memory duplex pipe.
 
 ---
 
@@ -25,9 +25,7 @@ src/
 ├── lib.rs              Public re-exports for library users
 │
 ├── client.rs           OpenheimClient / SessionHandle — library facade
-├── acp/                Agent Client Protocol server implementation
-│   ├── session.rs      Live session map — state and eviction policy
-│   ├── state.rs        AgentState — shared handle, request handlers
+├── acp/                Agent Client Protocol wire adapter
 │   ├── serve.rs        Connection loop wiring transports to agent-client-protocol
 │   ├── permission.rs   Adapts session/request_permission to core::PermissionGate
 │   ├── client_io.rs    Adapts fs/* requests to core::ClientIo
@@ -39,6 +37,10 @@ src/
 │   ├── permission.rs   PermissionGate trait — embedder hook for tool-call approval
 │   ├── turn.rs         Cross-cutting turn controls (cancellation, …)
 │   ├── client_io.rs    Optional delegation of file I/O to the ACP client
+│   ├── runtime/        The runtime core — used by acp, the other transports, and the library facade
+│   │   ├── state.rs    AgentState — shared handle, request handlers
+│   │   ├── session.rs  Live session map — state and eviction policy
+│   │   └── mod.rs      AgentMode (session tool policy)
 │   ├── llm/            LLM provider abstraction + implementations
 │   │   ├── mod.rs      LlmClient trait
 │   │   ├── anthropic.rs
@@ -122,7 +124,7 @@ User / Client
                      │ ACP PromptRequest
                      ▼
 ┌─────────────────────────────────────────────┐
-│            acp::serve / AgentState          │
+│      acp::serve / core::runtime::AgentState │
 │                                             │
 │  AgentState holds:                          │
 │  • llm       Arc<dyn LlmClient>             │
@@ -132,7 +134,7 @@ User / Client
 │  • config    AgentConfig (model, iters, …)  │
 │  • sessions  HashMap<id, SessionState>      │
 └────────────────────┬────────────────────────┘
-                     │ acp_prompt()
+                     │ AgentState::prompt()
                      ▼
 ┌─────────────────────────────────────────────┐
 │         memory::MemoryContext::prepare      │
@@ -166,8 +168,8 @@ User / Client
 │    │      break                          │  │
 │    └─────────────────────────────────────┘  │
 │                                             │
-│  acp_prompt appends each MessageAppended    │
-│  event to history.jsonl as it's emitted,    │
+│  AgentState::prompt appends each            │
+│  MessageAppended event to history.jsonl,    │
 │  then rewrites the full log once more       │
 │  after the loop (history.save_conversation) │
 └──────────┬──────────────────┬───────────────┘
@@ -218,7 +220,7 @@ All persistence lives under `~/.openheim/` by default.
 
 ### Long-term memory
 
-`AgentState::new` always opens `memory.db` and registers three tools. `remember(content)` inserts a note into a `memories` table; an FTS5 external-content index (`memories_fts`) tracks it via triggers. `search_memory(query)` runs an FTS5 BM25 query (each word quoted and OR-ed, so user input can't inject query syntax) and returns the best notes with their date. `forget(id)` deletes a note. Nothing is stored or injected automatically: the model calls the tools when the user asks it to remember, recall, or drop something, or when it judges a stored preference relevant.
+`core::runtime::AgentState::new` always opens `memory.db` and registers three tools. `remember(content)` inserts a note into a `memories` table; an FTS5 external-content index (`memories_fts`) tracks it via triggers. `search_memory(query)` runs an FTS5 BM25 query (each word quoted and OR-ed, so user input can't inject query syntax) and returns the best notes with their date. `forget(id)` deletes a note. Nothing is stored or injected automatically: the model calls the tools when the user asks it to remember, recall, or drop something, or when it judges a stored preference relevant.
 
 When `[memory]` names an `embedding_provider` and `embedding_model`, the same store gains a `vec0` virtual table with cosine distance: `remember` embeds the note (OpenAI-compatible `/embeddings` or Gemini `batchEmbedContents`) and `search_memory` becomes a KNN `MATCH` over embeddings instead of keyword search. Notes written before embeddings were enabled are back-filled on the next call. The store records the embedding model and dimension; if either changes, the vectors are dropped and every note is re-embedded from its stored text, since vectors from different models aren't comparable.
 
@@ -226,10 +228,10 @@ When `[memory]` names an `embedding_provider` and `embedding_model`, the same st
 
 ## ACP and the library facade
 
-The `OpenheimClient` facade (`src/client.rs`) wraps the same `AgentState` the transports use, behind a simple Rust API. Internally it:
+The `OpenheimClient` facade (`src/client.rs`) wraps the same `core::runtime::AgentState` the transports use, behind a simple Rust API. Internally it:
 
 1. Builds an `AgentState` (LLM client, tool executor, memory context, long-term memory).
-2. Calls its request handlers (`acp_prompt`, `acp_load_session`, `acp_cancel`, …) directly — no wire protocol, no background task. Streaming updates reach your callback through the same `SessionUpdate` events a transport would forward.
+2. Calls its request handlers (`prompt`, `load_session`, `cancel_session`, …) directly — no wire protocol, no background task. Streaming updates reach your callback through the same `SessionUpdate` events a transport would forward.
 
 The duplex-pipe + ACP-client wiring does exist — in `src/transport/run.rs`, where the headless `openheim run` mode drives `acp::serve` over `tokio::io::duplex`. Either way there is no separate "library mode" agent logic: the facade and every transport share the exact same session and agent-loop code path.
 

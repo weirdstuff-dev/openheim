@@ -13,6 +13,7 @@
 - **`delegate_task` is an ordinary `ToolHandler`.** `DelegateTool` implements `ToolHandler` and is registered into the `SystemToolExecutor` like every other tool; the `WithDelegate` wrapper and `with_delegation()` are removed. The no-recursion guarantee is unchanged: `SystemToolExecutor` is now `Clone` (a cheap registry snapshot), and `AgentState::new` hands `DelegateTool` a clone taken *before* it registers itself, so subagents structurally never see `delegate_task` (covered by a test). Subagents now inherit the parent turn's `client_io` too, so inside an editor-hosted session a subagent reads the same unsaved buffers the orchestrator does (previously they always went to local disk).
 - **`rag` module renamed to `memory`; `RagContext` is now `MemoryContext`.** The old module held conversation history, the write lease, skills, the system identity, and the prompt builder — none of which is retrieval. They now live under `openheim::memory::{history, lease, skills, system, prompt}`, and `AgentState.rag` / `OpenheimClient::rag()` are `AgentState.memory` / `OpenheimClient::memory()`. This is a clean break with no deprecated aliases: `openheim::rag` now names the new RAG module, so code that imported `openheim::RagContext`, `client.rag()`, or `openheim::rag::{HistoryManager, SkillsManager, …}` must switch to `MemoryContext`, `client.memory()`, and `openheim::memory`.
 - New `Error::DatabaseError` variant for SQLite failures in the long-term memory store.
+- **`AgentState` and `AgentMode` moved out of `acp` into `core::runtime`.** `acp` is now purely the ACP wire adapter (`serve`, `AcpPermissionGate`, `AcpClientIo`, `convert`, and the ACP-specific slice of `util`); `core::runtime::{state, session}` is the runtime core every entry point — ACP, the other transports, the library facade — is built on. The `acp_`-prefixed method names on `AgentState` are gone: `acp_new_session` → `new_session`, `acp_prompt` → `prompt`, `acp_load_session` → `load_session`, `acp_list_sessions` → `list_sessions`, `acp_set_session_model` → `set_session_model`, `acp_update_session_model` → `switch_model`, `acp_set_session_mode` → `set_session_mode`. No behavior change.
 
 ### Breaking changes (library)
 
@@ -21,6 +22,7 @@
 - **`tools::SandboxedExecutor` is removed** — the boundary now travels in `TurnContext`. `tools::ScopedExecutor` is unchanged.
 - **`tools::with_delegation` is removed and `DelegateTool::new` no longer takes `work_dir`/`allow_shell`** — register `DelegateTool` into a `SystemToolExecutor` instead, passing a clone of the executor taken before registration as `base_executor`.
 - `list_dir` and `search` default to the turn's `work_dir` (not the process's current directory) when `path` is omitted.
+- **`acp::AgentState`/`acp::AgentMode` are now `core::runtime::AgentState`/`core::runtime::AgentMode`**, with the `acp_`-prefixed methods renamed (see above). `acp::session` is now `core::runtime::session`.
 
 ## [0.9.0] - 2026-09-01
 
