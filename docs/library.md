@@ -9,7 +9,7 @@ Openheim can be embedded directly in your Rust application. The library exposes 
 ```toml
 # Cargo.toml
 [dependencies]
-openheim = "0.8"
+openheim = "0.9"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -22,7 +22,7 @@ Embedders that drive the agent through `OpenheimClient` (or their own ACP
 wiring) usually don't need those:
 
 ```toml
-openheim = { version = "0.10", default-features = false }
+openheim = { version = "0.9", default-features = false }
 # optionally: features = ["server"]  # axum WS/REST server (openheim::transport::ws)
 # optionally: features = ["tui"]     # ratatui terminal UI (openheim::tui)
 # optionally: features = ["rag"]     # remember/search_memory/forget long-term memory (rusqlite FTS5 + sqlite-vec)
