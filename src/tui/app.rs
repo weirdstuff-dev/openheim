@@ -52,6 +52,7 @@ pub(super) struct App {
     switch_model_tx: mpsc::UnboundedSender<(String, String)>,
     switch_session_tx: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
     list_sessions_tx: mpsc::UnboundedSender<()>,
+    new_session_tx: mpsc::UnboundedSender<()>,
     picker_items: Vec<(String, String)>,
     picker_selected: usize,
     config_rows: Vec<ConfigRow>,
@@ -78,6 +79,7 @@ pub(super) struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         agent_config: AgentConfig,
         app_config: AppConfig,
@@ -86,6 +88,7 @@ impl App {
         switch_model_tx: mpsc::UnboundedSender<(String, String)>,
         switch_session_tx: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
         list_sessions_tx: mpsc::UnboundedSender<()>,
+        new_session_tx: mpsc::UnboundedSender<()>,
     ) -> Self {
         let theme_name = app_config
             .theme_color
@@ -114,6 +117,7 @@ impl App {
             switch_model_tx,
             switch_session_tx,
             list_sessions_tx,
+            new_session_tx,
             picker_items: Vec::new(),
             picker_selected: 0,
             config_rows: Vec::new(),
@@ -567,6 +571,7 @@ impl App {
             "help" => self.push(ChatItem::SystemInfo(
                 ":help              show this\n\
                  :q / :quit         exit\n\
+                 :new               start a new session\n\
                  :sessions          browse and restore saved sessions\n\
                  :config            current config\n\
                  :models            list available models\n\
@@ -578,6 +583,7 @@ impl App {
                  ↑/↓  scroll · PgUp/PgDn  page · Ctrl+C  quit"
                     .to_string(),
             )),
+            "new" => self.start_new_session(),
             "sessions" => {
                 let _ = self.list_sessions_tx.send(());
             }
@@ -732,6 +738,23 @@ impl App {
                 ":{unknown}: unknown command  (try :help)"
             ))),
         }
+    }
+
+    /// Clears the transcript and asks the agent task to start a brand-new,
+    /// unsaved session — the same `SessionBuilder::start` path `run()` uses
+    /// on startup, just triggered mid-session instead. Unlike
+    /// `open_session`, there's no history to replay, so the agent task's
+    /// confirmation arrives as an empty-ish `AgentUpdate::History` (see
+    /// `mod.rs`'s `new_session_rx` arm) plus an `AgentUpdate::Usage(None)`
+    /// to reset the footer's context size.
+    fn start_new_session(&mut self) {
+        self.items.clear();
+        self.status = Status::Idle;
+        self.scroll = 0;
+        self.pinned = true;
+        self.context_usage = None;
+        self.push(ChatItem::SystemInfo("─── new session".to_string()));
+        let _ = self.new_session_tx.send(());
     }
 
     /// Clears the transcript and requests the agent task load `meta`'s full
@@ -960,6 +983,7 @@ mod tests {
         let (switch_model_tx, _) = mpsc::unbounded_channel();
         let (switch_session_tx, _) = mpsc::unbounded_channel();
         let (list_sessions_tx, _) = mpsc::unbounded_channel();
+        let (new_session_tx, _) = mpsc::unbounded_channel();
         App::new(
             AgentConfig::default(),
             test_app_config(),
@@ -968,6 +992,7 @@ mod tests {
             switch_model_tx,
             switch_session_tx,
             list_sessions_tx,
+            new_session_tx,
         )
     }
 

@@ -59,7 +59,7 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
         .skills(skills.clone())
         .start()
         .await?
-        .permission_gate(permission_gate);
+        .permission_gate(permission_gate.clone());
 
     let (update_tx, mut update_rx) = mpsc::unbounded_channel::<AgentUpdate>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<String>();
@@ -67,9 +67,14 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
     let (switch_session_tx, mut switch_session_rx) =
         mpsc::unbounded_channel::<(String, std::path::PathBuf)>();
     let (list_sessions_tx, mut list_sessions_rx) = mpsc::unbounded_channel::<()>();
+    let (new_session_tx, mut new_session_rx) = mpsc::unbounded_channel::<()>();
 
     let agent_handle = {
         let update_tx = update_tx.clone();
+        // Captured separately from the `skills` moved into `App::new` below —
+        // this copy lives inside the agent task so a `:new` command can spin
+        // up another session with the same skills, same as startup did.
+        let session_skills = skills.clone();
         tokio::spawn(async move {
             let mut session = session;
             loop {
@@ -149,6 +154,30 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                             None => break,
                         }
                     }
+                    maybe_new = new_session_rx.recv() => {
+                        match maybe_new {
+                            Some(()) => {
+                                match client
+                                    .new_session()
+                                    .skills(session_skills.clone())
+                                    .start()
+                                    .await
+                                {
+                                    Ok(new_session) => {
+                                        session = new_session.permission_gate(permission_gate.clone());
+                                        let _ = update_tx.send(AgentUpdate::History(vec![
+                                            ChatItem::SystemInfo("─── session started".to_string()),
+                                        ]));
+                                        let _ = update_tx.send(AgentUpdate::Usage(None));
+                                    }
+                                    Err(e) => {
+                                        let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
+                                    }
+                                }
+                            }
+                            None => break,
+                        }
+                    }
                     maybe_list = list_sessions_rx.recv() => {
                         match maybe_list {
                             Some(()) => {
@@ -177,6 +206,7 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
         switch_model_tx,
         switch_session_tx,
         list_sessions_tx,
+        new_session_tx,
     );
 
     enable_raw_mode()?;
