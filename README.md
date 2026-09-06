@@ -337,6 +337,7 @@ src/
       gemini.rs       Google Gemini API client
       openai.rs       OpenAI API client
       openai_compatible.rs  Generic OpenAI-compatible client (Ollama, etc.)
+      http.rs         Shared POST-JSON-and-check-status helper
       sse.rs          Shared Server-Sent Events decoder for streaming
       retry.rs        Automatic retry with exponential backoff
   tools/            Tool trait, registry, and built-in tools

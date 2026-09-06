@@ -47,6 +47,7 @@ src/
 │   │   ├── openai.rs
 │   │   ├── gemini.rs
 │   │   ├── openai_compatible.rs
+│   │   ├── http.rs     Shared POST-JSON-and-check-status helper
 │   │   ├── sse.rs      Shared Server-Sent Events decoder for streaming
 │   │   └── retry.rs    Exponential-backoff wrapper
 │   └── models.rs       Shared data types (Message, Tool, Choice, …)
