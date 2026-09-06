@@ -7,6 +7,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
+use agent_client_protocol::schema::{ContentBlock, SessionUpdate, ToolCallStatus};
 use crossterm::{
     cursor::Show,
     event::{
@@ -20,11 +21,11 @@ use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
-use crate::{client::OpenheimClient, config::load_config, core::permission::PermissionGate};
+use crate::{client::OpenheimClient, core::permission::PermissionGate};
 
 use app::App;
 use permission::TuiPermissionGate;
-use types::AgentUpdate;
+use types::{AgentUpdate, ChatItem};
 
 struct TerminalGuard {
     kbd_enhanced: bool,
@@ -42,10 +43,12 @@ impl Drop for TerminalGuard {
 }
 
 pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
-    let app_config = load_config()?;
-    let agent_config = app_config.resolve(None)?;
-
     let client = OpenheimClient::builder().build().await?;
+    // Snapshots for `:config`/`:models` — read once here instead of a second
+    // `load_config()` duplicating the one `OpenheimClient::builder().build()`
+    // already did internally.
+    let agent_config = client.state().config.clone();
+    let app_config = client.state().app_config.clone();
 
     let (permission_tx, mut permission_rx) =
         mpsc::unbounded_channel::<permission::PermissionRequest>();
@@ -63,6 +66,7 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
     let (switch_model_tx, mut switch_model_rx) = mpsc::unbounded_channel::<(String, String)>();
     let (switch_session_tx, mut switch_session_rx) =
         mpsc::unbounded_channel::<(String, std::path::PathBuf)>();
+    let (list_sessions_tx, mut list_sessions_rx) = mpsc::unbounded_channel::<()>();
 
     let agent_handle = {
         let update_tx = update_tx.clone();
@@ -109,8 +113,22 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                     maybe_switch = switch_session_rx.recv() => {
                         match maybe_switch {
                             Some((session_id, cwd)) => {
-                                match session.restore(&session_id, cwd).await {
+                                // Collected rather than streamed one at a time: a
+                                // history replay isn't "live" the way a turn is,
+                                // and batching means the app only clears/repaints
+                                // once instead of on every historical message.
+                                let mut history = Vec::new();
+                                match session
+                                    .restore(&session_id, cwd, |update| {
+                                        history.extend(session_update_to_chat_item(update));
+                                    })
+                                    .await
+                                {
                                     Ok(restored) => {
+                                        history.push(ChatItem::SystemInfo(
+                                            "─── session restored".to_string(),
+                                        ));
+                                        let _ = update_tx.send(AgentUpdate::History(history));
                                         // Refreshes the footer's context size to
                                         // the restored session's own snapshot
                                         // instead of leaving the previous
@@ -122,6 +140,21 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                                             let _ = update_tx.send(AgentUpdate::Usage(usage));
                                         }
                                         session = restored;
+                                    }
+                                    Err(e) => {
+                                        let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
+                                    }
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                    maybe_list = list_sessions_rx.recv() => {
+                        match maybe_list {
+                            Some(()) => {
+                                match client.list_all_sessions().await {
+                                    Ok(metas) => {
+                                        let _ = update_tx.send(AgentUpdate::SessionList(metas));
                                     }
                                     Err(e) => {
                                         let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
@@ -143,6 +176,7 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
         prompt_tx,
         switch_model_tx,
         switch_session_tx,
+        list_sessions_tx,
     );
 
     enable_raw_mode()?;
@@ -215,4 +249,67 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
     let _ = agent_handle.await;
 
     Ok(())
+}
+
+/// Converts one `SessionUpdate` from a history replay (`SessionHandle::restore`'s
+/// `on_history` callback) into the `ChatItem` a live turn would have produced
+/// for the equivalent content — the same mapping `App::handle_stream_event`
+/// applies to a live turn's `StreamEvent`s, just starting from the ACP shape
+/// `replay_history_messages` replays persisted messages as instead (there's
+/// no live `StreamEvent` for "here's a message from a past turn"). Unlike the
+/// raw `Message`-block walk this replaces, an image attachment isn't silently
+/// dropped — it renders as a placeholder line, since the terminal can't
+/// inline it.
+fn session_update_to_chat_item(update: SessionUpdate) -> Option<ChatItem> {
+    match update {
+        SessionUpdate::UserMessageChunk(chunk) => match chunk.content {
+            ContentBlock::Text(t) => Some(ChatItem::UserMessage(t.text)),
+            ContentBlock::Image(_) => Some(ChatItem::SystemInfo("[image attached]".to_string())),
+            _ => None,
+        },
+        SessionUpdate::AgentMessageChunk(chunk) => match chunk.content {
+            ContentBlock::Text(t) => {
+                let is_thinking = t
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get("kind"))
+                    .and_then(|v| v.as_str())
+                    == Some("thinking");
+                if is_thinking {
+                    Some(ChatItem::Thinking(t.text))
+                } else {
+                    Some(ChatItem::AssistantMessage(t.text))
+                }
+            }
+            _ => None,
+        },
+        SessionUpdate::ToolCall(tc) => {
+            let args = tc
+                .raw_input
+                .as_ref()
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            Some(ChatItem::ToolCall {
+                name: tc.title.clone(),
+                args,
+            })
+        }
+        SessionUpdate::ToolCallUpdate(tcu) => {
+            if matches!(
+                tcu.fields.status,
+                Some(ToolCallStatus::Completed) | Some(ToolCallStatus::Failed)
+            ) {
+                let is_error = matches!(tcu.fields.status, Some(ToolCallStatus::Failed));
+                let result = match tcu.fields.raw_output {
+                    Some(serde_json::Value::String(s)) => s,
+                    Some(v) => v.to_string(),
+                    None => String::new(),
+                };
+                Some(ChatItem::ToolResult { result, is_error })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }

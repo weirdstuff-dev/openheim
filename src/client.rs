@@ -344,15 +344,20 @@ impl SessionHandle {
     /// Restore a persisted session as the active session for this handle.
     ///
     /// Registers the conversation in the agent state so subsequent `prompt`
-    /// calls continue from its history. Pass a no-op callback — the TUI
-    /// already replays history visually before calling this. The returned
-    /// handle inherits this handle's permission gate and client I/O.
+    /// calls continue from its history. `on_history` is called once for each
+    /// message in the conversation (as `SessionUpdate::UserMessageChunk` /
+    /// `AgentMessageChunk` / `ToolCall` / `ToolCallUpdate`, in the same shape
+    /// and order a live turn would have produced — including thinking blocks
+    /// tagged via `_meta.kind`) so callers can replay it in their UI; pass a
+    /// no-op callback to skip that. The returned handle inherits this
+    /// handle's permission gate and client I/O.
     pub async fn restore(
         &self,
         session_id: &str,
         cwd: std::path::PathBuf,
+        on_history: impl FnMut(SessionUpdate) + Send,
     ) -> Result<SessionHandle> {
-        self.state.load_session(session_id, cwd, |_| {}).await?;
+        self.state.load_session(session_id, cwd, on_history).await?;
         Ok(SessionHandle {
             id: session_id.to_string(),
             state: Arc::clone(&self.state),
