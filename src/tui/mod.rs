@@ -75,8 +75,17 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
         // this copy lives inside the agent task so a `:new` command can spin
         // up another session with the same skills, same as startup did.
         let session_skills = skills.clone();
+        // `client.new_session()` always starts from the client's original
+        // default config (see `AgentState::new_session`'s fallback), not
+        // whatever `:model`/`:models` had switched this session to — tracked
+        // here so a `:new` replacement can re-apply it instead of silently
+        // regressing to the default.
+        let default_provider = agent_config.provider_name.clone();
+        let default_model = agent_config.model.clone();
         tokio::spawn(async move {
             let mut session = session;
+            let mut current_provider = default_provider.clone();
+            let mut current_model = default_model.clone();
             loop {
                 tokio::select! {
                     maybe_prompt = prompt_rx.recv() => {
@@ -105,6 +114,8 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                             Some((provider, model)) => {
                                 match session.switch_model(&provider, &model).await {
                                     Ok((provider, model)) => {
+                                        current_provider = provider.clone();
+                                        current_model = model.clone();
                                         let _ = update_tx.send(AgentUpdate::ModelChanged { provider, model });
                                     }
                                     Err(e) => {
@@ -164,7 +175,26 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                                     .await
                                 {
                                     Ok(new_session) => {
-                                        session = new_session.permission_gate(permission_gate.clone());
+                                        let new_session =
+                                            new_session.permission_gate(permission_gate.clone());
+                                        // Re-apply the active model on top of the
+                                        // fresh session's default. If it's no
+                                        // longer valid (e.g. removed from the
+                                        // config file since startup), fall back to
+                                        // the default and let the UI know so the
+                                        // footer doesn't keep showing the stale one.
+                                        match new_session.switch_model(&current_provider, &current_model).await {
+                                            Ok(_) => {}
+                                            Err(_) => {
+                                                current_provider = default_provider.clone();
+                                                current_model = default_model.clone();
+                                                let _ = update_tx.send(AgentUpdate::ModelChanged {
+                                                    provider: default_provider.clone(),
+                                                    model: default_model.clone(),
+                                                });
+                                            }
+                                        }
+                                        session = new_session;
                                         let _ = update_tx.send(AgentUpdate::NewSession(vec![
                                             ChatItem::SystemInfo("─── new session".to_string()),
                                         ]));
