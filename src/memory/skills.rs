@@ -1,4 +1,3 @@
-use crate::config::config_dir;
 use crate::error::{Error, Result};
 use std::path::{Component, Path, PathBuf};
 
@@ -40,14 +39,6 @@ pub struct SkillsManager {
 }
 
 impl SkillsManager {
-    /// Creates a `SkillsManager` backed by `~/.openheim/skills/`, creating the
-    /// directory if it doesn't exist.
-    pub fn new() -> Result<Self> {
-        let dir = config_dir()?.join("skills");
-        std::fs::create_dir_all(&dir)?;
-        Ok(Self { skills_dir: dir })
-    }
-
     /// Loads the content of a single skill by name.
     ///
     /// Reads `{skills_dir}/{name}.md`. Returns an error if the file does not

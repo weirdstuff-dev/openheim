@@ -181,11 +181,6 @@ pub fn save_theme_to_config_at(path: &std::path::Path, name: &str) -> Result<()>
     Ok(())
 }
 
-/// [`save_theme_to_config_at`] against `~/.openheim/config.toml`.
-pub fn save_theme_to_config(name: &str) -> Result<()> {
-    save_theme_to_config_at(&config_path()?, name)
-}
-
 /// Whether `line` is a `[tui]` table header, allowing for trailing
 /// whitespace or a `# comment` after the closing bracket (e.g. `[tui] #
 /// theme settings`), so those aren't mistaken for the start of a new,

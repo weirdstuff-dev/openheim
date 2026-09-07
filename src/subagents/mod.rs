@@ -24,7 +24,6 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::config::config_dir;
 use crate::error::{Error, Result};
 
 /// A user-defined subagent persona loaded from `~/.openheim/agents/{name}.md`.
@@ -71,14 +70,6 @@ pub struct SubagentLoader {
 }
 
 impl SubagentLoader {
-    /// Creates a `SubagentLoader` backed by `~/.openheim/agents/`, creating the
-    /// directory if it doesn't exist.
-    pub fn new() -> Result<Self> {
-        let dir = config_dir()?.join("agents");
-        std::fs::create_dir_all(&dir)?;
-        Ok(Self { agents_dir: dir })
-    }
-
     /// Creates a `SubagentLoader` backed by a caller-chosen directory, e.g.
     /// for an injected `AppConfig::data_dir` or in tests. Does not create
     /// the directory; [`Self::load`] returns no profiles if it is absent.

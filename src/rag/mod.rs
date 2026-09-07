@@ -36,7 +36,7 @@ pub mod tool;
 
 use std::sync::Arc;
 
-use crate::config::{AppConfig, build_http_client, config_dir};
+use crate::config::{AppConfig, build_http_client};
 use crate::error::Result;
 
 pub use embedding::{EmbeddingClient, GeminiEmbeddingClient, OpenAiEmbeddingClient};
@@ -83,10 +83,11 @@ impl LongTermMemory {
         let memory = config.memory.as_ref();
         let db_path = match memory.and_then(|m| m.db_path.clone()) {
             Some(p) => p,
-            None => match config.data_dir.clone() {
-                Some(dir) => dir.join("memory.db"),
-                None => config_dir()?.join("memory.db"),
-            },
+            None => config
+                .data_dir
+                .as_deref()
+                .expect("data_dir is resolved by OpenheimBuilder::build before AgentState::new")
+                .join("memory.db"),
         };
         let embedder = match config.resolve_embedding()? {
             Some(embedding) => {

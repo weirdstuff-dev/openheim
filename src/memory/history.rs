@@ -2,7 +2,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::config::config_dir;
 use crate::core::models::{Message, Role, Usage};
 use crate::error::{Error, Result};
 use crate::memory::lease::{self, SessionLease};
@@ -89,14 +88,6 @@ pub struct HistoryManager {
 }
 
 impl HistoryManager {
-    /// Creates a `HistoryManager` backed by `~/.openheim/history/`, creating the
-    /// directory if it doesn't exist.
-    pub fn new() -> Result<Self> {
-        let dir = config_dir()?.join("history");
-        std::fs::create_dir_all(&dir)?;
-        Ok(Self { history_dir: dir })
-    }
-
     fn meta_path(&self, id: &Uuid) -> PathBuf {
         self.history_dir.join(format!("{}.json", id))
     }

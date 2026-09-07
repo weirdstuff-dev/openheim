@@ -428,7 +428,7 @@ impl App {
         self.theme_color_name = name.to_string();
         self.cached_width = 0;
         self.app_config.tui.theme_color = Some(name.to_string());
-        match crate::config::save_theme_to_config(name) {
+        match crate::config::save_theme_to_config_at(&self.app_config.config_path, name) {
             Ok(()) => self.push(ChatItem::SystemInfo(format!("theme set to {name}"))),
             Err(e) => self.push(ChatItem::SystemInfo(format!(
                 "theme set to {name} (could not save: {e})"
@@ -716,21 +716,28 @@ impl App {
                     }
                 }
             }
-            "skills" => match SkillsManager::new().and_then(|m| m.list_skills()) {
-                Ok(names) if names.is_empty() => {
-                    self.push(ChatItem::SystemInfo(
-                        "no skills available\n\
-                         add <name>.md files to ~/.openheim/skills/"
-                            .to_string(),
-                    ));
+            "skills" => {
+                let data_dir = self
+                    .app_config
+                    .data_dir
+                    .clone()
+                    .expect("data_dir is resolved by OpenheimBuilder::build");
+                match SkillsManager::with_dir(data_dir.join("skills")).list_skills() {
+                    Ok(names) if names.is_empty() => {
+                        self.push(ChatItem::SystemInfo(
+                            "no skills available\n\
+                             add <name>.md files to ~/.openheim/skills/"
+                                .to_string(),
+                        ));
+                    }
+                    Ok(names) => {
+                        self.skills_items = names;
+                        self.skills_scroll = 0;
+                        self.push_screen(Screen::SkillsViewer);
+                    }
+                    Err(e) => self.push(ChatItem::Err(e.to_string())),
                 }
-                Ok(names) => {
-                    self.skills_items = names;
-                    self.skills_scroll = 0;
-                    self.push_screen(Screen::SkillsViewer);
-                }
-                Err(e) => self.push(ChatItem::Err(e.to_string())),
-            },
+            }
             "theme" => {
                 if arg.is_empty() {
                     self.theme_selected = render::THEME_COLORS
@@ -989,6 +996,7 @@ mod tests {
             allow_shell: false,
             memory: None,
             data_dir: None,
+            config_path: std::path::PathBuf::new(),
         }
     }
 

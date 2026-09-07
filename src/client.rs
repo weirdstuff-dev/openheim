@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::acp::util::{replay_history_messages, stream_event_to_session_update};
 use crate::{
     config::{
-        AgentConfig, AppConfig, McpServerConfig, ProviderConfig, TuiConfig, load_config,
-        load_config_from,
+        AgentConfig, AppConfig, McpServerConfig, ProviderConfig, TuiConfig, config_dir,
+        config_path, load_config, load_config_from,
     },
     core::{
         client_io::{ClientIo, NoClientIo},
@@ -595,11 +595,17 @@ impl OpenheimBuilder {
         if let Some(dir) = self.data_dir {
             app_config.data_dir = Some(dir);
         }
+        app_config.data_dir.get_or_insert(config_dir()?);
+        app_config.config_path = match self.config_path {
+            Some(path) => path,
+            None => config_path()?,
+        };
 
-        let memory = MemoryContext::new(
-            app_config.default_skills.clone(),
-            app_config.data_dir.as_deref(),
-        )?;
+        let data_dir = app_config
+            .data_dir
+            .clone()
+            .expect("data_dir was just defaulted above");
+        let memory = MemoryContext::new(app_config.default_skills.clone(), &data_dir)?;
         let state = Arc::new(AgentState::new(agent_config, app_config, memory, self.tools).await?);
         Ok(OpenheimClient { state })
     }
@@ -650,6 +656,7 @@ fn build_programmatic(
         allow_shell: false,
         memory: None,
         data_dir: None,
+        config_path: std::path::PathBuf::new(),
     };
 
     // Funnels through the same `AppConfig::agent_config` assembly every
@@ -657,4 +664,33 @@ fn build_programmatic(
     // `AgentConfig` with the same field set alongside it.
     let agent_config = app_config.resolve_provider_default(&provider)?;
     Ok((agent_config, app_config))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression guard for the `data_dir`/`config_path` resolution `build()`
+    /// does once: every downstream reader (`MemoryContext`, `AgentState`,
+    /// `LongTermMemory::from_config`, the TUI's `:skills`/`:theme`) assumes
+    /// both are always populated after `build()` succeeds, never `None`/empty.
+    /// Uses the programmatic path (`provider`/`api_key`/`model` set) so this
+    /// stays mock-free — no config file, no MCP servers, no network.
+    #[tokio::test]
+    async fn build_resolves_data_dir_and_config_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = OpenheimClient::builder()
+            .provider("openai")
+            .api_key("test-key")
+            .model("gpt-4o")
+            .data_dir(dir.path())
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            client.state.app_config.data_dir,
+            Some(dir.path().to_path_buf())
+        );
+        assert!(!client.state.app_config.config_path.as_os_str().is_empty());
+    }
 }

@@ -345,6 +345,7 @@ mod tests {
             allow_shell: false,
             memory: None,
             data_dir: None,
+            config_path: std::path::PathBuf::new(),
         }
     }
 

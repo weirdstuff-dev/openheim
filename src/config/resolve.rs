@@ -199,6 +199,7 @@ mod tests {
             allow_shell: true,
             memory: None,
             data_dir: None,
+            config_path: std::path::PathBuf::new(),
         }
     }
 
@@ -244,6 +245,7 @@ mod tests {
             allow_shell: true,
             memory: None,
             data_dir: None,
+            config_path: std::path::PathBuf::new(),
         };
         let err = config.resolve(None).unwrap_err();
         assert!(err.to_string().contains("nonexistent"));

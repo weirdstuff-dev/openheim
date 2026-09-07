@@ -44,31 +44,20 @@ pub struct MemoryContext {
 }
 
 impl MemoryContext {
-    /// Initialise history, skills, and system identity from `data_dir`, or
-    /// `~/.openheim` when `data_dir` is `None`.
+    /// Initialise history, skills, and system identity under `data_dir`.
     ///
     /// `default_skills` are merged with any per-session skills on each new conversation.
-    pub fn new(default_skills: Vec<String>, data_dir: Option<&Path>) -> Result<Self> {
-        match data_dir {
-            Some(dir) => {
-                let history_dir = dir.join("history");
-                let skills_dir = dir.join("skills");
-                std::fs::create_dir_all(&history_dir)?;
-                std::fs::create_dir_all(&skills_dir)?;
-                Ok(Self::from_parts(
-                    HistoryManager::with_dir(history_dir),
-                    SkillsManager::with_dir(skills_dir),
-                    SystemLoader::with_dir(dir.to_path_buf()),
-                    default_skills,
-                ))
-            }
-            None => Ok(Self {
-                history: HistoryManager::new()?,
-                skills: SkillsManager::new()?,
-                system: SystemLoader::new()?,
-                default_skills,
-            }),
-        }
+    pub fn new(default_skills: Vec<String>, data_dir: &Path) -> Result<Self> {
+        let history_dir = data_dir.join("history");
+        let skills_dir = data_dir.join("skills");
+        std::fs::create_dir_all(&history_dir)?;
+        std::fs::create_dir_all(&skills_dir)?;
+        Ok(Self::from_parts(
+            HistoryManager::with_dir(history_dir),
+            SkillsManager::with_dir(skills_dir),
+            SystemLoader::with_dir(data_dir.to_path_buf()),
+            default_skills,
+        ))
     }
 
     /// Assembles a `MemoryContext` from already-built parts, e.g. when an
@@ -178,7 +167,7 @@ mod tests {
     #[test]
     fn new_with_data_dir_creates_history_and_skills_subdirs() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = MemoryContext::new(vec![], Some(dir.path())).unwrap();
+        let ctx = MemoryContext::new(vec![], dir.path()).unwrap();
         assert!(dir.path().join("history").is_dir());
         assert!(dir.path().join("skills").is_dir());
         assert!(ctx.system.load().is_err(), "no system.md written yet");

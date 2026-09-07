@@ -48,9 +48,17 @@ pub struct AppConfig {
     pub memory: Option<MemoryConfig>,
     /// Overrides where history, skills, `system.md`, subagent profiles, and
     /// (absent an explicit `memory.db_path`) the memory database live.
-    /// Defaults to `~/.openheim` when unset, preserving today's behaviour.
+    /// `None` in the TOML shape means "default to `~/.openheim`"; filled in
+    /// with the resolved directory by [`crate::client::OpenheimBuilder::build`],
+    /// so `AgentState` and everything downstream can always assume `Some`.
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
+    /// The file this config was loaded from (or would be written to for a
+    /// programmatic config). Not part of the TOML shape — filled in by
+    /// `OpenheimBuilder::build` alongside `data_dir`, so config-file writers
+    /// like `:theme` target the file the running client actually used.
+    #[serde(skip)]
+    pub config_path: PathBuf,
 }
 
 fn default_allow_shell() -> bool {
