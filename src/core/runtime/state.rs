@@ -137,9 +137,10 @@ impl AgentState {
     ) -> Result<String> {
         let chat_id = Uuid::new_v4();
         let session_key = chat_id.to_string();
-        let config = model
-            .and_then(|m| self.app_config.resolve(Some(m)).ok())
-            .unwrap_or_else(|| self.config.clone());
+        let config = match model {
+            Some(m) => self.app_config.resolve(Some(m))?,
+            None => self.config.clone(),
+        };
         // No write lease taken here — merely creating/holding a session open
         // doesn't touch history, so it doesn't contend with other processes.
         // The cross-process write lease is acquired per-turn in `Self::prompt`.
@@ -608,5 +609,73 @@ mod prompt_lease_ordering_tests {
             !lock_path.exists(),
             "turn A's own lease still releases normally"
         );
+    }
+}
+
+#[cfg(test)]
+mod new_session_tests {
+    use std::collections::BTreeMap;
+
+    use tempfile::tempdir;
+
+    use crate::config::{ProviderConfig, TuiConfig};
+
+    use super::*;
+
+    /// A minimal, network-free `AgentState`: one provider/model, empty MCP
+    /// servers, everything rooted at a temp `data_dir`.
+    async fn sample_state(dir: &std::path::Path) -> AgentState {
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "mock".to_string(),
+            ProviderConfig {
+                api_base: "https://example.com".into(),
+                default_model: "mock-model".into(),
+                models: vec!["mock-model".into()],
+                env_var: None,
+                api_key: Some("key".into()),
+                timeout_secs: None,
+                max_tokens: None,
+                thinking: None,
+            },
+        );
+        let app_config = AppConfig {
+            default_provider: "mock".into(),
+            max_iterations: 5,
+            tui: TuiConfig::default(),
+            providers,
+            mcp_servers: BTreeMap::new(),
+            default_skills: vec![],
+            work_dir: Some(dir.to_path_buf()),
+            allow_shell: false,
+            memory: None,
+            data_dir: Some(dir.to_path_buf()),
+            config_path: PathBuf::new(),
+        };
+        let agent_config = AgentConfig::new(
+            "mock".into(),
+            "https://example.com".into(),
+            "key".into(),
+            "mock-model".into(),
+            5,
+        );
+        let memory = MemoryContext::new(vec![], dir).unwrap();
+        AgentState::new(agent_config, app_config, memory, vec![])
+            .await
+            .unwrap()
+    }
+
+    // Regression test for `new_session` swallowing a bad `model` override:
+    // it used to fall back to the session default silently
+    // (`resolve(model).ok().unwrap_or_else(default)`) instead of surfacing
+    // the `ConfigError` `resolve` returns for an unknown model.
+    #[tokio::test]
+    async fn bad_model_override_is_an_error() {
+        let dir = tempdir().unwrap();
+        let state = sample_state(dir.path()).await;
+        let result = state
+            .new_session(Some("nope"), vec![], dir.path().to_path_buf())
+            .await;
+        assert!(result.is_err(), "{result:?}");
     }
 }
