@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 
 use super::ToolHandler;
 use super::args::{parse_args, require_str};
+use super::capabilities::{ToolCapabilities, ToolKindHint};
 use super::read_file::read_text;
 use super::sandbox::validate_path;
 use super::write_file::write_text;
@@ -124,6 +125,13 @@ impl ToolHandler for EditFileTool {
         let (edited, count) = apply_edit(&content, old_string, new_string, replace_all)?;
         write_text(&validated, &edited, turn).await?;
         Ok(success_message(&validated, count))
+    }
+
+    fn capabilities(&self) -> ToolCapabilities {
+        ToolCapabilities {
+            kind: ToolKindHint::Edit,
+            ..Default::default()
+        }
     }
 }
 

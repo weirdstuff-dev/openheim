@@ -9,11 +9,11 @@ use agent_client_protocol_tokio::Stdio;
 
 use crate::{acp, client::OpenheimClient};
 
-/// Loads configuration, initialises the agent runtime, and serves ACP over stdin/stdout.
+/// Serves ACP over stdin/stdout for `client` — caller-built, so an embedder
+/// with custom tools or a custom `LlmClient` can use this transport too.
 ///
 /// Blocks until the client closes the connection (EOF on stdin).
-pub async fn run() -> crate::error::Result<()> {
-    let client = OpenheimClient::builder().build().await?;
+pub async fn run(client: OpenheimClient) -> crate::error::Result<()> {
     let state = client.state().clone();
 
     acp::serve(Stdio::new(), state)

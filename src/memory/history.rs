@@ -51,9 +51,9 @@ pub struct Conversation {
 
 /// On-disk (de)serialization shape for a conversation's `{id}.json` meta
 /// file, and also — for backward compatibility — the *entire* shape of a
-/// conversation file written before message logs were split out (see
+/// conversation in the legacy single-file format (see
 /// [`HistoryManager`]'s doc comment). `messages` is only ever populated by
-/// deserializing one of those old files; new code never sets it, since
+/// deserializing one of those files; new code never sets it, since
 /// current-format meta files never write it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ConversationEnvelope {
@@ -71,18 +71,18 @@ struct ConversationEnvelope {
 /// [`Message`] per line, appended to as the conversation grows rather than
 /// rewritten — see [`Self::append_message`]. This means a crash mid-turn
 /// loses at most the one message that was mid-write, not every message
-/// appended since the conversation was created, and avoids repeatedly
-/// rewriting an ever-growing file for every message (the old format, a
-/// single JSON blob containing the entire message array, was O(n) to save
-/// per message written).
+/// appended since the conversation was created, and keeps per-message
+/// persistence O(1) instead of rewriting the entire message array into one
+/// JSON blob on every save.
 ///
 /// Both files are written atomically (temp file + rename) so a crash mid-write
 /// can't corrupt the previous, already-saved content.
 ///
-/// Conversation files written before this split (a single `{uuid}.json`
+/// Conversations in the legacy single-file format (a single `{uuid}.json`
 /// containing both `meta` and the full `messages` array, no `.jsonl`
-/// sibling) still load correctly — see [`Self::load_conversation`] — and are
-/// transparently upgraded to the split layout the next time they're saved.
+/// sibling) still load correctly — see [`Self::load_conversation`] — and
+/// are transparently upgraded to the split layout the next time they're
+/// saved.
 #[derive(Clone)]
 pub struct HistoryManager {
     history_dir: PathBuf,
@@ -169,8 +169,8 @@ impl HistoryManager {
     }
 
     /// Rewrites a conversation's message log from scratch. Used to write the
-    /// complete log for a [`Self::save_conversation`] call and to upgrade an
-    /// old single-file conversation to the split layout; per-message
+    /// complete log for a [`Self::save_conversation`] call and to upgrade a
+    /// legacy single-file conversation to the split layout; per-message
     /// persistence during a turn should use [`Self::append_message`] instead,
     /// which doesn't pay this method's O(n) cost per call.
     fn write_message_log(&self, id: &Uuid, messages: &[Message]) -> Result<()> {
@@ -216,7 +216,7 @@ impl HistoryManager {
     /// Returns an error if the meta file does not exist or cannot be
     /// deserialised. Messages come from the `.jsonl` log if one exists
     /// (current format), or from the meta file's own `messages` field
-    /// otherwise (a conversation saved before message logs were split out).
+    /// otherwise (a legacy single-file conversation).
     pub fn load_conversation(&self, id: &Uuid) -> Result<Conversation> {
         let path = self.meta_path(id);
         if !path.exists() {
@@ -371,7 +371,10 @@ impl HistoryManager {
         Ok(metas)
     }
 
-    #[cfg(test)]
+    /// Creates a `HistoryManager` backed by a caller-chosen directory, e.g.
+    /// for an injected [`AppConfig::data_dir`](crate::config::AppConfig) or
+    /// in tests. Does not create the directory; the caller is responsible
+    /// for it existing.
     pub fn with_dir(dir: std::path::PathBuf) -> Self {
         Self { history_dir: dir }
     }
@@ -533,10 +536,9 @@ mod tests {
         assert_eq!(loaded.meta.skills, vec!["coding", "rust"]);
     }
 
-    /// The actual regression test for this durability item: messages
-    /// persisted only via `append_message` (never `save_conversation`) must
-    /// still be there on load — this is what a crash before the end-of-turn
-    /// save would leave behind.
+    /// Messages persisted only via `append_message` (never
+    /// `save_conversation`) must still be there on load — this is the state
+    /// a crash before the end-of-turn save would leave behind.
     #[test]
     fn append_message_persists_without_a_full_save() {
         let (mgr, _dir) = make_manager();
@@ -680,9 +682,8 @@ mod tests {
 
     #[test]
     fn pre_split_format_conversation_still_loads() {
-        // A conversation written before message logs were split into a
-        // `.jsonl` sidecar: a single `{id}.json` containing both `meta` and
-        // the full `messages` array, no `.jsonl` sibling.
+        // The legacy single-file format: a single `{id}.json` containing
+        // both `meta` and the full `messages` array, no `.jsonl` sibling.
         let (mgr, dir) = make_manager();
         let id = Uuid::new_v4();
         let now = Utc::now();

@@ -22,8 +22,9 @@ pub struct AppConfig {
     pub default_provider: String,
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
+    /// The `[tui]` section: terminal UI display preferences.
     #[serde(default)]
-    pub theme_color: Option<String>,
+    pub tui: TuiConfig,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
@@ -45,10 +46,25 @@ pub struct AppConfig {
     /// to make `search_memory` semantic.
     #[serde(default)]
     pub memory: Option<MemoryConfig>,
+    /// Overrides where history, skills, `system.md`, subagent profiles, and
+    /// (absent an explicit `memory.db_path`) the memory database live.
+    /// Defaults to `~/.openheim` when unset, preserving today's behaviour.
+    #[serde(default)]
+    pub data_dir: Option<PathBuf>,
 }
 
 fn default_allow_shell() -> bool {
     false
+}
+
+/// The `[tui]` section: terminal UI display preferences. Every field is
+/// optional; so is the section.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TuiConfig {
+    /// Named color theme (see `tui::render::theme_color` for the accepted
+    /// names). Set via `:theme` in the running TUI, which persists it here.
+    #[serde(default)]
+    pub theme_color: Option<String>,
 }
 
 /// The `[memory]` section: where long-term memory lives, how many notes a
@@ -174,8 +190,24 @@ impl AppConfig {
         if let Some(memory) = val.get_mut("memory").and_then(|v| v.as_object_mut()) {
             memory.remove("db_path");
         }
+        if let Some(obj) = val.as_object_mut() {
+            // Local filesystem path, not something an unauthenticated client
+            // needs; internal serialization (e.g. persisted config) keeps it.
+            obj.remove("data_dir");
+        }
         val
     }
+}
+
+/// Extended-thinking mode for a provider. Only [`AnthropicClient`](crate::core::llm::AnthropicClient)
+/// consults this today; other providers ignore it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingMode {
+    /// Request Anthropic's adaptive extended thinking.
+    Adaptive,
+    /// Never request extended thinking.
+    Off,
 }
 
 /// Per-provider configuration
@@ -192,6 +224,14 @@ pub struct ProviderConfig {
     pub timeout_secs: Option<u64>,
     /// Maximum output tokens for LLM responses
     pub max_tokens: Option<u32>,
+    /// Extended thinking (`"adaptive"` or `"off"`). Defaults to `adaptive`
+    /// for a provider named `anthropic`, `off` for everything else — see
+    /// [`Self::resolve_thinking`]. Set explicitly to `"off"` for an Anthropic
+    /// model that doesn't support adaptive thinking (e.g. `claude-haiku-4-5`,
+    /// `claude-3-7-sonnet`), since a single `[providers.<name>]` entry has no
+    /// per-model granularity.
+    #[serde(default)]
+    pub thinking: Option<ThinkingMode>,
 }
 
 impl ProviderConfig {
@@ -211,6 +251,18 @@ impl ProviderConfig {
         }
         self.api_key.clone().unwrap_or_default()
     }
+
+    /// Whether extended thinking should be requested, given this provider's
+    /// `thinking` setting and `provider_name` (the key it's registered
+    /// under). Unset defaults to `true` only when `provider_name` is
+    /// `"anthropic"` — the only client that reads this.
+    pub fn resolve_thinking(&self, provider_name: &str) -> bool {
+        match self.thinking {
+            Some(ThinkingMode::Adaptive) => true,
+            Some(ThinkingMode::Off) => false,
+            None => provider_name == "anthropic",
+        }
+    }
 }
 
 /// Runtime configuration passed to agent/LLM code
@@ -225,6 +277,10 @@ pub struct AgentConfig {
     pub timeout_secs: u64,
     /// Maximum output tokens for LLM responses (provider-specific defaults if not set)
     pub max_tokens: Option<u32>,
+    /// Whether to request extended thinking (`AnthropicClient` only); see
+    /// [`ProviderConfig::resolve_thinking`].
+    #[serde(default)]
+    pub thinking: bool,
 }
 
 /// The one source of truth for the request-timeout default; every path that
@@ -243,6 +299,7 @@ impl AgentConfig {
         max_iterations: usize,
     ) -> Self {
         Self {
+            thinking: provider_name == "anthropic",
             provider_name,
             api_base,
             api_key,
@@ -271,6 +328,7 @@ impl Default for AgentConfig {
             max_iterations: 10,
             timeout_secs: default_timeout_secs(),
             max_tokens: None,
+            thinking: false,
         }
     }
 }
@@ -288,6 +346,7 @@ mod tests {
             api_key: api_key.map(String::from),
             timeout_secs: None,
             max_tokens: None,
+            thinking: None,
         }
     }
 
@@ -413,6 +472,7 @@ mod tests {
     fn to_public_json_redacts_secrets_and_local_paths() {
         let toml_str = r#"
             default_provider = "openai"
+            data_dir = "/Users/alice/.openheim"
             [providers.openai]
             api_base = "https://api.openai.com/v1"
             default_model = "gpt-4"
@@ -443,5 +503,13 @@ mod tests {
         assert_eq!(val["memory"]["embedding_provider"], "openai");
         assert_eq!(val["memory"]["embedding_model"], "text-embedding-3-small");
         assert_eq!(val["memory"]["top_k"], 7);
+
+        // data_dir is a local filesystem path, not something an
+        // unauthenticated client needs; it's stripped from the public view.
+        assert!(val.get("data_dir").is_none());
+        assert_eq!(
+            cfg.data_dir,
+            Some(std::path::PathBuf::from("/Users/alice/.openheim"))
+        );
     }
 }

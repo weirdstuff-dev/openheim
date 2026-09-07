@@ -75,14 +75,18 @@ impl LongTermMemory {
     }
 
     /// Builds the memory described by `config.memory` (all of it optional):
-    /// opens `db_path` or `~/.openheim/memory.db`, and attaches an embedder
-    /// when `embedding_provider` / `embedding_model` are set. Does not touch
-    /// the network.
+    /// opens `db_path`, or `memory.db` under `config.data_dir`, or
+    /// `~/.openheim/memory.db`, and attaches an embedder when
+    /// `embedding_provider` / `embedding_model` are set. Does not touch the
+    /// network.
     pub fn from_config(config: &AppConfig) -> Result<Self> {
         let memory = config.memory.as_ref();
         let db_path = match memory.and_then(|m| m.db_path.clone()) {
             Some(p) => p,
-            None => config_dir()?.join("memory.db"),
+            None => match config.data_dir.clone() {
+                Some(dir) => dir.join("memory.db"),
+                None => config_dir()?.join("memory.db"),
+            },
         };
         let embedder = match config.resolve_embedding()? {
             Some(embedding) => {

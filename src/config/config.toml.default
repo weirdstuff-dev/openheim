@@ -13,6 +13,7 @@ max_iterations = 10
 
 # TUI accent color (defaults to gray): white, gray, blue, cyan, magenta, green, yellow, red, pink.
 # Can also be changed at runtime with :theme (persisted back to this file).
+# [tui]
 # theme_color = "gray"
 
 # Root directory the agent is allowed to read/write.
@@ -45,7 +46,7 @@ env_var = "OPENAI_API_KEY"
 [providers.anthropic]
 api_base = "https://api.anthropic.com/v1"
 default_model = "claude-sonnet-4-6"
-models = ["claude-sonnet-4-6", "claude-opus-4-7", "claude-haiku-4-5-20251001"]
+models = ["claude-sonnet-4-6", "claude-opus-4-7"]
 env_var = "ANTHROPIC_API_KEY"
 
 # Google Gemini

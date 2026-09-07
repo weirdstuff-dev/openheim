@@ -91,6 +91,7 @@ impl App {
         new_session_tx: mpsc::UnboundedSender<()>,
     ) -> Self {
         let theme_name = app_config
+            .tui
             .theme_color
             .as_deref()
             .unwrap_or("gray")
@@ -426,7 +427,7 @@ impl App {
         self.theme_color = render::theme_color(name);
         self.theme_color_name = name.to_string();
         self.cached_width = 0;
-        self.app_config.theme_color = Some(name.to_string());
+        self.app_config.tui.theme_color = Some(name.to_string());
         match crate::config::save_theme_to_config(name) {
             Ok(()) => self.push(ChatItem::SystemInfo(format!("theme set to {name}"))),
             Err(e) => self.push(ChatItem::SystemInfo(format!(
@@ -774,10 +775,9 @@ impl App {
     /// history via `SessionHandle::restore`'s `on_history` replay — which
     /// goes through the same ACP-shaped replay a wire client's `session/load`
     /// gets (see `replay_history_messages`), so thinking blocks and image
-    /// attachments show up instead of being silently dropped the way a raw
-    /// `Message`-block walk here used to. That also moves the history read
-    /// off the UI task and onto the agent task, where the rest of I/O
-    /// already lives — the actual message items arrive later as
+    /// attachments show up instead of being silently dropped. That also
+    /// keeps the history read off the UI task and on the agent task, where
+    /// the rest of I/O lives — the actual message items arrive later as
     /// `AgentUpdate::History` once the load completes.
     fn open_session(&mut self, meta: &ConversationMeta) {
         self.items.clear();
@@ -981,13 +981,14 @@ mod tests {
         AppConfig {
             default_provider: "mock".into(),
             max_iterations: 10,
-            theme_color: None,
+            tui: crate::config::TuiConfig::default(),
             providers: BTreeMap::new(),
             mcp_servers: BTreeMap::new(),
             default_skills: vec![],
             work_dir: None,
             allow_shell: false,
             memory: None,
+            data_dir: None,
         }
     }
 

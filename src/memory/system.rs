@@ -19,6 +19,14 @@ impl SystemLoader {
         })
     }
 
+    /// Creates a `SystemLoader` pointed at `{dir}/system.md`, e.g. for an
+    /// injected `AppConfig::data_dir` or in tests.
+    pub fn with_dir(dir: PathBuf) -> Self {
+        Self {
+            path: dir.join("system.md"),
+        }
+    }
+
     /// Returns the contents of `system.md`.
     ///
     /// Returns an error if the file does not exist.

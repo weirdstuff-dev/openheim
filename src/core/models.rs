@@ -270,22 +270,6 @@ impl Usage {
     }
 }
 
-/// One iteration of an agent run, including the LLM response and any tools invoked.
-#[derive(Debug, Serialize, Clone)]
-pub struct AgentStep {
-    pub iteration: usize,
-    pub message: String,
-    pub tool_calls: Option<Vec<ToolExecutionResult>>,
-}
-
-/// Result of executing a single tool during an agent step.
-#[derive(Debug, Serialize, Clone)]
-pub struct ToolExecutionResult {
-    pub tool_name: String,
-    pub arguments: String,
-    pub result: String,
-}
-
 /// Why an agent run stopped. Distinct from ACP's own `StopReason` (which this
 /// maps onto at the ACP boundary) so `core` doesn't depend on the `acp` crate.
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -305,7 +289,6 @@ pub enum StopReason {
 #[derive(Debug, Serialize)]
 pub struct AgentResult {
     pub final_response: String,
-    pub steps: Vec<AgentStep>,
     pub iterations_used: usize,
     pub stop_reason: StopReason,
     /// Usage of the *most recent* LLM call this turn made — a snapshot of

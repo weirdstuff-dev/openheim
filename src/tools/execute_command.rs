@@ -16,6 +16,7 @@ use crate::error::{Error, Result};
 
 use super::ToolHandler;
 use super::args::{parse_args, require_str};
+use super::capabilities::{ApprovalScope, ToolCapabilities, ToolKindHint};
 
 /// Default hard wall-clock limit on a single command. Anything still running
 /// past this is killed (whole process group) and reported as an error, so a
@@ -299,6 +300,16 @@ impl ToolHandler for ExecuteCommandTool {
             },
         )
         .await
+    }
+
+    fn capabilities(&self) -> ToolCapabilities {
+        ToolCapabilities {
+            kind: ToolKindHint::Execute,
+            // Approving one command must not silently cover every other
+            // command — see `core::permission::approval_key`'s doc comment.
+            approval_scope: ApprovalScope::ExactArguments,
+            ..Default::default()
+        }
     }
 }
 

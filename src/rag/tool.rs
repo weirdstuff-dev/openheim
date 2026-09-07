@@ -12,6 +12,7 @@ use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 use crate::tools::ToolHandler;
 use crate::tools::args::parse_args;
+use crate::tools::capabilities::{ToolCapabilities, ToolKindHint};
 
 use super::LongTermMemory;
 use super::store::SearchMethod;
@@ -76,6 +77,13 @@ impl ToolHandler for RememberTool {
         }
         let record = self.memory.remember(content).await?;
         Ok(format!("Remembered as memory #{}.", record.id))
+    }
+
+    fn capabilities(&self) -> ToolCapabilities {
+        ToolCapabilities {
+            kind: ToolKindHint::Think,
+            ..Default::default()
+        }
     }
 }
 
@@ -160,6 +168,14 @@ impl ToolHandler for SearchMemoryTool {
         }
         Ok(out)
     }
+
+    fn capabilities(&self) -> ToolCapabilities {
+        ToolCapabilities {
+            read_only: true,
+            kind: ToolKindHint::Search,
+            ..Default::default()
+        }
+    }
 }
 
 /// Deletes a note from long-term memory by id.
@@ -204,6 +220,13 @@ impl ToolHandler for ForgetTool {
             Ok(format!("Forgot memory #{id}."))
         } else {
             Ok(format!("No memory #{id} exists; nothing to forget."))
+        }
+    }
+
+    fn capabilities(&self) -> ToolCapabilities {
+        ToolCapabilities {
+            kind: ToolKindHint::Delete,
+            ..Default::default()
         }
     }
 }

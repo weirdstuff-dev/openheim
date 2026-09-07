@@ -51,6 +51,7 @@ impl AppConfig {
             max_iterations: self.max_iterations,
             timeout_secs: provider.resolve_timeout_secs(),
             max_tokens: provider.max_tokens,
+            thinking: provider.resolve_thinking(provider_name),
         }
     }
 
@@ -171,6 +172,7 @@ mod tests {
                 api_key: Some("test-key".into()),
                 timeout_secs: Some(60),
                 max_tokens: Some(4096),
+                thinking: None,
             },
         );
         providers.insert(
@@ -183,18 +185,20 @@ mod tests {
                 api_key: Some("anthropic-key".into()),
                 timeout_secs: None,
                 max_tokens: None,
+                thinking: None,
             },
         );
         AppConfig {
             default_provider: "openai".into(),
             max_iterations: 5,
-            theme_color: None,
+            tui: crate::config::TuiConfig::default(),
             providers,
             mcp_servers: BTreeMap::new(),
             default_skills: vec![],
             work_dir: None,
             allow_shell: true,
             memory: None,
+            data_dir: None,
         }
     }
 
@@ -232,13 +236,14 @@ mod tests {
         let config = AppConfig {
             default_provider: "nonexistent".into(),
             max_iterations: 10,
-            theme_color: None,
+            tui: crate::config::TuiConfig::default(),
             providers: BTreeMap::new(),
             mcp_servers: BTreeMap::new(),
             default_skills: vec![],
             work_dir: None,
             allow_shell: true,
             memory: None,
+            data_dir: None,
         };
         let err = config.resolve(None).unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
@@ -253,6 +258,7 @@ mod tests {
             api_key: Some("key".into()),
             timeout_secs: None,
             max_tokens: None,
+            thinking: None,
         }
     }
 

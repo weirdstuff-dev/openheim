@@ -7,11 +7,11 @@ use agent_client_protocol::{
     Agent, Client, ConnectTo, ConnectionTo, Dispatch, Handled, on_receive_dispatch,
     on_receive_notification, on_receive_request,
     schema::{
-        AgentCapabilities, CancelNotification, ClientCapabilities, Implementation,
-        InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-        LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
-        PromptCapabilities, PromptRequest, PromptResponse, SessionCapabilities,
-        SessionListCapabilities, SessionNotification, SetSessionModeRequest,
+        AgentCapabilities, CancelNotification, ClientCapabilities, ContentBlock as AcpContentBlock,
+        ContentChunk, Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
+        ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
+        NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse, SessionCapabilities,
+        SessionListCapabilities, SessionNotification, SessionUpdate, SetSessionModeRequest,
         SetSessionModeResponse, SetSessionModelRequest, SetSessionModelResponse,
     },
     util::internal_error,
@@ -27,8 +27,12 @@ use crate::{
 
 use super::{
     client_io::AcpClientIo,
+    convert::convert_prompt_blocks,
     permission::AcpPermissionGate,
-    util::{map_stop_reason, session_mode_state, stream_event_to_session_update},
+    util::{
+        conversation_metas_to_session_info, map_stop_reason, replay_history_messages,
+        session_mode_state, session_model_state, stream_event_to_session_update,
+    },
 };
 
 pub async fn serve(
@@ -120,7 +124,7 @@ pub async fn serve(
                     .as_deref()
                     .unwrap_or(&state_session.config.model)
                     .to_string();
-                let model_state = state_session.session_model_state(&current_model);
+                let model_state = session_model_state(&state_session.app_config, &current_model);
 
                 match state_session
                     .new_session(model.as_deref(), skills, req.cwd)
@@ -139,7 +143,7 @@ pub async fn serve(
         .on_receive_request(
             async move |req: PromptRequest, responder, cx: ConnectionTo<Client>| {
                 let session_key = req.session_id.to_string();
-                let prompt_blocks = req.prompt;
+                let prompt_blocks = convert_prompt_blocks(&req.prompt);
                 let cx_cb = cx.clone();
                 let session_id_cb = req.session_id.clone();
                 let state = state_prompt.clone();
@@ -162,6 +166,16 @@ pub async fn serve(
                 // off the event loop via `cx.spawn`, with the response sent from
                 // inside the spawned task once the turn actually finishes.
                 cx.spawn(async move {
+                    let prompt_blocks = match prompt_blocks {
+                        Ok(blocks) => blocks,
+                        Err(e) => {
+                            if let Err(e) = responder.respond_with_error(to_acp_error(&e)) {
+                                tracing::warn!("failed to send prompt response: {e}");
+                            }
+                            return Ok(());
+                        }
+                    };
+                    let executor = state.executor.clone();
                     let result = state
                         .prompt(
                             &session_key,
@@ -169,7 +183,9 @@ pub async fn serve(
                             permission_gate,
                             client_io,
                             move |event| {
-                                if let Some(update) = stream_event_to_session_update(event) {
+                                if let Some(update) =
+                                    stream_event_to_session_update(event, executor.as_ref())
+                                {
                                     let _ = cx_cb.send_notification(SessionNotification::new(
                                         session_id_cb.clone(),
                                         update,
@@ -202,7 +218,9 @@ pub async fn serve(
         .on_receive_request(
             async move |req: ListSessionsRequest, responder, _cx: ConnectionTo<Client>| {
                 match state_list.list_sessions(req.cwd.as_deref()).await {
-                    Ok(sessions) => responder.respond(ListSessionsResponse::new(sessions)),
+                    Ok(metas) => responder.respond(ListSessionsResponse::new(
+                        conversation_metas_to_session_info(metas),
+                    )),
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
                 }
             },
@@ -211,21 +229,36 @@ pub async fn serve(
         .on_receive_request(
             async move |req: LoadSessionRequest, responder, cx: ConnectionTo<Client>| {
                 let session_id_str = req.session_id.0.as_ref().to_string();
-                let cx_cb = cx.clone();
                 let session_id_cb = req.session_id.clone();
 
                 let result = state_load
-                    .load_session(&session_id_str, req.cwd.clone(), move |update| {
-                        let _ = cx_cb.send_notification(SessionNotification::new(
-                            session_id_cb.clone(),
-                            update,
-                        ));
-                    })
+                    .load_session(&session_id_str, req.cwd.clone())
                     .await;
 
                 match result {
-                    Ok(mode) => responder
-                        .respond(LoadSessionResponse::new().modes(session_mode_state(mode))),
+                    Ok(loaded) => {
+                        if let Some(warning) = loaded.warning {
+                            let _ = cx.send_notification(SessionNotification::new(
+                                session_id_cb.clone(),
+                                SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                    AcpContentBlock::from(warning),
+                                )),
+                            ));
+                        }
+                        replay_history_messages(
+                            &loaded.messages,
+                            state_load.executor.as_ref(),
+                            &mut |update| {
+                                let _ = cx.send_notification(SessionNotification::new(
+                                    session_id_cb.clone(),
+                                    update,
+                                ));
+                            },
+                        );
+                        responder.respond(
+                            LoadSessionResponse::new().modes(session_mode_state(loaded.mode)),
+                        )
+                    }
                     Err(e) => responder.respond_with_error(to_acp_error(&e)),
                 }
             },

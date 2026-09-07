@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 
 use super::ToolHandler;
 use super::args::{parse_args, require_str};
+use super::capabilities::{ToolCapabilities, ToolKindHint};
 use super::sandbox::validate_path;
 
 /// Writes `content` to `path`, asking `turn.client_io` first and falling back
@@ -78,6 +79,13 @@ impl ToolHandler for WriteFileTool {
         let validated = validate_path(path, turn.work_dir)?;
         write_text(&validated, content, turn).await?;
         Ok(format!("Successfully wrote to {}", validated.display()))
+    }
+
+    fn capabilities(&self) -> ToolCapabilities {
+        ToolCapabilities {
+            kind: ToolKindHint::Edit,
+            ..Default::default()
+        }
     }
 }
 

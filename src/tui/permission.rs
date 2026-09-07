@@ -7,12 +7,13 @@
 //! reply, which `App` sends once the user picks an option.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::core::permission::{PermissionDecision, PermissionGate, approval_key};
+use crate::tools::ToolExecutor;
 
 /// Options shown in the permission prompt, in display/cycle order. Shared
 /// between `app` (key handling) and `render` (the popup) so they can't drift.
@@ -36,13 +37,20 @@ pub(crate) struct TuiPermissionGate {
     /// [`approval_key`], so picking "Allow Always" actually sticks for the
     /// rest of the session instead of re-prompting on every matching call.
     approved_tools: Mutex<HashMap<String, PermissionDecision>>,
+    /// Consulted for each tool's [`ApprovalScope`](crate::tools::ApprovalScope)
+    /// (how its approvals are keyed).
+    executor: Arc<dyn ToolExecutor>,
 }
 
 impl TuiPermissionGate {
-    pub(crate) fn new(tx: mpsc::UnboundedSender<PermissionRequest>) -> Self {
+    pub(crate) fn new(
+        tx: mpsc::UnboundedSender<PermissionRequest>,
+        executor: Arc<dyn ToolExecutor>,
+    ) -> Self {
         Self {
             tx,
             approved_tools: Mutex::new(HashMap::new()),
+            executor,
         }
     }
 }
@@ -55,7 +63,8 @@ impl PermissionGate for TuiPermissionGate {
         tool_name: &str,
         arguments: &str,
     ) -> PermissionDecision {
-        let key = approval_key(tool_name, arguments);
+        let scope = self.executor.capabilities(tool_name).approval_scope;
+        let key = approval_key(scope, tool_name, arguments);
         if let Some(remembered) = self.approved_tools.lock().unwrap().get(&key).copied() {
             return remembered;
         }
@@ -87,14 +96,19 @@ impl PermissionGate for TuiPermissionGate {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
+    use crate::tools::SystemToolExecutor;
+
+    fn executor() -> Arc<dyn ToolExecutor> {
+        let mut e = SystemToolExecutor::new();
+        e.register_builtins(true);
+        Arc::new(e)
+    }
 
     #[tokio::test]
     async fn check_returns_the_ui_loops_answer() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let gate = TuiPermissionGate::new(tx);
+        let gate = TuiPermissionGate::new(tx, executor());
 
         let check = tokio::spawn(async move { gate.check("call_1", "read_file", "{}").await });
 
@@ -109,7 +123,7 @@ mod tests {
     async fn check_fails_closed_when_ui_loop_is_gone() {
         let (tx, rx) = mpsc::unbounded_channel();
         drop(rx); // simulate the UI loop having shut down
-        let gate = TuiPermissionGate::new(tx);
+        let gate = TuiPermissionGate::new(tx, executor());
 
         let decision = gate.check("call_1", "execute_command", "{}").await;
         assert_eq!(decision, PermissionDecision::RejectOnce);
@@ -118,7 +132,7 @@ mod tests {
     #[tokio::test]
     async fn check_fails_closed_when_request_is_dropped_unanswered() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let gate = TuiPermissionGate::new(tx);
+        let gate = TuiPermissionGate::new(tx, executor());
 
         let check = tokio::spawn(async move { gate.check("call_1", "write_file", "{}").await });
         let request = rx.recv().await.unwrap();
@@ -130,7 +144,7 @@ mod tests {
     #[tokio::test]
     async fn allow_always_is_remembered_for_later_calls_to_the_same_tool() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let gate = Arc::new(TuiPermissionGate::new(tx));
+        let gate = Arc::new(TuiPermissionGate::new(tx, executor()));
 
         let first_gate = gate.clone();
         let first =
@@ -149,7 +163,7 @@ mod tests {
     #[tokio::test]
     async fn allow_always_on_one_command_does_not_cover_a_different_command() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let gate = Arc::new(TuiPermissionGate::new(tx));
+        let gate = Arc::new(TuiPermissionGate::new(tx, executor()));
 
         let first_gate = gate.clone();
         let first = tokio::spawn(async move {
@@ -181,7 +195,7 @@ mod tests {
     #[tokio::test]
     async fn allow_once_is_not_remembered() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let gate = Arc::new(TuiPermissionGate::new(tx));
+        let gate = Arc::new(TuiPermissionGate::new(tx, executor()));
 
         let first_gate = gate.clone();
         let first =

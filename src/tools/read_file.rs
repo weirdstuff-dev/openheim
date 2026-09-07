@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 
 use super::ToolHandler;
 use super::args::{parse_args, require_str};
+use super::capabilities::{ToolCapabilities, ToolKindHint};
 use super::sandbox::validate_path;
 
 /// Reads `path` as UTF-8 text, asking `turn.client_io` first (e.g. an ACP
@@ -64,6 +65,14 @@ impl ToolHandler for ReadFileTool {
         let path = require_str(&args, "path")?;
         let validated = validate_path(path, turn.work_dir)?;
         read_text(&validated, turn).await
+    }
+
+    fn capabilities(&self) -> ToolCapabilities {
+        ToolCapabilities {
+            read_only: true,
+            kind: ToolKindHint::Read,
+            ..Default::default()
+        }
     }
 }
 

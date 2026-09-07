@@ -15,9 +15,9 @@ openheim init
 | `default_provider` | string | — | Provider to use when no `--model` override is given (must match a key under `[providers]`) |
 | `max_iterations` | integer | `10` | Maximum number of agent loop iterations per prompt before stopping |
 | `default_skills` | string[] | `[]` | Skills loaded automatically in every new session. Merged with per-session `--skills`; defaults appear first, duplicates removed. |
-| `theme_color` | string | `"gray"` | TUI accent color. Valid values: `white`, `gray`, `blue`, `cyan`, `magenta`, `green`, `yellow`, `red`, `pink`. Can also be changed at runtime with `:theme` |
 | `work_dir` | path | cwd at invocation | Root directory the agent is allowed to read and write. The agent cannot access files outside this tree. When unset, defaults to the directory from which openheim was invoked. |
 | `allow_shell` | boolean | `false` | Whether to expose the `execute_command` shell tool to the LLM. Disabled by default — set to `true` to expose the tool. When `false`, the LLM never sees it in its tool list. |
+| `data_dir` | path | `~/.openheim` | Root directory for openheim's own data: conversation history (`history/`), skills (`skills/`), `system.md`, subagent profiles (`agents/`), and the long-term memory database (`memory.db`, unless `[memory].db_path` overrides it). The config file itself is still read from `~/.openheim/config.toml`. Lets two agents in one process keep separate state, or a sandboxed run stay out of the real home directory. |
 
 ```toml
 default_provider = "anthropic"
@@ -31,6 +31,9 @@ work_dir = "/home/user/projects/myproject"
 
 # Enable shell command execution (disabled by default)
 # allow_shell = true
+
+# Keep openheim's own data (history, skills, memory) out of $HOME
+# data_dir = "/var/lib/openheim"
 ```
 
 ### Security notes
@@ -56,6 +59,7 @@ Each key under `[providers]` defines a provider. The key name is used as the pro
 | `api_key` | string | No | Inline API key — `env_var` takes precedence if both are set |
 | `timeout_secs` | integer | `120` | Connect and idle-read timeout in seconds — bounds the connect phase and the maximum gap between body reads, not total request duration, so long streaming responses are not cut off mid-stream |
 | `max_tokens` | integer | No | Maximum output tokens per response (provider default if omitted) |
+| `thinking` | `"adaptive"` \| `"off"` | `"adaptive"` for a provider named `anthropic`, `"off"` otherwise | Extended thinking. Only the Anthropic client reads this — other providers ignore it. Applies to every model under this entry, so set it to `"off"` if `default_model`/`models` includes one that doesn't support adaptive thinking (e.g. `claude-haiku-4-5`, `claude-3-7-sonnet`) — use a second `[providers.<other-name>]` entry for that model if you need both. |
 
 Key resolution order: `env_var` (if set and non-empty) → `api_key` → empty string (for keyless providers like Ollama).
 
@@ -73,8 +77,9 @@ max_tokens = 4096
 [providers.anthropic]
 api_base = "https://api.anthropic.com/v1"
 default_model = "claude-sonnet-4-6"
-models = ["claude-sonnet-4-6", "claude-opus-4-7", "claude-haiku-4-5-20251001"]
+models = ["claude-sonnet-4-6", "claude-opus-4-7"]
 env_var = "ANTHROPIC_API_KEY"
+# thinking = "off"  # both models above support adaptive thinking, so the "adaptive" default applies; set "off" here instead if any model in `models` doesn't
 
 [providers.gemini]
 api_base = "https://generativelanguage.googleapis.com/v1beta"
@@ -146,6 +151,21 @@ Notes are capped at 4000 characters each. Enabling embeddings later back-fills v
 
 ---
 
+## `[tui]`
+
+Optional, as is the field in it.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `theme_color` | string | `"gray"` | TUI accent color. Valid values: `white`, `gray`, `blue`, `cyan`, `magenta`, `green`, `yellow`, `red`, `pink`. Can also be changed at runtime with `:theme`, which persists the choice back to this section. |
+
+```toml
+[tui]
+theme_color = "blue"
+```
+
+---
+
 ## Complete example
 
 ```toml
@@ -157,6 +177,9 @@ work_dir = "/home/user/projects/myproject"
 
 # Enable shell command access (disabled by default)
 # allow_shell = true
+
+[tui]
+theme_color = "blue"
 
 [providers.anthropic]
 api_base = "https://api.anthropic.com/v1"

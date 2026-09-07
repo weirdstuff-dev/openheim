@@ -1,6 +1,6 @@
 # openheim as a Rust library
 
-Openheim can be embedded directly in your Rust application. The library exposes the full agent runtime — sessions, streaming, conversation history, RAG, skills, MCP servers, and tools — through a single `OpenheimClient` facade built on top of the [Agent Client Protocol (ACP)](https://github.com/block/agent-client-protocol).
+Openheim can be embedded directly in your Rust application. The library exposes the full agent runtime — sessions, streaming, conversation history, RAG, skills, MCP servers, and tools — through a single `OpenheimClient` facade; wire-level ACP (`openheim::acp`, plus the ACP-typed facade ergonomics) is available behind the `acp` feature. See the [Agent Client Protocol](https://github.com/block/agent-client-protocol) repo for the protocol itself.
 
 ---
 
@@ -16,20 +16,27 @@ tokio = { version = "1", features = ["full"] }
 ### Feature flags
 
 By default the `openheim` dependency also builds the CLI/TUI binary stack
-(`clap`, `ratatui`, `crossterm`, `tracing-subscriber`) and the WebSocket
-server stack (`axum`, `tower-http`, `notify`, `walkdir`, `futures`).
-Embedders that drive the agent through `OpenheimClient` (or their own ACP
-wiring) usually don't need those:
+(`clap`, `ratatui`, `crossterm`, `tracing-subscriber`), the ACP stack
+(`agent-client-protocol`, `agent-client-protocol-tokio`), and the WebSocket
+server stack (`axum`, `tower-http`, `notify`, `walkdir`). Embedders that
+drive the agent through `OpenheimClient` (or their own ACP wiring) usually
+don't need those. `futures` is not behind any feature — the agent loop uses
+it directly — so it is built regardless.
 
 ```toml
 openheim = { version = "0.9", default-features = false }
+# optionally: features = ["acp"]     # ACP vocabulary + ACP-typed facade methods (agent-client-protocol)
 # optionally: features = ["server"]  # axum WS/REST server (openheim::transport::ws)
 # optionally: features = ["tui"]     # ratatui terminal UI (openheim::tui)
 # optionally: features = ["rag"]     # remember/search_memory/forget long-term memory (rusqlite FTS5 + sqlite-vec)
 ```
 
-Everything else — the client facade, agent loop, providers, tools, MCP, ACP,
-and config — is always available.
+Everything else — the client facade, agent loop, providers, tools, MCP, and
+config — is always available. On the facade, `prompt_events`/
+`prompt_events_with_images`, `list_sessions`, `get_session`, and
+`delete_session` are core-typed and always available; `prompt`,
+`prompt_with_images`, `restore`, and `load_session` speak ACP's
+`SessionUpdate` vocabulary and need `features = ["acp"]`.
 
 ---
 
@@ -132,6 +139,19 @@ let client = OpenheimClient::builder()
 **`.work_dir(path)`** — sets the root directory the agent may read and write. The agent cannot access files outside this tree. Relative paths in tool arguments are resolved against this directory. Defaults to the directory from which the process was invoked when not set in the builder or config file.
 
 **`.allow_shell(bool)`** — controls whether the `execute_command` tool is exposed to the LLM. When `false` the tool is removed from the tool list entirely; the LLM never sees it and cannot request it. Defaults to `false`.
+
+### Data directory
+
+**`.data_dir(path)`** — repoints openheim's own state at a directory of your choosing: conversation history, skills, `system.md`, subagent profiles, and — unless `[memory].db_path` says otherwise — the long-term memory database. Defaults to `~/.openheim` (and overrides the `data_dir` config-file field when set). The config file itself is still loaded from `~/.openheim/config.toml`. Two agents in one process can hold separate `data_dir`s; a sandboxed CI run can point at a temp directory and never touch the real home directory:
+
+```rust
+let client = OpenheimClient::builder()
+    .provider("openai")
+    .api_key("sk-...")
+    .data_dir(std::env::temp_dir().join("openheim-ci"))
+    .build()
+    .await?;
+```
 
 ### With MCP servers
 
@@ -350,6 +370,11 @@ for info in &workspace {
 }
 ```
 
+Each entry is a `ConversationMeta` — `id: Uuid`, `title`, `cwd`,
+`created_at`/`updated_at`, `model`/`provider`, `context_usage` — a core type,
+so this works with `default-features = false`. ACP's `SessionInfo`
+projection happens inside `acp::serve`, not on the facade.
+
 ### Get full conversation (messages + metadata)
 
 ```rust
@@ -388,8 +413,14 @@ let session = client
     .await?;
 
 // Continue where the conversation left off
-session.prompt("Continue from where you left off", |update| { /* … */ }).await?;
+session.prompt("Continue from where you left off", |update| { /* … */ }).await?
 ```
+
+The returned handle starts from the defaults — `AllowAll` permission gate,
+local-disk I/O; call `.permission_gate(..)`/`.client_io(..)` on it to change
+either. If you already have a handle configured with a gate/I/O,
+`handle.restore(id, cwd, cb)` performs the same load with that handle's
+gate/I/O inherited instead.
 
 ### Delete a session
 

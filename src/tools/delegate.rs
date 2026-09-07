@@ -27,6 +27,7 @@ use crate::memory::PromptBuilder;
 use crate::subagents::AgentProfile;
 
 use super::args::{parse_args, require_str};
+use super::capabilities::ToolCapabilities;
 use super::scoped_executor::ScopedExecutor;
 use super::{ToolExecutor, ToolHandler};
 
@@ -270,6 +271,15 @@ impl ToolHandler for DelegateTool {
             Ok(result.final_response)
         }
     }
+
+    fn capabilities(&self) -> ToolCapabilities {
+        // Not read-only: a subagent's own tool set (its profile's `tools`
+        // allowlist, defaulting to the parent's full set) can include
+        // writes/execution, so `delegate_task` itself can't be exposed in
+        // Architect mode. Kind stays the `Other` default — there's no ACP
+        // `ToolKind` for "ran a subagent".
+        ToolCapabilities::default()
+    }
 }
 
 /// Builds an ephemeral [`AgentProfile`] from `delegate_task`'s inline arguments.
@@ -327,13 +337,14 @@ mod tests {
         AppConfig {
             default_provider: "mock".into(),
             max_iterations: 10,
-            theme_color: None,
+            tui: crate::config::TuiConfig::default(),
             providers: BTreeMap::new(),
             mcp_servers: BTreeMap::new(),
             default_skills: vec![],
             work_dir: None,
             allow_shell: false,
             memory: None,
+            data_dir: None,
         }
     }
 
@@ -585,13 +596,14 @@ mod tests {
     }
 
     /// Subagents are built from a snapshot of the registry taken before
-    /// `delegate_task` was added, so they can never delegate again. This is
-    /// the wiring `AgentState::new` relies on; keep it explicit here.
+    /// `delegate_task` registers itself, so they can never delegate again.
+    /// This is the wiring `AgentState::new` relies on; keep it explicit
+    /// here.
     #[test]
     fn subagents_never_see_delegate_task() {
         let llm = Arc::new(MockLlm::new(vec![]));
         let mut executor = SystemToolExecutor::new();
-        executor.register_builtins();
+        executor.register_builtins(true);
         let base: Arc<dyn ToolExecutor> = Arc::new(executor.clone());
         let tool = DelegateTool::new(
             base.clone(),

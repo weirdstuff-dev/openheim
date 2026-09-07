@@ -42,17 +42,21 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
-    let client = OpenheimClient::builder().build().await?;
+/// Runs the TUI against `client` — caller-built, so an embedder with custom
+/// tools or a custom `LlmClient` can use this transport too.
+pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::Result<()> {
     // Snapshots for `:config`/`:models` — read once here instead of a second
     // `load_config()` duplicating the one `OpenheimClient::builder().build()`
-    // already did internally.
+    // the caller did.
     let agent_config = client.state().config.clone();
     let app_config = client.state().app_config.clone();
 
     let (permission_tx, mut permission_rx) =
         mpsc::unbounded_channel::<permission::PermissionRequest>();
-    let permission_gate: Arc<dyn PermissionGate> = Arc::new(TuiPermissionGate::new(permission_tx));
+    let permission_gate: Arc<dyn PermissionGate> = Arc::new(TuiPermissionGate::new(
+        permission_tx,
+        client.state().executor.clone(),
+    ));
 
     let session = client
         .new_session()
@@ -73,7 +77,7 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
         let update_tx = update_tx.clone();
         // Captured separately from the `skills` moved into `App::new` below —
         // this copy lives inside the agent task so a `:new` command can spin
-        // up another session with the same skills, same as startup did.
+        // up another session with the same skills, matching startup.
         let session_skills = skills.clone();
         // `client.new_session()` always starts from the client's original
         // default config (see `AgentState::new_session`'s fallback), not
@@ -210,7 +214,7 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                     maybe_list = list_sessions_rx.recv() => {
                         match maybe_list {
                             Some(()) => {
-                                match client.list_all_sessions().await {
+                                match client.list_sessions(None).await {
                                     Ok(metas) => {
                                         let _ = update_tx.send(AgentUpdate::SessionList(metas));
                                     }

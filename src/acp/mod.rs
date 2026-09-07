@@ -21,3 +21,9 @@ mod permission;
 mod serve;
 
 pub use serve::serve;
+
+// ACP's own wire vocabulary, for library users who want the ACP-typed
+// `SessionHandle`/`OpenheimClient` methods (`prompt`, `prompt_with_images`,
+// `restore`, `load_session`) without a direct `agent-client-protocol`
+// dependency.
+pub use agent_client_protocol::schema;
