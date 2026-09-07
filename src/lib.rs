@@ -17,7 +17,9 @@
 //!         .await?;
 //!
 //!     let session = client.new_session().start().await?;
-//!     session.prompt("List the files in the current directory.", |_update| {}).await?;
+//!     session
+//!         .prompt_events("List the files in the current directory.", |_event| {})
+//!         .await?;
 //!
 //!     Ok(())
 //! }
