@@ -16,10 +16,12 @@ tokio = { version = "1", features = ["full"] }
 ### Feature flags
 
 By default the `openheim` dependency also builds the CLI/TUI binary stack
-(`clap`, `ratatui`, `crossterm`, `tracing-subscriber`) and the WebSocket
-server stack (`axum`, `tower-http`, `notify`, `walkdir`, `futures`).
-Embedders that drive the agent through `OpenheimClient` (or their own ACP
-wiring) usually don't need those:
+(`clap`, `ratatui`, `crossterm`, `tracing-subscriber`), the ACP stack
+(`agent-client-protocol`, `agent-client-protocol-tokio`), and the WebSocket
+server stack (`axum`, `tower-http`, `notify`, `walkdir`). Embedders that
+drive the agent through `OpenheimClient` (or their own ACP wiring) usually
+don't need those. `futures` is not behind any feature — the agent loop uses
+it directly — so it is built regardless.
 
 ```toml
 openheim = { version = "0.9", default-features = false }
@@ -137,6 +139,19 @@ let client = OpenheimClient::builder()
 **`.work_dir(path)`** — sets the root directory the agent may read and write. The agent cannot access files outside this tree. Relative paths in tool arguments are resolved against this directory. Defaults to the directory from which the process was invoked when not set in the builder or config file.
 
 **`.allow_shell(bool)`** — controls whether the `execute_command` tool is exposed to the LLM. When `false` the tool is removed from the tool list entirely; the LLM never sees it and cannot request it. Defaults to `false`.
+
+### Data directory
+
+**`.data_dir(path)`** — repoints openheim's own state at a directory of your choosing: conversation history, skills, `system.md`, subagent profiles, and — unless `[memory].db_path` says otherwise — the long-term memory database. Defaults to `~/.openheim` (and overrides the `data_dir` config-file field when set). The config file itself is still loaded from `~/.openheim/config.toml`. Two agents in one process can hold separate `data_dir`s; a sandboxed CI run can point at a temp directory and never touch the real home directory:
+
+```rust
+let client = OpenheimClient::builder()
+    .provider("openai")
+    .api_key("sk-...")
+    .data_dir(std::env::temp_dir().join("openheim-ci"))
+    .build()
+    .await?;
+```
 
 ### With MCP servers
 
