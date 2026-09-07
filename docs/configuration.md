@@ -15,7 +15,6 @@ openheim init
 | `default_provider` | string | — | Provider to use when no `--model` override is given (must match a key under `[providers]`) |
 | `max_iterations` | integer | `10` | Maximum number of agent loop iterations per prompt before stopping |
 | `default_skills` | string[] | `[]` | Skills loaded automatically in every new session. Merged with per-session `--skills`; defaults appear first, duplicates removed. |
-| `theme_color` | string | `"gray"` | TUI accent color. Valid values: `white`, `gray`, `blue`, `cyan`, `magenta`, `green`, `yellow`, `red`, `pink`. Can also be changed at runtime with `:theme` |
 | `work_dir` | path | cwd at invocation | Root directory the agent is allowed to read and write. The agent cannot access files outside this tree. When unset, defaults to the directory from which openheim was invoked. |
 | `allow_shell` | boolean | `false` | Whether to expose the `execute_command` shell tool to the LLM. Disabled by default — set to `true` to expose the tool. When `false`, the LLM never sees it in its tool list. |
 
@@ -146,6 +145,21 @@ Notes are capped at 4000 characters each. Enabling embeddings later back-fills v
 
 ---
 
+## `[tui]`
+
+Optional, as is the field in it.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `theme_color` | string | `"gray"` | TUI accent color. Valid values: `white`, `gray`, `blue`, `cyan`, `magenta`, `green`, `yellow`, `red`, `pink`. Can also be changed at runtime with `:theme`, which persists the choice back to this section. |
+
+```toml
+[tui]
+theme_color = "blue"
+```
+
+---
+
 ## Complete example
 
 ```toml
@@ -157,6 +171,9 @@ work_dir = "/home/user/projects/myproject"
 
 # Enable shell command access (disabled by default)
 # allow_shell = true
+
+[tui]
+theme_color = "blue"
 
 [providers.anthropic]
 api_base = "https://api.anthropic.com/v1"
