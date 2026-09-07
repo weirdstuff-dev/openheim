@@ -650,6 +650,7 @@ fn build_programmatic(
             api_key: Some(api_key),
             timeout_secs: Some(timeout),
             max_tokens,
+            thinking: None,
         },
     );
 

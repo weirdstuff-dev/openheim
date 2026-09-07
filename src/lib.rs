@@ -7,7 +7,10 @@
 //! ```no_run
 //! use openheim::{OpenheimClient, Result};
 //!
-//! #[tokio::main]
+//! // `current_thread`: the library itself only needs `tokio`'s `rt` feature,
+//! // not `rt-multi-thread` (that's what the `cli` feature adds for the
+//! // `openheim` binary's own `#[tokio::main]`).
+//! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<()> {
 //!     let client = OpenheimClient::builder()
 //!         .provider("openai")

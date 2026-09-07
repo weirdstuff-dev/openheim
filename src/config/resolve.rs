@@ -51,6 +51,7 @@ impl AppConfig {
             max_iterations: self.max_iterations,
             timeout_secs: provider.resolve_timeout_secs(),
             max_tokens: provider.max_tokens,
+            thinking: provider.resolve_thinking(provider_name),
         }
     }
 
@@ -171,6 +172,7 @@ mod tests {
                 api_key: Some("test-key".into()),
                 timeout_secs: Some(60),
                 max_tokens: Some(4096),
+                thinking: None,
             },
         );
         providers.insert(
@@ -183,6 +185,7 @@ mod tests {
                 api_key: Some("anthropic-key".into()),
                 timeout_secs: None,
                 max_tokens: None,
+                thinking: None,
             },
         );
         AppConfig {
@@ -255,6 +258,7 @@ mod tests {
             api_key: Some("key".into()),
             timeout_secs: None,
             max_tokens: None,
+            thinking: None,
         }
     }
 

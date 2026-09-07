@@ -51,6 +51,7 @@ pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<d
             config.api_key.clone(),
             config.model.clone(),
             config.max_tokens,
+            config.thinking,
         )),
         "gemini" => Arc::new(GeminiClient::new(
             http_client.clone(),

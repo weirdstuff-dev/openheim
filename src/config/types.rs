@@ -194,6 +194,17 @@ impl AppConfig {
     }
 }
 
+/// Extended-thinking mode for a provider. Only [`AnthropicClient`](crate::core::llm::AnthropicClient)
+/// consults this today; other providers ignore it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingMode {
+    /// Request Anthropic's adaptive extended thinking.
+    Adaptive,
+    /// Never request extended thinking.
+    Off,
+}
+
 /// Per-provider configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
@@ -208,6 +219,14 @@ pub struct ProviderConfig {
     pub timeout_secs: Option<u64>,
     /// Maximum output tokens for LLM responses
     pub max_tokens: Option<u32>,
+    /// Extended thinking (`"adaptive"` or `"off"`). Defaults to `adaptive`
+    /// for a provider named `anthropic`, `off` for everything else — see
+    /// [`Self::resolve_thinking`]. Set explicitly to `"off"` for an Anthropic
+    /// model that doesn't support adaptive thinking (e.g. `claude-haiku-4-5`,
+    /// `claude-3-7-sonnet`), since a single `[providers.<name>]` entry has no
+    /// per-model granularity.
+    #[serde(default)]
+    pub thinking: Option<ThinkingMode>,
 }
 
 impl ProviderConfig {
@@ -227,6 +246,18 @@ impl ProviderConfig {
         }
         self.api_key.clone().unwrap_or_default()
     }
+
+    /// Whether extended thinking should be requested, given this provider's
+    /// `thinking` setting and `provider_name` (the key it's registered
+    /// under). Unset defaults to `true` only when `provider_name` is
+    /// `"anthropic"` — the only client that reads this.
+    pub fn resolve_thinking(&self, provider_name: &str) -> bool {
+        match self.thinking {
+            Some(ThinkingMode::Adaptive) => true,
+            Some(ThinkingMode::Off) => false,
+            None => provider_name == "anthropic",
+        }
+    }
 }
 
 /// Runtime configuration passed to agent/LLM code
@@ -241,6 +272,10 @@ pub struct AgentConfig {
     pub timeout_secs: u64,
     /// Maximum output tokens for LLM responses (provider-specific defaults if not set)
     pub max_tokens: Option<u32>,
+    /// Whether to request extended thinking (`AnthropicClient` only); see
+    /// [`ProviderConfig::resolve_thinking`].
+    #[serde(default)]
+    pub thinking: bool,
 }
 
 /// The one source of truth for the request-timeout default; every path that
@@ -259,6 +294,7 @@ impl AgentConfig {
         max_iterations: usize,
     ) -> Self {
         Self {
+            thinking: provider_name == "anthropic",
             provider_name,
             api_base,
             api_key,
@@ -287,6 +323,7 @@ impl Default for AgentConfig {
             max_iterations: 10,
             timeout_secs: default_timeout_secs(),
             max_tokens: None,
+            thinking: false,
         }
     }
 }
@@ -304,6 +341,7 @@ mod tests {
             api_key: api_key.map(String::from),
             timeout_secs: None,
             max_tokens: None,
+            thinking: None,
         }
     }
 
