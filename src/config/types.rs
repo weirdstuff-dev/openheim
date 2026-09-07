@@ -22,8 +22,9 @@ pub struct AppConfig {
     pub default_provider: String,
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
+    /// The `[tui]` section: terminal UI display preferences.
     #[serde(default)]
-    pub theme_color: Option<String>,
+    pub tui: TuiConfig,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
@@ -54,6 +55,16 @@ pub struct AppConfig {
 
 fn default_allow_shell() -> bool {
     false
+}
+
+/// The `[tui]` section: terminal UI display preferences. Every field is
+/// optional; so is the section.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TuiConfig {
+    /// Named color theme (see `tui::render::theme_color` for the accepted
+    /// names). Set via `:theme` in the running TUI, which persists it here.
+    #[serde(default)]
+    pub theme_color: Option<String>,
 }
 
 /// The `[memory]` section: where long-term memory lives, how many notes a

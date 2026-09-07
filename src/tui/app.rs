@@ -91,6 +91,7 @@ impl App {
         new_session_tx: mpsc::UnboundedSender<()>,
     ) -> Self {
         let theme_name = app_config
+            .tui
             .theme_color
             .as_deref()
             .unwrap_or("gray")
@@ -426,7 +427,7 @@ impl App {
         self.theme_color = render::theme_color(name);
         self.theme_color_name = name.to_string();
         self.cached_width = 0;
-        self.app_config.theme_color = Some(name.to_string());
+        self.app_config.tui.theme_color = Some(name.to_string());
         match crate::config::save_theme_to_config(name) {
             Ok(()) => self.push(ChatItem::SystemInfo(format!("theme set to {name}"))),
             Err(e) => self.push(ChatItem::SystemInfo(format!(
@@ -981,7 +982,7 @@ mod tests {
         AppConfig {
             default_provider: "mock".into(),
             max_iterations: 10,
-            theme_color: None,
+            tui: crate::config::TuiConfig::default(),
             providers: BTreeMap::new(),
             mcp_servers: BTreeMap::new(),
             default_skills: vec![],

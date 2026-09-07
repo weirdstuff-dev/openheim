@@ -52,8 +52,6 @@ pub struct AgentState {
     pub mcp_statuses: Vec<crate::mcp::McpServerStatus>,
     /// Resolved work directory used as the sandbox boundary for every session.
     pub work_dir: PathBuf,
-    /// Whether shell command execution is enabled for the LLM.
-    pub allow_shell: bool,
     /// `pub(crate)` (not private) so `acp::AcpPermissionGate` — which lives
     /// outside this module — can read remembered approvals directly.
     pub(crate) sessions: Sessions,
@@ -126,7 +124,6 @@ impl AgentState {
             long_term_memory,
             mcp_statuses,
             work_dir,
-            allow_shell,
             sessions: Arc::new(RwLock::new(HashMap::new())),
         })
     }

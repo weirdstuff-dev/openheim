@@ -6,7 +6,7 @@ pub use client::{build_http_client, client_for_config, create_client};
 pub(crate) use types::default_timeout_secs;
 pub use types::{
     AgentConfig, AppConfig, EmbeddingConfig, McpServerConfig, MemoryConfig, ModelsInfo,
-    ProviderConfig, ProviderModels,
+    ProviderConfig, ProviderModels, TuiConfig,
 };
 
 use std::path::PathBuf;
@@ -128,13 +128,14 @@ pub fn load_config() -> Result<AppConfig> {
     Ok(config)
 }
 
-/// Sets or updates the top-level `theme_color` key in the config file at
-/// `path`, leaving every other line untouched. Deliberately not a full TOML
-/// round-trip (no `toml_edit` dependency pulled in for one field): it only
-/// ever touches a line that already looks like `theme_color = "..."`, or —
-/// if there isn't one yet — inserts a new one right after `max_iterations`/
-/// `default_provider` (matching the shipped template's field order), so it
-/// can't corrupt a `[table]` or an unrelated key.
+/// Sets or updates the `theme_color` key inside the `[tui]` table in the
+/// config file at `path`, leaving every other line untouched. Deliberately
+/// not a full TOML round-trip (no `toml_edit` dependency pulled in for one
+/// field): it only ever touches a line that already looks like
+/// `theme_color = "..."` within an existing `[tui]` section (bounded by that
+/// section's header and the next `[table]` header or EOF), or — if there is
+/// no `[tui]` section yet — appends a new one at the end of the file, so it
+/// can't corrupt an unrelated `[table]` or key.
 ///
 /// `name` is interpolated into a TOML basic string rather than run through a
 /// full TOML encoder, so quotes, backslashes, and newlines are rejected
@@ -149,36 +150,34 @@ pub fn save_theme_to_config_at(path: &std::path::Path, name: &str) -> Result<()>
     }
     let contents = std::fs::read_to_string(path)?;
     let new_line = format!("theme_color = \"{name}\"");
-    let has_theme = contents
-        .lines()
-        .any(|l| l.trim_start().starts_with("theme_color"));
-    let updated: String = if has_theme {
-        contents
-            .lines()
-            .map(|l| {
-                if l.trim_start().starts_with("theme_color") {
-                    new_line.clone()
-                } else {
-                    l.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else {
-        let mut lines: Vec<String> = contents.lines().map(String::from).collect();
-        let insert_pos = lines
-            .iter()
-            .rposition(|l| {
-                l.trim_start().starts_with("max_iterations")
-                    || l.trim_start().starts_with("default_provider")
-            })
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        lines.insert(insert_pos, new_line);
-        lines.join("\n")
-    };
+    let mut lines: Vec<String> = contents.lines().map(String::from).collect();
+
+    let tui_header = lines.iter().position(|l| l.trim() == "[tui]");
+    match tui_header {
+        Some(header_idx) => {
+            // The section runs until the next `[...]` header or EOF.
+            let section_end = lines[header_idx + 1..]
+                .iter()
+                .position(|l| l.trim_start().starts_with('['))
+                .map(|i| header_idx + 1 + i)
+                .unwrap_or(lines.len());
+            let existing_theme = (header_idx + 1..section_end)
+                .find(|&i| lines[i].trim_start().starts_with("theme_color"));
+            match existing_theme {
+                Some(i) => lines[i] = new_line,
+                None => lines.insert(section_end, new_line),
+            }
+        }
+        None => {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push("[tui]".to_string());
+            lines.push(new_line);
+        }
+    }
     let trailing = if contents.ends_with('\n') { "\n" } else { "" };
-    std::fs::write(path, format!("{updated}{trailing}"))?;
+    std::fs::write(path, format!("{}{trailing}", lines.join("\n")))?;
     Ok(())
 }
 
@@ -252,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn save_theme_to_config_at_inserts_a_new_line_when_absent() {
+    fn save_theme_to_config_at_appends_a_new_tui_section_when_absent() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(
@@ -266,7 +265,26 @@ mod tests {
         let contents = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             contents,
-            "default_provider = \"openai\"\nmax_iterations = 10\ntheme_color = \"blue\"\n\n[providers.openai]\n"
+            "default_provider = \"openai\"\nmax_iterations = 10\n\n[providers.openai]\n\n[tui]\ntheme_color = \"blue\"\n"
+        );
+    }
+
+    #[test]
+    fn save_theme_to_config_at_inserts_into_an_existing_empty_tui_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "default_provider = \"openai\"\n\n[tui]\n[providers.openai]\n",
+        )
+        .unwrap();
+
+        save_theme_to_config_at(&path, "blue").unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents,
+            "default_provider = \"openai\"\n\n[tui]\ntheme_color = \"blue\"\n[providers.openai]\n"
         );
     }
 
@@ -276,7 +294,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "default_provider = \"openai\"\ntheme_color = \"red\"\nmax_iterations = 10\n",
+            "default_provider = \"openai\"\n\n[tui]\ntheme_color = \"red\"\n\n[providers.openai]\n",
         )
         .unwrap();
 
@@ -285,7 +303,7 @@ mod tests {
         let contents = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             contents,
-            "default_provider = \"openai\"\ntheme_color = \"green\"\nmax_iterations = 10\n"
+            "default_provider = \"openai\"\n\n[tui]\ntheme_color = \"green\"\n\n[providers.openai]\n"
         );
     }
 
@@ -300,7 +318,7 @@ mod tests {
         let contents = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             contents,
-            "default_provider = \"openai\"\ntheme_color = \"blue\""
+            "default_provider = \"openai\"\n\n[tui]\ntheme_color = \"blue\""
         );
     }
 

@@ -337,7 +337,7 @@ mod tests {
         AppConfig {
             default_provider: "mock".into(),
             max_iterations: 10,
-            theme_color: None,
+            tui: crate::config::TuiConfig::default(),
             providers: BTreeMap::new(),
             mcp_servers: BTreeMap::new(),
             default_skills: vec![],

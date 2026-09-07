@@ -14,7 +14,8 @@ use crate::acp::util::{
 };
 use crate::{
     config::{
-        AgentConfig, AppConfig, McpServerConfig, ProviderConfig, load_config, load_config_from,
+        AgentConfig, AppConfig, McpServerConfig, ProviderConfig, TuiConfig, load_config,
+        load_config_from,
     },
     core::{
         client_io::{ClientIo, NoClientIo},
@@ -554,7 +555,7 @@ impl OpenheimBuilder {
                     self.timeout_secs,
                     self.max_tokens,
                     self.default_skills.clone(),
-                )
+                )?
             } else {
                 let app_config = match self.config_path {
                     Some(ref path) => load_config_from(path)?,
@@ -629,7 +630,7 @@ fn build_programmatic(
     timeout_secs: Option<u64>,
     max_tokens: Option<u32>,
     default_skills: Vec<String>,
-) -> (AgentConfig, AppConfig) {
+) -> Result<(AgentConfig, AppConfig)> {
     let provider = provider.unwrap_or_else(|| "openai".to_string());
     let (default_api_base, default_model) = crate::config::builtin_provider_defaults(&provider);
     let api_base = api_base.unwrap_or_else(|| default_api_base.to_string());
@@ -642,11 +643,11 @@ fn build_programmatic(
     providers.insert(
         provider.clone(),
         ProviderConfig {
-            api_base: api_base.clone(),
+            api_base,
             default_model: model.clone(),
-            models: vec![model.clone()],
+            models: vec![model],
             env_var: None,
-            api_key: Some(api_key.clone()),
+            api_key: Some(api_key),
             timeout_secs: Some(timeout),
             max_tokens,
         },
@@ -655,7 +656,7 @@ fn build_programmatic(
     let app_config = AppConfig {
         default_provider: provider.clone(),
         max_iterations: max_iter,
-        theme_color: None,
+        tui: TuiConfig::default(),
         providers,
         mcp_servers: BTreeMap::new(),
         default_skills,
@@ -665,15 +666,9 @@ fn build_programmatic(
         data_dir: None,
     };
 
-    let agent_config = AgentConfig {
-        provider_name: provider,
-        api_base,
-        api_key,
-        model,
-        max_iterations: max_iter,
-        timeout_secs: timeout,
-        max_tokens,
-    };
-
-    (agent_config, app_config)
+    // Funnels through the same `AppConfig::agent_config` assembly every
+    // file-based `resolve()` path uses, instead of hand-building a second
+    // `AgentConfig` with the same field set alongside it.
+    let agent_config = app_config.resolve_provider_default(&provider)?;
+    Ok((agent_config, app_config))
 }

@@ -13,6 +13,7 @@ max_iterations = 10
 
 # TUI accent color (defaults to gray): white, gray, blue, cyan, magenta, green, yellow, red, pink.
 # Can also be changed at runtime with :theme (persisted back to this file).
+# [tui]
 # theme_color = "gray"
 
 # Root directory the agent is allowed to read/write.

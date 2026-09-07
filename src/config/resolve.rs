@@ -188,7 +188,7 @@ mod tests {
         AppConfig {
             default_provider: "openai".into(),
             max_iterations: 5,
-            theme_color: None,
+            tui: crate::config::TuiConfig::default(),
             providers,
             mcp_servers: BTreeMap::new(),
             default_skills: vec![],
@@ -233,7 +233,7 @@ mod tests {
         let config = AppConfig {
             default_provider: "nonexistent".into(),
             max_iterations: 10,
-            theme_color: None,
+            tui: crate::config::TuiConfig::default(),
             providers: BTreeMap::new(),
             mcp_servers: BTreeMap::new(),
             default_skills: vec![],

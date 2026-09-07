@@ -96,8 +96,8 @@ pub use error::{Error, Result};
 pub use llm::{AnthropicClient, GeminiClient, LlmClient, OpenAiClient, OpenAiCompatibleClient};
 pub use memory::{Conversation, ConversationMeta, HistoryManager, MemoryContext, PromptBuilder};
 pub use models::{
-    AgentResult, AgentStep, Choice, ContentBlock, FinishReason, FunctionDefinition, Message, Role,
-    StopReason, StreamEvent, Tool, ToolExecutionResult, ToolResultBlock, ToolUseBlock,
+    AgentResult, Choice, ContentBlock, FinishReason, FunctionDefinition, Message, Role, StopReason,
+    StreamEvent, Tool, ToolResultBlock, ToolUseBlock,
 };
 #[cfg(feature = "rag")]
 pub use rag::LongTermMemory;
