@@ -1,6 +1,6 @@
 # openheim as a Rust library
 
-Openheim can be embedded directly in your Rust application. The library exposes the full agent runtime — sessions, streaming, conversation history, RAG, skills, MCP servers, and tools — through a single `OpenheimClient` facade built on top of the [Agent Client Protocol (ACP)](https://github.com/block/agent-client-protocol).
+Openheim can be embedded directly in your Rust application. The library exposes the full agent runtime — sessions, streaming, conversation history, RAG, skills, MCP servers, and tools — through a single `OpenheimClient` facade; wire-level ACP (`openheim::acp`, plus the ACP-typed facade ergonomics) is available behind the `acp` feature. See the [Agent Client Protocol](https://github.com/block/agent-client-protocol) repo for the protocol itself.
 
 ---
 
@@ -23,13 +23,18 @@ wiring) usually don't need those:
 
 ```toml
 openheim = { version = "0.9", default-features = false }
+# optionally: features = ["acp"]     # ACP vocabulary + ACP-typed facade methods (agent-client-protocol)
 # optionally: features = ["server"]  # axum WS/REST server (openheim::transport::ws)
 # optionally: features = ["tui"]     # ratatui terminal UI (openheim::tui)
 # optionally: features = ["rag"]     # remember/search_memory/forget long-term memory (rusqlite FTS5 + sqlite-vec)
 ```
 
-Everything else — the client facade, agent loop, providers, tools, MCP, ACP,
-and config — is always available.
+Everything else — the client facade, agent loop, providers, tools, MCP, and
+config — is always available. On the facade, `prompt_events`/
+`prompt_events_with_images`, `list_sessions`, `get_session`, and
+`delete_session` are core-typed and always available; `prompt`,
+`prompt_with_images`, `restore`, and `load_session` speak ACP's
+`SessionUpdate` vocabulary and need `features = ["acp"]`.
 
 ---
 
@@ -350,6 +355,11 @@ for info in &workspace {
 }
 ```
 
+Each entry is a `ConversationMeta` — `id: Uuid`, `title`, `cwd`,
+`created_at`/`updated_at`, `model`/`provider`, `context_usage` — a core type,
+so this works with `default-features = false`. ACP's `SessionInfo`
+projection happens inside `acp::serve`, not on the facade.
+
 ### Get full conversation (messages + metadata)
 
 ```rust
@@ -388,8 +398,14 @@ let session = client
     .await?;
 
 // Continue where the conversation left off
-session.prompt("Continue from where you left off", |update| { /* … */ }).await?;
+session.prompt("Continue from where you left off", |update| { /* … */ }).await?
 ```
+
+The returned handle starts from the defaults — `AllowAll` permission gate,
+local-disk I/O; call `.permission_gate(..)`/`.client_io(..)` on it to change
+either. If you already have a handle configured with a gate/I/O,
+`handle.restore(id, cwd, cb)` performs the same load with that handle's
+gate/I/O inherited instead.
 
 ### Delete a session
 
