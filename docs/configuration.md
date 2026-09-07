@@ -55,6 +55,7 @@ Each key under `[providers]` defines a provider. The key name is used as the pro
 | `api_key` | string | No | Inline API key — `env_var` takes precedence if both are set |
 | `timeout_secs` | integer | `120` | Connect and idle-read timeout in seconds — bounds the connect phase and the maximum gap between body reads, not total request duration, so long streaming responses are not cut off mid-stream |
 | `max_tokens` | integer | No | Maximum output tokens per response (provider default if omitted) |
+| `thinking` | `"adaptive"` \| `"off"` | `"adaptive"` for a provider named `anthropic`, `"off"` otherwise | Extended thinking. Only the Anthropic client reads this — other providers ignore it. Applies to every model under this entry, so set it to `"off"` if `default_model`/`models` includes one that doesn't support adaptive thinking (e.g. `claude-haiku-4-5`, `claude-3-7-sonnet`) — use a second `[providers.<other-name>]` entry for that model if you need both. |
 
 Key resolution order: `env_var` (if set and non-empty) → `api_key` → empty string (for keyless providers like Ollama).
 
@@ -72,8 +73,9 @@ max_tokens = 4096
 [providers.anthropic]
 api_base = "https://api.anthropic.com/v1"
 default_model = "claude-sonnet-4-6"
-models = ["claude-sonnet-4-6", "claude-opus-4-7", "claude-haiku-4-5-20251001"]
+models = ["claude-sonnet-4-6", "claude-opus-4-7"]
 env_var = "ANTHROPIC_API_KEY"
+# thinking = "off"  # both models above support adaptive thinking, so the "adaptive" default applies; set "off" here instead if any model in `models` doesn't
 
 [providers.gemini]
 api_base = "https://generativelanguage.googleapis.com/v1beta"
