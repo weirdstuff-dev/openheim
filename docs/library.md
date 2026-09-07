@@ -33,10 +33,11 @@ openheim = { version = "0.9", default-features = false }
 
 Everything else — the client facade, agent loop, providers, tools, MCP, and
 config — is always available. On the facade, `prompt_events`/
-`prompt_events_with_images`, `list_sessions`, `get_session`, and
-`delete_session` are core-typed and always available; `prompt`,
-`prompt_with_images`, `restore`, and `load_session` speak ACP's
-`SessionUpdate` vocabulary and need `features = ["acp"]`.
+`prompt_events_with_images`, `list_sessions`, `get_session`,
+`delete_session`, `resume_session`, and `SessionHandle::resume` are
+core-typed and always available; `prompt`, `prompt_with_images`, `restore`,
+and `load_session` are thin wrappers around the same calls that additionally
+speak ACP's `SessionUpdate` vocabulary, so they need `features = ["acp"]`.
 
 ---
 
@@ -346,7 +347,7 @@ let session = client
 
 `PermissionGate::check` is called once per tool call, before it executes — including tool calls made by a `delegate_task` subagent, which inherits the parent turn's gate rather than always-allowing.
 
-`.client_io(Arc<dyn ClientIo>)` similarly lets `read_file`/`write_file`/`edit_file` be delegated to the embedder's own I/O (e.g. an editor's unsaved buffers) instead of local disk — see [`ClientIo`](../src/core/client_io.rs). `edit_file` uses it for both the read and the write, since an edit is a read followed by a write. Both `.permission_gate()` and `.client_io()` carry over automatically when a handle is reused via `.restore()`.
+`.client_io(Arc<dyn ClientIo>)` similarly lets `read_file`/`write_file`/`edit_file` be delegated to the embedder's own I/O (e.g. an editor's unsaved buffers) instead of local disk — see [`ClientIo`](../src/core/client_io.rs). `edit_file` uses it for both the read and the write, since an edit is a read followed by a write. Both `.permission_gate()` and `.client_io()` carry over automatically when a handle is reused via `.resume()`/`.restore()`.
 
 `session.cancel().await` cancels the turn currently in flight for that session (no-op if none is running) — call it from another task while `prompt()` is awaiting.
 
@@ -394,7 +395,38 @@ for msg in &conv.messages {
 
 ### Resume a session (load + continue prompting)
 
-`load_session` registers the conversation in the live sessions map and replays the message history through your callback so you can populate a UI.
+`resume_session` registers the conversation in the live sessions map and
+hands back its full message history for you to render however you like — no
+`acp` feature needed.
+
+```rust
+let (session, loaded) = client
+    .resume_session(
+        "550e8400-e29b-41d4-a716-446655440000",
+        "/my/workspace".into(),
+    )
+    .await?;
+
+for msg in &loaded.messages {
+    println!("[{:?}] {}", msg.role, msg.text().unwrap_or_default());
+}
+if let Some(warning) = &loaded.warning {
+    println!("{warning}"); // saved provider/model no longer resolves; fell back to default
+}
+
+// Continue where the conversation left off
+session.prompt_events("Continue from where you left off", |event| { /* … */ }).await?;
+```
+
+The returned handle starts from the defaults — `AllowAll` permission gate,
+local-disk I/O; call `.permission_gate(..)`/`.client_io(..)` on it to change
+either. If you already have a handle configured with a gate/I/O,
+`handle.resume(id, cwd)` performs the same load with that handle's gate/I/O
+inherited instead.
+
+With `features = ["acp"]`, `load_session`/`handle.restore(id, cwd, cb)` are
+thin wrappers around `resume_session`/`handle.resume(..)` that additionally
+replay the history through your callback as ACP `SessionUpdate`s:
 
 ```rust
 let session = client
@@ -411,16 +443,7 @@ let session = client
         },
     )
     .await?;
-
-// Continue where the conversation left off
-session.prompt("Continue from where you left off", |update| { /* … */ }).await?
 ```
-
-The returned handle starts from the defaults — `AllowAll` permission gate,
-local-disk I/O; call `.permission_gate(..)`/`.client_io(..)` on it to change
-either. If you already have a handle configured with a gate/I/O,
-`handle.restore(id, cwd, cb)` performs the same load with that handle's
-gate/I/O inherited instead.
 
 ### Delete a session
 
