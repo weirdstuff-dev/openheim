@@ -46,7 +46,7 @@ env_var = "OPENAI_API_KEY"
 [providers.anthropic]
 api_base = "https://api.anthropic.com/v1"
 default_model = "claude-sonnet-4-6"
-models = ["claude-sonnet-4-6", "claude-opus-4-7", "claude-haiku-4-5-20251001"]
+models = ["claude-sonnet-4-6", "claude-opus-4-7"]
 env_var = "ANTHROPIC_API_KEY"
 
 # Google Gemini
