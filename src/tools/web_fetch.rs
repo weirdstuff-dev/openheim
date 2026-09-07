@@ -14,6 +14,7 @@ use crate::error::{Error, Result};
 
 use super::ToolHandler;
 use super::args::{parse_args, require_str};
+use super::capabilities::{ToolCapabilities, ToolKindHint};
 
 /// Wall-clock limit for the whole request (connect + headers + body).
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
@@ -372,6 +373,14 @@ impl ToolHandler for WebFetchTool {
                 "web_fetch cancelled".to_string(),
             )),
             result = fetch_url(url) => result,
+        }
+    }
+
+    fn capabilities(&self) -> ToolCapabilities {
+        ToolCapabilities {
+            read_only: true,
+            kind: ToolKindHint::Fetch,
+            ..Default::default()
         }
     }
 }

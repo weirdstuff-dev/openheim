@@ -27,6 +27,7 @@ use crate::memory::PromptBuilder;
 use crate::subagents::AgentProfile;
 
 use super::args::{parse_args, require_str};
+use super::capabilities::ToolCapabilities;
 use super::scoped_executor::ScopedExecutor;
 use super::{ToolExecutor, ToolHandler};
 
@@ -269,6 +270,15 @@ impl ToolHandler for DelegateTool {
         } else {
             Ok(result.final_response)
         }
+    }
+
+    fn capabilities(&self) -> ToolCapabilities {
+        // Not read-only: a subagent's own tool set (its profile's `tools`
+        // allowlist, defaulting to the parent's full set) can include
+        // writes/execution, so `delegate_task` itself can't be exposed in
+        // Architect mode. Kind stays the `Other` default — there's no ACP
+        // `ToolKind` for "ran a subagent".
+        ToolCapabilities::default()
     }
 }
 
@@ -592,7 +602,7 @@ mod tests {
     fn subagents_never_see_delegate_task() {
         let llm = Arc::new(MockLlm::new(vec![]));
         let mut executor = SystemToolExecutor::new();
-        executor.register_builtins();
+        executor.register_builtins(true);
         let base: Arc<dyn ToolExecutor> = Arc::new(executor.clone());
         let tool = DelegateTool::new(
             base.clone(),

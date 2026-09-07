@@ -175,6 +175,7 @@ pub async fn serve(
                             return Ok(());
                         }
                     };
+                    let executor = state.executor.clone();
                     let result = state
                         .prompt(
                             &session_key,
@@ -182,7 +183,9 @@ pub async fn serve(
                             permission_gate,
                             client_io,
                             move |event| {
-                                if let Some(update) = stream_event_to_session_update(event) {
+                                if let Some(update) =
+                                    stream_event_to_session_update(event, executor.as_ref())
+                                {
                                     let _ = cx_cb.send_notification(SessionNotification::new(
                                         session_id_cb.clone(),
                                         update,
@@ -242,12 +245,16 @@ pub async fn serve(
                                 )),
                             ));
                         }
-                        replay_history_messages(&loaded.messages, &mut |update| {
-                            let _ = cx.send_notification(SessionNotification::new(
-                                session_id_cb.clone(),
-                                update,
-                            ));
-                        });
+                        replay_history_messages(
+                            &loaded.messages,
+                            state_load.executor.as_ref(),
+                            &mut |update| {
+                                let _ = cx.send_notification(SessionNotification::new(
+                                    session_id_cb.clone(),
+                                    update,
+                                ));
+                            },
+                        );
                         responder.respond(
                             LoadSessionResponse::new().modes(session_mode_state(loaded.mode)),
                         )

@@ -13,6 +13,7 @@ use crate::error::{Error, Result};
 
 use super::ToolHandler;
 use super::args::parse_args;
+use super::capabilities::{ToolCapabilities, ToolKindHint};
 use super::sandbox::validate_path;
 
 /// Entries beyond this count are omitted, with a marker noting how many were
@@ -104,6 +105,14 @@ impl ToolHandler for ListDirTool {
         let path = args["path"].as_str().unwrap_or(".");
         let validated = validate_path(path, turn.work_dir)?;
         list_dir(&validated).await
+    }
+
+    fn capabilities(&self) -> ToolCapabilities {
+        ToolCapabilities {
+            read_only: true,
+            kind: ToolKindHint::Read,
+            ..Default::default()
+        }
     }
 }
 

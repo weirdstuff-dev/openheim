@@ -3,7 +3,8 @@
 //!
 //! # Built-in tools
 //!
-//! Seven tools are registered by default via [`SystemToolExecutor::register_builtins`]:
+//! Seven tools are available via [`SystemToolExecutor::register_builtins`]
+//! (`execute_command` only when `allow_shell` is `true`):
 //!
 //! | Name | Description |
 //! |------|-------------|
@@ -92,6 +93,7 @@
 //! going through the builder.
 
 pub mod args;
+pub mod capabilities;
 pub mod delegate;
 mod edit_file;
 mod execute_command;
@@ -113,6 +115,7 @@ use crate::core::models::Tool;
 use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
+pub use capabilities::{ApprovalScope, ToolCapabilities, ToolKindHint};
 pub use delegate::{DELEGATE_TOOL_NAME, DelegateTool};
 pub use scoped_executor::ScopedExecutor;
 
@@ -128,6 +131,13 @@ pub trait ToolHandler: Send + Sync {
     /// [`sandbox::validate_path`]), and prefer `turn.client_io` for file
     /// reads/writes so an editor-hosted client can serve its own buffers.
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String>;
+
+    /// Declares what this tool is: read-only or not, its [`ToolKindHint`],
+    /// and how its approvals are scoped. See [`ToolCapabilities`] for what
+    /// the default (a tool that declares nothing) means in practice.
+    fn capabilities(&self) -> ToolCapabilities {
+        ToolCapabilities::default()
+    }
 }
 
 /// Routes LLM tool-call requests to the correct [`ToolHandler`].
@@ -145,6 +155,13 @@ pub trait ToolExecutor: Send + Sync {
     /// Returns the tool output as a string, or an error if the tool is unknown
     /// or its execution fails.
     async fn execute(&self, name: &str, args_json: &str, turn: &TurnContext<'_>) -> Result<String>;
+
+    /// Returns the named tool's declared [`ToolCapabilities`], or the
+    /// (conservative) default if the tool is unknown.
+    fn capabilities(&self, name: &str) -> ToolCapabilities {
+        let _ = name;
+        ToolCapabilities::default()
+    }
 }
 
 /// The default tool executor used by the agent runtime.
@@ -185,10 +202,7 @@ impl SystemToolExecutor {
         allow_shell: bool,
     ) -> (Self, Vec<crate::mcp::McpServerStatus>) {
         let mut executor = Self::new();
-        executor.register_builtins();
-        if !allow_shell {
-            executor.handlers.remove("execute_command");
-        }
+        executor.register_builtins(allow_shell);
         let (handlers, statuses) = crate::mcp::load_mcp_tools(mcp_configs).await;
         for handler in handlers {
             executor.register(handler);
@@ -196,10 +210,15 @@ impl SystemToolExecutor {
         (executor, statuses)
     }
 
-    /// Registers the seven built-in tools: `execute_command`, `read_file`,
-    /// `write_file`, `edit_file`, `list_dir`, `search`, `web_fetch`.
-    pub fn register_builtins(&mut self) {
-        self.register(Box::new(execute_command::ExecuteCommandTool));
+    /// Registers the built-in tools: `read_file`, `write_file`, `edit_file`,
+    /// `list_dir`, `search`, `web_fetch`, and — when `allow_shell` is `true`
+    /// — `execute_command`. This is the one place `allow_shell` is enforced:
+    /// when it's `false`, `execute_command` is simply never registered, so
+    /// the LLM neither sees it nor can call it.
+    pub fn register_builtins(&mut self, allow_shell: bool) {
+        if allow_shell {
+            self.register(Box::new(execute_command::ExecuteCommandTool));
+        }
         self.register(Box::new(read_file::ReadFileTool));
         self.register(Box::new(write_file::WriteFileTool));
         self.register(Box::new(edit_file::EditFileTool));
@@ -239,6 +258,13 @@ impl ToolExecutor for SystemToolExecutor {
             .get(name)
             .ok_or_else(|| Error::ToolExecutionError(format!("Unknown tool: {}", name)))?;
         handler.execute(args_json, turn).await
+    }
+
+    fn capabilities(&self, name: &str) -> ToolCapabilities {
+        self.handlers
+            .get(name)
+            .map(|h| h.capabilities())
+            .unwrap_or_default()
     }
 }
 
@@ -348,7 +374,7 @@ mod tests {
     #[test]
     fn register_builtins_adds_seven_tools() {
         let mut executor = SystemToolExecutor::new();
-        executor.register_builtins();
+        executor.register_builtins(true);
         assert!(executor.handlers.contains_key("execute_command"));
         assert!(executor.handlers.contains_key("read_file"));
         assert!(executor.handlers.contains_key("write_file"));
@@ -379,9 +405,39 @@ mod tests {
     }
 
     #[test]
+    fn capabilities_reflect_each_handlers_own_declaration() {
+        let mut executor = SystemToolExecutor::new();
+        executor.register_builtins(true);
+
+        assert!(executor.capabilities("read_file").read_only);
+        assert!(executor.capabilities("list_dir").read_only);
+        assert!(executor.capabilities("search").read_only);
+        assert!(executor.capabilities("web_fetch").read_only);
+        assert!(!executor.capabilities("write_file").read_only);
+        assert!(!executor.capabilities("edit_file").read_only);
+        assert!(!executor.capabilities("execute_command").read_only);
+        assert_eq!(
+            executor.capabilities("execute_command").approval_scope,
+            ApprovalScope::ExactArguments
+        );
+        assert_eq!(
+            executor.capabilities("read_file").approval_scope,
+            ApprovalScope::ToolName
+        );
+    }
+
+    #[test]
+    fn capabilities_default_for_unknown_tool() {
+        let executor = SystemToolExecutor::new();
+        let caps = executor.capabilities("nonexistent_tool");
+        assert!(!caps.read_only);
+        assert_eq!(caps.approval_scope, ApprovalScope::ToolName);
+    }
+
+    #[test]
     fn clone_snapshots_the_registry() {
         let mut executor = SystemToolExecutor::new();
-        executor.register_builtins();
+        executor.register_builtins(true);
         let snapshot = executor.clone();
         executor.register(Box::new(ContextEchoTool));
         assert!(executor.handlers.contains_key("context_echo"));

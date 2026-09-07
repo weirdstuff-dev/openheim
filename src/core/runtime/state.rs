@@ -296,15 +296,17 @@ impl AgentState {
             s.last_active = Instant::now();
             let llm = crate::config::client_for_config(&s.config, &self.config, &self.llm)?;
             let executor: Arc<dyn ToolExecutor> = if s.mode == AgentMode::Architect {
-                Arc::new(ScopedExecutor::new(
-                    self.executor.clone(),
-                    vec![
-                        "read_file".to_string(),
-                        "list_dir".to_string(),
-                        "search".to_string(),
-                        "search_memory".to_string(),
-                    ],
-                ))
+                // Every read-only tool is available in Architect mode — built-in
+                // or custom — derived from each `ToolHandler`'s own declared
+                // `capabilities()` instead of a hand-maintained name list.
+                let read_only: Vec<String> = self
+                    .executor
+                    .list_tools()
+                    .into_iter()
+                    .map(|t| t.function.name)
+                    .filter(|name| self.executor.capabilities(name).read_only)
+                    .collect();
+                Arc::new(ScopedExecutor::new(self.executor.clone(), read_only))
             } else {
                 self.executor.clone()
             };

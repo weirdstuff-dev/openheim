@@ -101,7 +101,11 @@ impl OpenheimClient {
                 ),
             ));
         }
-        replay_history_messages(&loaded.messages, &mut on_history);
+        replay_history_messages(
+            &loaded.messages,
+            self.state.executor.as_ref(),
+            &mut on_history,
+        );
         Ok(SessionHandle::new(
             session_id.to_string(),
             self.state.clone(),
@@ -272,8 +276,9 @@ impl SessionHandle {
         images: Vec<(String, String)>,
         mut on_update: impl FnMut(SessionUpdate) + Send,
     ) -> Result<()> {
+        let executor = self.state.executor.clone();
         self.prompt_events_with_images(text, images, move |event| {
-            if let Some(update) = stream_event_to_session_update(event) {
+            if let Some(update) = stream_event_to_session_update(event, executor.as_ref()) {
                 on_update(update);
             }
         })
@@ -386,7 +391,11 @@ impl SessionHandle {
                 ),
             ));
         }
-        replay_history_messages(&loaded.messages, &mut on_history);
+        replay_history_messages(
+            &loaded.messages,
+            self.state.executor.as_ref(),
+            &mut on_history,
+        );
         Ok(SessionHandle {
             id: session_id.to_string(),
             state: Arc::clone(&self.state),

@@ -15,6 +15,7 @@ use crate::{
         runtime::AgentMode,
     },
     memory::ConversationMeta,
+    tools::{ToolExecutor, ToolKindHint},
 };
 
 /// Every model configured across every provider, tagged with `provider` in
@@ -90,8 +91,11 @@ pub(super) fn thinking_chunk(content: String) -> TextContent {
 /// `content._meta.kind == "thinking"` exactly as the live streaming path
 /// does. Without this, thinking shown during a turn vanished on reload even
 /// though it was persisted.
-pub(crate) fn replay_history_messages<F>(messages: &[Message], on_update: &mut F)
-where
+pub(crate) fn replay_history_messages<F>(
+    messages: &[Message],
+    executor: &dyn ToolExecutor,
+    on_update: &mut F,
+) where
     F: FnMut(SessionUpdate),
 {
     for msg in messages {
@@ -147,7 +151,7 @@ where
                     };
                     on_update(SessionUpdate::ToolCall(
                         AcpToolCall::new(tc.id.clone(), &tc.name)
-                            .kind(tool_kind_for(&tc.name))
+                            .kind(tool_kind_for(&tc.name, executor))
                             .status(ToolCallStatus::InProgress)
                             .raw_input(raw_input),
                     ));
@@ -173,46 +177,60 @@ where
     }
 }
 
-/// Maps a builtin/MCP tool name to the closest ACP [`ToolKind`], purely for
-/// client UI treatment (icons etc.) — has no bearing on execution.
-pub(super) fn tool_kind_for(tool_name: &str) -> ToolKind {
-    match tool_name {
-        "execute_command" => ToolKind::Execute,
-        "read_file" => ToolKind::Read,
-        "write_file" => ToolKind::Edit,
-        "edit_file" => ToolKind::Edit,
-        "list_dir" => ToolKind::Read,
-        "search" => ToolKind::Search,
-        "search_memory" => ToolKind::Search,
-        "remember" => ToolKind::Think,
-        "forget" => ToolKind::Delete,
-        "web_fetch" => ToolKind::Fetch,
-        _ => ToolKind::Other,
+/// Maps a [`ToolKindHint`] (a tool's own [`capabilities()`](crate::tools::ToolHandler::capabilities)
+/// declaration) onto the closest ACP [`ToolKind`], purely for client UI
+/// treatment (icons etc.) — has no bearing on execution.
+pub(super) fn acp_tool_kind(hint: ToolKindHint) -> ToolKind {
+    match hint {
+        ToolKindHint::Read => ToolKind::Read,
+        ToolKindHint::Edit => ToolKind::Edit,
+        ToolKindHint::Delete => ToolKind::Delete,
+        ToolKindHint::Move => ToolKind::Move,
+        ToolKindHint::Search => ToolKind::Search,
+        ToolKindHint::Execute => ToolKind::Execute,
+        ToolKindHint::Think => ToolKind::Think,
+        ToolKindHint::Fetch => ToolKind::Fetch,
+        ToolKindHint::SwitchMode => ToolKind::SwitchMode,
+        ToolKindHint::Other => ToolKind::Other,
     }
+}
+
+/// Looks up `tool_name`'s declared [`ToolKindHint`] in `executor` and maps it
+/// to ACP's [`ToolKind`]. Unregistered names (e.g. replaying history from a
+/// tool that's no longer configured) fall back to [`ToolKind::Other`] — see
+/// [`crate::tools::ToolExecutor::capabilities`]'s default.
+pub(super) fn tool_kind_for(tool_name: &str, executor: &dyn ToolExecutor) -> ToolKind {
+    acp_tool_kind(executor.capabilities(tool_name).kind)
 }
 
 #[cfg(test)]
 mod tool_kind_tests {
     use super::*;
+    use crate::tools::SystemToolExecutor;
+
+    fn executor() -> SystemToolExecutor {
+        let mut e = SystemToolExecutor::new();
+        e.register_builtins(true);
+        e
+    }
 
     #[test]
     fn maps_every_builtin_tool() {
-        assert_eq!(tool_kind_for("execute_command"), ToolKind::Execute);
-        assert_eq!(tool_kind_for("read_file"), ToolKind::Read);
-        assert_eq!(tool_kind_for("write_file"), ToolKind::Edit);
-        assert_eq!(tool_kind_for("edit_file"), ToolKind::Edit);
-        assert_eq!(tool_kind_for("list_dir"), ToolKind::Read);
-        assert_eq!(tool_kind_for("search"), ToolKind::Search);
-        assert_eq!(tool_kind_for("search_memory"), ToolKind::Search);
-        assert_eq!(tool_kind_for("remember"), ToolKind::Think);
-        assert_eq!(tool_kind_for("forget"), ToolKind::Delete);
-        assert_eq!(tool_kind_for("web_fetch"), ToolKind::Fetch);
+        let e = executor();
+        assert_eq!(tool_kind_for("execute_command", &e), ToolKind::Execute);
+        assert_eq!(tool_kind_for("read_file", &e), ToolKind::Read);
+        assert_eq!(tool_kind_for("write_file", &e), ToolKind::Edit);
+        assert_eq!(tool_kind_for("edit_file", &e), ToolKind::Edit);
+        assert_eq!(tool_kind_for("list_dir", &e), ToolKind::Read);
+        assert_eq!(tool_kind_for("search", &e), ToolKind::Search);
+        assert_eq!(tool_kind_for("web_fetch", &e), ToolKind::Fetch);
     }
 
     #[test]
     fn unknown_tool_falls_back_to_other() {
+        let e = executor();
         assert_eq!(
-            tool_kind_for("some_mcp_server__custom_tool"),
+            tool_kind_for("some_mcp_server__custom_tool", &e),
             ToolKind::Other
         );
     }
@@ -223,7 +241,10 @@ mod tool_kind_tests {
 /// `MessageAppended` have no ACP wire equivalent — they're `AgentState`-
 /// internal or ACP-client-facing-nothing signals (history persistence,
 /// context-size bookkeeping, turn-done) — and map to `None`.
-pub(crate) fn stream_event_to_session_update(event: StreamEvent) -> Option<SessionUpdate> {
+pub(crate) fn stream_event_to_session_update(
+    event: StreamEvent,
+    executor: &dyn ToolExecutor,
+) -> Option<SessionUpdate> {
     match event {
         StreamEvent::LlmResponse { content } => Some(SessionUpdate::AgentMessageChunk(
             ContentChunk::new(AcpContentBlock::from(content)),
@@ -242,7 +263,7 @@ pub(crate) fn stream_event_to_session_update(event: StreamEvent) -> Option<Sessi
             let raw_input = serde_json::from_str(&arguments).ok();
             Some(SessionUpdate::ToolCall(
                 AcpToolCall::new(id, &*tool_name)
-                    .kind(tool_kind_for(&tool_name))
+                    .kind(tool_kind_for(&tool_name, executor))
                     .status(ToolCallStatus::Pending)
                     .raw_input(raw_input),
             ))
@@ -287,6 +308,13 @@ pub(super) fn map_stop_reason(reason: CoreStopReason) -> StopReason {
 #[cfg(test)]
 mod replay_tests {
     use super::*;
+    use crate::tools::SystemToolExecutor;
+
+    fn executor() -> SystemToolExecutor {
+        let mut e = SystemToolExecutor::new();
+        e.register_builtins(true);
+        e
+    }
 
     fn agent_text_chunks(updates: &[SessionUpdate]) -> Vec<&ContentChunk> {
         updates
@@ -316,7 +344,7 @@ mod replay_tests {
             },
         ];
         let mut updates = Vec::new();
-        replay_history_messages(&messages, &mut |u| updates.push(u));
+        replay_history_messages(&messages, &executor(), &mut |u| updates.push(u));
 
         let chunks = agent_text_chunks(&updates);
         assert_eq!(chunks.len(), 2);
@@ -355,7 +383,7 @@ mod replay_tests {
             Message::tool_result("call_1", "read_file", "file content", false),
         ];
         let mut updates = Vec::new();
-        replay_history_messages(&messages, &mut |u| updates.push(u));
+        replay_history_messages(&messages, &executor(), &mut |u| updates.push(u));
 
         assert!(matches!(
             &updates[0],
@@ -383,7 +411,7 @@ mod replay_tests {
             ],
         }];
         let mut updates = Vec::new();
-        replay_history_messages(&messages, &mut |u| updates.push(u));
+        replay_history_messages(&messages, &executor(), &mut |u| updates.push(u));
 
         assert_eq!(updates.len(), 2);
         assert!(matches!(
@@ -404,12 +432,22 @@ mod replay_tests {
 mod stream_event_tests {
     use super::*;
     use crate::core::models::Usage;
+    use crate::tools::SystemToolExecutor;
+
+    fn executor() -> SystemToolExecutor {
+        let mut e = SystemToolExecutor::new();
+        e.register_builtins(true);
+        e
+    }
 
     #[test]
     fn llm_response_becomes_agent_message_chunk() {
-        let update = stream_event_to_session_update(StreamEvent::LlmResponse {
-            content: "hi".into(),
-        });
+        let update = stream_event_to_session_update(
+            StreamEvent::LlmResponse {
+                content: "hi".into(),
+            },
+            &executor(),
+        );
         assert!(matches!(
             update,
             Some(SessionUpdate::AgentMessageChunk(c)) if matches!(&c.content, AcpContentBlock::Text(t) if t.text == "hi")
@@ -418,9 +456,12 @@ mod stream_event_tests {
 
     #[test]
     fn thinking_content_is_tagged_via_meta() {
-        let update = stream_event_to_session_update(StreamEvent::ThinkingContent {
-            content: "pondering".into(),
-        });
+        let update = stream_event_to_session_update(
+            StreamEvent::ThinkingContent {
+                content: "pondering".into(),
+            },
+            &executor(),
+        );
         match update {
             Some(SessionUpdate::AgentMessageChunk(c)) => match c.content {
                 AcpContentBlock::Text(t) => {
@@ -438,22 +479,29 @@ mod stream_event_tests {
 
     #[test]
     fn tool_call_and_tool_result_map_to_their_acp_shapes() {
-        let call = stream_event_to_session_update(StreamEvent::ToolCall {
-            id: "call_1".into(),
-            tool_name: "read_file".into(),
-            arguments: r#"{"path":"a.txt"}"#.into(),
-        });
+        let e = executor();
+        let call = stream_event_to_session_update(
+            StreamEvent::ToolCall {
+                id: "call_1".into(),
+                tool_name: "read_file".into(),
+                arguments: r#"{"path":"a.txt"}"#.into(),
+            },
+            &e,
+        );
         assert!(matches!(
             call,
             Some(SessionUpdate::ToolCall(tc)) if tc.raw_input.is_some()
         ));
 
-        let result = stream_event_to_session_update(StreamEvent::ToolResult {
-            id: "call_1".into(),
-            tool_name: "read_file".into(),
-            result: "contents".into(),
-            is_error: false,
-        });
+        let result = stream_event_to_session_update(
+            StreamEvent::ToolResult {
+                id: "call_1".into(),
+                tool_name: "read_file".into(),
+                result: "contents".into(),
+                is_error: false,
+            },
+            &e,
+        );
         assert!(matches!(
             result,
             Some(SessionUpdate::ToolCallUpdate(u)) if u.fields.status == Some(ToolCallStatus::Completed)
@@ -462,26 +510,37 @@ mod stream_event_tests {
 
     #[test]
     fn events_with_no_acp_equivalent_map_to_none() {
+        let e = executor();
         assert!(
-            stream_event_to_session_update(StreamEvent::IterationStart { iteration: 1 }).is_none()
+            stream_event_to_session_update(StreamEvent::IterationStart { iteration: 1 }, &e)
+                .is_none()
         );
         assert!(
-            stream_event_to_session_update(StreamEvent::Usage {
-                usage: Usage::default()
-            })
+            stream_event_to_session_update(
+                StreamEvent::Usage {
+                    usage: Usage::default()
+                },
+                &e
+            )
             .is_none()
         );
         assert!(
-            stream_event_to_session_update(StreamEvent::Finished {
-                final_response: "done".into(),
-                iterations: 1,
-            })
+            stream_event_to_session_update(
+                StreamEvent::Finished {
+                    final_response: "done".into(),
+                    iterations: 1,
+                },
+                &e
+            )
             .is_none()
         );
         assert!(
-            stream_event_to_session_update(StreamEvent::MessageAppended {
-                message: Message::user("hi"),
-            })
+            stream_event_to_session_update(
+                StreamEvent::MessageAppended {
+                    message: Message::user("hi"),
+                },
+                &e
+            )
             .is_none()
         );
     }

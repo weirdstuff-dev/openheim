@@ -32,7 +32,8 @@ impl PermissionGate for AcpPermissionGate {
         tool_name: &str,
         arguments: &str,
     ) -> PermissionDecision {
-        let key = approval_key(tool_name, arguments);
+        let scope = self.state.executor.capabilities(tool_name).approval_scope;
+        let key = approval_key(scope, tool_name, arguments);
         if let Some(remembered) = self
             .state
             .sessions
@@ -49,7 +50,7 @@ impl PermissionGate for AcpPermissionGate {
             tool_call_id.to_string(),
             ToolCallUpdateFields::new()
                 .title(tool_name)
-                .kind(tool_kind_for(tool_name))
+                .kind(tool_kind_for(tool_name, self.state.executor.as_ref()))
                 .status(ToolCallStatus::Pending)
                 .raw_input(raw_input),
         );
