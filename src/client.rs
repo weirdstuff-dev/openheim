@@ -4,13 +4,15 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "acp")]
 use agent_client_protocol::schema::{SessionInfo, SessionUpdate};
 use uuid::Uuid;
 
+#[cfg(feature = "acp")]
+use crate::acp::util::{
+    conversation_metas_to_session_info, replay_history_messages, stream_event_to_session_update,
+};
 use crate::{
-    acp::util::{
-        conversation_metas_to_session_info, replay_history_messages, stream_event_to_session_update,
-    },
     config::{
         AgentConfig, AppConfig, McpServerConfig, ProviderConfig, load_config, load_config_from,
     },
@@ -53,6 +55,7 @@ impl OpenheimClient {
     /// `AgentState` to hand to `acp::serve`, so every entry point builds it
     /// the same way (config load, resolve, `MemoryContext::new`, custom
     /// tools) instead of each hand-rolling that sequence.
+    #[cfg(feature = "acp")]
     pub(crate) fn state(&self) -> &Arc<AgentState> {
         &self.state
     }
@@ -69,7 +72,10 @@ impl OpenheimClient {
         }
     }
 
-    /// List persisted sessions (all or filtered by cwd).
+    /// List persisted sessions (all or filtered by cwd) in ACP's `SessionInfo`
+    /// shape; see [`Self::list_all_sessions`] for the always-available,
+    /// non-ACP equivalent.
+    #[cfg(feature = "acp")]
     pub async fn list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<SessionInfo>> {
         let metas = self.state.list_sessions(cwd).await?;
         Ok(conversation_metas_to_session_info(metas))
@@ -80,6 +86,7 @@ impl OpenheimClient {
     /// `on_history` is called once for each message in the conversation history
     /// (as `SessionUpdate::UserMessageChunk` / `AgentMessageChunk`) so callers
     /// can replay the conversation in their UI.
+    #[cfg(feature = "acp")]
     pub async fn load_session(
         &self,
         session_id: &str,
@@ -243,6 +250,7 @@ impl SessionHandle {
     /// vocabulary; [`Self::prompt_events`] gives the same turn's raw
     /// [`crate::core::models::StreamEvent`]s instead, including ones with no
     /// ACP equivalent (context-usage updates, the turn-finished signal).
+    #[cfg(feature = "acp")]
     pub async fn prompt(
         &self,
         text: &str,
@@ -257,6 +265,7 @@ impl SessionHandle {
     /// of a `data:` URL and `"image/png"`. The text block (when non-empty)
     /// leads, followed by the images, matching the order a user composes them.
     /// Streams the same `SessionUpdate` events as [`Self::prompt`].
+    #[cfg(feature = "acp")]
     pub async fn prompt_with_images(
         &self,
         text: &str,
@@ -362,6 +371,7 @@ impl SessionHandle {
     /// tagged via `_meta.kind`) so callers can replay it in their UI; pass a
     /// no-op callback to skip that. The returned handle inherits this
     /// handle's permission gate and client I/O.
+    #[cfg(feature = "acp")]
     pub async fn restore(
         &self,
         session_id: &str,

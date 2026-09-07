@@ -28,11 +28,13 @@ required-features = ["cli"]
 # produce the full binary. Library embedders use `default-features = false`.
 default = ["cli"]
 # The `openheim` binary: CLI parsing + everything it can reach.
-cli = ["dep:clap", "dep:tracing-subscriber", "server", "tui", "rag"]
-# Terminal UI (`openheim::tui`).
-tui = ["dep:crossterm", "dep:ratatui", "dep:unicode-width", "dep:unicode-segmentation"]
+cli = ["dep:clap", "dep:tracing-subscriber", "server", "tui", "rag", "acp"]
+# Terminal UI (`openheim::tui`). Implies `acp`.
+tui = ["dep:crossterm", "dep:ratatui", "dep:unicode-width", "dep:unicode-segmentation", "acp"]
+# Agent Client Protocol (`openheim::acp`, `openheim::transport::{run,stdio,ws}`).
+acp = ["dep:agent-client-protocol", "dep:agent-client-protocol-tokio"]
 # WebSocket/REST server (`openheim::transport::ws`).
-server = ["dep:axum", "dep:notify", "dep:tower-http", "dep:walkdir"]
+server = ["dep:axum", "dep:notify", "dep:tower-http", "dep:walkdir", "acp"]
 # Tool-driven long-term memory (`openheim::rag`: `remember`, `search_memory`,
 # `forget`): bundled SQLite with FTS5 + the sqlite-vec extension.
 rag = ["dep:rusqlite", "dep:sqlite-vec"]
@@ -60,8 +62,8 @@ dirs = "6.0"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 rmcp = { version = "1.6.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
-agent-client-protocol = { version = "0.11.1", features = ["unstable_session_model"] }
-agent-client-protocol-tokio = "0.11.1"
+agent-client-protocol = { version = "0.11.1", features = ["unstable_session_model"], optional = true }
+agent-client-protocol-tokio = { version = "0.11.1", optional = true }
 tokio-util = { version = "0.7", features = ["compat"] }
 tower-http = { version = "0.6", features = ["cors"], optional = true }
 grep = "0.4.1"
