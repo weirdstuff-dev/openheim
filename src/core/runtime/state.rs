@@ -9,27 +9,22 @@ use std::{
     time::Instant,
 };
 
-use agent_client_protocol::schema::{
-    ContentBlock as AcpContentBlock, ContentChunk, ModelInfo, SessionInfo, SessionModelState,
-    SessionUpdate,
-};
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    acp::{convert::convert_prompt_blocks, util::replay_history_messages},
     config::{AgentConfig, AppConfig, build_http_client, create_client},
     core::{
         agent::run_agent_streaming_with_history,
         client_io::ClientIo,
-        models::{Message, Role, StopReason as CoreStopReason, StreamEvent},
+        models::{ContentBlock, Message, Role, StopReason as CoreStopReason, StreamEvent},
         permission::PermissionGate,
         turn::TurnContext,
     },
     error::{Error, Result},
     llm::LlmClient,
-    memory::{Conversation, MemoryContext},
+    memory::{Conversation, ConversationMeta, MemoryContext},
     subagents::SubagentLoader,
     tools::{DelegateTool, ScopedExecutor, SystemToolExecutor, ToolExecutor, ToolHandler},
 };
@@ -233,25 +228,6 @@ impl AgentState {
         Ok(())
     }
 
-    pub fn session_model_state(&self, current_model: &str) -> SessionModelState {
-        let available_models = self
-            .app_config
-            .providers
-            .iter()
-            .flat_map(|(provider_name, p)| {
-                p.models.iter().map(move |m| {
-                    let mut meta = serde_json::Map::new();
-                    meta.insert(
-                        "provider".to_string(),
-                        serde_json::Value::String(provider_name.clone()),
-                    );
-                    ModelInfo::new(m.clone(), m.clone()).meta(meta)
-                })
-            })
-            .collect();
-        SessionModelState::new(current_model.to_string(), available_models)
-    }
-
     /// Persists `conv`'s full current state off the async runtime thread,
     /// logging (not propagating) any failure — history durability is
     /// best-effort and must never fail a turn that otherwise succeeded.
@@ -281,7 +257,7 @@ impl AgentState {
     pub async fn prompt<F>(
         &self,
         session_id: &str,
-        prompt: Vec<AcpContentBlock>,
+        prompt: Vec<ContentBlock>,
         permission_gate: Arc<dyn PermissionGate>,
         client_io: Arc<dyn ClientIo>,
         mut on_update: F,
@@ -361,7 +337,7 @@ impl AgentState {
         conversation.meta.cwd = Some(cwd);
         conversation.messages.push(Message {
             role: Role::User,
-            content: convert_prompt_blocks(&prompt)?,
+            content: prompt,
         });
 
         // Full checkpoint before the turn starts: durably records this
@@ -429,34 +405,25 @@ impl AgentState {
         run_result.map(|r| r.stop_reason)
     }
 
-    pub async fn list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<SessionInfo>> {
+    /// Persisted session metadata (all or filtered by `cwd`); the ACP
+    /// `SessionInfo` shape is the caller's concern.
+    pub async fn list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<ConversationMeta>> {
         let history = self.memory.history.clone();
         let metas = tokio::task::spawn_blocking(move || history.list_conversations())
             .await
             .map_err(Error::from)??;
         Ok(metas
-            .iter()
+            .into_iter()
             .filter(|m| cwd.is_none_or(|filter| m.cwd.as_deref() == Some(filter)))
-            .map(|m| {
-                let path = m.cwd.clone().unwrap_or_else(|| PathBuf::from("/"));
-                let mut info = SessionInfo::new(m.id.to_string(), path);
-                if let Some(t) = &m.title {
-                    info = info.title(t.clone());
-                }
-                info.updated_at(m.updated_at.to_rfc3339())
-            })
             .collect())
     }
 
-    pub async fn load_session<F>(
-        &self,
-        session_id: &str,
-        cwd: PathBuf,
-        mut on_update: F,
-    ) -> Result<AgentMode>
-    where
-        F: FnMut(SessionUpdate) + Send,
-    {
+    /// Loads a persisted session as the active session for `session_id`,
+    /// returning the mode it's live under, its full message history (for the
+    /// caller to replay in whatever form its transport needs), and a
+    /// warning to surface if the session's saved provider no longer
+    /// resolves.
+    pub async fn load_session(&self, session_id: &str, cwd: PathBuf) -> Result<LoadedSession> {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| Error::ParseError("invalid session id format".to_string()))?;
 
@@ -466,6 +433,7 @@ impl AgentState {
             .map_err(Error::from)??;
 
         let mut session_config = self.config.clone();
+        let mut warning = None;
         if let Some(provider_name) = &conversation.meta.provider {
             // Same resolution (and validation) as every other config path;
             // a session whose saved provider/model no longer resolves —
@@ -478,13 +446,10 @@ impl AgentState {
             match resolved {
                 Ok(config) => session_config = config,
                 Err(e) => {
-                    let warning = format!(
+                    warning = Some(format!(
                         "[warning] Could not restore this session's provider '{}' ({e}). Falling back to the default provider '{}'.",
                         provider_name, session_config.provider_name
-                    );
-                    on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                        AcpContentBlock::from(warning),
-                    )));
+                    ));
                 }
             }
         } else if let Some(model) = &conversation.meta.model {
@@ -550,10 +515,24 @@ impl AgentState {
             live.mode
         };
 
-        replay_history_messages(&conversation.messages, &mut on_update);
-
-        Ok(mode)
+        Ok(LoadedSession {
+            mode,
+            messages: conversation.messages,
+            warning,
+        })
     }
+}
+
+/// The result of [`AgentState::load_session`]: enough to both replay the
+/// conversation in whatever wire form the caller needs (see
+/// `acp::util::replay_history_messages` for the ACP shape) and reflect the
+/// mode it's now live under.
+pub struct LoadedSession {
+    pub mode: AgentMode,
+    pub messages: Vec<Message>,
+    /// Set if the session's saved provider/model no longer resolves and the
+    /// load fell back to the default provider.
+    pub warning: Option<String>,
 }
 
 #[cfg(test)]

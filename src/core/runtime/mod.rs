@@ -4,23 +4,20 @@
 //! session map's own state and eviction policy; [`AgentMode`] controls which
 //! tools a session's turns are offered.
 //!
-//! `AgentState::prompt` speaks `core::models::StreamEvent` end-to-end — ACP
-//! mapping onto `SessionUpdate` lives entirely at the ACP edge
-//! (`acp::util::stream_event_to_session_update`, called from `acp::serve` and
-//! from the library facade's own `SessionHandle::prompt`). `AgentState`
-//! still reaches into `crate::acp::{convert, util}` for two one-shot, ACP-
-//! shaped conversions that have no `StreamEvent` equivalent to speak
-//! instead: `prompt`'s input (`convert_prompt_blocks`, turning the caller's
-//! ACP content blocks into `core::models::ContentBlock`s) and
-//! `load_session`'s history replay (`replay_history_messages`, reconstructing
-//! `SessionUpdate`s from persisted `Message`s rather than a live event
-//! stream).
+//! `AgentState` speaks only `core::models` types — no `agent_client_protocol`
+//! import anywhere in this module. `prompt` takes `core::models::ContentBlock`
+//! directly and streams `core::models::StreamEvent`; `load_session` returns
+//! the persisted `Message`s as-is. Mapping any of that onto ACP's wire
+//! vocabulary (`SessionUpdate`, `SessionInfo`, `SessionModelState`,
+//! `convert_prompt_blocks`, `replay_history_messages`) is entirely the
+//! caller's concern — `acp::serve` and the library facade (`client.rs`) do
+//! it at their own edges.
 
 pub mod session;
 
 mod state;
 
-pub use state::AgentState;
+pub use state::{AgentState, LoadedSession};
 
 /// Which tool policy a session runs under, set via `session/set_mode`.
 /// [`Self::as_str`] gives the wire-level mode id; [`Self::parse`] is the

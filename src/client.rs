@@ -4,17 +4,19 @@ use std::{
     sync::Arc,
 };
 
-use agent_client_protocol::schema::{ContentBlock, ImageContent, SessionInfo, SessionUpdate};
+use agent_client_protocol::schema::{SessionInfo, SessionUpdate};
 use uuid::Uuid;
 
 use crate::{
-    acp::util::stream_event_to_session_update,
+    acp::util::{
+        conversation_metas_to_session_info, replay_history_messages, stream_event_to_session_update,
+    },
     config::{
         AgentConfig, AppConfig, McpServerConfig, ProviderConfig, load_config, load_config_from,
     },
     core::{
         client_io::{ClientIo, NoClientIo},
-        models::StreamEvent,
+        models::{ContentBlock, StreamEvent},
         permission::{AllowAll, PermissionGate},
         runtime::AgentState,
     },
@@ -69,7 +71,8 @@ impl OpenheimClient {
 
     /// List persisted sessions (all or filtered by cwd).
     pub async fn list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<SessionInfo>> {
-        self.state.list_sessions(cwd).await
+        let metas = self.state.list_sessions(cwd).await?;
+        Ok(conversation_metas_to_session_info(metas))
     }
 
     /// Load a persisted session into a live `SessionHandle`.
@@ -81,9 +84,17 @@ impl OpenheimClient {
         &self,
         session_id: &str,
         cwd: PathBuf,
-        on_history: impl FnMut(SessionUpdate) + Send,
+        mut on_history: impl FnMut(SessionUpdate) + Send,
     ) -> Result<SessionHandle> {
-        self.state.load_session(session_id, cwd, on_history).await?;
+        let loaded = self.state.load_session(session_id, cwd).await?;
+        if let Some(warning) = loaded.warning {
+            on_history(SessionUpdate::AgentMessageChunk(
+                agent_client_protocol::schema::ContentChunk::new(
+                    agent_client_protocol::schema::ContentBlock::from(warning),
+                ),
+            ));
+        }
+        replay_history_messages(&loaded.messages, &mut on_history);
         Ok(SessionHandle::new(
             session_id.to_string(),
             self.state.clone(),
@@ -287,7 +298,7 @@ impl SessionHandle {
             blocks.push(ContentBlock::from(text));
         }
         for (data, mime_type) in images {
-            blocks.push(ContentBlock::Image(ImageContent::new(data, mime_type)));
+            blocks.push(ContentBlock::Image { data, mime_type });
         }
         self.state
             .prompt(
@@ -355,9 +366,17 @@ impl SessionHandle {
         &self,
         session_id: &str,
         cwd: std::path::PathBuf,
-        on_history: impl FnMut(SessionUpdate) + Send,
+        mut on_history: impl FnMut(SessionUpdate) + Send,
     ) -> Result<SessionHandle> {
-        self.state.load_session(session_id, cwd, on_history).await?;
+        let loaded = self.state.load_session(session_id, cwd).await?;
+        if let Some(warning) = loaded.warning {
+            on_history(SessionUpdate::AgentMessageChunk(
+                agent_client_protocol::schema::ContentChunk::new(
+                    agent_client_protocol::schema::ContentBlock::from(warning),
+                ),
+            ));
+        }
+        replay_history_messages(&loaded.messages, &mut on_history);
         Ok(SessionHandle {
             id: session_id.to_string(),
             state: Arc::clone(&self.state),

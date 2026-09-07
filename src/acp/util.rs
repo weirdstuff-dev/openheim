@@ -3,15 +3,59 @@
 //! `StreamEvent → SessionUpdate` mapping for a live turn.
 
 use agent_client_protocol::schema::{
-    ContentBlock as AcpContentBlock, ContentChunk, ImageContent, SessionMode, SessionModeState,
-    SessionUpdate, StopReason, TextContent, ToolCall as AcpToolCall, ToolCallStatus,
-    ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    ContentBlock as AcpContentBlock, ContentChunk, ImageContent, ModelInfo, SessionInfo,
+    SessionMode, SessionModeState, SessionModelState, SessionUpdate, StopReason, TextContent,
+    ToolCall as AcpToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 
-use crate::core::{
-    models::{ContentBlock, Message, Role, StopReason as CoreStopReason, StreamEvent},
-    runtime::AgentMode,
+use crate::{
+    config::AppConfig,
+    core::{
+        models::{ContentBlock, Message, Role, StopReason as CoreStopReason, StreamEvent},
+        runtime::AgentMode,
+    },
+    memory::ConversationMeta,
 };
+
+/// Every model configured across every provider, tagged with `provider` in
+/// each entry's `_meta` — the shape `session/new` and `session/set_model`
+/// advertise available models in.
+pub(super) fn session_model_state(
+    app_config: &AppConfig,
+    current_model: &str,
+) -> SessionModelState {
+    let available_models = app_config
+        .providers
+        .iter()
+        .flat_map(|(provider_name, p)| {
+            p.models.iter().map(move |m| {
+                let mut meta = serde_json::Map::new();
+                meta.insert(
+                    "provider".to_string(),
+                    serde_json::Value::String(provider_name.clone()),
+                );
+                ModelInfo::new(m.clone(), m.clone()).meta(meta)
+            })
+        })
+        .collect();
+    SessionModelState::new(current_model.to_string(), available_models)
+}
+
+/// Maps persisted session metadata onto the ACP `SessionInfo` shape
+/// `session/list` responds with.
+pub(crate) fn conversation_metas_to_session_info(metas: Vec<ConversationMeta>) -> Vec<SessionInfo> {
+    metas
+        .into_iter()
+        .map(|m| {
+            let path = m.cwd.unwrap_or_else(|| std::path::PathBuf::from("/"));
+            let mut info = SessionInfo::new(m.id.to_string(), path);
+            if let Some(t) = m.title {
+                info = info.title(t);
+            }
+            info.updated_at(m.updated_at.to_rfc3339())
+        })
+        .collect()
+}
 
 pub(super) fn session_mode_state(current_mode: AgentMode) -> SessionModeState {
     SessionModeState::new(
