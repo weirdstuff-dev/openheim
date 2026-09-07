@@ -5,13 +5,11 @@ use std::{
 };
 
 #[cfg(feature = "acp")]
-use agent_client_protocol::schema::{SessionInfo, SessionUpdate};
+use agent_client_protocol::schema::SessionUpdate;
 use uuid::Uuid;
 
 #[cfg(feature = "acp")]
-use crate::acp::util::{
-    conversation_metas_to_session_info, replay_history_messages, stream_event_to_session_update,
-};
+use crate::acp::util::{replay_history_messages, stream_event_to_session_update};
 use crate::{
     config::{
         AgentConfig, AppConfig, McpServerConfig, ProviderConfig, TuiConfig, load_config,
@@ -73,13 +71,12 @@ impl OpenheimClient {
         }
     }
 
-    /// List persisted sessions (all or filtered by cwd) in ACP's `SessionInfo`
-    /// shape; see [`Self::list_all_sessions`] for the always-available,
-    /// non-ACP equivalent.
-    #[cfg(feature = "acp")]
-    pub async fn list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<SessionInfo>> {
-        let metas = self.state.list_sessions(cwd).await?;
-        Ok(conversation_metas_to_session_info(metas))
+    /// List persisted sessions — all of them (`None`) or only those whose
+    /// cwd matches (`Some`). Entries are [`ConversationMeta`]s (id, title,
+    /// cwd, timestamps, model/provider, context usage); ACP's `SessionInfo`
+    /// mapping happens at the ACP edge (`acp::serve`), not on the facade.
+    pub async fn list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<ConversationMeta>> {
+        self.state.list_sessions(cwd).await
     }
 
     /// Load a persisted session into a live `SessionHandle`.
@@ -87,30 +84,23 @@ impl OpenheimClient {
     /// `on_history` is called once for each message in the conversation history
     /// (as `SessionUpdate::UserMessageChunk` / `AgentMessageChunk`) so callers
     /// can replay the conversation in their UI.
+    ///
+    /// Delegates to [`SessionHandle::restore`] on a default-configured handle:
+    /// the returned handle starts from the default permission gate
+    /// ([`AllowAll`]) and client I/O ([`NoClientIo`]) — apply
+    /// [`SessionHandle::permission_gate`]/[`SessionHandle::client_io`] to it
+    /// afterwards if needed. Restoring through an *existing* handle instead
+    /// inherits that handle's gate/client_io.
     #[cfg(feature = "acp")]
     pub async fn load_session(
         &self,
         session_id: &str,
         cwd: PathBuf,
-        mut on_history: impl FnMut(SessionUpdate) + Send,
+        on_history: impl FnMut(SessionUpdate) + Send,
     ) -> Result<SessionHandle> {
-        let loaded = self.state.load_session(session_id, cwd).await?;
-        if let Some(warning) = loaded.warning {
-            on_history(SessionUpdate::AgentMessageChunk(
-                agent_client_protocol::schema::ContentChunk::new(
-                    agent_client_protocol::schema::ContentBlock::from(warning),
-                ),
-            ));
-        }
-        replay_history_messages(
-            &loaded.messages,
-            self.state.executor.as_ref(),
-            &mut on_history,
-        );
-        Ok(SessionHandle::new(
-            session_id.to_string(),
-            self.state.clone(),
-        ))
+        SessionHandle::new(String::new(), Arc::clone(&self.state))
+            .restore(session_id, cwd, on_history)
+            .await
     }
 
     /// Fetch the full `Conversation` (messages + metadata) for a session id.
@@ -119,12 +109,6 @@ impl OpenheimClient {
             .map_err(|_| crate::error::Error::ParseError("invalid session id".to_string()))?;
         let history = self.state.memory.history.clone();
         tokio::task::spawn_blocking(move || history.load_conversation(&uuid)).await?
-    }
-
-    /// List all conversation metadata without loading messages.
-    pub async fn list_all_sessions(&self) -> Result<Vec<ConversationMeta>> {
-        let history = self.state.memory.history.clone();
-        tokio::task::spawn_blocking(move || history.list_conversations()).await?
     }
 
     /// Permanently delete a persisted session.
@@ -376,7 +360,8 @@ impl SessionHandle {
     /// and order a live turn would have produced — including thinking blocks
     /// tagged via `_meta.kind`) so callers can replay it in their UI; pass a
     /// no-op callback to skip that. The returned handle inherits this
-    /// handle's permission gate and client I/O.
+    /// handle's permission gate and client I/O — the load-and-defaults
+    /// counterpart is [`OpenheimClient::load_session`].
     #[cfg(feature = "acp")]
     pub async fn restore(
         &self,

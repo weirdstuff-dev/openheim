@@ -214,7 +214,7 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
                     maybe_list = list_sessions_rx.recv() => {
                         match maybe_list {
                             Some(()) => {
-                                match client.list_all_sessions().await {
+                                match client.list_sessions(None).await {
                                     Ok(metas) => {
                                         let _ = update_tx.send(AgentUpdate::SessionList(metas));
                                     }
