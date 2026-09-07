@@ -293,12 +293,12 @@ async fn main() -> openheim::Result<()> {
         )))
     );
 
-    let mut executor = SystemToolExecutor::new();
-    executor.register_builtins();
-    let executor = Arc::new(executor);
-
     let app_config = load_config()?;
     let agent_config = app_config.resolve(None)?;
+
+    let mut executor = SystemToolExecutor::new();
+    executor.register_builtins(app_config.allow_shell);
+    let executor = Arc::new(executor);
 
     let mut messages = vec![Message::user("Hello!")];
 

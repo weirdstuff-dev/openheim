@@ -16,10 +16,28 @@ pub trait ToolHandler: Send + Sync {
 
     /// Executes the tool with JSON-encoded arguments and returns the result as a string.
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String>;
+
+    /// Declares what this tool is. Defaults to `ToolCapabilities::default()`
+    /// — not read-only, generic `ToolKindHint::Other`, approvals keyed by
+    /// tool name. Override it to opt into behavior that depends on it (see
+    /// below).
+    fn capabilities(&self) -> ToolCapabilities {
+        ToolCapabilities::default()
+    }
 }
 ```
 
-The `definition` method runs once at startup to populate the list sent to the LLM. The `execute` method is called each time the LLM decides to use the tool.
+The `definition` method runs once at startup to populate the list sent to the LLM. The `execute` method is called each time the LLM decides to use the tool. `capabilities` is consulted three places: Architect mode only exposes tools with `read_only: true`; the approval-remembering logic uses `approval_scope` to decide whether "Allow Always" covers every call to the tool (`ApprovalScope::ToolName`, the default) or only byte-identical arguments (`ApprovalScope::ExactArguments` — what `execute_command` uses, so approving `git status` can't silently cover `git status && rm -rf ~`); and the ACP transport uses `kind` for client-side icon treatment. A read-only tool (e.g. one that only queries an API) should set `read_only: true` so it works in Architect mode too:
+
+```rust
+fn capabilities(&self) -> ToolCapabilities {
+    ToolCapabilities {
+        read_only: true,
+        kind: ToolKindHint::Search,
+        ..Default::default()
+    }
+}
+```
 
 `turn` is the calling turn's `openheim::core::turn::TurnContext`. It carries everything the built-in tools use to behave well inside an agent session, and custom tools get exactly the same:
 
@@ -176,7 +194,7 @@ async fn main() -> openheim::Result<()> {
     let agent_config = app_config.resolve(None)?;
 
     let mut executor = SystemToolExecutor::new();
-    executor.register_builtins();                        // built-ins
+    executor.register_builtins(app_config.allow_shell);   // built-ins
     executor.register(Box::new(FetchUrlTool::new()));    // your tool
     let executor = Arc::new(executor);
 
