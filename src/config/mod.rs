@@ -152,7 +152,7 @@ pub fn save_theme_to_config_at(path: &std::path::Path, name: &str) -> Result<()>
     let new_line = format!("theme_color = \"{name}\"");
     let mut lines: Vec<String> = contents.lines().map(String::from).collect();
 
-    let tui_header = lines.iter().position(|l| l.trim() == "[tui]");
+    let tui_header = lines.iter().position(|l| is_tui_header(l));
     match tui_header {
         Some(header_idx) => {
             // The section runs until the next `[...]` header or EOF.
@@ -161,8 +161,8 @@ pub fn save_theme_to_config_at(path: &std::path::Path, name: &str) -> Result<()>
                 .position(|l| l.trim_start().starts_with('['))
                 .map(|i| header_idx + 1 + i)
                 .unwrap_or(lines.len());
-            let existing_theme = (header_idx + 1..section_end)
-                .find(|&i| lines[i].trim_start().starts_with("theme_color"));
+            let existing_theme =
+                (header_idx + 1..section_end).find(|&i| is_theme_color_line(&lines[i]));
             match existing_theme {
                 Some(i) => lines[i] = new_line,
                 None => lines.insert(section_end, new_line),
@@ -184,6 +184,27 @@ pub fn save_theme_to_config_at(path: &std::path::Path, name: &str) -> Result<()>
 /// [`save_theme_to_config_at`] against `~/.openheim/config.toml`.
 pub fn save_theme_to_config(name: &str) -> Result<()> {
     save_theme_to_config_at(&config_path()?, name)
+}
+
+/// Whether `line` is a `[tui]` table header, allowing for trailing
+/// whitespace or a `# comment` after the closing bracket (e.g. `[tui] #
+/// theme settings`), so those aren't mistaken for the start of a new,
+/// unrelated table and don't cause a second `[tui]` header to be appended.
+fn is_tui_header(line: &str) -> bool {
+    let Some(rest) = line.trim_start().strip_prefix("[tui]") else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with(char::is_whitespace) || rest.starts_with('#')
+}
+
+/// Whether `line` assigns the `theme_color` key, as opposed to a
+/// similarly-prefixed but distinct key like `theme_color_backup`. Requires
+/// the next non-whitespace character after `theme_color` to be `=`.
+fn is_theme_color_line(line: &str) -> bool {
+    let Some(rest) = line.trim_start().strip_prefix("theme_color") else {
+        return false;
+    };
+    rest.trim_start().starts_with('=')
 }
 
 #[cfg(test)]
@@ -343,5 +364,47 @@ mod tests {
         // Rejected names must not have modified the file.
         let contents = std::fs::read_to_string(&path).unwrap();
         assert_eq!(contents, "default_provider = \"openai\"\n");
+    }
+
+    #[test]
+    fn save_theme_to_config_at_recognizes_a_commented_tui_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "default_provider = \"openai\"\n\n[tui] # theme settings\n[providers.openai]\n",
+        )
+        .unwrap();
+
+        save_theme_to_config_at(&path, "blue").unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        // Inserted into the existing (commented) [tui] section rather than
+        // appending a second, duplicate [tui] header at the end.
+        assert_eq!(
+            contents,
+            "default_provider = \"openai\"\n\n[tui] # theme settings\ntheme_color = \"blue\"\n[providers.openai]\n"
+        );
+    }
+
+    #[test]
+    fn save_theme_to_config_at_does_not_touch_a_similarly_prefixed_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "default_provider = \"openai\"\n\n[tui]\ntheme_color_backup = \"red\"\n[providers.openai]\n",
+        )
+        .unwrap();
+
+        save_theme_to_config_at(&path, "blue").unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        // theme_color_backup is left alone; the new theme_color key is
+        // appended at the end of the [tui] section instead of overwriting it.
+        assert_eq!(
+            contents,
+            "default_provider = \"openai\"\n\n[tui]\ntheme_color_backup = \"red\"\ntheme_color = \"blue\"\n[providers.openai]\n"
+        );
     }
 }
