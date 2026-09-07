@@ -190,6 +190,11 @@ impl AppConfig {
         if let Some(memory) = val.get_mut("memory").and_then(|v| v.as_object_mut()) {
             memory.remove("db_path");
         }
+        if let Some(obj) = val.as_object_mut() {
+            // Local filesystem path, not something an unauthenticated client
+            // needs; internal serialization (e.g. persisted config) keeps it.
+            obj.remove("data_dir");
+        }
         val
     }
 }
@@ -467,6 +472,7 @@ mod tests {
     fn to_public_json_redacts_secrets_and_local_paths() {
         let toml_str = r#"
             default_provider = "openai"
+            data_dir = "/Users/alice/.openheim"
             [providers.openai]
             api_base = "https://api.openai.com/v1"
             default_model = "gpt-4"
@@ -497,5 +503,13 @@ mod tests {
         assert_eq!(val["memory"]["embedding_provider"], "openai");
         assert_eq!(val["memory"]["embedding_model"], "text-embedding-3-small");
         assert_eq!(val["memory"]["top_k"], 7);
+
+        // data_dir is a local filesystem path, not something an
+        // unauthenticated client needs; it's stripped from the public view.
+        assert!(val.get("data_dir").is_none());
+        assert_eq!(
+            cfg.data_dir,
+            Some(std::path::PathBuf::from("/Users/alice/.openheim"))
+        );
     }
 }
