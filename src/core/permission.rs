@@ -152,8 +152,8 @@ mod tests {
 
     #[test]
     fn shell_approval_cannot_ride_a_different_command_sharing_its_first_word() {
-        // Regression test: first-word scoping let all of these share
-        // `git status`'s approval key.
+        // ExactArguments keys must scope to the full command: none of these
+        // may share `git status`'s approval key.
         let status = approval_key(
             ApprovalScope::ExactArguments,
             "execute_command",

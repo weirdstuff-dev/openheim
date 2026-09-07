@@ -219,10 +219,10 @@ mod tests {
 
     /// `config.toml.default`'s `[providers.openai]`/`[providers.anthropic]`
     /// sections are the ones actually shipped active-by-default (Gemini is
-    /// commented out, so it isn't valid TOML data to parse here) — this is
-    /// the regression test for the drift `BUILTIN_PROVIDER_DEFAULTS`'s doc
-    /// comment describes. If this fails, either the template or the
-    /// constant is stale; update whichever one is wrong.
+    /// commented out, so it isn't valid TOML data to parse here). Pins the
+    /// shipped template against `BUILTIN_PROVIDER_DEFAULTS` so the two
+    /// can't drift; if this fails, either the template or the constant is
+    /// stale — update whichever one is wrong.
     #[test]
     fn config_toml_default_matches_builtin_provider_defaults() {
         let config: AppConfig = toml::from_str(DEFAULT_CONFIG).unwrap();

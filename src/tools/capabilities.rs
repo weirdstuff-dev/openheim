@@ -1,8 +1,8 @@
 //! [`ToolCapabilities`]: the single declaration each [`super::ToolHandler`]
-//! makes about itself, replacing four independent places that used to
-//! hardcode tool names — Architect mode's allowlist, `approval_key`'s
-//! `execute_command` special case, ACP's tool-kind-for-UI mapping, and
-//! `SystemToolExecutor::build`'s shell-tool gate.
+//! makes about itself, consumed wherever a tool's coarse behavior matters —
+//! Architect mode's allowlist, `approval_key`'s `execute_command` special
+//! case, ACP's tool-kind-for-UI mapping, and `SystemToolExecutor::build`'s
+//! shell-tool gate.
 
 /// Coarse hint of what kind of action a tool performs. Mirrors
 /// `agent_client_protocol::schema::ToolKind`'s variant set without depending

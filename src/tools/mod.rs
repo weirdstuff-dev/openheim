@@ -340,7 +340,7 @@ pub(crate) mod test_support {
         }
     }
 
-    /// Never resolves on its own; used to prove cancellation aborts the wait
+    /// Never resolves on its own; proves cancellation aborts the wait
     /// on an unresponsive client rather than blocking the turn.
     pub(crate) struct HangingClientIo;
 

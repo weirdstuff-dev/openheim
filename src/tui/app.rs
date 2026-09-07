@@ -775,10 +775,9 @@ impl App {
     /// history via `SessionHandle::restore`'s `on_history` replay — which
     /// goes through the same ACP-shaped replay a wire client's `session/load`
     /// gets (see `replay_history_messages`), so thinking blocks and image
-    /// attachments show up instead of being silently dropped the way a raw
-    /// `Message`-block walk here used to. That also moves the history read
-    /// off the UI task and onto the agent task, where the rest of I/O
-    /// already lives — the actual message items arrive later as
+    /// attachments show up instead of being silently dropped. That also
+    /// keeps the history read off the UI task and on the agent task, where
+    /// the rest of I/O lives — the actual message items arrive later as
     /// `AgentUpdate::History` once the load completes.
     fn open_session(&mut self, meta: &ConversationMeta) {
         self.items.clear();

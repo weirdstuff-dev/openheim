@@ -77,7 +77,7 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
         let update_tx = update_tx.clone();
         // Captured separately from the `skills` moved into `App::new` below —
         // this copy lives inside the agent task so a `:new` command can spin
-        // up another session with the same skills, same as startup did.
+        // up another session with the same skills, matching startup.
         let session_skills = skills.clone();
         // `client.new_session()` always starts from the client's original
         // default config (see `AgentState::new_session`'s fallback), not

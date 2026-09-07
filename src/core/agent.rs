@@ -185,7 +185,7 @@ where
 
             // Phase 1b: collect every call's permission decision
             // concurrently, mirroring Phase 2's execution model — an
-            // interactive gate now sees every request up front instead of
+            // interactive gate sees every request up front instead of
             // one at a time. The ACP gate can answer them independently and
             // out of order; the TUI gate queues concurrent requests instead
             // of dropping them (see `App::handle_permission_request`), so
@@ -866,7 +866,7 @@ mod tests {
         assert_eq!(result.stop_reason, StopReason::Cancelled);
     }
 
-    /// LLM that never resolves on its own; used to prove cancellation aborts
+    /// LLM that never resolves on its own; proves cancellation aborts
     /// an in-flight call instead of waiting for it to finish.
     struct SlowLlm;
 
@@ -920,7 +920,7 @@ mod tests {
         assert_eq!(result.stop_reason, StopReason::Cancelled);
     }
 
-    /// ToolExecutor that never resolves; used to prove cancellation aborts an
+    /// ToolExecutor that never resolves; proves cancellation aborts an
     /// in-flight tool call (Phase 2) instead of waiting for it to finish.
     struct SlowToolExecutor;
 

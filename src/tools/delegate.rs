@@ -596,8 +596,9 @@ mod tests {
     }
 
     /// Subagents are built from a snapshot of the registry taken before
-    /// `delegate_task` was added, so they can never delegate again. This is
-    /// the wiring `AgentState::new` relies on; keep it explicit here.
+    /// `delegate_task` registers itself, so they can never delegate again.
+    /// This is the wiring `AgentState::new` relies on; keep it explicit
+    /// here.
     #[test]
     fn subagents_never_see_delegate_task() {
         let llm = Arc::new(MockLlm::new(vec![]));

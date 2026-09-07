@@ -346,10 +346,11 @@ impl AgentState {
         // Full checkpoint before the turn starts: durably records this
         // turn's new user message even if the turn crashes before producing
         // anything else, and — since `save_conversation` always rewrites the
-        // message log from scratch — transparently upgrades a pre-split-
-        // format conversation (see `memory::history::HistoryManager`'s doc
-        // comment) so the `append_message` calls below have a `.jsonl` log
-        // that already reflects everything up to this point to append onto.
+        // message log from scratch — transparently upgrades a legacy
+        // single-file conversation (see `memory::history::HistoryManager`'s
+        // doc comment) so the `append_message` calls below have a `.jsonl`
+        // log that already reflects everything up to this point to append
+        // onto.
         self.persist_conversation(&conversation, "persist conversation before turn start")
             .await;
 
@@ -568,14 +569,13 @@ mod prompt_lease_ordering_tests {
         }
     }
 
-    // Regression test for the ordering `Self::prompt` relies on: the
-    // in-process `prompt_lock` must be acquired (and fail fast on an
-    // overlapping call) *before* the cross-process `SessionLease` is
-    // acquired. Getting this backwards let an overlapping, rejected
-    // `session/prompt` call create its own lease guard and then drop it
-    // (`SessionLease::drop` can't tell that apart from a legitimately
-    // superseded one) — deleting the still-running accepted turn's lockfile
-    // out from under it.
+    // The ordering `Self::prompt` relies on: the in-process `prompt_lock`
+    // must be acquired (and fail fast on an overlapping call) *before* the
+    // cross-process `SessionLease` is acquired. Getting this backwards lets
+    // an overlapping, rejected `session/prompt` call create its own lease
+    // guard and then drop it (`SessionLease::drop` can't tell that apart
+    // from a legitimately superseded one) — deleting the still-running
+    // accepted turn's lockfile out from under it.
     #[test]
     fn overlapping_prompt_in_same_process_never_touches_the_accepted_turns_lease() {
         let dir = tempdir().unwrap();
@@ -584,7 +584,7 @@ mod prompt_lease_ordering_tests {
         let lock_path = dir.path().join(format!("{chat_id}.lock"));
         let state = sample_session_state(chat_id);
 
-        // Turn A: accepted, in the same order `Self::prompt` now uses.
+        // Turn A: accepted, in the order `Self::prompt` uses.
         let _prompt_guard_a = state.try_acquire_prompt_lock("s1").unwrap();
         let _lease_a = history.acquire_lease(&chat_id).unwrap();
         assert!(lock_path.exists());

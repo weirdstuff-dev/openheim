@@ -208,9 +208,9 @@ fn is_disallowed_ip(ip: IpAddr) -> bool {
             // the IPv4 checks too. `to_ipv4_mapped()` covers the first form;
             // `ipv4_compatible` covers the second, deprecated (RFC 4291) one
             // that `to_ipv4_mapped()` doesn't — between them, `::` and `::1`
-            // are still matched too (as 0.0.0.0 and 0.0.0.1, neither of which
-            // is IPv4-loopback), same as the old `to_ipv4()` did, so this is
-            // additive, not a replacement for the native checks below.
+            // are still matched too (as 0.0.0.0 and 0.0.0.1, neither of
+            // which is IPv4-loopback), so this is additive, not a
+            // replacement for the native checks below.
             let embedded_v4 = v6.to_ipv4_mapped().or_else(|| ipv4_compatible(&v6));
             let embeds_disallowed_ipv4 =
                 embedded_v4.is_some_and(|v4| is_disallowed_ip(IpAddr::V4(v4)));

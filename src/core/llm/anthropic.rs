@@ -25,8 +25,9 @@ pub struct AnthropicClient {
     model: String,
     max_tokens: u32,
     /// Whether to request extended thinking. Resolved by the caller from
-    /// `[providers.<name>].thinking` (see [`crate::config::ProviderConfig::resolve_thinking`]) —
-    /// this client no longer guesses support from the model name.
+    /// `[providers.<name>].thinking` (see
+    /// [`crate::config::ProviderConfig::resolve_thinking`]); the client
+    /// makes no model-name-based guess of its own.
     thinking: bool,
 }
 
@@ -366,10 +367,10 @@ fn extract_system(messages: &[Message]) -> Option<String> {
 
 /// Returns Anthropic's adaptive-thinking request config when `enabled`.
 ///
-/// Adaptive thinking (`type: "adaptive"`) replaced the old fixed-budget form
-/// (`type: "enabled", budget_tokens: N`) starting with Claude 4.6; the old
-/// form now returns a 400 on Opus 4.7/4.8, Sonnet 5, and Fable 5, and is
-/// deprecated on Opus 4.6 / Sonnet 4.6. Models predating adaptive thinking
+/// Adaptive thinking (`type: "adaptive"`) is the form current Claude models
+/// accept; the fixed-budget form (`type: "enabled", budget_tokens: N`)
+/// returns a 400 on Opus 4.7/4.8, Sonnet 5, and Fable 5, and is deprecated
+/// on Opus 4.6 / Sonnet 4.6. Models predating adaptive thinking
 /// (Sonnet 3.7 and earlier Claude 4 releases) only support the fixed-budget
 /// form and reject adaptive thinking outright — set `thinking = "off"` on
 /// the provider entry for those (see [`crate::config::ProviderConfig::resolve_thinking`]).
@@ -419,9 +420,7 @@ impl LlmClient for AnthropicClient {
     /// Implemented in terms of [`Self::send_streaming`] with a discarded
     /// channel: Anthropic's streaming and non-streaming responses carry the
     /// same information, so there is no reason to maintain a second
-    /// request/response code path (and the JSON non-streaming path used to
-    /// silently skip `thinking_config`, leaving thinking enabled only for
-    /// streaming callers).
+    /// request/response code path.
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
         let (chunk_tx, chunk_rx) = mpsc::unbounded_channel();
         // Dropped immediately, before any chunk is sent: an unbounded
@@ -765,10 +764,8 @@ mod tests {
 
     #[test]
     fn build_request_always_streams_and_respects_thinking() {
-        // Regression test for the non-streaming `send()` bug: it used to build
-        // its own request with `stream: false, thinking: None`, so thinking
-        // silently never worked outside of `send_streaming`. `build_request`
-        // is now the single source for both, so this holds for both callers.
+        // `build_request` is the single request source for both `send` and
+        // `send_streaming`; both must stream and honor the thinking config.
         let request = client_with_thinking(true)
             .build_request(&[Message::user("hi")], &[])
             .unwrap();
