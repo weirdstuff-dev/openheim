@@ -36,6 +36,10 @@
 - **`AppConfig.theme_color` moved to `AppConfig.tui.theme_color`** (a new `[tui]` table, `TuiConfig { theme_color: Option<String> }`) — a TUI display preference doesn't belong at the config's top level next to provider/agent settings. `save_theme_to_config`/`save_theme_to_config_at` (the `:theme`-triggered file writer) now find/update `theme_color` bounded by an existing `[tui]` section, or append a fresh `[tui]` section at the end of the file when there isn't one — still line-based munging, no `toml_edit` dependency.
 - **`build_programmatic` (the `.provider()`/`.api_key()`/`.api_base()` builder path) now funnels its `AgentConfig` through `AppConfig::resolve_provider_default`** instead of hand-assembling a second copy of the same field set alongside `AppConfig` — the same `validate_provider` checks the file-based config path always ran (non-empty `api_base`, `http://` + `api_key` rejected, scheme required) now apply uniformly to the programmatic path too. A programmatic client built with an `http://` `api_base` plus an API key now correctly errors instead of silently sending credentials unencrypted.
 
+### Fixed
+
+- **`cargo test --doc --no-default-features` (and every feature combo without `acp`) failed to compile.** The crate-root Quick Start doc example called `SessionHandle::prompt`, which is `#[cfg(feature = "acp")]`-gated, without the example itself being gated to that feature — so building docs/tests with `default-features = false` and no `acp` broke on the one example every `cargo doc`/`docs.rs` reader sees first. Switched the example to `prompt_events` (the always-on, non-ACP-typed API) instead of gating it, since that's the API embedders without the `acp` feature actually have available.
+
 ### Breaking changes (library)
 
 - **`tools::ToolHandler::execute` gained a `turn: &TurnContext<'_>` parameter**; custom tools must accept it (ignore it with `_turn` if unused).
