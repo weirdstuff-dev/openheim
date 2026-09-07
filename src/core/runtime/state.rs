@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    config::{AgentConfig, AppConfig, build_http_client, create_client},
+    config::{AgentConfig, AppConfig, build_http_client, config_dir, create_client},
     core::{
         agent::run_agent_streaming_with_history,
         client_io::ClientIo,
@@ -101,7 +101,11 @@ impl AgentState {
         // It's built from a snapshot of the registry taken *before* it
         // registers itself, so subagents structurally never see
         // `delegate_task` and can't delegate recursively.
-        let profiles = SubagentLoader::new()?.load()?;
+        let agents_dir = match app_config.data_dir.clone() {
+            Some(dir) => dir.join("agents"),
+            None => config_dir()?.join("agents"),
+        };
+        let profiles = SubagentLoader::with_dir(agents_dir).load()?;
         let base: Arc<dyn ToolExecutor> = Arc::new(sys_executor.clone());
         sys_executor.register(Box::new(DelegateTool::new(
             base,

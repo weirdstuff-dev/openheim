@@ -79,12 +79,24 @@ impl SubagentLoader {
         Ok(Self { agents_dir: dir })
     }
 
+    /// Creates a `SubagentLoader` backed by a caller-chosen directory, e.g.
+    /// for an injected `AppConfig::data_dir` or in tests. Does not create
+    /// the directory; [`Self::load`] returns no profiles if it is absent.
+    pub fn with_dir(dir: PathBuf) -> Self {
+        Self { agents_dir: dir }
+    }
+
     /// Loads every valid `.md` profile in the agents directory, sorted by name.
     ///
-    /// A file whose frontmatter fails to parse is skipped with a warning rather
-    /// than failing the whole load — one malformed profile shouldn't prevent the
-    /// agent from starting.
+    /// Returns no profiles (rather than an error) if the directory doesn't
+    /// exist, so callers aren't forced to create it just to check for
+    /// profiles. A file whose frontmatter fails to parse is skipped with a
+    /// warning rather than failing the whole load — one malformed profile
+    /// shouldn't prevent the agent from starting.
     pub fn load(&self) -> Result<Vec<AgentProfile>> {
+        if !self.agents_dir.exists() {
+            return Ok(Vec::new());
+        }
         let mut profiles = Vec::new();
         for entry in std::fs::read_dir(&self.agents_dir)? {
             let path = entry?.path();
@@ -226,5 +238,22 @@ You are a meticulous code reviewer.\n";
         assert_eq!(profile.tools, None);
         assert_eq!(profile.max_iterations, None);
         assert_eq!(profile.system_prompt, "Prompt body.");
+    }
+
+    #[test]
+    fn load_returns_empty_when_dir_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let loader = SubagentLoader::with_dir(dir.path().join("agents"));
+        assert_eq!(loader.load().unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn with_dir_loads_profiles_from_a_custom_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("reviewer.md"), "Review code.").unwrap();
+        let loader = SubagentLoader::with_dir(dir.path().to_path_buf());
+        let profiles = loader.load().unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "reviewer");
     }
 }

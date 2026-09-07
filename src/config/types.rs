@@ -45,6 +45,11 @@ pub struct AppConfig {
     /// to make `search_memory` semantic.
     #[serde(default)]
     pub memory: Option<MemoryConfig>,
+    /// Overrides where history, skills, `system.md`, subagent profiles, and
+    /// (absent an explicit `memory.db_path`) the memory database live.
+    /// Defaults to `~/.openheim` when unset, preserving today's behaviour.
+    #[serde(default)]
+    pub data_dir: Option<PathBuf>,
 }
 
 fn default_allow_shell() -> bool {

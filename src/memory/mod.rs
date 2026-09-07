@@ -27,6 +27,7 @@ pub use skills::SkillsManager;
 pub use system::SystemLoader;
 
 use crate::error::Result;
+use std::path::Path;
 use uuid::Uuid;
 
 /// Holds the conversation history store and skill definitions used to build agent prompts.
@@ -43,16 +44,48 @@ pub struct MemoryContext {
 }
 
 impl MemoryContext {
-    /// Initialise history, skills, and system identity from the default openheim data directory.
+    /// Initialise history, skills, and system identity from `data_dir`, or
+    /// `~/.openheim` when `data_dir` is `None`.
     ///
     /// `default_skills` are merged with any per-session skills on each new conversation.
-    pub fn new(default_skills: Vec<String>) -> Result<Self> {
-        Ok(Self {
-            history: HistoryManager::new()?,
-            skills: SkillsManager::new()?,
-            system: SystemLoader::new()?,
+    pub fn new(default_skills: Vec<String>, data_dir: Option<&Path>) -> Result<Self> {
+        match data_dir {
+            Some(dir) => {
+                let history_dir = dir.join("history");
+                let skills_dir = dir.join("skills");
+                std::fs::create_dir_all(&history_dir)?;
+                std::fs::create_dir_all(&skills_dir)?;
+                Ok(Self::from_parts(
+                    HistoryManager::with_dir(history_dir),
+                    SkillsManager::with_dir(skills_dir),
+                    SystemLoader::with_dir(dir.to_path_buf()),
+                    default_skills,
+                ))
+            }
+            None => Ok(Self {
+                history: HistoryManager::new()?,
+                skills: SkillsManager::new()?,
+                system: SystemLoader::new()?,
+                default_skills,
+            }),
+        }
+    }
+
+    /// Assembles a `MemoryContext` from already-built parts, e.g. when an
+    /// embedder wants managers pointed at directories that don't share a
+    /// common parent.
+    pub fn from_parts(
+        history: HistoryManager,
+        skills: SkillsManager,
+        system: SystemLoader,
+        default_skills: Vec<String>,
+    ) -> Self {
+        Self {
+            history,
+            skills,
+            system,
             default_skills,
-        })
+        }
     }
 
     /// Load or create a conversation and build the prompt context for an agent turn.
@@ -140,5 +173,30 @@ mod tests {
         let defaults = vec!["rules".to_string(), "rules".to_string()];
         let merged = merge_skills(&defaults, &[]);
         assert_eq!(merged, vec!["rules"]);
+    }
+
+    #[test]
+    fn new_with_data_dir_creates_history_and_skills_subdirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = MemoryContext::new(vec![], Some(dir.path())).unwrap();
+        assert!(dir.path().join("history").is_dir());
+        assert!(dir.path().join("skills").is_dir());
+        assert!(ctx.system.load().is_err(), "no system.md written yet");
+    }
+
+    #[test]
+    fn from_parts_assembles_a_context_from_independent_managers() {
+        let history_dir = tempfile::tempdir().unwrap();
+        let skills_dir = tempfile::tempdir().unwrap();
+        let system_dir = tempfile::tempdir().unwrap();
+        std::fs::write(system_dir.path().join("system.md"), "I am the agent.").unwrap();
+        let ctx = MemoryContext::from_parts(
+            HistoryManager::with_dir(history_dir.path().to_path_buf()),
+            SkillsManager::with_dir(skills_dir.path().to_path_buf()),
+            SystemLoader::with_dir(system_dir.path().to_path_buf()),
+            vec!["rust".to_string()],
+        );
+        assert_eq!(ctx.system.load().unwrap(), "I am the agent.");
+        assert_eq!(ctx.default_skills, vec!["rust".to_string()]);
     }
 }

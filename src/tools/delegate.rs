@@ -334,6 +334,7 @@ mod tests {
             work_dir: None,
             allow_shell: false,
             memory: None,
+            data_dir: None,
         }
     }
 

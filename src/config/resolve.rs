@@ -195,6 +195,7 @@ mod tests {
             work_dir: None,
             allow_shell: true,
             memory: None,
+            data_dir: None,
         }
     }
 
@@ -239,6 +240,7 @@ mod tests {
             work_dir: None,
             allow_shell: true,
             memory: None,
+            data_dir: None,
         };
         let err = config.resolve(None).unwrap_err();
         assert!(err.to_string().contains("nonexistent"));

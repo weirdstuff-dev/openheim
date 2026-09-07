@@ -371,7 +371,10 @@ impl HistoryManager {
         Ok(metas)
     }
 
-    #[cfg(test)]
+    /// Creates a `HistoryManager` backed by a caller-chosen directory, e.g.
+    /// for an injected [`AppConfig::data_dir`](crate::config::AppConfig) or
+    /// in tests. Does not create the directory; the caller is responsible
+    /// for it existing.
     pub fn with_dir(dir: std::path::PathBuf) -> Self {
         Self { history_dir: dir }
     }

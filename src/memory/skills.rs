@@ -115,9 +115,9 @@ impl SkillsManager {
         Ok(names)
     }
 
-    /// Test-only constructor pointing at a specific skills directory
-    /// (mirrors `HistoryManager::with_dir`).
-    #[cfg(test)]
+    /// Creates a `SkillsManager` backed by a caller-chosen directory, e.g.
+    /// for an injected `AppConfig::data_dir` or in tests. Does not create
+    /// the directory; the caller is responsible for it existing.
     pub fn with_dir(dir: PathBuf) -> Self {
         Self { skills_dir: dir }
     }

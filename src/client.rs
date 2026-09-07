@@ -430,6 +430,7 @@ pub struct OpenheimBuilder {
     default_skills: Vec<String>,
     work_dir: Option<PathBuf>,
     allow_shell: Option<bool>,
+    data_dir: Option<PathBuf>,
     tools: Vec<Box<dyn ToolHandler>>,
 }
 
@@ -512,6 +513,16 @@ impl OpenheimBuilder {
         self
     }
 
+    /// Directory backing history, skills, `system.md`, subagent profiles,
+    /// and (absent an explicit `[memory].db_path`) the memory database.
+    /// Overrides `data_dir` from the config file. Defaults to `~/.openheim`
+    /// when not set — lets two agents share a process with separate state,
+    /// or a sandboxed caller keep everything project-local.
+    pub fn data_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.data_dir = Some(path.into());
+        self
+    }
+
     /// Register a custom tool (see [`crate::tools::ToolHandler`]). Registered
     /// alongside the built-ins and any MCP-sourced tools, and subject to the
     /// same `work_dir`/`allow_shell` sandbox boundary. Call multiple times to
@@ -586,8 +597,14 @@ impl OpenheimBuilder {
         if let Some(shell) = self.allow_shell {
             app_config.allow_shell = shell;
         }
+        if let Some(dir) = self.data_dir {
+            app_config.data_dir = Some(dir);
+        }
 
-        let memory = MemoryContext::new(app_config.default_skills.clone())?;
+        let memory = MemoryContext::new(
+            app_config.default_skills.clone(),
+            app_config.data_dir.as_deref(),
+        )?;
         let state = Arc::new(AgentState::new(agent_config, app_config, memory, self.tools).await?);
         Ok(OpenheimClient { state })
     }
@@ -636,6 +653,7 @@ fn build_programmatic(
         work_dir: None,
         allow_shell: false,
         memory: None,
+        data_dir: None,
     };
 
     let agent_config = AgentConfig {
