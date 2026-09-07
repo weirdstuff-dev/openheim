@@ -176,11 +176,12 @@ pub enum FsResponse {
     Error { message: String },
 }
 
-/// Loads configuration, initialises the agent runtime, and starts the HTTP/WebSocket server.
+/// Starts the HTTP/WebSocket server for `client` — caller-built, so an
+/// embedder with custom tools or a custom `LlmClient` can use this transport
+/// too.
 ///
 /// Blocks until a Ctrl-C signal is received, then shuts down gracefully.
-pub async fn serve(host: String, port: u16) -> crate::error::Result<()> {
-    let client = OpenheimClient::builder().build().await?;
+pub async fn serve(client: OpenheimClient, host: String, port: u16) -> crate::error::Result<()> {
     let state = client.state().clone();
 
     let cors = CorsLayer::new()

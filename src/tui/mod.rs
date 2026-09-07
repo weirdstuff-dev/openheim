@@ -42,11 +42,12 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
-    let client = OpenheimClient::builder().build().await?;
+/// Runs the TUI against `client` — caller-built, so an embedder with custom
+/// tools or a custom `LlmClient` can use this transport too.
+pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::Result<()> {
     // Snapshots for `:config`/`:models` — read once here instead of a second
     // `load_config()` duplicating the one `OpenheimClient::builder().build()`
-    // already did internally.
+    // the caller did.
     let agent_config = client.state().config.clone();
     let app_config = client.state().app_config.clone();
 

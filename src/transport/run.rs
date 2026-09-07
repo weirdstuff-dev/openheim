@@ -22,14 +22,10 @@ use crate::{acp, client::OpenheimClient};
 /// Runs the agent against `prompt` using an in-process ACP session and prints
 /// the streamed response to stdout.
 ///
-/// `model` overrides the default model from the configuration file. If `None`,
-/// the provider's configured default is used.
-pub async fn run_headless(prompt: String, model: Option<String>) -> crate::error::Result<()> {
-    let mut builder = OpenheimClient::builder();
-    if let Some(model) = model {
-        builder = builder.model(model);
-    }
-    let client = builder.build().await?;
+/// `client` is caller-built — via `OpenheimClient::builder().model(..)` for a
+/// model override, or with custom tools / a custom `LlmClient` an embedder
+/// needs — so this transport doesn't have to hand-roll its own build path.
+pub async fn run_headless(client: OpenheimClient, prompt: String) -> crate::error::Result<()> {
     let state = client.state().clone();
 
     let (server_half, client_half) = tokio::io::duplex(65536);

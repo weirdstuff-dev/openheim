@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::{EnvFilter, fmt};
 
 use openheim::{
+    OpenheimClient,
     config::init_config,
     transport::{run, stdio, ws},
     tui,
@@ -45,6 +46,27 @@ enum Command {
     Init,
 }
 
+/// Builds the client every subcommand below runs against — the one place
+/// this binary assembles config load, resolve, `MemoryContext::new`, and
+/// `AgentState::new`, so each transport just takes the finished
+/// `OpenheimClient` instead of hand-rolling its own build path. `model`
+/// overrides the config's default model (only `openheim run` uses it).
+async fn build_client(model: Option<String>) -> openheim::Result<OpenheimClient> {
+    let mut builder = OpenheimClient::builder();
+    if let Some(model) = model {
+        builder = builder.model(model);
+    }
+    builder.build().await
+}
+
+/// Prints the error and exits(1) — the uniform failure path every
+/// subcommand below shares, whether the failure is building the client or
+/// running the transport.
+fn die(e: impl std::fmt::Display) -> ! {
+    eprintln!("Error: {e}");
+    std::process::exit(1);
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
@@ -56,27 +78,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         None => {
-            if let Err(e) = tui::run(cli.skills).await {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
+            let client = build_client(None).await.unwrap_or_else(|e| die(e));
+            if let Err(e) = tui::run(client, cli.skills).await {
+                die(e);
             }
         }
         Some(Command::Acp) => {
-            if let Err(e) = stdio::run().await {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
+            let client = build_client(None).await.unwrap_or_else(|e| die(e));
+            if let Err(e) = stdio::run(client).await {
+                die(e);
             }
         }
         Some(Command::Run { prompt, model }) => {
-            if let Err(e) = run::run_headless(prompt, model).await {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
+            let client = build_client(model).await.unwrap_or_else(|e| die(e));
+            if let Err(e) = run::run_headless(client, prompt).await {
+                die(e);
             }
         }
         Some(Command::Serve { host, port }) => {
-            if let Err(e) = ws::serve(host, port).await {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
+            let client = build_client(None).await.unwrap_or_else(|e| die(e));
+            if let Err(e) = ws::serve(client, host, port).await {
+                die(e);
             }
         }
         Some(Command::Init) => match init_config() {
@@ -84,10 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Config file created at {}", path.display());
                 println!("Edit it to configure your LLM providers.");
             }
-            Err(e) => {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            }
+            Err(e) => die(e),
         },
     }
 
