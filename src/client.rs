@@ -19,7 +19,7 @@ use crate::{
         client_io::{ClientIo, NoClientIo},
         models::{ContentBlock, StreamEvent},
         permission::{AllowAll, PermissionGate},
-        runtime::AgentState,
+        runtime::{AgentState, LoadedSession},
     },
     error::Result,
     mcp::McpServerStatus,
@@ -50,11 +50,15 @@ impl OpenheimClient {
     }
 
     /// The shared runtime handle behind this client. `pub(crate)` — for the
-    /// transports (`transport::{run,stdio,ws}`), which need the raw
-    /// `AgentState` to hand to `acp::serve`, so every entry point builds it
-    /// the same way (config load, resolve, `MemoryContext::new`, custom
-    /// tools) instead of each hand-rolling that sequence.
-    #[cfg(feature = "acp")]
+    /// ACP-based transports (`transport::{run,stdio,ws}`), which need the
+    /// raw `AgentState` to hand to `acp::serve`, so every entry point builds
+    /// it the same way (config load, resolve, `MemoryContext::new`, custom
+    /// tools) instead of each hand-rolling that sequence; and for the TUI,
+    /// which reads `config`/`app_config`/`executor` off it directly for
+    /// `:config`/`:models` and the permission gate. `AgentState` itself has
+    /// no `acp` dependency, so this accessor doesn't need the feature either
+    /// — just one of its two callers.
+    #[cfg(any(feature = "acp", feature = "tui"))]
     pub(crate) fn state(&self) -> &Arc<AgentState> {
         &self.state
     }
@@ -90,7 +94,24 @@ impl OpenheimClient {
     /// ([`AllowAll`]) and client I/O ([`NoClientIo`]) — apply
     /// [`SessionHandle::permission_gate`]/[`SessionHandle::client_io`] to it
     /// afterwards if needed. Restoring through an *existing* handle instead
-    /// inherits that handle's gate/client_io.
+    /// inherits that handle's gate/client_io. Doesn't require the `acp`
+    /// feature — replay is entirely up to the caller, via the returned
+    /// [`LoadedSession`]'s `messages`. The ACP-typed counterpart, built on
+    /// this, is [`Self::load_session`].
+    pub async fn resume_session(
+        &self,
+        session_id: &str,
+        cwd: PathBuf,
+    ) -> Result<(SessionHandle, LoadedSession)> {
+        SessionHandle::new(String::new(), Arc::clone(&self.state))
+            .resume(session_id, cwd)
+            .await
+    }
+
+    /// [`Self::resume_session`], replaying the loaded history as ACP
+    /// `SessionUpdate`s via `on_history` (one call per message, in the same
+    /// shape and order a live turn would have produced — including thinking
+    /// blocks tagged via `_meta.kind`); pass a no-op callback to skip that.
     #[cfg(feature = "acp")]
     pub async fn load_session(
         &self,
@@ -354,14 +375,38 @@ impl SessionHandle {
     /// Restore a persisted session as the active session for this handle.
     ///
     /// Registers the conversation in the agent state so subsequent `prompt`
-    /// calls continue from its history. `on_history` is called once for each
-    /// message in the conversation (as `SessionUpdate::UserMessageChunk` /
-    /// `AgentMessageChunk` / `ToolCall` / `ToolCallUpdate`, in the same shape
-    /// and order a live turn would have produced — including thinking blocks
-    /// tagged via `_meta.kind`) so callers can replay it in their UI; pass a
-    /// no-op callback to skip that. The returned handle inherits this
-    /// handle's permission gate and client I/O — the load-and-defaults
-    /// counterpart is [`OpenheimClient::load_session`].
+    /// calls continue from its history. Returns the new handle (inheriting
+    /// this handle's permission gate and client I/O) plus the loaded
+    /// session's mode, message history, and any fallback warning (set when
+    /// the session's saved provider/model no longer resolves) — replaying
+    /// that history is entirely up to the caller. Doesn't require the `acp`
+    /// feature. The load-and-defaults counterpart is
+    /// [`OpenheimClient::resume_session`]; the ACP-typed wrapper around this
+    /// is [`Self::restore`].
+    pub async fn resume(
+        &self,
+        session_id: &str,
+        cwd: std::path::PathBuf,
+    ) -> Result<(SessionHandle, LoadedSession)> {
+        let loaded = self.state.load_session(session_id, cwd).await?;
+        Ok((
+            SessionHandle {
+                id: session_id.to_string(),
+                state: Arc::clone(&self.state),
+                permission_gate: self.permission_gate.clone(),
+                client_io: self.client_io.clone(),
+            },
+            loaded,
+        ))
+    }
+
+    /// [`Self::resume`], replaying the loaded history as ACP `SessionUpdate`s
+    /// via `on_history` (`UserMessageChunk` / `AgentMessageChunk` /
+    /// `ToolCall` / `ToolCallUpdate`, in the same shape and order a live turn
+    /// would have produced — including thinking blocks tagged via
+    /// `_meta.kind`) so callers can replay it in their UI; pass a no-op
+    /// callback to skip that. The load-and-defaults counterpart is
+    /// [`OpenheimClient::load_session`].
     #[cfg(feature = "acp")]
     pub async fn restore(
         &self,
@@ -369,7 +414,7 @@ impl SessionHandle {
         cwd: std::path::PathBuf,
         mut on_history: impl FnMut(SessionUpdate) + Send,
     ) -> Result<SessionHandle> {
-        let loaded = self.state.load_session(session_id, cwd).await?;
+        let (handle, loaded) = self.resume(session_id, cwd).await?;
         if let Some(warning) = loaded.warning {
             on_history(SessionUpdate::AgentMessageChunk(
                 agent_client_protocol::schema::ContentChunk::new(
@@ -382,12 +427,7 @@ impl SessionHandle {
             self.state.executor.as_ref(),
             &mut on_history,
         );
-        Ok(SessionHandle {
-            id: session_id.to_string(),
-            state: Arc::clone(&self.state),
-            permission_gate: self.permission_gate.clone(),
-            client_io: self.client_io.clone(),
-        })
+        Ok(handle)
     }
 }
 
@@ -692,5 +732,41 @@ mod tests {
             Some(dir.path().to_path_buf())
         );
         assert!(!client.state.app_config.config_path.as_os_str().is_empty());
+    }
+
+    /// `resume_session` (and by extension `SessionHandle::resume`) works
+    /// without the `acp` feature — no `SessionUpdate`, no ACP replay, just
+    /// the persisted `Message`s straight from `HistoryManager`. Writes a
+    /// conversation directly via `client.memory().history` (mock-free, no
+    /// LLM call) and resumes it by id.
+    #[tokio::test]
+    async fn resume_session_loads_a_conversation_written_via_history_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = OpenheimClient::builder()
+            .provider("openai")
+            .api_key("test-key")
+            .model("gpt-4o")
+            .data_dir(dir.path())
+            .build()
+            .await
+            .unwrap();
+
+        let history = client.memory().history.clone();
+        let mut conv = history
+            .create_conversation(Some("gpt-4o".into()), Some("openai".into()), vec![])
+            .unwrap();
+        conv.messages.push(crate::core::models::Message::user("hi"));
+        conv.messages
+            .push(crate::core::models::Message::assistant("hello there"));
+        history.save_conversation(&conv).unwrap();
+
+        let (handle, loaded) = client
+            .resume_session(&conv.meta.id.to_string(), dir.path().to_path_buf())
+            .await
+            .unwrap();
+
+        assert_eq!(handle.id, conv.meta.id.to_string());
+        assert_eq!(loaded.messages, conv.messages);
+        assert!(loaded.warning.is_none());
     }
 }

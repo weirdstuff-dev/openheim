@@ -31,8 +31,9 @@ default = ["cli"]
 # needs the multi-threaded runtime and its attribute macro; neither is needed
 # by the library itself (an embedder brings its own runtime).
 cli = ["dep:clap", "dep:tracing-subscriber", "server", "tui", "rag", "acp", "tokio/rt-multi-thread", "tokio/macros"]
-# Terminal UI (`openheim::tui`). Implies `acp`.
-tui = ["dep:crossterm", "dep:ratatui", "dep:unicode-width", "dep:unicode-segmentation", "acp"]
+# Terminal UI (`openheim::tui`). Doesn't need `acp` — session resume and
+# live turns both use core's own (non-ACP) types.
+tui = ["dep:crossterm", "dep:ratatui", "dep:unicode-width", "dep:unicode-segmentation"]
 # Agent Client Protocol (`openheim::acp`, `openheim::transport::{run,stdio,ws}`).
 acp = ["dep:agent-client-protocol", "dep:agent-client-protocol-tokio"]
 # WebSocket/REST server (`openheim::transport::ws`). `tokio/signal` backs the

@@ -7,7 +7,6 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::schema::{ContentBlock, SessionUpdate, ToolCallStatus};
 use crossterm::{
     cursor::Show,
     event::{
@@ -137,14 +136,15 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
                                 // history replay isn't "live" the way a turn is,
                                 // and batching means the app only clears/repaints
                                 // once instead of on every historical message.
-                                let mut history = Vec::new();
-                                match session
-                                    .restore(&session_id, cwd, |update| {
-                                        history.extend(session_update_to_chat_item(update));
-                                    })
-                                    .await
-                                {
-                                    Ok(restored) => {
+                                match session.resume(&session_id, cwd).await {
+                                    Ok((restored, loaded)) => {
+                                        let mut history = Vec::new();
+                                        if let Some(warning) = loaded.warning {
+                                            history.push(ChatItem::AssistantMessage(warning));
+                                        }
+                                        for msg in &loaded.messages {
+                                            history.extend(message_to_chat_items(msg));
+                                        }
                                         history.push(ChatItem::SystemInfo(
                                             "─── session restored".to_string(),
                                         ));
@@ -314,65 +314,59 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
     Ok(())
 }
 
-/// Converts one `SessionUpdate` from a history replay (`SessionHandle::restore`'s
-/// `on_history` callback) into the `ChatItem` a live turn would have produced
-/// for the equivalent content — the same mapping `App::handle_stream_event`
-/// applies to a live turn's `StreamEvent`s, just starting from the ACP shape
-/// `replay_history_messages` replays persisted messages as instead (there's
-/// no live `StreamEvent` for "here's a message from a past turn"). Unlike the
-/// raw `Message`-block walk this replaces, an image attachment isn't silently
-/// dropped — it renders as a placeholder line, since the terminal can't
-/// inline it.
-fn session_update_to_chat_item(update: SessionUpdate) -> Option<ChatItem> {
-    match update {
-        SessionUpdate::UserMessageChunk(chunk) => match chunk.content {
-            ContentBlock::Text(t) => Some(ChatItem::UserMessage(t.text)),
-            ContentBlock::Image(_) => Some(ChatItem::SystemInfo("[image attached]".to_string())),
-            _ => None,
-        },
-        SessionUpdate::AgentMessageChunk(chunk) => match chunk.content {
-            ContentBlock::Text(t) => {
-                let is_thinking = t
-                    .meta
-                    .as_ref()
-                    .and_then(|m| m.get("kind"))
-                    .and_then(|v| v.as_str())
-                    == Some("thinking");
-                if is_thinking {
-                    Some(ChatItem::Thinking(t.text))
-                } else {
-                    Some(ChatItem::AssistantMessage(t.text))
+/// Converts one persisted [`Message`](crate::core::models::Message) from a
+/// history replay (`SessionHandle::resume`'s `LoadedSession::messages`) into
+/// the `ChatItem`s a live turn would have produced for the equivalent
+/// content — the same mapping `App::handle_stream_event` applies to a live
+/// turn's `StreamEvent`s, just walking the message's content blocks directly
+/// instead of decoding ACP's `SessionUpdate` vocabulary (there's no live
+/// `StreamEvent` for "here's a message from a past turn"), so this works
+/// without the `acp` feature. An image attachment isn't silently dropped —
+/// it renders as a placeholder line, since the terminal can't inline it.
+fn message_to_chat_items(msg: &crate::core::models::Message) -> Vec<ChatItem> {
+    use crate::core::models::{ContentBlock, Role};
+
+    let mut items = Vec::new();
+    match msg.role {
+        Role::User => {
+            // Every block, not just `msg.text()` (which only concatenates
+            // `Text` blocks), so an image attached to the prompt is
+            // restored alongside the text instead of silently dropped.
+            for block in &msg.content {
+                match block {
+                    ContentBlock::Text { text } => items.push(ChatItem::UserMessage(text.clone())),
+                    ContentBlock::Image { .. } => {
+                        items.push(ChatItem::SystemInfo("[image attached]".to_string()));
+                    }
+                    _ => {}
                 }
             }
-            _ => None,
-        },
-        SessionUpdate::ToolCall(tc) => {
-            let args = tc
-                .raw_input
-                .as_ref()
-                .map(|v| v.to_string())
-                .unwrap_or_default();
-            Some(ChatItem::ToolCall {
-                name: tc.title.clone(),
-                args,
-            })
         }
-        SessionUpdate::ToolCallUpdate(tcu) => {
-            if matches!(
-                tcu.fields.status,
-                Some(ToolCallStatus::Completed) | Some(ToolCallStatus::Failed)
-            ) {
-                let is_error = matches!(tcu.fields.status, Some(ToolCallStatus::Failed));
-                let result = match tcu.fields.raw_output {
-                    Some(serde_json::Value::String(s)) => s,
-                    Some(v) => v.to_string(),
-                    None => String::new(),
-                };
-                Some(ChatItem::ToolResult { result, is_error })
-            } else {
-                None
+        Role::Assistant => {
+            for block in &msg.content {
+                if let ContentBlock::Thinking { thinking, .. } = block {
+                    items.push(ChatItem::Thinking(thinking.clone()));
+                }
+            }
+            if let Some(text) = msg.text() {
+                items.push(ChatItem::AssistantMessage(text));
+            }
+            for tc in msg.tool_calls() {
+                items.push(ChatItem::ToolCall {
+                    name: tc.name,
+                    args: tc.arguments,
+                });
             }
         }
-        _ => None,
+        Role::Tool => {
+            if let Some(tr) = msg.tool_result_block() {
+                items.push(ChatItem::ToolResult {
+                    result: tr.content,
+                    is_error: tr.is_error,
+                });
+            }
+        }
+        Role::System => {}
     }
+    items
 }
