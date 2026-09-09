@@ -284,6 +284,69 @@ Returns all registered tool definitions (built-in + MCP). Each tool follows the 
   {
     "type": "function",
     "function": {
+      "name": "delegate_task",
+      "description": "Delegate a self-contained task to a specialized subagent that runs independently with its own context, persona, and (optionally) its own model or restricted tool set. The subagent CANNOT see this conversation, so `task` must be a complete, standalone brief containing every detail it needs. Only its final answer is returned to you — its intermediate steps are not visible.\n\nPick a pre-configured subagent by `agent` name, OR define an ephemeral one inline by providing `system_prompt` (with optional `tools`, `model`, `provider`, `max_iterations`). Inline subagents exist only for this one call and are not saved. Exactly one of `agent` or `system_prompt` is required.\n\nAvailable subagents: ... (lists configured profiles by name and description; empty unless subagent profiles are configured — see subagents.md)",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "task": { "type": "string" },
+          "agent": { "type": "string", "description": "Name of a pre-configured subagent to delegate to. Mutually exclusive with `system_prompt`." },
+          "system_prompt": { "type": "string", "description": "System prompt for an ephemeral inline subagent. Mutually exclusive with `agent`." },
+          "tools": { "type": "array", "items": { "type": "string" }, "description": "Inline subagent only: restrict it to this set of tool names." },
+          "model": { "type": "string", "description": "Inline subagent only: run it on this model instead of yours." },
+          "provider": { "type": "string" },
+          "max_iterations": { "type": "integer" }
+        },
+        "required": ["task"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "remember",
+      "description": "Save a fact, preference, decision, or piece of context to long-term memory so it can be recalled in future sessions with `search_memory`. Use it when the user asks you to remember something, or states something clearly worth keeping. Write one self-contained note per call, in plain prose, including enough context to make sense on its own.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "content": { "type": "string", "description": "The note to remember (max 4000 characters)" }
+        },
+        "required": ["content"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "search_memory",
+      "description": "Search notes previously saved with `remember`. Use it when the user refers to something from an earlier session, asks what you remember, or when a stored preference or decision would change your answer. Returns the most relevant notes with their id and date. Search is keyword-based by default, or semantic when an `embedding_provider` is configured — see configuration.md.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "description": "What to recall" },
+          "top_k": { "type": "integer", "description": "Number of notes to return (default from config, max 20)", "minimum": 1, "maximum": 20 }
+        },
+        "required": ["query"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "forget",
+      "description": "Permanently delete a note from long-term memory by its id (the `#N` shown by `search_memory` or returned by `remember`). Use it when the user asks you to forget something or when a note is outdated and being replaced. Search first if you don't know the id.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer", "description": "Id of the memory to delete" }
+        },
+        "required": ["id"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "filesystem__read_file",
       "description": "... (from MCP server)",
       "parameters": { "..." : "..." }
@@ -292,7 +355,7 @@ Returns all registered tool definitions (built-in + MCP). Each tool follows the 
 ]
 ```
 
-> MCP tools are names-spaced as `{server_name}__{tool_name}` (double underscore). The server name is sanitized: hyphens and spaces become underscores.
+> `delegate_task` is always registered. `remember`/`search_memory`/`forget` are registered with the `rag` feature (on by default for the binary) — see configuration.md for the `[memory]` section. MCP tools are namespaced as `{server_name}__{tool_name}` (double underscore); the server name is sanitized: hyphens and spaces become underscores.
 
 ---
 
@@ -488,7 +551,7 @@ turn commonly holds a leading `thinking` block followed by `text` and/or
 **Error `404`** — if the session does not exist:
 
 ```json
-{ "error": "Conversation 550e8400-... not found at ..." }
+{ "error": "session not found" }
 ```
 
 ---
@@ -892,6 +955,8 @@ The flow is:
 }
 ```
 
+`session/load` also fails with `session_busy` when a `session/prompt` turn is already in flight for this session — see [§3.2.5 Errors](#325-send-prompt) — instead of handing back a history snapshot that would never catch up with the in-flight turn.
+
 ---
 
 #### 3.2.5 Send Prompt
@@ -923,7 +988,7 @@ Send a user message to the agent within a session. The agent will stream back re
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `sessionId` | `string` | Yes | Session ID from `session/new` |
-| `prompt` | `ContentBlock[]` | Yes | Array of content blocks (currently only `text` type is supported) |
+| `prompt` | `ContentBlock[]` | Yes | Array of content blocks — `text` and `image` pass through; `resource_link` is converted to a text hint; `audio` and embedded resources are rejected |
 
 **Response (after all streaming is complete):**
 
@@ -944,6 +1009,35 @@ Send a user message to the agent within a session. The agent will stream back re
 |---|---|
 | `"end_turn"` | Agent completed successfully |
 | `"tool_use"` | Agent stopped to request tool execution (shouldn't happen — openheim auto-executes tools) |
+
+**Errors specific to `session/prompt` and `session/load`:**
+
+Both requests can fail with one of two structured errors, in addition to the generic `{"code": -32603, "message": "Internal error", "data": "<string>"}` shape used elsewhere (e.g. session not found). Both carry a machine-readable `data.kind` so a client can offer a "busy, retry" UX instead of surfacing a generic failure.
+
+**`session_busy`** — another turn is already in flight for this session, in this process (only one `session/prompt` runs per session at a time). Retry once it completes; unlike `session_locked` below, this is expected under normal concurrent use and not a hard failure.
+
+```json
+{
+  "code": -32603,
+  "message": "Internal error",
+  "data": { "kind": "session_busy", "session_id": "550e8400-e29b-41d4-a716-446655440000" }
+}
+```
+
+**`session_locked`** — `session/prompt` only. Another `openheim` process (a different `pid`/`host` sharing the same `~/.openheim/history/`) holds the cross-process write lease for this session's history. Retry later, or treat as a hard conflict if `pid`/`host` don't correspond to a process you expect to release it soon.
+
+```json
+{
+  "code": -32603,
+  "message": "Internal error",
+  "data": {
+    "kind": "session_locked",
+    "session_id": "550e8400-e29b-41d4-a716-446655440000",
+    "pid": 12345,
+    "host": "my-machine"
+  }
+}
+```
 
 ---
 
