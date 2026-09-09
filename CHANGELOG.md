@@ -41,6 +41,7 @@
 - **`build_programmatic` now funnels through `AppConfig::resolve_provider_default`** instead of duplicating the field set — the same provider validation (e.g. rejecting `http://` + an API key) now applies to the programmatic builder path too.
 - **Anthropic's SSE stream is now parsed into a typed `AnthropicStreamEvent` enum** instead of indexing into an untyped `Value`, matching how `openai.rs`/`gemini.rs` already parse their streams.
 - **`tokio`'s `full` feature is gone** — the base crate now declares only what it needs (`rt`, `sync`, `time`, `process`, `io-util`, `fs`, `net`); `rt-multi-thread`/`macros`/`signal` are forwarded through `cli`/`server`. Smaller dependency footprint for `default-features = false` embedders.
+- **Dropped support for the legacy single-file conversation format** (a `{uuid}.json` holding both `meta` and the full `messages` array, no `.jsonl` sibling) — every conversation has been written in the split `.json`/`.jsonl` layout since 0.5.0 (2026-07-06), several releases ago. A conversation still in the old format now loads with no messages instead of being transparently upgraded.
 
 ### Fixed
 

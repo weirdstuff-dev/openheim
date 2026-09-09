@@ -347,10 +347,7 @@ impl AgentState {
 
         // Full checkpoint before the turn starts: durably records this
         // turn's new user message even if the turn crashes before producing
-        // anything else, and — since `save_conversation` always rewrites the
-        // message log from scratch — transparently upgrades a legacy
-        // single-file conversation (see `memory::history::HistoryManager`'s
-        // doc comment) so the `append_message` calls below have a `.jsonl`
+        // anything else, so the `append_message` calls below have a `.jsonl`
         // log that already reflects everything up to this point to append
         // onto.
         self.persist_conversation(&conversation, "persist conversation before turn start")

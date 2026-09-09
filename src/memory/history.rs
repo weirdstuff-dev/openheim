@@ -48,17 +48,10 @@ pub struct Conversation {
     pub messages: Vec<Message>,
 }
 
-/// On-disk (de)serialization shape for a conversation's `{id}.json` meta
-/// file, and also — for backward compatibility — the *entire* shape of a
-/// conversation in the legacy single-file format (see
-/// [`HistoryManager`]'s doc comment). `messages` is only ever populated by
-/// deserializing one of those files; new code never sets it, since
-/// current-format meta files never write it.
+/// On-disk (de)serialization shape for a conversation's `{id}.json` meta file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ConversationEnvelope {
     meta: ConversationMeta,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    messages: Vec<Message>,
 }
 
 /// Manages persisted conversation history on disk.
@@ -71,11 +64,6 @@ struct ConversationEnvelope {
 /// one message mid-write and keeps per-message persistence O(1).
 ///
 /// Both files are written atomically (temp file + rename).
-///
-/// Conversations in the legacy single-file format (`{uuid}.json` holding both
-/// `meta` and the full `messages` array, no `.jsonl` sibling) still load —
-/// see [`Self::load_conversation`] — and are upgraded to the split layout on
-/// next save.
 #[derive(Clone)]
 pub struct HistoryManager {
     history_dir: PathBuf,
@@ -154,8 +142,7 @@ impl HistoryManager {
     }
 
     /// Rewrites a conversation's message log from scratch. Used to write the
-    /// complete log for a [`Self::save_conversation`] call and to upgrade a
-    /// legacy single-file conversation to the split layout; per-message
+    /// complete log for a [`Self::save_conversation`] call; per-message
     /// persistence during a turn should use [`Self::append_message`] instead,
     /// which doesn't pay this method's O(n) cost per call.
     fn write_message_log(&self, id: &Uuid, messages: &[Message]) -> Result<()> {
@@ -199,9 +186,8 @@ impl HistoryManager {
     /// Loads a conversation from disk by its UUID.
     ///
     /// Returns an error if the meta file does not exist or cannot be
-    /// deserialised. Messages come from the `.jsonl` log if one exists
-    /// (current format), or from the meta file's own `messages` field
-    /// otherwise (a legacy single-file conversation).
+    /// deserialised. Messages come from the `.jsonl` log (empty if the
+    /// conversation has none yet).
     pub fn load_conversation(&self, id: &Uuid) -> Result<Conversation> {
         let path = self.meta_path(id);
         if !path.exists() {
@@ -213,11 +199,7 @@ impl HistoryManager {
         }
         let data = std::fs::read_to_string(&path)?;
         let envelope: ConversationEnvelope = serde_json::from_str(&data)?;
-        let messages = if self.log_path(id).exists() {
-            self.read_message_log(id)?
-        } else {
-            envelope.messages
-        };
+        let messages = self.read_message_log(id)?;
         Ok(Conversation {
             meta: envelope.meta,
             messages,
@@ -270,10 +252,7 @@ impl HistoryManager {
         }
 
         self.write_message_log(&conv.meta.id, &conv.messages)?;
-        let envelope = ConversationEnvelope {
-            meta,
-            messages: Vec::new(),
-        };
+        let envelope = ConversationEnvelope { meta };
         Self::write_atomic(
             &self.meta_path(&conv.meta.id),
             &serde_json::to_string_pretty(&envelope)?,
@@ -310,7 +289,6 @@ impl HistoryManager {
             {
                 envelope.meta.title = Some(text.chars().take(80).collect());
             }
-            envelope.messages = Vec::new();
             Self::write_atomic(
                 &self.meta_path(id),
                 &serde_json::to_string_pretty(&envelope)?,
@@ -322,10 +300,9 @@ impl HistoryManager {
     /// Deletes a conversation's meta file and message log by UUID.
     ///
     /// Returns an error if the meta file does not exist; the `.jsonl` log
-    /// and `.lock` lease file (neither of which necessarily exist — an
-    /// empty or pre-split-format conversation has no log, and a session
-    /// that was never activated for writing has no lease) are removed on a
-    /// best-effort basis.
+    /// and `.lock` lease file (neither of which necessarily exist — an empty
+    /// conversation has no log, and a session that was never activated for
+    /// writing has no lease) are removed on a best-effort basis.
     pub fn delete_conversation(&self, id: &Uuid) -> Result<()> {
         let path = self.meta_path(id);
         if !path.exists() {
@@ -663,41 +640,6 @@ mod tests {
         let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
         assert_eq!(loaded.messages.len(), 1);
         assert_eq!(loaded.messages[0].text().as_deref(), Some("intact"));
-    }
-
-    #[test]
-    fn pre_split_format_conversation_still_loads() {
-        // The legacy single-file format: a single `{id}.json` containing
-        // both `meta` and the full `messages` array, no `.jsonl` sibling.
-        let (mgr, dir) = make_manager();
-        let id = Uuid::new_v4();
-        let now = Utc::now();
-        let legacy = Conversation {
-            meta: ConversationMeta {
-                id,
-                created_at: now,
-                updated_at: now,
-                model: None,
-                provider: None,
-                title: None,
-                skills: vec![],
-                cwd: None,
-                context_usage: None,
-            },
-            messages: vec![Message::user("from the old format")],
-        };
-        std::fs::write(
-            dir.path().join(format!("{id}.json")),
-            serde_json::to_string_pretty(&legacy).unwrap(),
-        )
-        .unwrap();
-
-        let loaded = mgr.load_conversation(&id).unwrap();
-        assert_eq!(loaded.messages.len(), 1);
-        assert_eq!(
-            loaded.messages[0].text().as_deref(),
-            Some("from the old format")
-        );
     }
 
     #[test]
