@@ -779,9 +779,8 @@ impl App {
     }
 
     /// Clears the transcript and requests the agent task load `meta`'s full
-    /// history via `SessionHandle::restore`'s `on_history` replay — which
-    /// goes through the same ACP-shaped replay a wire client's `session/load`
-    /// gets (see `replay_history_messages`), so thinking blocks and image
+    /// history via `SessionHandle::resume`, converted straight to `ChatItem`s
+    /// (see `message_to_chat_items`), so thinking blocks and image
     /// attachments show up instead of being silently dropped. That also
     /// keeps the history read off the UI task and on the agent task, where
     /// the rest of I/O lives — the actual message items arrive later as
