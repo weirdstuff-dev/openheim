@@ -213,7 +213,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn success_after_transient_failure() {
         let inner = Arc::new(FailThenSucceed {
             remaining_failures: AtomicUsize::new(2),
@@ -224,7 +224,7 @@ mod tests {
         assert_eq!(result.unwrap().message.text().as_deref(), Some("recovered"));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retryable_error_exhausts_retries() {
         let inner = Arc::new(AlwaysFailRetryable {
             call_count: AtomicUsize::new(0),
@@ -296,7 +296,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn streaming_retries_when_failure_precedes_first_chunk() {
         let inner = Arc::new(StreamFailThenSucceed {
             remaining_failures: AtomicUsize::new(2),
