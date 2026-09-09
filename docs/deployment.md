@@ -39,7 +39,7 @@ Running `openheim` with no subcommand opens the interactive terminal UI. Type a 
 
 **Theme colors:** `white`, `gray`, `blue`, `cyan`, `magenta`, `green`, `yellow`, `red`, `pink`
 
-The selected theme is persisted to `~/.openheim/config.toml` as `theme_color`.
+The selected theme is persisted to `~/.openheim/config.toml` as `theme_color` under `[tui]`.
 
 ---
 

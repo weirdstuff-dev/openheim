@@ -10,9 +10,12 @@ use agent_client_protocol::{
     },
 };
 
-use crate::core::permission::{PermissionDecision, PermissionGate, approval_key};
+use crate::core::{
+    permission::{PermissionDecision, PermissionGate, approval_key},
+    runtime::AgentState,
+};
 
-use super::{AgentState, util::tool_kind_for};
+use super::util::tool_kind_for;
 
 /// Lives here (not in `core`) because it depends on the live client connection.
 pub(super) struct AcpPermissionGate {
@@ -29,7 +32,8 @@ impl PermissionGate for AcpPermissionGate {
         tool_name: &str,
         arguments: &str,
     ) -> PermissionDecision {
-        let key = approval_key(tool_name, arguments);
+        let scope = self.state.executor.capabilities(tool_name).approval_scope;
+        let key = approval_key(scope, tool_name, arguments);
         if let Some(remembered) = self
             .state
             .sessions
@@ -46,7 +50,7 @@ impl PermissionGate for AcpPermissionGate {
             tool_call_id.to_string(),
             ToolCallUpdateFields::new()
                 .title(tool_name)
-                .kind(tool_kind_for(tool_name))
+                .kind(tool_kind_for(tool_name, self.state.executor.as_ref()))
                 .status(ToolCallStatus::Pending)
                 .raw_input(raw_input),
         );

@@ -108,9 +108,11 @@ name or an inline `system_prompt`, openheim:
 
 1. Resolves the subagent's model/provider/iteration cap from the profile (falling
    back to the parent's configuration for anything left unset).
-2. Builds a tool executor scoped to the profile's `tools` allowlist (if any) and
-   wrapped in the **same sandbox boundary** (`work_dir` / `allow_shell`) as the
-   parent — subagents cannot escalate privileges beyond what the parent has.
+2. Builds a tool executor scoped to the profile's `tools` allowlist (if any).
+   It runs under the **same `work_dir` sandbox boundary** as the parent (the
+   boundary travels in the turn context every tool receives) and `execute_command`
+   is only present if `allow_shell` enabled it for the parent — subagents cannot
+   escalate privileges beyond what the parent has.
 3. Starts a **fresh, isolated** agent run: its own message history (just the `task`
    as the first user message) and its own system prompt (the profile's persona —
    not the parent's `system.md` or skills) — but the **same cancellation token

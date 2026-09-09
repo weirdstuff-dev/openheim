@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use rmcp::model::Tool as McpTool;
 
 use crate::{
-    core::models::{FunctionDefinition, Tool},
+    core::{models::Tool, turn::TurnContext},
     error::Result,
     tools::ToolHandler,
 };
@@ -52,17 +52,14 @@ impl McpToolHandler {
 #[async_trait]
 impl ToolHandler for McpToolHandler {
     fn definition(&self) -> Tool {
-        Tool {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: self.prefixed_name.clone(),
-                description: self.description.clone(),
-                parameters: self.schema.clone(),
-            },
-        }
+        Tool::function(
+            self.prefixed_name.clone(),
+            self.description.clone(),
+            self.schema.clone(),
+        )
     }
 
-    async fn execute(&self, args: &str) -> Result<String> {
+    async fn execute(&self, args: &str, _turn: &TurnContext<'_>) -> Result<String> {
         self.client.call_tool(&self.tool_name, args).await
     }
 }

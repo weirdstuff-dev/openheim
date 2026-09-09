@@ -1,9 +1,9 @@
 //! Advisory, per-session write lease so two `openheim` processes sharing the
 //! same `~/.openheim/history/` (the desktop app's embedded core and an
 //! independently-spawned CLI, in particular) don't both write the same
-//! conversation at once — see `PLAN.md` §1.
+//! conversation at once.
 //!
-//! The lease is turn-scoped, not session-scoped: `acp::AgentState::acp_prompt`
+//! The lease is turn-scoped, not session-scoped: `core::runtime::AgentState::prompt`
 //! acquires it right before running a turn and holds it only for that turn's
 //! duration, so merely loading or holding a session open never locks it
 //! against other processes — only an in-flight `session/prompt` does. Two
@@ -127,11 +127,11 @@ fn create_lease_exclusively(path: &Path, contents: &str) -> std::io::Result<()> 
 
 /// Holds a session's write lease for as long as it's alive; releases it
 /// (best-effort — the lockfile is simply removed) on drop, which is how a
-/// lease is meant to be released. `acp::AgentState::acp_prompt` holds one for
+/// lease is meant to be released. `core::runtime::AgentState::prompt` holds one for
 /// exactly the duration of a single turn, so normal release just means "the
 /// turn finished" (or was cancelled, or errored) — no eviction or process
 /// exit required. A crash (or `kill -9`) mid-turn skips this and leaves the
-/// lockfile behind for the next [`acquire`] to find and take over as stale.
+/// lockfile behind for the next `acquire` call to find and take over as stale.
 #[derive(Debug)]
 pub struct SessionLease {
     path: PathBuf,

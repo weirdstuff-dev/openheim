@@ -12,7 +12,7 @@ use crate::{config::McpServerConfig, error::Result, tools::ToolHandler};
 
 /// Connection status and tool-count summary for a single MCP server.
 ///
-/// Returned by [`OpenheimClient::mcp_servers`] so callers can inspect which
+/// Returned by [`crate::OpenheimClient::mcp_servers`] so callers can inspect which
 /// servers connected successfully and how many tools each one exposed.
 #[derive(Debug, Clone, Serialize)]
 pub struct McpServerStatus {

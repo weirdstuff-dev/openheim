@@ -1,6 +1,6 @@
 # openheim as a Rust library
 
-Openheim can be embedded directly in your Rust application. The library exposes the full agent runtime — sessions, streaming, conversation history, RAG, skills, MCP servers, and tools — through a single `OpenheimClient` facade built on top of the [Agent Client Protocol (ACP)](https://github.com/block/agent-client-protocol).
+Openheim can be embedded directly in your Rust application. The library exposes the full agent runtime — sessions, streaming, conversation history, RAG, skills, MCP servers, and tools — through a single `OpenheimClient` facade; wire-level ACP (`openheim::acp`, plus the ACP-typed facade ergonomics) is available behind the `acp` feature. See the [Agent Client Protocol](https://github.com/block/agent-client-protocol) repo for the protocol itself.
 
 ---
 
@@ -9,26 +9,35 @@ Openheim can be embedded directly in your Rust application. The library exposes 
 ```toml
 # Cargo.toml
 [dependencies]
-openheim = "0.8"
+openheim = "0.9"
 tokio = { version = "1", features = ["full"] }
 ```
 
 ### Feature flags
 
 By default the `openheim` dependency also builds the CLI/TUI binary stack
-(`clap`, `ratatui`, `crossterm`, `tracing-subscriber`) and the WebSocket
-server stack (`axum`, `tower-http`, `notify`, `walkdir`, `futures`).
-Embedders that drive the agent through `OpenheimClient` (or their own ACP
-wiring) usually don't need those:
+(`clap`, `ratatui`, `crossterm`, `tracing-subscriber`), the ACP stack
+(`agent-client-protocol`, `agent-client-protocol-tokio`), and the WebSocket
+server stack (`axum`, `tower-http`, `notify`, `walkdir`). Embedders that
+drive the agent through `OpenheimClient` (or their own ACP wiring) usually
+don't need those. `futures` is not behind any feature — the agent loop uses
+it directly — so it is built regardless.
 
 ```toml
-openheim = { version = "0.8", default-features = false }
+openheim = { version = "0.9", default-features = false }
+# optionally: features = ["acp"]     # ACP vocabulary + ACP-typed facade methods (agent-client-protocol)
 # optionally: features = ["server"]  # axum WS/REST server (openheim::transport::ws)
 # optionally: features = ["tui"]     # ratatui terminal UI (openheim::tui)
+# optionally: features = ["rag"]     # remember/search_memory/forget long-term memory (rusqlite FTS5 + sqlite-vec)
 ```
 
-Everything else — the client facade, agent loop, providers, tools, MCP, ACP,
-and config — is always available.
+Everything else — the client facade, agent loop, providers, tools, MCP, and
+config — is always available. On the facade, `prompt_events`/
+`prompt_events_with_images`, `list_sessions`, `get_session`,
+`delete_session`, `resume_session`, and `SessionHandle::resume` are
+core-typed and always available; `prompt`, `prompt_with_images`, `restore`,
+and `load_session` are thin wrappers around the same calls that additionally
+speak ACP's `SessionUpdate` vocabulary, so they need `features = ["acp"]`.
 
 ---
 
@@ -82,6 +91,17 @@ let client = OpenheimClient::from_config("/etc/myapp/openheim.toml")
     .await?;
 ```
 
+### Overriding just the model
+
+`.model()` alone (with no `.provider()`/`.api_key()`/`.api_base()`) doesn't switch to programmatic config — it still loads the config file, but resolves this model instead of the default one, the same as passing `--model` to `openheim run`:
+
+```rust
+let client = OpenheimClient::builder()
+    .model("claude-opus-4-7") // must be listed under some provider in the config file
+    .build()
+    .await?;
+```
+
 ### Programmatic config (no file needed)
 
 ```rust
@@ -121,6 +141,19 @@ let client = OpenheimClient::builder()
 
 **`.allow_shell(bool)`** — controls whether the `execute_command` tool is exposed to the LLM. When `false` the tool is removed from the tool list entirely; the LLM never sees it and cannot request it. Defaults to `false`.
 
+### Data directory
+
+**`.data_dir(path)`** — repoints openheim's own state at a directory of your choosing: conversation history, skills, `system.md`, subagent profiles, and — unless `[memory].db_path` says otherwise — the long-term memory database. Defaults to `~/.openheim` (and overrides the `data_dir` config-file field when set). The config file itself is still loaded from `~/.openheim/config.toml`. Two agents in one process can hold separate `data_dir`s; a sandboxed CI run can point at a temp directory and never touch the real home directory:
+
+```rust
+let client = OpenheimClient::builder()
+    .provider("openai")
+    .api_key("sk-...")
+    .data_dir(std::env::temp_dir().join("openheim-ci"))
+    .build()
+    .await?;
+```
+
 ### With MCP servers
 
 MCP servers can be added in either mode. Their tools become available to the agent automatically as `{server_name}__{tool_name}`.
@@ -158,7 +191,7 @@ MCP servers defined in a config file are always loaded; builder `.mcp_server()` 
 
 ### With custom tools
 
-`.tool()` registers an in-process `ToolHandler` alongside the built-ins and any MCP-sourced tools, subject to the same `work_dir`/`allow_shell` sandbox boundary. See [custom-tools.md](./custom-tools.md) for how to implement `ToolHandler`.
+`.tool()` registers an in-process `ToolHandler` alongside the built-ins and any MCP-sourced tools. Each call receives the turn's `TurnContext` (cancel token, `work_dir`, client I/O), so a custom tool can enforce the same sandbox boundary the built-ins do. See [custom-tools.md](./custom-tools.md) for how to implement `ToolHandler`.
 
 ```rust
 let client = OpenheimClient::builder()
@@ -235,6 +268,28 @@ session
     .await?;
 ```
 
+### Send a prompt (raw `StreamEvent`)
+
+`prompt`/`prompt_with_images` map every event onto ACP's `SessionUpdate` vocabulary, which has no room for some of what the agent loop actually produces. `prompt_events`/`prompt_events_with_images` hand you the raw [`StreamEvent`](https://docs.rs/openheim) instead — same turn, no ACP mapping in between — including `Usage` (context size, live per LLM call) and `Finished` (the turn is done) alongside the four `SessionUpdate` has equivalents for. They return the turn's `StopReason` (`EndTurn`/`MaxIterations`/`Cancelled`/`NoContent`) instead of `()`.
+
+```rust
+use openheim::StreamEvent;
+
+let stop_reason = session
+    .prompt_events("Refactor the auth module to use JWTs", |event| {
+        match event {
+            StreamEvent::LlmResponse { content } => print!("{content}"),
+            StreamEvent::ThinkingContent { content } => eprint!("{content}"),
+            StreamEvent::ToolCall { tool_name, .. } => println!("\n[tool] {tool_name} — running…"),
+            StreamEvent::ToolResult { tool_name, .. } => println!("[tool] {tool_name} — done"),
+            StreamEvent::Usage { usage } => { /* update a live context-size indicator */ let _ = usage; }
+            StreamEvent::Finished { .. } => { /* turn done */ }
+            _ => {}
+        }
+    })
+    .await?;
+```
+
 ### Multi-turn conversation
 
 Call `prompt` multiple times on the same handle. The agent accumulates history on disk automatically.
@@ -292,7 +347,7 @@ let session = client
 
 `PermissionGate::check` is called once per tool call, before it executes — including tool calls made by a `delegate_task` subagent, which inherits the parent turn's gate rather than always-allowing.
 
-`.client_io(Arc<dyn ClientIo>)` similarly lets `read_file`/`write_file`/`edit_file` be delegated to the embedder's own I/O (e.g. an editor's unsaved buffers) instead of local disk — see [`ClientIo`](../src/core/client_io.rs). `edit_file` uses it for both the read and the write, since an edit is a read followed by a write. Both `.permission_gate()` and `.client_io()` carry over automatically when a handle is reused via `.restore()`.
+`.client_io(Arc<dyn ClientIo>)` similarly lets `read_file`/`write_file`/`edit_file` be delegated to the embedder's own I/O (e.g. an editor's unsaved buffers) instead of local disk — see [`ClientIo`](../src/core/client_io.rs). `edit_file` uses it for both the read and the write, since an edit is a read followed by a write. Both `.permission_gate()` and `.client_io()` carry over automatically when a handle is reused via `.resume()`/`.restore()`.
 
 `session.cancel().await` cancels the turn currently in flight for that session (no-op if none is running) — call it from another task while `prompt()` is awaiting.
 
@@ -316,6 +371,11 @@ for info in &workspace {
 }
 ```
 
+Each entry is a `ConversationMeta` — `id: Uuid`, `title`, `cwd`,
+`created_at`/`updated_at`, `model`/`provider`, `context_usage` — a core type,
+so this works with `default-features = false`. ACP's `SessionInfo`
+projection happens inside `acp::serve`, not on the facade.
+
 ### Get full conversation (messages + metadata)
 
 ```rust
@@ -335,7 +395,38 @@ for msg in &conv.messages {
 
 ### Resume a session (load + continue prompting)
 
-`load_session` registers the conversation in the live sessions map and replays the message history through your callback so you can populate a UI.
+`resume_session` registers the conversation in the live sessions map and
+hands back its full message history for you to render however you like — no
+`acp` feature needed.
+
+```rust
+let (session, loaded) = client
+    .resume_session(
+        "550e8400-e29b-41d4-a716-446655440000",
+        "/my/workspace".into(),
+    )
+    .await?;
+
+for msg in &loaded.messages {
+    println!("[{:?}] {}", msg.role, msg.text().unwrap_or_default());
+}
+if let Some(warning) = &loaded.warning {
+    println!("{warning}"); // saved provider/model no longer resolves; fell back to default
+}
+
+// Continue where the conversation left off
+session.prompt_events("Continue from where you left off", |event| { /* … */ }).await?;
+```
+
+The returned handle starts from the defaults — `AllowAll` permission gate,
+local-disk I/O; call `.permission_gate(..)`/`.client_io(..)` on it to change
+either. If you already have a handle configured with a gate/I/O,
+`handle.resume(id, cwd)` performs the same load with that handle's gate/I/O
+inherited instead.
+
+With `features = ["acp"]`, `load_session`/`handle.restore(id, cwd, cb)` are
+thin wrappers around `resume_session`/`handle.resume(..)` that additionally
+replay the history through your callback as ACP `SessionUpdate`s:
 
 ```rust
 let session = client
@@ -352,9 +443,6 @@ let session = client
         },
     )
     .await?;
-
-// Continue where the conversation left off
-session.prompt("Continue from where you left off", |update| { /* … */ }).await?;
 ```
 
 ### Delete a session
@@ -365,30 +453,50 @@ client.delete_session("550e8400-e29b-41d4-a716-446655440000").await?;
 
 ---
 
-## RAG — direct history and skills access
+## Memory — direct history and skills access
 
-`client.rag()` returns a `&RagContext` with direct access to the underlying `HistoryManager` and `SkillsManager`. This is useful for advanced use cases like building custom UIs, searching conversations, or managing skills programmatically.
+`client.memory()` returns a `&MemoryContext` with direct access to the underlying `HistoryManager` and `SkillsManager`. This is useful for advanced use cases like building custom UIs, searching conversations, or managing skills programmatically.
 
 ```rust
-let rag = client.rag();
+let memory = client.memory();
 
 // List all conversation metadata
-let metas = rag.history.list_conversations()?;
+let metas = memory.history.list_conversations()?;
 
 // Load a full conversation
-let conv = rag.history.load_conversation(&uuid)?;
+let conv = memory.history.load_conversation(&uuid)?;
 
 // Save a conversation (e.g. after external edits)
-rag.history.save_conversation(&conv)?;
+memory.history.save_conversation(&conv)?;
 
 // List available skills
-let skills = rag.skills.list_skills()?;
+let skills = memory.skills.list_skills()?;
 // → ["debugging", "rust", "tdd"]
 
 // Load skill content
-let content = rag.skills.load_skill("rust")?;
+let content = memory.skills.load_skill("rust")?;
 println!("{content}");
 ```
+
+---
+
+## Long-term memory
+
+With the `rag` feature, `client.long_term_memory()` returns the `LongTermMemory` behind the `remember` / `search_memory` / `forget` tools. It is keyword search (FTS5) unless the config's `[memory]` section names an embedding provider, in which case search is semantic. You can drive it directly, for example to seed memories or build a memory browser:
+
+```rust
+let memory = client.long_term_memory();
+let note = memory.remember("The user's staging cluster is eu-west-1.").await?;
+
+// Best match first; `hit.method` says whether the score is cosine similarity or a BM25 rank.
+for hit in memory.search("where is staging?", Some(3)).await? {
+    println!("#{} {} ({:?} {:.2})\n{}", hit.record.id, hit.record.created_at, hit.method, hit.score, hit.record.content);
+}
+
+memory.forget(note.id).await?;
+```
+
+To use a custom embeddings backend, implement `openheim::rag::EmbeddingClient` and build `LongTermMemory::new(VectorStore::open(path)?, Some(Arc::new(my_embedder)), top_k)` yourself; wrap it in `RememberTool` / `SearchMemoryTool` / `ForgetTool` and register them via `OpenheimBuilder::tool` if the agent should be able to call them.
 
 ---
 

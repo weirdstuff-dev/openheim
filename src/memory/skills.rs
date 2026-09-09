@@ -1,4 +1,3 @@
-use crate::config::config_dir;
 use crate::error::{Error, Result};
 use std::path::{Component, Path, PathBuf};
 
@@ -24,7 +23,7 @@ fn validate_skill_name(name: &str) -> Result<()> {
 /// Manages Markdown skill files stored in `~/.openheim/skills/`.
 ///
 /// A skill is a named Markdown file (`{name}.md`) containing system-level
-/// instructions. Skills are loaded by [`PromptBuilder::add_skill`] and injected
+/// instructions. Skills are loaded by [`crate::memory::prompt::PromptBuilder::add_skill`] and injected
 /// into the LLM prompt as a system message, letting users extend the agent's
 /// behaviour without modifying code.
 ///
@@ -40,18 +39,10 @@ pub struct SkillsManager {
 }
 
 impl SkillsManager {
-    /// Creates a `SkillsManager` backed by `~/.openheim/skills/`, creating the
-    /// directory if it doesn't exist.
-    pub fn new() -> Result<Self> {
-        let dir = config_dir()?.join("skills");
-        std::fs::create_dir_all(&dir)?;
-        Ok(Self { skills_dir: dir })
-    }
-
     /// Loads the content of a single skill by name.
     ///
     /// Reads `{skills_dir}/{name}.md`. Returns an error if the file does not
-    /// exist or the name is invalid (see [`validate_skill_name`]). The path is
+    /// exist or the name is invalid (see `validate_skill_name`). The path is
     /// canonicalized and checked for containment so a symlink inside the
     /// skills directory cannot redirect the read outside it; the canonical
     /// (fully resolved) path is what gets read.
@@ -115,9 +106,9 @@ impl SkillsManager {
         Ok(names)
     }
 
-    /// Test-only constructor pointing at a specific skills directory
-    /// (mirrors `HistoryManager::with_dir`).
-    #[cfg(test)]
+    /// Creates a `SkillsManager` backed by a caller-chosen directory, e.g.
+    /// for an injected `AppConfig::data_dir` or in tests. Does not create
+    /// the directory; the caller is responsible for it existing.
     pub fn with_dir(dir: PathBuf) -> Self {
         Self { skills_dir: dir }
     }

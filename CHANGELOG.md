@@ -2,6 +2,73 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-09
+
+### Added
+
+- **`OpenheimClient::resume_session` / `SessionHandle::resume`**, ungated (no `acp` feature needed). Returns `(SessionHandle, LoadedSession)` for the caller to replay however it likes, instead of ACP's `SessionUpdate`. The TUI no longer implies `acp` as a result.
+- **The four transports (`stdio`, `run`, `ws`, `tui`) take a caller-built `OpenheimClient`** instead of building their own, so embedders with custom tools or a custom `LlmClient` can use any shipped transport. `run_headless` drops its `model` param — use `.model(..)` on the builder instead.
+- **New `acp` feature, on by default via `cli`/`server`; `agent-client-protocol` deps are now optional.** ACP-typed methods (`load_session`, `restore`, `prompt`) are gated behind it; `prompt_events` and `list_sessions` (now core-typed) stay always-on regardless.
+- **`Error::SessionBusy { session_id }`** for a `session/prompt`/`session/load` that arrives mid-turn for that session — previously a generic `Error::Other`. Same JSON-RPC error-data treatment `SessionLocked` already got.
+- **`SessionHandle::prompt_events`/`prompt_events_with_images`.** Same turn as `prompt`, but the callback sees raw `core::models::StreamEvent`s (including live `Usage` and `Finished`) instead of ACP's `SessionUpdate` subset, and returns `StopReason`.
+- **`ToolHandler::capabilities()` declares read-only/kind/approval-scope**, replacing four hardcoded tool-name lists. Every built-in now self-declares; Architect mode's read-only allowlist is derived from it instead of a hand-maintained list.
+- **Injectable data directory via `AppConfig.data_dir` / `OpenheimBuilder::data_dir(..)`.** Repoints history, skills, subagents, and (absent an explicit `db_path`) memory at a caller-chosen directory — multiple agents per process, project-local data, sandboxed CI. Defaults to `~/.openheim` when unset.
+- **`[providers.<name>].thinking = "adaptive" | "off"`** replaces a hardcoded Anthropic model-name allowlist. Defaults to `"adaptive"` for a provider named `anthropic`, `"off"` otherwise — a provider entry mixing adaptive-capable and incapable models needs it set explicitly.
+- **Tool-driven long-term memory (`openheim::rag`, feature `rag`, on by default).** Three agent tools — `remember`, `search_memory`, `forget` — backed by local SQLite/FTS5 keyword search, with optional semantic search via a configured embedding provider (`sqlite-vec`). Nothing is stored or injected automatically.
+
+### Changed
+
+- **`AgentState::new_session` no longer swallows a bad `model` override** — it used to silently fall back to the session's default provider/model; now it propagates the `ConfigError`, matching every other config-resolution call site.
+- **`data_dir` is resolved once, by `OpenheimBuilder::build`**, instead of eight call sites each falling back to `~/.openheim` independently. Fixes the TUI's `:skills` reading the wrong directory when `data_dir` was set; `:theme` now also writes to the config file actually loaded, not always `~/.openheim/config.toml`.
+- **Facade session APIs deduplicated.** `list_sessions` is now core-typed (`Vec<ConversationMeta>`) and always available; `list_all_sessions()` is removed (`list_sessions(None)` is the same listing). `load_session` now delegates to `restore` instead of duplicating its load-and-replay body.
+- **`AgentState` now speaks only `core::models` types** — zero `agent_client_protocol` imports left in `core/`. `prompt`, `list_sessions`, and `load_session` all take/return core types; ACP conversion moved to the edges (`acp::serve`, `client.rs`). No behavior change for existing callers.
+- **Tools receive the turn context directly; the per-session sandbox wrapper is gone.** `ToolHandler::execute` takes `turn: &TurnContext<'_>` (now carrying `work_dir`/`client_io` too), and each built-in enforces its own sandboxing/cancellation instead of `SandboxedExecutor` intercepting six of them by name. Custom and MCP tools get the same treatment for the first time.
+- **`Tool::function(name, description, parameters)` constructor** replaces the ten-plus-site `Tool { tool_type: .., function: FunctionDefinition { .. } }` literal.
+- **`delegate_task` is an ordinary `ToolHandler`**, registered into `SystemToolExecutor` like any other tool. `WithDelegate`/`with_delegation()` are removed; subagents still structurally never see `delegate_task`, and now inherit the parent turn's `client_io` too.
+- **`rag` module renamed to `memory`; `RagContext` is now `MemoryContext`.** Conversation history, the write lease, skills, and the prompt builder move to `openheim::memory::*` — `openheim::rag` now names only the new retrieval module. Clean break, no deprecated aliases.
+- New `Error::DatabaseError` variant for SQLite failures in the long-term memory store.
+- **`AgentState`/`AgentMode` moved out of `acp` into `core::runtime`.** `acp` is now purely the wire adapter; the `acp_`-prefixed method names (`acp_prompt`, `acp_new_session`, …) are gone in favor of plain ones (`prompt`, `new_session`, …). No behavior change.
+- **The three transports (`stdio`, `ws`, `run`) now build their `AgentState` through `OpenheimClient::builder().build()`** instead of each hand-rolling load-config → resolve → construct. `OpenheimBuilder::model()` alone no longer forces programmatic config.
+- **`AgentState::prompt` speaks `core::models::StreamEvent` end-to-end** instead of building ACP's `SessionUpdate` itself — that mapping moved to the ACP edge. The TUI switched to `prompt_events` and matches `StreamEvent` directly (`AgentUpdate::Stream`, replacing four separate chunk variants).
+- **The TUI no longer builds its own `MemoryContext` or re-implements history replay.** `:sessions` and session-restore both go through the agent task now (`list_sessions`, `SessionHandle::resume`) instead of synchronous disk I/O on the UI task that used to silently drop thinking/image blocks.
+- **`SessionHandle::restore` gained an `on_history` callback** (previously always a no-op) so callers can actually receive the replay.
+- **`save_theme_to_config` moved from `tui::app` to `config::{save_theme_to_config, save_theme_to_config_at}`**, now unit-tested against a temp file.
+- **New `core::llm::http::post_json` helper** for the POST → check-status → read-error-body sequence every provider repeated — `AnthropicClient`, `GeminiClient`, and both OpenAI-style clients share it now instead of five near-identical copies.
+- **`GeminiClient::send` is now `send_streaming` with a discarded channel**, same as `AnthropicClient` — one request/response path instead of two that could drift.
+- **OpenAI streaming parses each SSE chunk into typed structs** instead of indexing into a raw `serde_json::Value` — a malformed or renamed field is now caught by `serde` instead of silently reading back `None`/`0`.
+- **The `stream_options` 400 retry is now conditional** — it used to blindly re-POST on *any* 400 (doubling cost on genuine bad-request errors too); it now only retries when the error body actually names `stream_options` as the problem.
+- **`web_fetch`'s SSRF guard no longer uses the deprecated `Ipv6Addr::to_ipv4`** — replaced by `to_ipv4_mapped()` plus a new helper for the older `::a.b.c.d` form, same coverage.
+- **`openheim run` now uses the library facade** (`new_session().start()` + `prompt_events`) instead of driving its own in-process ACP session. Output is now exactly the final response text — thinking-chunk leakage into stdout is gone.
+- **`AppConfig.theme_color` moved to `AppConfig.tui.theme_color`** (new `[tui]` table) — a display preference doesn't belong at the config's top level.
+- **`build_programmatic` now funnels through `AppConfig::resolve_provider_default`** instead of duplicating the field set — the same provider validation (e.g. rejecting `http://` + an API key) now applies to the programmatic builder path too.
+- **Anthropic's SSE stream is now parsed into a typed `AnthropicStreamEvent` enum** instead of indexing into an untyped `Value`, matching how `openai.rs`/`gemini.rs` already parse their streams.
+- **`tokio`'s `full` feature is gone** — the base crate now declares only what it needs (`rt`, `sync`, `time`, `process`, `io-util`, `fs`, `net`); `rt-multi-thread`/`macros`/`signal` are forwarded through `cli`/`server`. Smaller dependency footprint for `default-features = false` embedders.
+- **Dropped support for the legacy single-file conversation format** (a `{uuid}.json` holding both `meta` and the full `messages` array, no `.jsonl` sibling) — every conversation has been written in the split `.json`/`.jsonl` layout since 0.5.0 (2026-07-06), several releases ago. A conversation still in the old format now loads with no messages instead of being transparently upgraded.
+
+### Fixed
+
+- **`cargo test --doc --no-default-features` failed to compile.** The crate-root Quick Start example called `SessionHandle::prompt`, which is `acp`-gated, without the example itself being gated. Switched to `prompt_events`, the always-on equivalent.
+- **The same doc example's `#[tokio::main]` failed under `--no-default-features`** once `tokio`'s `full` feature was narrowed (see Changed). Switched to `#[tokio::main(flavor = "current_thread")]`, which only needs `rt`.
+
+### Breaking changes (library)
+
+- **`OpenheimClient::list_all_sessions()` is removed** — call `list_sessions(None)` instead.
+- **`OpenheimClient::list_sessions` returns `Vec<ConversationMeta>` and is always available** (previously `Vec<acp::schema::SessionInfo>`, ACP-gated). Build `SessionInfo` yourself from `ConversationMeta` if you relied on its field shapes.
+- **`tools::ToolHandler::execute` gained a `turn: &TurnContext<'_>` parameter** — accept it (`_turn` if unused).
+- **`TurnContext` gained `work_dir: &Path` and `client_io: &dyn ClientIo`** — hand-built ones (e.g. calling `run_agent_with_history` directly) must supply both; use `&NoClientIo` when there's no client. See `docs/custom-tools.md`.
+- **`tools::SandboxedExecutor` is removed** — the boundary now travels in `TurnContext`. `ScopedExecutor` is unchanged.
+- **`tools::with_delegation` is removed; `DelegateTool::new` no longer takes `work_dir`/`allow_shell`** — register it into a `SystemToolExecutor` instead, passing a pre-registration clone as `base_executor`.
+- `list_dir` and `search` default to the turn's `work_dir` (not the process's current directory) when `path` is omitted.
+- **`acp::AgentState`/`acp::AgentMode` are now `core::runtime::AgentState`/`core::runtime::AgentMode`**, with `acp_`-prefixed methods renamed (see Changed). `acp::session` is now `core::runtime::session`.
+- **`SessionHandle::restore` gained an `on_history` parameter** — pass `|_| {}` for the previous behavior.
+- **`AgentResult.steps`, `AgentStep`, and `ToolExecutionResult` are removed** — unused outside a single test; the same info is available live via `StreamEvent` and persisted in `messages`. `AgentResult` now has `final_response`, `iterations_used`, `stop_reason`, `context_usage`.
+- **`AgentState.allow_shell` (a `pub` field) is removed** — unused; `allow_shell` still gates `execute_command` registration via `SystemToolExecutor`.
+- **`AppConfig.theme_color: Option<String>` is now `AppConfig.tui: TuiConfig`** — update reads/writes to `app_config.tui.theme_color`.
+- **`OpenheimBuilder::build`'s programmatic path is now fallible** — it surfaces the same provider validation the file-based config path always ran.
+- **`ToolExecutor`/`ToolHandler` gained a default-provided `capabilities()` method** (existing implementors compile unchanged). `approval_key` now takes an explicit `ApprovalScope`; `register_builtins` takes `allow_shell: bool`.
+- **Dead code removed:** `AgentConfig::arc_with_max_iterations`, `AppConfig::mcp_servers_info`/`McpServerInfo`, `HistoryManager::get_last_conversation` — all had no caller. `core::models::Choice` no longer derives `Deserialize`.
+- **`AnthropicClient::new` gained a `thinking: bool` parameter** (last arg) — pass `false` for the old behavior, or route it through `ProviderConfig::resolve_thinking`. `ProviderConfig`/`AgentConfig` both gained a `thinking` field.
+
 ## [0.9.0] - 2026-09-01
 
 ### Added

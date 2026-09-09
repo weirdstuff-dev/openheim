@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 /// Public model info for a single provider (no credentials).
 #[derive(Debug, Clone, Serialize)]
@@ -17,24 +16,15 @@ pub struct ModelsInfo {
     pub providers: BTreeMap<String, ProviderModels>,
 }
 
-/// Public info for a single MCP server (no credentials or env vars).
-#[derive(Debug, Clone, Serialize)]
-pub struct McpServerInfo {
-    pub transport: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-}
-
 /// Top-level configuration loaded from ~/.openheim/config.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub default_provider: String,
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
+    /// The `[tui]` section: terminal UI display preferences.
     #[serde(default)]
-    pub theme_color: Option<String>,
+    pub tui: TuiConfig,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
@@ -50,10 +40,91 @@ pub struct AppConfig {
     /// Defaults to `false`. Set to `true` to explicitly opt in to shell access.
     #[serde(default = "default_allow_shell")]
     pub allow_shell: bool,
+    /// Long-term memory (`remember` / `search_memory` / `forget` tools).
+    /// Optional: without it memory still works, keyword-only, in
+    /// `~/.openheim/memory.db`. Set `embedding_provider` / `embedding_model`
+    /// to make `search_memory` semantic.
+    #[serde(default)]
+    pub memory: Option<MemoryConfig>,
+    /// Overrides where history, skills, `system.md`, subagent profiles, and
+    /// (absent an explicit `memory.db_path`) the memory database live.
+    /// `None` in the TOML shape means "default to `~/.openheim`"; filled in
+    /// with the resolved directory by [`crate::client::OpenheimBuilder::build`],
+    /// so `AgentState` and everything downstream can always assume `Some`.
+    #[serde(default)]
+    pub data_dir: Option<PathBuf>,
+    /// The file this config was loaded from (or would be written to for a
+    /// programmatic config). Not part of the TOML shape — filled in by
+    /// `OpenheimBuilder::build` alongside `data_dir`, so config-file writers
+    /// like `:theme` target the file the running client actually used.
+    #[serde(skip)]
+    pub config_path: PathBuf,
 }
 
 fn default_allow_shell() -> bool {
     false
+}
+
+/// The `[tui]` section: terminal UI display preferences. Every field is
+/// optional; so is the section.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TuiConfig {
+    /// Named color theme (see `tui::render::theme_color` for the accepted
+    /// names). Set via `:theme` in the running TUI, which persists it here.
+    #[serde(default)]
+    pub theme_color: Option<String>,
+}
+
+/// The `[memory]` section: where long-term memory lives, how many notes a
+/// search returns, and (optionally) which embeddings endpoint makes search
+/// semantic. Every field is optional; so is the section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    /// Name of a `[providers.<name>]` entry whose `api_base` / API key serve
+    /// the embeddings endpoint. `"gemini"` speaks Gemini's `embedContent`
+    /// API; anything else is treated as OpenAI-compatible `/embeddings`
+    /// (OpenAI, Ollama, Together, …). Anthropic has no embeddings API.
+    /// Unset means keyword (FTS5) search only.
+    #[serde(default)]
+    pub embedding_provider: Option<String>,
+    /// Embedding model name (e.g. `text-embedding-3-small`,
+    /// `gemini-embedding-001`, `nomic-embed-text`). Required when
+    /// `embedding_provider` is set.
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+    /// SQLite file holding notes and vectors. Defaults to
+    /// `~/.openheim/memory.db`. Must be an absolute path (no `~` expansion).
+    #[serde(default)]
+    pub db_path: Option<PathBuf>,
+    /// Default number of notes a `search_memory` call returns (default 5).
+    #[serde(default = "default_top_k")]
+    pub top_k: usize,
+}
+
+fn default_top_k() -> usize {
+    5
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            embedding_provider: None,
+            embedding_model: None,
+            db_path: None,
+            top_k: default_top_k(),
+        }
+    }
+}
+
+/// Resolved embeddings endpoint, assembled from a [`MemoryConfig`] plus the
+/// provider entry it names (see `AppConfig::resolve_embedding`).
+#[derive(Debug, Clone)]
+pub struct EmbeddingConfig {
+    pub provider_name: String,
+    pub api_base: String,
+    pub api_key: String,
+    pub model: String,
+    pub timeout_secs: u64,
 }
 
 /// Configuration for a single MCP server connection.
@@ -124,36 +195,27 @@ impl AppConfig {
                 }
             }
         }
+        if let Some(memory) = val.get_mut("memory").and_then(|v| v.as_object_mut()) {
+            memory.remove("db_path");
+        }
+        if let Some(obj) = val.as_object_mut() {
+            // Local filesystem path, not something an unauthenticated client
+            // needs; internal serialization (e.g. persisted config) keeps it.
+            obj.remove("data_dir");
+        }
         val
     }
+}
 
-    pub fn mcp_servers_info(&self) -> BTreeMap<String, McpServerInfo> {
-        self.mcp_servers
-            .iter()
-            .map(|(name, cfg)| {
-                let info = if cfg.command.is_some() {
-                    McpServerInfo {
-                        transport: "stdio",
-                        command: cfg.command.clone(),
-                        url: None,
-                    }
-                } else if cfg.url.is_some() {
-                    McpServerInfo {
-                        transport: "http",
-                        command: None,
-                        url: cfg.url.clone(),
-                    }
-                } else {
-                    McpServerInfo {
-                        transport: "unknown",
-                        command: None,
-                        url: None,
-                    }
-                };
-                (name.clone(), info)
-            })
-            .collect()
-    }
+/// Extended-thinking mode for a provider. Only [`AnthropicClient`](crate::core::llm::AnthropicClient)
+/// consults this today; other providers ignore it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingMode {
+    /// Request Anthropic's adaptive extended thinking.
+    Adaptive,
+    /// Never request extended thinking.
+    Off,
 }
 
 /// Per-provider configuration
@@ -170,6 +232,14 @@ pub struct ProviderConfig {
     pub timeout_secs: Option<u64>,
     /// Maximum output tokens for LLM responses
     pub max_tokens: Option<u32>,
+    /// Extended thinking (`"adaptive"` or `"off"`). Defaults to `adaptive`
+    /// for a provider named `anthropic`, `off` for everything else — see
+    /// [`Self::resolve_thinking`]. Set explicitly to `"off"` for an Anthropic
+    /// model that doesn't support adaptive thinking (e.g. `claude-haiku-4-5`,
+    /// `claude-3-7-sonnet`), since a single `[providers.<name>]` entry has no
+    /// per-model granularity.
+    #[serde(default)]
+    pub thinking: Option<ThinkingMode>,
 }
 
 impl ProviderConfig {
@@ -189,6 +259,18 @@ impl ProviderConfig {
         }
         self.api_key.clone().unwrap_or_default()
     }
+
+    /// Whether extended thinking should be requested, given this provider's
+    /// `thinking` setting and `provider_name` (the key it's registered
+    /// under). Unset defaults to `true` only when `provider_name` is
+    /// `"anthropic"` — the only client that reads this.
+    pub fn resolve_thinking(&self, provider_name: &str) -> bool {
+        match self.thinking {
+            Some(ThinkingMode::Adaptive) => true,
+            Some(ThinkingMode::Off) => false,
+            None => provider_name == "anthropic",
+        }
+    }
 }
 
 /// Runtime configuration passed to agent/LLM code
@@ -203,6 +285,10 @@ pub struct AgentConfig {
     pub timeout_secs: u64,
     /// Maximum output tokens for LLM responses (provider-specific defaults if not set)
     pub max_tokens: Option<u32>,
+    /// Whether to request extended thinking (`AnthropicClient` only); see
+    /// [`ProviderConfig::resolve_thinking`].
+    #[serde(default)]
+    pub thinking: bool,
 }
 
 /// The one source of truth for the request-timeout default; every path that
@@ -221,6 +307,7 @@ impl AgentConfig {
         max_iterations: usize,
     ) -> Self {
         Self {
+            thinking: provider_name == "anthropic",
             provider_name,
             api_base,
             api_key,
@@ -237,14 +324,6 @@ impl AgentConfig {
             ..self.clone()
         }
     }
-
-    pub fn arc_with_max_iterations(self: &Arc<Self>, max_iterations: usize) -> Arc<Self> {
-        if self.max_iterations == max_iterations {
-            Arc::clone(self)
-        } else {
-            Arc::new(self.with_max_iterations(max_iterations))
-        }
-    }
 }
 
 impl Default for AgentConfig {
@@ -257,6 +336,7 @@ impl Default for AgentConfig {
             max_iterations: 10,
             timeout_secs: default_timeout_secs(),
             max_tokens: None,
+            thinking: false,
         }
     }
 }
@@ -274,6 +354,7 @@ mod tests {
             api_key: api_key.map(String::from),
             timeout_secs: None,
             max_tokens: None,
+            thinking: None,
         }
     }
 
@@ -353,33 +434,6 @@ mod tests {
     }
 
     #[test]
-    fn arc_with_max_iterations_reuses_arc_when_same() {
-        let cfg = Arc::new(AgentConfig::new(
-            "p".into(),
-            "b".into(),
-            "k".into(),
-            "m".into(),
-            10,
-        ));
-        let same = cfg.arc_with_max_iterations(10);
-        assert!(Arc::ptr_eq(&cfg, &same));
-    }
-
-    #[test]
-    fn arc_with_max_iterations_creates_new_when_different() {
-        let cfg = Arc::new(AgentConfig::new(
-            "p".into(),
-            "b".into(),
-            "k".into(),
-            "m".into(),
-            10,
-        ));
-        let different = cfg.arc_with_max_iterations(20);
-        assert!(!Arc::ptr_eq(&cfg, &different));
-        assert_eq!(different.max_iterations, 20);
-    }
-
-    #[test]
     fn agent_config_default_has_correct_values() {
         let cfg = AgentConfig::default();
         assert_eq!(cfg.max_iterations, 10);
@@ -395,5 +449,75 @@ mod tests {
         "#;
         let cfg: AppConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.max_iterations, 10);
+        assert!(cfg.memory.is_none());
+    }
+
+    #[test]
+    fn memory_section_deserializes_with_defaults() {
+        let toml_str = r#"
+            default_provider = "openai"
+            [memory]
+            embedding_provider = "openai"
+            embedding_model = "text-embedding-3-small"
+        "#;
+        let cfg: AppConfig = toml::from_str(toml_str).unwrap();
+        let memory = cfg.memory.unwrap();
+        assert_eq!(memory.embedding_provider.as_deref(), Some("openai"));
+        assert_eq!(
+            memory.embedding_model.as_deref(),
+            Some("text-embedding-3-small")
+        );
+        assert_eq!(memory.top_k, 5);
+        assert!(memory.db_path.is_none());
+
+        let bare: AppConfig = toml::from_str("default_provider = \"openai\"\n[memory]\n").unwrap();
+        let memory = bare.memory.unwrap();
+        assert!(memory.embedding_provider.is_none());
+        assert_eq!(memory.top_k, 5);
+    }
+
+    #[test]
+    fn to_public_json_redacts_secrets_and_local_paths() {
+        let toml_str = r#"
+            default_provider = "openai"
+            data_dir = "/Users/alice/.openheim"
+            [providers.openai]
+            api_base = "https://api.openai.com/v1"
+            default_model = "gpt-4"
+            models = ["gpt-4"]
+            api_key = "sk-super-secret"
+
+            [mcp_servers.demo]
+            command = "npx"
+            env = { API_TOKEN = "also-secret" }
+
+            [memory]
+            embedding_provider = "openai"
+            embedding_model = "text-embedding-3-small"
+            db_path = "/Users/alice/.openheim/memory.db"
+            top_k = 7
+        "#;
+        let cfg: AppConfig = toml::from_str(toml_str).unwrap();
+
+        let val = cfg.to_public_json(std::path::Path::new("/work/dir"));
+
+        assert_eq!(val["work_dir"], "/work/dir");
+        assert!(val["providers"]["openai"].get("api_key").is_none());
+        assert_eq!(val["mcp_servers"]["demo"]["env"]["API_TOKEN"], "<redacted>");
+
+        // db_path is a local filesystem path, not a secret the client needs;
+        // it's stripped, while the rest of the [memory] section survives.
+        assert!(val["memory"].get("db_path").is_none());
+        assert_eq!(val["memory"]["embedding_provider"], "openai");
+        assert_eq!(val["memory"]["embedding_model"], "text-embedding-3-small");
+        assert_eq!(val["memory"]["top_k"], 7);
+
+        // data_dir is a local filesystem path, not something an
+        // unauthenticated client needs; it's stripped from the public view.
+        assert!(val.get("data_dir").is_none());
+        assert_eq!(
+            cfg.data_dir,
+            Some(std::path::PathBuf::from("/Users/alice/.openheim"))
+        );
     }
 }

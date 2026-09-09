@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use reqwest::Client as ReqwestClient;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
@@ -24,6 +24,11 @@ pub struct AnthropicClient {
     api_key: String,
     model: String,
     max_tokens: u32,
+    /// Whether to request extended thinking. Resolved by the caller from
+    /// `[providers.<name>].thinking` (see
+    /// [`crate::config::ProviderConfig::resolve_thinking`]); the client
+    /// makes no model-name-based guess of its own.
+    thinking: bool,
 }
 
 impl AnthropicClient {
@@ -33,6 +38,7 @@ impl AnthropicClient {
         api_key: String,
         model: String,
         max_tokens: Option<u32>,
+        thinking: bool,
     ) -> Self {
         Self {
             client,
@@ -40,6 +46,7 @@ impl AnthropicClient {
             api_key,
             model,
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            thinking,
         }
     }
 }
@@ -112,6 +119,102 @@ struct AnthropicTool {
     name: String,
     description: String,
     input_schema: Value,
+}
+
+// --- Anthropic streaming event types ---
+//
+// Unlike OpenAI/Gemini's single repeated envelope shape, each Anthropic SSE
+// event's fields depend on its `type` — an externally-tagged enum on `type`
+// models that directly. `#[serde(other)]` on `Other` absorbs any event type
+// this client doesn't special-case (`message_stop`, `ping`, and any future
+// addition), matching the previous `Value`-based code's silent-ignore
+// behavior for unrecognized types instead of failing the whole stream.
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum AnthropicStreamEvent {
+    #[serde(rename = "message_start")]
+    MessageStart { message: AnthropicStreamMessage },
+    #[serde(rename = "content_block_start")]
+    ContentBlockStart {
+        content_block: AnthropicStreamContentBlock,
+    },
+    #[serde(rename = "content_block_delta")]
+    ContentBlockDelta { delta: AnthropicStreamDelta },
+    #[serde(rename = "content_block_stop")]
+    ContentBlockStop,
+    #[serde(rename = "message_delta")]
+    MessageDelta {
+        delta: AnthropicMessageDeltaFields,
+        #[serde(default)]
+        usage: Option<AnthropicDeltaUsage>,
+    },
+    #[serde(rename = "error")]
+    Error { error: AnthropicStreamError },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicStreamMessage {
+    #[serde(default)]
+    usage: AnthropicStartUsage,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct AnthropicStartUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum AnthropicStreamContentBlock {
+    #[serde(rename = "tool_use")]
+    ToolUse { id: String, name: String },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum AnthropicStreamDelta {
+    #[serde(rename = "text_delta")]
+    Text { text: String },
+    #[serde(rename = "thinking_delta")]
+    Thinking { thinking: String },
+    #[serde(rename = "signature_delta")]
+    Signature { signature: String },
+    #[serde(rename = "input_json_delta")]
+    InputJson { partial_json: String },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicMessageDeltaFields {
+    #[serde(default)]
+    stop_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicDeltaUsage {
+    /// Cumulative, not a per-event delta — see the `message_delta` handling
+    /// in `send_streaming` for why the last value seen wins.
+    #[serde(default)]
+    output_tokens: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicStreamError {
+    #[serde(default)]
+    message: Option<String>,
 }
 
 // --- Conversions ---
@@ -262,32 +365,19 @@ fn extract_system(messages: &[Message]) -> Option<String> {
     }
 }
 
-/// Returns a thinking config for models that support adaptive thinking.
+/// Returns Anthropic's adaptive-thinking request config when `enabled`.
 ///
-/// Adaptive thinking (`type: "adaptive"`) replaced the old fixed-budget form
-/// (`type: "enabled", budget_tokens: N`) starting with Claude 4.6; the old
-/// form now returns a 400 on Opus 4.7/4.8, Sonnet 5, and Fable 5, and is
-/// deprecated on Opus 4.6 / Sonnet 4.6. Models predating adaptive thinking
+/// Adaptive thinking (`type: "adaptive"`) is the form current Claude models
+/// accept; the fixed-budget form (`type: "enabled", budget_tokens: N`)
+/// returns a 400 on Opus 4.7/4.8, Sonnet 5, and Fable 5, and is deprecated
+/// on Opus 4.6 / Sonnet 4.6. Models predating adaptive thinking
 /// (Sonnet 3.7 and earlier Claude 4 releases) only support the fixed-budget
-/// form; rather than special-case each one, thinking is left disabled for
-/// them. Adaptive thinking also enables interleaved thinking automatically,
-/// so no `anthropic-beta` header is needed here.
-fn thinking_config(model: &str) -> Option<AnthropicThinkingConfig> {
-    let supported = [
-        "claude-opus-4-6",
-        "claude-opus-4-7",
-        "claude-opus-4-8",
-        "claude-sonnet-4-6",
-        "claude-sonnet-5",
-        "claude-fable-5",
-        "claude-mythos-5",
-    ]
-    .iter()
-    .any(|m| model.contains(m));
-    if !supported {
-        return None;
-    }
-    Some(AnthropicThinkingConfig {
+/// form and reject adaptive thinking outright — set `thinking = "off"` on
+/// the provider entry for those (see [`crate::config::ProviderConfig::resolve_thinking`]).
+/// Adaptive thinking also enables interleaved thinking automatically, so no
+/// `anthropic-beta` header is needed here.
+fn thinking_config(enabled: bool) -> Option<AnthropicThinkingConfig> {
+    enabled.then_some(AnthropicThinkingConfig {
         thinking_type: "adaptive",
         display: "summarized",
     })
@@ -302,7 +392,7 @@ impl AnthropicClient {
             system: extract_system(messages),
             messages: convert_messages(messages)?,
             tools: convert_tools(tools),
-            thinking: thinking_config(&self.model),
+            thinking: thinking_config(self.thinking),
         })
     }
 
@@ -312,27 +402,16 @@ impl AnthropicClient {
     async fn post(&self, request: &AnthropicRequest) -> Result<reqwest::Response> {
         let endpoint = format!("{}/messages", self.api_base.trim_end_matches('/'));
 
-        let response = self
-            .client
-            .post(&endpoint)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("Content-Type", "application/json")
-            .json(request)
-            .send()
-            .await
-            .map_err(Error::ReqwestError)?;
-
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to read error body>".into());
-            return Err(Error::HttpError { status, body });
-        }
-
-        Ok(response)
+        super::http::post_json(
+            &self.client,
+            &endpoint,
+            &[
+                ("x-api-key", self.api_key.as_str()),
+                ("anthropic-version", ANTHROPIC_VERSION),
+            ],
+            request,
+        )
+        .await
     }
 }
 
@@ -341,11 +420,16 @@ impl LlmClient for AnthropicClient {
     /// Implemented in terms of [`Self::send_streaming`] with a discarded
     /// channel: Anthropic's streaming and non-streaming responses carry the
     /// same information, so there is no reason to maintain a second
-    /// request/response code path (and the JSON non-streaming path used to
-    /// silently skip `thinking_config`, leaving thinking enabled only for
-    /// streaming callers).
+    /// request/response code path.
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
-        let (chunk_tx, _chunk_rx) = mpsc::unbounded_channel();
+        let (chunk_tx, chunk_rx) = mpsc::unbounded_channel();
+        // Dropped immediately, before any chunk is sent: an unbounded
+        // channel with a live receiver buffers every chunk in memory until
+        // something calls `recv()`, and nothing here ever will. Dropping it
+        // up front makes `chunk_tx.send()` fail fast (already ignored below
+        // and in `send_streaming`) instead of accumulating the whole
+        // response in the channel for the life of the request.
+        drop(chunk_rx);
         self.send_streaming(messages, tools, chunk_tx).await
     }
 
@@ -360,7 +444,6 @@ impl LlmClient for AnthropicClient {
 
         // Parse SSE stream.
         let mut decoder = SseDecoder::new();
-        let mut current_block_type: Option<String> = None;
         let mut current_tool_id: Option<String> = None;
         let mut current_tool_name: Option<String> = None;
         let mut current_tool_json = String::new();
@@ -380,97 +463,76 @@ impl LlmClient for AnthropicClient {
                     continue;
                 }
 
-                let event: Value = match serde_json::from_str(&data) {
+                let event: AnthropicStreamEvent = match serde_json::from_str(&data) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
 
-                match event["type"].as_str().unwrap_or("") {
-                    "message_start" => {
-                        let u = &event["message"]["usage"];
-                        usage.input_tokens = u["input_tokens"].as_u64().unwrap_or(0);
-                        usage.output_tokens = u["output_tokens"].as_u64().unwrap_or(0);
-                        usage.cache_creation_tokens =
-                            u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
-                        usage.cache_read_tokens =
-                            u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                match event {
+                    AnthropicStreamEvent::MessageStart { message } => {
+                        let u = message.usage;
+                        usage.input_tokens = u.input_tokens;
+                        usage.output_tokens = u.output_tokens;
+                        usage.cache_creation_tokens = u.cache_creation_input_tokens;
+                        usage.cache_read_tokens = u.cache_read_input_tokens;
                     }
-                    "content_block_start" => {
-                        let block_type = event["content_block"]["type"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        if block_type == "tool_use" {
-                            current_tool_id =
-                                event["content_block"]["id"].as_str().map(String::from);
-                            current_tool_name =
-                                event["content_block"]["name"].as_str().map(String::from);
+                    AnthropicStreamEvent::ContentBlockStart { content_block } => {
+                        if let AnthropicStreamContentBlock::ToolUse { id, name } = content_block {
+                            current_tool_id = Some(id);
+                            current_tool_name = Some(name);
                             current_tool_json.clear();
                         }
-                        current_block_type = Some(block_type);
                     }
-                    "content_block_delta" => {
-                        let delta = &event["delta"];
-                        match delta["type"].as_str().unwrap_or("") {
-                            "text_delta" => {
-                                if let Some(text) = delta["text"].as_str() {
-                                    text_content.push_str(text);
-                                    let _ = chunk_tx.send(LlmChunk::Text(text.to_string()));
-                                }
-                            }
-                            "thinking_delta" => {
-                                if let Some(thinking) = delta["thinking"].as_str() {
-                                    thinking_content.push_str(thinking);
-                                    let _ = chunk_tx.send(LlmChunk::Thinking(thinking.to_string()));
-                                }
-                            }
-                            "signature_delta" => {
-                                if let Some(signature) = delta["signature"].as_str() {
-                                    thinking_signature.push_str(signature);
-                                }
-                            }
-                            "input_json_delta" => {
-                                if let Some(partial) = delta["partial_json"].as_str() {
-                                    current_tool_json.push_str(partial);
-                                }
-                            }
-                            _ => {}
+                    AnthropicStreamEvent::ContentBlockDelta { delta } => match delta {
+                        AnthropicStreamDelta::Text { text } => {
+                            text_content.push_str(&text);
+                            let _ = chunk_tx.send(LlmChunk::Text(text));
                         }
-                    }
-                    "content_block_stop" => {
-                        if current_block_type.as_deref() == Some("tool_use") {
-                            if let (Some(id), Some(name)) =
-                                (current_tool_id.take(), current_tool_name.take())
-                            {
-                                tool_calls.push(ContentBlock::ToolUse {
-                                    id,
-                                    name,
-                                    arguments: current_tool_json.clone(),
-                                });
-                            }
-                            current_tool_json.clear();
+                        AnthropicStreamDelta::Thinking { thinking } => {
+                            thinking_content.push_str(&thinking);
+                            let _ = chunk_tx.send(LlmChunk::Thinking(thinking));
                         }
-                        current_block_type = None;
+                        AnthropicStreamDelta::Signature { signature } => {
+                            thinking_signature.push_str(&signature);
+                        }
+                        AnthropicStreamDelta::InputJson { partial_json } => {
+                            current_tool_json.push_str(&partial_json);
+                        }
+                        AnthropicStreamDelta::Other => {}
+                    },
+                    AnthropicStreamEvent::ContentBlockStop => {
+                        if let (Some(id), Some(name)) =
+                            (current_tool_id.take(), current_tool_name.take())
+                        {
+                            tool_calls.push(ContentBlock::ToolUse {
+                                id,
+                                name,
+                                arguments: current_tool_json.clone(),
+                            });
+                        }
+                        current_tool_json.clear();
                     }
-                    "message_delta" => {
-                        if let Some(reason) = event["delta"]["stop_reason"].as_str() {
-                            stop_reason = Some(reason.to_string());
+                    AnthropicStreamEvent::MessageDelta {
+                        delta,
+                        usage: delta_usage,
+                    } => {
+                        if let Some(reason) = delta.stop_reason {
+                            stop_reason = Some(reason);
                         }
                         // Anthropic reports `output_tokens` cumulatively on each
                         // `message_delta`, not as a per-event delta — the last
                         // value seen before the stream ends is the true total.
-                        if let Some(ot) = event["usage"]["output_tokens"].as_u64() {
+                        if let Some(ot) = delta_usage.and_then(|u| u.output_tokens) {
                             usage.output_tokens = ot;
                         }
                     }
-                    "error" => {
-                        let msg = event["error"]["message"]
-                            .as_str()
-                            .unwrap_or("unknown streaming error")
-                            .to_string();
+                    AnthropicStreamEvent::Error { error } => {
+                        let msg = error
+                            .message
+                            .unwrap_or_else(|| "unknown streaming error".to_string());
                         return Err(Error::ApiError(format!("Anthropic streaming error: {msg}")));
                     }
-                    _ => {}
+                    AnthropicStreamEvent::Other => {}
                 }
             }
         }
@@ -634,14 +696,11 @@ mod tests {
 
     #[test]
     fn convert_tools_maps_definitions() {
-        let tools = vec![Tool {
-            tool_type: "function".into(),
-            function: crate::core::models::FunctionDefinition {
-                name: "read_file".into(),
-                description: "Read a file".into(),
-                parameters: json!({"type": "object"}),
-            },
-        }];
+        let tools = vec![Tool::function(
+            "read_file",
+            "Read a file",
+            json!({"type": "object"}),
+        )];
         let result = convert_tools(&tools);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "read_file");
@@ -681,50 +740,149 @@ mod tests {
     }
 
     #[test]
-    fn thinking_config_enabled_for_adaptive_capable_models() {
-        for model in [
-            "claude-opus-4-8",
-            "claude-opus-4-7",
-            "claude-opus-4-6",
-            "claude-sonnet-4-6",
-            "claude-sonnet-5",
-            "claude-fable-5",
-        ] {
-            let config = thinking_config(model);
-            assert!(config.is_some(), "expected thinking enabled for {model}");
-            assert_eq!(config.unwrap().thinking_type, "adaptive");
-        }
+    fn thinking_config_enabled_when_requested() {
+        let config = thinking_config(true);
+        assert!(config.is_some());
+        assert_eq!(config.unwrap().thinking_type, "adaptive");
     }
 
     #[test]
-    fn thinking_config_disabled_for_unsupported_models() {
-        for model in [
-            "claude-haiku-4-5",
-            "claude-3-7-sonnet-20250219",
-            "claude-opus-4-5-20251101",
-        ] {
-            assert!(
-                thinking_config(model).is_none(),
-                "expected thinking disabled for {model}"
-            );
-        }
+    fn thinking_config_disabled_when_not_requested() {
+        assert!(thinking_config(false).is_none());
     }
 
-    #[test]
-    fn build_request_always_streams_and_enables_thinking_when_supported() {
-        // Regression test for the non-streaming `send()` bug: it used to build
-        // its own request with `stream: false, thinking: None`, so thinking
-        // silently never worked outside of `send_streaming`. `build_request`
-        // is now the single source for both, so this holds for both callers.
-        let client = AnthropicClient::new(
+    fn client_with_thinking(thinking: bool) -> AnthropicClient {
+        AnthropicClient::new(
             ReqwestClient::new(),
             "https://api.anthropic.com/v1".into(),
             "test-key".into(),
             "claude-sonnet-5".into(),
             None,
-        );
-        let request = client.build_request(&[Message::user("hi")], &[]).unwrap();
+            thinking,
+        )
+    }
+
+    #[test]
+    fn build_request_always_streams_and_respects_thinking() {
+        // `build_request` is the single request source for both `send` and
+        // `send_streaming`; both must stream and honor the thinking config.
+        let request = client_with_thinking(true)
+            .build_request(&[Message::user("hi")], &[])
+            .unwrap();
         assert!(request.stream);
         assert!(request.thinking.is_some());
+
+        let request = client_with_thinking(false)
+            .build_request(&[Message::user("hi")], &[])
+            .unwrap();
+        assert!(request.thinking.is_none());
+    }
+
+    #[test]
+    fn stream_event_deserializes_message_start_usage() {
+        let event: AnthropicStreamEvent = serde_json::from_str(
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":0,"cache_creation_input_tokens":3,"cache_read_input_tokens":1}}}"#,
+        )
+        .unwrap();
+        let AnthropicStreamEvent::MessageStart { message } = event else {
+            panic!("expected MessageStart");
+        };
+        assert_eq!(message.usage.input_tokens, 12);
+        assert_eq!(message.usage.cache_creation_input_tokens, 3);
+        assert_eq!(message.usage.cache_read_input_tokens, 1);
+    }
+
+    #[test]
+    fn stream_event_deserializes_content_block_start_tool_use() {
+        let event: AnthropicStreamEvent = serde_json::from_str(
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"read_file"}}"#,
+        )
+        .unwrap();
+        let AnthropicStreamEvent::ContentBlockStart { content_block } = event else {
+            panic!("expected ContentBlockStart");
+        };
+        let AnthropicStreamContentBlock::ToolUse { id, name } = content_block else {
+            panic!("expected ToolUse content block");
+        };
+        assert_eq!(id, "call_1");
+        assert_eq!(name, "read_file");
+    }
+
+    #[test]
+    fn stream_event_deserializes_content_block_start_text_as_other() {
+        let event: AnthropicStreamEvent = serde_json::from_str(
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+        )
+        .unwrap();
+        let AnthropicStreamEvent::ContentBlockStart { content_block } = event else {
+            panic!("expected ContentBlockStart");
+        };
+        assert!(matches!(content_block, AnthropicStreamContentBlock::Other));
+    }
+
+    #[test]
+    fn stream_event_deserializes_every_delta_variant() {
+        let cases = [
+            (r#"{"type":"text_delta","text":"hi"}"#, "text"),
+            (
+                r#"{"type":"thinking_delta","thinking":"pondering"}"#,
+                "thinking",
+            ),
+            (
+                r#"{"type":"signature_delta","signature":"sig"}"#,
+                "signature",
+            ),
+            (
+                r#"{"type":"input_json_delta","partial_json":"{\"a\""}"#,
+                "input_json",
+            ),
+        ];
+        for (json, label) in cases {
+            let event: AnthropicStreamEvent = serde_json::from_str(&format!(
+                r#"{{"type":"content_block_delta","index":0,"delta":{json}}}"#
+            ))
+            .unwrap();
+            let AnthropicStreamEvent::ContentBlockDelta { delta } = event else {
+                panic!("expected ContentBlockDelta for {label}");
+            };
+            assert!(
+                !matches!(delta, AnthropicStreamDelta::Other),
+                "expected a typed delta for {label}, got Other"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_event_deserializes_message_delta_with_cumulative_usage() {
+        let event: AnthropicStreamEvent = serde_json::from_str(
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}"#,
+        )
+        .unwrap();
+        let AnthropicStreamEvent::MessageDelta { delta, usage } = event else {
+            panic!("expected MessageDelta");
+        };
+        assert_eq!(delta.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(usage.unwrap().output_tokens, Some(42));
+    }
+
+    #[test]
+    fn stream_event_deserializes_error() {
+        let event: AnthropicStreamEvent =
+            serde_json::from_str(r#"{"type":"error","error":{"message":"overloaded"}}"#).unwrap();
+        let AnthropicStreamEvent::Error { error } = event else {
+            panic!("expected Error");
+        };
+        assert_eq!(error.message.as_deref(), Some("overloaded"));
+    }
+
+    #[test]
+    fn stream_event_unknown_type_falls_back_to_other() {
+        // `ping` and `message_stop` (and anything future) must not fail
+        // deserialization — the previous `Value`-based code silently
+        // ignored unrecognized types instead of erroring the whole stream.
+        for json in [r#"{"type":"ping"}"#, r#"{"type":"message_stop"}"#] {
+            let event: AnthropicStreamEvent = serde_json::from_str(json).unwrap();
+            assert!(matches!(event, AnthropicStreamEvent::Other));
+        }
     }
 }

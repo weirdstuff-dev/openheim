@@ -44,11 +44,12 @@ Openheim is built in Rust from the ground up:
 ## Features
 
 - **Multi-provider** — OpenAI, Anthropic Claude, Google Gemini, and any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.)
-- **Tool execution** — built-in shell, file read/write/edit, directory listing, ripgrep-style search, web fetch, and subagent-delegation tools. Trait-based, so you can add your own.
+- **Tool execution** — built-in shell, file read/write/edit, directory listing, ripgrep-style search, web fetch, long-term memory (`remember`/`search_memory`/`forget`), and subagent-delegation tools. Trait-based, so you can add your own.
 - **Subagents** — delegate a self-contained task to another agent (its own persona, model, and tools) via the always-on `delegate_task` tool. Named profiles live in `~/.openheim/agents/`; the orchestrator can also define inline, one-off subagents. See [docs/subagents.md](./docs/subagents.md).
 - **Agent sandboxing** — configurable work-directory boundary restricts file access to a directory tree. Shell execution is disabled by default and can be enabled via `allow_shell = true` in config or `.allow_shell(true)` in the builder.
 - **MCP (Model Context Protocol)** — connect external MCP servers (stdio or Streamable HTTP) and their tools are automatically exposed to the LLM as `{server_name}__{tool_name}`.
 - **Conversation memory** — conversations (including full tool call history) persist to disk and resume across sessions
+- **Long-term memory** — ask the agent to remember something and it saves a note via the `remember` tool; later sessions recall it with `search_memory`, and `forget` drops a note by id. Nothing is stored or injected automatically. Works out of the box with keyword search (SQLite FTS5, no network); add an embedding provider under `[memory]` (any OpenAI-compatible endpoint or Gemini) and search becomes semantic via [sqlite-vec](https://github.com/asg017/sqlite-vec).
 - **Context-size tracking** — each session's current context size (the last LLM call's token usage) is tracked, persisted, and shown live in the TUI footer; embedders can read it via `SessionHandle::context_usage()` or `GET /api/sessions/{id}`
 - **System identity** — edit `~/.openheim/system.md` to define how the agent presents itself. Required when preparing a session (created by `openheim init`).
 - **Skills** — drop a markdown file into `~/.openheim/skills/` and it's injected into the system prompt. Set `default_skills` in config to auto-load skills every session; pass `--skills` for per-session additions. ACP clients can also pass skills per-session via `_meta`.
@@ -327,28 +328,37 @@ src/
     permission.rs   PermissionGate trait — embedder hook for tool-call approval
     turn.rs         Cross-cutting turn controls (cancellation, etc.)
     client_io.rs    Optional delegation of file I/O to the ACP client
+    runtime/        The runtime core — used by acp, the other transports, and the library facade
+      state.rs      AgentState — shared handle, request handlers
+      session.rs    Live session map — state and eviction policy
+      mod.rs        AgentMode (session tool policy)
     llm/            LLM client trait and provider implementations
       anthropic.rs    Anthropic Messages API client
       gemini.rs       Google Gemini API client
       openai.rs       OpenAI API client
       openai_compatible.rs  Generic OpenAI-compatible client (Ollama, etc.)
+      http.rs         Shared POST-JSON-and-check-status helper
       sse.rs          Shared Server-Sent Events decoder for streaming
       retry.rs        Automatic retry with exponential backoff
   tools/            Tool trait, registry, and built-in tools
     execute_command.rs / read_file.rs / write_file.rs / edit_file.rs / list_dir.rs / search.rs / web_fetch.rs
-    delegate.rs       DelegateTool, with_delegation — delegate_task tool
-    sandbox.rs        Work-directory path validation
-    sandboxed_executor.rs  Per-session executor wrapper enforcing work_dir and allow_shell
+    delegate.rs       DelegateTool — delegate_task tool (subagents)
+    args.rs           Shared tool-argument decoding
+    sandbox.rs        Work-directory path validation (used by every file tool)
     scoped_executor.rs     Tool-name allowlist wrapper around any ToolExecutor
   mcp/              MCP (Model Context Protocol) client integration
     client.rs       MCP server connection (stdio + Streamable HTTP)
     tool_handler.rs  Adapts MCP tools to the ToolHandler trait
-  rag/              Conversation history, prompt builder, skills manager, and system identity
+  memory/           Agent memory — conversation history, prompt builder, skills manager, system identity
+    history.rs      HistoryManager — conversation persistence
     lease.rs        Advisory per-session write lease (guards ~/.openheim/history/ across processes)
+    skills.rs / system.rs / prompt.rs
+  rag/              Long-term memory via tool calls (feature `rag`)
+    embedding/      EmbeddingClient trait + OpenAI-compatible and Gemini clients
+    store.rs        VectorStore — SQLite schema, FTS5 keyword search, sqlite-vec KNN search
+    tool.rs         remember / search_memory / forget tools
   subagents/        Subagent profiles — delegated, isolated agent personas (~/.openheim/agents/)
-  acp/              Agent Client Protocol server implementation
-    session.rs      Live session map — state and eviction policy
-    state.rs        AgentState — shared handle, request handlers
+  acp/              Agent Client Protocol wire adapter
     serve.rs        Connection loop wiring transports to the agent-client-protocol crate
     permission.rs   Adapts ACP session/request_permission to PermissionGate
     client_io.rs    Adapts ACP fs/* requests to ClientIo

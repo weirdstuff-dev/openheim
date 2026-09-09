@@ -1,4 +1,3 @@
-use crate::config::config_dir;
 use crate::error::{Error, Result};
 use std::path::PathBuf;
 
@@ -12,11 +11,12 @@ pub struct SystemLoader {
 }
 
 impl SystemLoader {
-    /// Creates a `SystemLoader` pointed at `~/.openheim/system.md`.
-    pub fn new() -> Result<Self> {
-        Ok(Self {
-            path: config_dir()?.join("system.md"),
-        })
+    /// Creates a `SystemLoader` pointed at `{dir}/system.md`, e.g. for an
+    /// injected `AppConfig::data_dir` or in tests.
+    pub fn with_dir(dir: PathBuf) -> Self {
+        Self {
+            path: dir.join("system.md"),
+        }
     }
 
     /// Returns the contents of `system.md`.

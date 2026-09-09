@@ -293,18 +293,21 @@ async fn main() -> openheim::Result<()> {
         )))
     );
 
-    let mut executor = SystemToolExecutor::new();
-    executor.register_builtins();
-    let executor = Arc::new(executor);
-
     let app_config = load_config()?;
     let agent_config = app_config.resolve(None)?;
 
+    let mut executor = SystemToolExecutor::new();
+    executor.register_builtins(app_config.allow_shell);
+    let executor = Arc::new(executor);
+
     let mut messages = vec![Message::user("Hello!")];
 
+    let work_dir = std::env::current_dir()?;
     let turn = TurnContext {
         cancel: &CancellationToken::new(),
         permission_gate: &(Arc::new(AllowAll) as Arc<dyn PermissionGate>),
+        work_dir: &work_dir,
+        client_io: &openheim::core::client_io::NoClientIo,
     };
 
     let result = run_agent_with_history(

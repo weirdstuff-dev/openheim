@@ -5,7 +5,8 @@ mod types;
 pub use client::{build_http_client, client_for_config, create_client};
 pub(crate) use types::default_timeout_secs;
 pub use types::{
-    AgentConfig, AppConfig, McpServerConfig, ModelsInfo, ProviderConfig, ProviderModels,
+    AgentConfig, AppConfig, EmbeddingConfig, McpServerConfig, MemoryConfig, ModelsInfo,
+    ProviderConfig, ProviderModels, TuiConfig,
 };
 
 use std::path::PathBuf;
@@ -127,6 +128,80 @@ pub fn load_config() -> Result<AppConfig> {
     Ok(config)
 }
 
+/// Sets or updates the `theme_color` key inside the `[tui]` table in the
+/// config file at `path`, leaving every other line untouched. Deliberately
+/// not a full TOML round-trip (no `toml_edit` dependency pulled in for one
+/// field): it only ever touches a line that already looks like
+/// `theme_color = "..."` within an existing `[tui]` section (bounded by that
+/// section's header and the next `[table]` header or EOF), or — if there is
+/// no `[tui]` section yet — appends a new one at the end of the file, so it
+/// can't corrupt an unrelated `[table]` or key.
+///
+/// `name` is interpolated into a TOML basic string rather than run through a
+/// full TOML encoder, so quotes, backslashes, and newlines are rejected
+/// outright instead of being escaped — a caller passing one of those through
+/// (this is `pub`, so an embedder could pass anything) can't break out of
+/// the string and inject arbitrary lines into the config file.
+pub fn save_theme_to_config_at(path: &std::path::Path, name: &str) -> Result<()> {
+    if name.contains(['"', '\\', '\n', '\r']) {
+        return Err(Error::config(format!(
+            "invalid theme name {name:?}: quotes, backslashes, and newlines are not allowed"
+        )));
+    }
+    let contents = std::fs::read_to_string(path)?;
+    let new_line = format!("theme_color = \"{name}\"");
+    let mut lines: Vec<String> = contents.lines().map(String::from).collect();
+
+    let tui_header = lines.iter().position(|l| is_tui_header(l));
+    match tui_header {
+        Some(header_idx) => {
+            // The section runs until the next `[...]` header or EOF.
+            let section_end = lines[header_idx + 1..]
+                .iter()
+                .position(|l| l.trim_start().starts_with('['))
+                .map(|i| header_idx + 1 + i)
+                .unwrap_or(lines.len());
+            let existing_theme =
+                (header_idx + 1..section_end).find(|&i| is_theme_color_line(&lines[i]));
+            match existing_theme {
+                Some(i) => lines[i] = new_line,
+                None => lines.insert(section_end, new_line),
+            }
+        }
+        None => {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push("[tui]".to_string());
+            lines.push(new_line);
+        }
+    }
+    let trailing = if contents.ends_with('\n') { "\n" } else { "" };
+    std::fs::write(path, format!("{}{trailing}", lines.join("\n")))?;
+    Ok(())
+}
+
+/// Whether `line` is a `[tui]` table header, allowing for trailing
+/// whitespace or a `# comment` after the closing bracket (e.g. `[tui] #
+/// theme settings`), so those aren't mistaken for the start of a new,
+/// unrelated table and don't cause a second `[tui]` header to be appended.
+fn is_tui_header(line: &str) -> bool {
+    let Some(rest) = line.trim_start().strip_prefix("[tui]") else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with(char::is_whitespace) || rest.starts_with('#')
+}
+
+/// Whether `line` assigns the `theme_color` key, as opposed to a
+/// similarly-prefixed but distinct key like `theme_color_backup`. Requires
+/// the next non-whitespace character after `theme_color` to be `=`.
+fn is_theme_color_line(line: &str) -> bool {
+    let Some(rest) = line.trim_start().strip_prefix("theme_color") else {
+        return false;
+    };
+    rest.trim_start().starts_with('=')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,10 +235,10 @@ mod tests {
 
     /// `config.toml.default`'s `[providers.openai]`/`[providers.anthropic]`
     /// sections are the ones actually shipped active-by-default (Gemini is
-    /// commented out, so it isn't valid TOML data to parse here) — this is
-    /// the regression test for the drift `BUILTIN_PROVIDER_DEFAULTS`'s doc
-    /// comment describes. If this fails, either the template or the
-    /// constant is stale; update whichever one is wrong.
+    /// commented out, so it isn't valid TOML data to parse here). Pins the
+    /// shipped template against `BUILTIN_PROVIDER_DEFAULTS` so the two
+    /// can't drift; if this fails, either the template or the constant is
+    /// stale — update whichever one is wrong.
     #[test]
     fn config_toml_default_matches_builtin_provider_defaults() {
         let config: AppConfig = toml::from_str(DEFAULT_CONFIG).unwrap();
@@ -189,5 +264,142 @@ mod tests {
         let (gemini_api_base, gemini_model) = builtin_provider_defaults("gemini");
         assert!(DEFAULT_CONFIG.contains(gemini_api_base));
         assert!(DEFAULT_CONFIG.contains(gemini_model));
+    }
+
+    #[test]
+    fn save_theme_to_config_at_appends_a_new_tui_section_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "default_provider = \"openai\"\nmax_iterations = 10\n\n[providers.openai]\n",
+        )
+        .unwrap();
+
+        save_theme_to_config_at(&path, "blue").unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents,
+            "default_provider = \"openai\"\nmax_iterations = 10\n\n[providers.openai]\n\n[tui]\ntheme_color = \"blue\"\n"
+        );
+    }
+
+    #[test]
+    fn save_theme_to_config_at_inserts_into_an_existing_empty_tui_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "default_provider = \"openai\"\n\n[tui]\n[providers.openai]\n",
+        )
+        .unwrap();
+
+        save_theme_to_config_at(&path, "blue").unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents,
+            "default_provider = \"openai\"\n\n[tui]\ntheme_color = \"blue\"\n[providers.openai]\n"
+        );
+    }
+
+    #[test]
+    fn save_theme_to_config_at_replaces_an_existing_line_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "default_provider = \"openai\"\n\n[tui]\ntheme_color = \"red\"\n\n[providers.openai]\n",
+        )
+        .unwrap();
+
+        save_theme_to_config_at(&path, "green").unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents,
+            "default_provider = \"openai\"\n\n[tui]\ntheme_color = \"green\"\n\n[providers.openai]\n"
+        );
+    }
+
+    #[test]
+    fn save_theme_to_config_at_preserves_missing_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "default_provider = \"openai\"").unwrap();
+
+        save_theme_to_config_at(&path, "blue").unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents,
+            "default_provider = \"openai\"\n\n[tui]\ntheme_color = \"blue\""
+        );
+    }
+
+    #[test]
+    fn save_theme_to_config_at_rejects_names_that_would_break_out_of_the_toml_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "default_provider = \"openai\"\n").unwrap();
+
+        for bad_name in [
+            "blue\"\ninjected = true",
+            "blue\\",
+            "blue\nred",
+            "blue\r\nred",
+        ] {
+            assert!(
+                save_theme_to_config_at(&path, bad_name).is_err(),
+                "expected {bad_name:?} to be rejected"
+            );
+        }
+
+        // Rejected names must not have modified the file.
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "default_provider = \"openai\"\n");
+    }
+
+    #[test]
+    fn save_theme_to_config_at_recognizes_a_commented_tui_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "default_provider = \"openai\"\n\n[tui] # theme settings\n[providers.openai]\n",
+        )
+        .unwrap();
+
+        save_theme_to_config_at(&path, "blue").unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        // Inserted into the existing (commented) [tui] section rather than
+        // appending a second, duplicate [tui] header at the end.
+        assert_eq!(
+            contents,
+            "default_provider = \"openai\"\n\n[tui] # theme settings\ntheme_color = \"blue\"\n[providers.openai]\n"
+        );
+    }
+
+    #[test]
+    fn save_theme_to_config_at_does_not_touch_a_similarly_prefixed_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "default_provider = \"openai\"\n\n[tui]\ntheme_color_backup = \"red\"\n[providers.openai]\n",
+        )
+        .unwrap();
+
+        save_theme_to_config_at(&path, "blue").unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        // theme_color_backup is left alone; the new theme_color key is
+        // appended at the end of the [tui] section instead of overwriting it.
+        assert_eq!(
+            contents,
+            "default_provider = \"openai\"\n\n[tui]\ntheme_color_backup = \"red\"\ntheme_color = \"blue\"\n[providers.openai]\n"
+        );
     }
 }

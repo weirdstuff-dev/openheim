@@ -7,24 +7,32 @@ use agent_client_protocol::{
     Agent, Client, ConnectTo, ConnectionTo, Dispatch, Handled, on_receive_dispatch,
     on_receive_notification, on_receive_request,
     schema::{
-        AgentCapabilities, CancelNotification, ClientCapabilities, Implementation,
-        InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-        LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
-        PromptCapabilities, PromptRequest, PromptResponse, SessionCapabilities,
-        SessionListCapabilities, SessionNotification, SetSessionModeRequest,
+        AgentCapabilities, CancelNotification, ClientCapabilities, ContentBlock as AcpContentBlock,
+        ContentChunk, Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
+        ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
+        NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse, SessionCapabilities,
+        SessionListCapabilities, SessionNotification, SessionUpdate, SetSessionModeRequest,
         SetSessionModeResponse, SetSessionModelRequest, SetSessionModelResponse,
     },
     util::internal_error,
 };
 use tokio::sync::RwLock;
 
-use crate::{core::client_io::ClientIo, core::permission::PermissionGate, error::Error};
+use crate::{
+    core::client_io::ClientIo,
+    core::permission::PermissionGate,
+    core::runtime::{AgentMode, AgentState},
+    error::Error,
+};
 
 use super::{
-    AgentMode, AgentState,
     client_io::AcpClientIo,
+    convert::convert_prompt_blocks,
     permission::AcpPermissionGate,
-    util::{map_stop_reason, session_mode_state},
+    util::{
+        conversation_metas_to_session_info, map_stop_reason, replay_history_messages,
+        session_mode_state, session_model_state, stream_event_to_session_update,
+    },
 };
 
 pub async fn serve(
@@ -60,7 +68,7 @@ pub async fn serve(
                 if let Ok(val) = serde_json::to_value(&state_init.mcp_statuses) {
                     meta.insert("mcp_servers".to_string(), val);
                 }
-                if let Ok(skills) = state_init.rag.skills.list_skills()
+                if let Ok(skills) = state_init.memory.skills.list_skills()
                     && let Ok(val) = serde_json::to_value(skills)
                 {
                     meta.insert("skills".to_string(), val);
@@ -116,10 +124,10 @@ pub async fn serve(
                     .as_deref()
                     .unwrap_or(&state_session.config.model)
                     .to_string();
-                let model_state = state_session.session_model_state(&current_model);
+                let model_state = session_model_state(&state_session.app_config, &current_model);
 
                 match state_session
-                    .acp_new_session(model.as_deref(), skills, req.cwd)
+                    .new_session(model.as_deref(), skills, req.cwd)
                     .await
                 {
                     Ok(session_key) => responder.respond(
@@ -135,7 +143,7 @@ pub async fn serve(
         .on_receive_request(
             async move |req: PromptRequest, responder, cx: ConnectionTo<Client>| {
                 let session_key = req.session_id.to_string();
-                let prompt_blocks = req.prompt;
+                let prompt_blocks = convert_prompt_blocks(&req.prompt);
                 let cx_cb = cx.clone();
                 let session_id_cb = req.session_id.clone();
                 let state = state_prompt.clone();
@@ -158,17 +166,31 @@ pub async fn serve(
                 // off the event loop via `cx.spawn`, with the response sent from
                 // inside the spawned task once the turn actually finishes.
                 cx.spawn(async move {
+                    let prompt_blocks = match prompt_blocks {
+                        Ok(blocks) => blocks,
+                        Err(e) => {
+                            if let Err(e) = responder.respond_with_error(to_acp_error(&e)) {
+                                tracing::warn!("failed to send prompt response: {e}");
+                            }
+                            return Ok(());
+                        }
+                    };
+                    let executor = state.executor.clone();
                     let result = state
-                        .acp_prompt(
+                        .prompt(
                             &session_key,
                             prompt_blocks,
                             permission_gate,
                             client_io,
-                            move |update| {
-                                let _ = cx_cb.send_notification(SessionNotification::new(
-                                    session_id_cb.clone(),
-                                    update,
-                                ));
+                            move |event| {
+                                if let Some(update) =
+                                    stream_event_to_session_update(event, executor.as_ref())
+                                {
+                                    let _ = cx_cb.send_notification(SessionNotification::new(
+                                        session_id_cb.clone(),
+                                        update,
+                                    ));
+                                }
                             },
                         )
                         .await;
@@ -182,27 +204,7 @@ pub async fn serve(
                         }
                         Err(e) => {
                             tracing::error!("agent loop error: {e}");
-                            // SessionLocked carries structured fields a caller
-                            // needs to build a "busy, retry" UX instead of a
-                            // generic failure — encode them in the JSON-RPC
-                            // error's `data` so they survive the trip back to
-                            // the client instead of collapsing to `e.to_string()`.
-                            let acp_error = match &e {
-                                Error::SessionLocked {
-                                    session_id,
-                                    pid,
-                                    host,
-                                } => agent_client_protocol::Error::internal_error().data(
-                                    serde_json::json!({
-                                        "kind": "session_locked",
-                                        "session_id": session_id,
-                                        "pid": pid,
-                                        "host": host,
-                                    }),
-                                ),
-                                _ => internal_error(e.to_string()),
-                            };
-                            responder.respond_with_error(acp_error)
+                            responder.respond_with_error(to_acp_error(&e))
                         }
                     };
                     if let Err(e) = respond_result {
@@ -215,8 +217,10 @@ pub async fn serve(
         )
         .on_receive_request(
             async move |req: ListSessionsRequest, responder, _cx: ConnectionTo<Client>| {
-                match state_list.acp_list_sessions(req.cwd.as_deref()).await {
-                    Ok(sessions) => responder.respond(ListSessionsResponse::new(sessions)),
+                match state_list.list_sessions(req.cwd.as_deref()).await {
+                    Ok(metas) => responder.respond(ListSessionsResponse::new(
+                        conversation_metas_to_session_info(metas),
+                    )),
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
                 }
             },
@@ -225,22 +229,37 @@ pub async fn serve(
         .on_receive_request(
             async move |req: LoadSessionRequest, responder, cx: ConnectionTo<Client>| {
                 let session_id_str = req.session_id.0.as_ref().to_string();
-                let cx_cb = cx.clone();
                 let session_id_cb = req.session_id.clone();
 
                 let result = state_load
-                    .acp_load_session(&session_id_str, req.cwd.clone(), move |update| {
-                        let _ = cx_cb.send_notification(SessionNotification::new(
-                            session_id_cb.clone(),
-                            update,
-                        ));
-                    })
+                    .load_session(&session_id_str, req.cwd.clone())
                     .await;
 
                 match result {
-                    Ok(mode) => responder
-                        .respond(LoadSessionResponse::new().modes(session_mode_state(mode))),
-                    Err(e) => responder.respond_with_internal_error(e.to_string()),
+                    Ok(loaded) => {
+                        if let Some(warning) = loaded.warning {
+                            let _ = cx.send_notification(SessionNotification::new(
+                                session_id_cb.clone(),
+                                SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                    AcpContentBlock::from(warning),
+                                )),
+                            ));
+                        }
+                        replay_history_messages(
+                            &loaded.messages,
+                            state_load.executor.as_ref(),
+                            &mut |update| {
+                                let _ = cx.send_notification(SessionNotification::new(
+                                    session_id_cb.clone(),
+                                    update,
+                                ));
+                            },
+                        );
+                        responder.respond(
+                            LoadSessionResponse::new().modes(session_mode_state(loaded.mode)),
+                        )
+                    }
+                    Err(e) => responder.respond_with_error(to_acp_error(&e)),
                 }
             },
             on_receive_request!(),
@@ -250,7 +269,7 @@ pub async fn serve(
                 let session_id = req.session_id.0.as_ref().to_string();
                 let model_id = req.model_id.0.as_ref();
                 match state_set_model
-                    .acp_set_session_model(&session_id, model_id)
+                    .set_session_model(&session_id, model_id)
                     .await
                 {
                     Ok(_) => responder.respond(SetSessionModelResponse::new()),
@@ -263,10 +282,7 @@ pub async fn serve(
             async move |req: SetSessionModeRequest, responder, _cx: ConnectionTo<Client>| {
                 let session_id = req.session_id.0.as_ref().to_string();
                 let mode_id = req.mode_id.0.as_ref();
-                match state_set_mode
-                    .acp_set_session_mode(&session_id, mode_id)
-                    .await
-                {
+                match state_set_mode.set_session_mode(&session_id, mode_id).await {
                     Ok(()) => responder.respond(SetSessionModeResponse::new()),
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
                 }
@@ -305,4 +321,77 @@ pub async fn serve(
         )
         .connect_to(transport)
         .await
+}
+
+/// Maps an `Error` onto the ACP JSON-RPC error to send back. `SessionLocked`/
+/// `SessionBusy` carry structured fields a caller needs to build a "busy,
+/// retry" UX instead of a generic failure — encoded into the error's `data`
+/// so they survive the trip back to the client instead of collapsing to
+/// `e.to_string()`. Shared by `PromptRequest` and `LoadSessionRequest`, the
+/// two handlers either error can come from.
+fn to_acp_error(e: &Error) -> agent_client_protocol::Error {
+    match e {
+        Error::SessionLocked {
+            session_id,
+            pid,
+            host,
+        } => agent_client_protocol::Error::internal_error().data(serde_json::json!({
+            "kind": "session_locked",
+            "session_id": session_id,
+            "pid": pid,
+            "host": host,
+        })),
+        Error::SessionBusy { session_id } => {
+            agent_client_protocol::Error::internal_error().data(serde_json::json!({
+                "kind": "session_busy",
+                "session_id": session_id,
+            }))
+        }
+        _ => internal_error(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod to_acp_error_tests {
+    use super::*;
+
+    #[test]
+    fn session_busy_carries_structured_data() {
+        let e = Error::SessionBusy {
+            session_id: "abc".to_string(),
+        };
+        let acp_error = to_acp_error(&e);
+        assert_eq!(
+            acp_error.data,
+            Some(serde_json::json!({ "kind": "session_busy", "session_id": "abc" }))
+        );
+    }
+
+    #[test]
+    fn session_locked_carries_structured_data() {
+        let e = Error::SessionLocked {
+            session_id: "abc".to_string(),
+            pid: 42,
+            host: "host1".to_string(),
+        };
+        let acp_error = to_acp_error(&e);
+        assert_eq!(
+            acp_error.data,
+            Some(serde_json::json!({
+                "kind": "session_locked",
+                "session_id": "abc",
+                "pid": 42,
+                "host": "host1",
+            }))
+        );
+    }
+
+    #[test]
+    fn other_errors_fall_back_to_the_display_string() {
+        let e = Error::NotFound("session not found: abc".to_string());
+        let acp_error = to_acp_error(&e);
+        // `util::internal_error` puts the message in `data` (as a plain
+        // string, not the structured objects the two cases above use).
+        assert_eq!(acp_error.data, Some(serde_json::json!(e.to_string())));
+    }
 }

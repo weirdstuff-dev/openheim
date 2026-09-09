@@ -1,6 +1,6 @@
 //! [`AgentState`]: the process-wide, per-connection-shared state behind every
-//! ACP entry point — session bookkeeping plus the `acp_*` methods `serve()`
-//! dispatches into.
+//! entry point — session bookkeeping plus the methods `acp::serve()` and the
+//! other transports dispatch into.
 
 use std::{
     collections::HashMap,
@@ -9,10 +9,6 @@ use std::{
     time::Instant,
 };
 
-use agent_client_protocol::schema::{
-    ContentBlock as AcpContentBlock, ContentChunk, ModelInfo, SessionInfo, SessionModelState,
-    SessionUpdate, ToolCall as AcpToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
-};
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -22,27 +18,23 @@ use crate::{
     core::{
         agent::run_agent_streaming_with_history,
         client_io::ClientIo,
-        models::{Message, Role, StopReason as CoreStopReason, StreamEvent},
+        models::{ContentBlock, Message, Role, StopReason as CoreStopReason, StreamEvent},
         permission::PermissionGate,
         turn::TurnContext,
     },
     error::{Error, Result},
     llm::LlmClient,
-    rag::{Conversation, RagContext},
+    memory::{Conversation, ConversationMeta, MemoryContext},
     subagents::SubagentLoader,
-    tools::{
-        SandboxedExecutor, ScopedExecutor, SystemToolExecutor, ToolExecutor, ToolHandler,
-        with_delegation,
-    },
+    tools::{DelegateTool, ScopedExecutor, SystemToolExecutor, ToolExecutor, ToolHandler},
 };
 
 use super::{
-    convert::convert_prompt_blocks,
+    AgentMode,
     session::{
         MAX_LIVE_SESSIONS, SESSION_IDLE_EVICTION_AFTER, SessionState, evict_idle_sessions,
         insert_or_keep_live, prompt_in_flight,
     },
-    util::{AgentMode, replay_history_messages, thinking_chunk, tool_kind_for},
 };
 
 type Sessions = Arc<RwLock<HashMap<String, SessionState>>>;
@@ -52,26 +44,28 @@ pub struct AgentState {
     pub executor: Arc<dyn ToolExecutor>,
     pub config: AgentConfig,
     pub app_config: AppConfig,
-    pub rag: RagContext,
+    pub memory: MemoryContext,
+    /// Long-term memory behind the `remember` / `search_memory` / `forget`
+    /// tools (keyword-only unless `[memory]` names an embedding provider).
+    #[cfg(feature = "rag")]
+    pub long_term_memory: Arc<crate::rag::LongTermMemory>,
     pub mcp_statuses: Vec<crate::mcp::McpServerStatus>,
     /// Resolved work directory used as the sandbox boundary for every session.
     pub work_dir: PathBuf,
-    /// Whether shell command execution is enabled for the LLM.
-    pub allow_shell: bool,
-    /// Visible to the rest of `acp` (e.g. [`super::permission::AcpPermissionGate`]
-    /// reads remembered approvals directly) but not outside it.
-    pub(super) sessions: Sessions,
+    /// `pub(crate)` (not private) so `acp::AcpPermissionGate` — which lives
+    /// outside this module — can read remembered approvals directly.
+    pub(crate) sessions: Sessions,
 }
 
 impl AgentState {
     /// `custom_tools` are registered alongside the built-ins (`execute_command`,
-    /// `read_file`, `write_file`) and any MCP-sourced tools, before the
-    /// sandbox/delegation wrappers are applied — so custom tools are subject
-    /// to the same `work_dir`/`allow_shell` boundary as everything else.
+    /// `read_file`, `write_file`, …) and any MCP-sourced tools. Every handler
+    /// receives the turn's [`TurnContext`] — `work_dir`, cancel token, client
+    /// I/O — so custom tools can enforce the same boundary the built-ins do.
     pub async fn new(
         config: AgentConfig,
         app_config: AppConfig,
-        rag: RagContext,
+        memory: MemoryContext,
         custom_tools: Vec<Box<dyn ToolHandler>>,
     ) -> Result<Self> {
         let http_client = build_http_client(config.timeout_secs)?;
@@ -90,33 +84,52 @@ impl AgentState {
         for tool in custom_tools {
             sys_executor.register(tool);
         }
-        let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
+        #[cfg(feature = "rag")]
+        let long_term_memory = Arc::new(crate::rag::LongTermMemory::from_config(&app_config)?);
+        #[cfg(feature = "rag")]
+        {
+            let m = &long_term_memory;
+            sys_executor.register(Box::new(crate::rag::RememberTool::new(m.clone())));
+            sys_executor.register(Box::new(crate::rag::SearchMemoryTool::new(m.clone())));
+            sys_executor.register(Box::new(crate::rag::ForgetTool::new(m.clone())));
+        }
 
-        let profiles = SubagentLoader::new()?.load()?;
-        let executor = with_delegation(
-            executor,
-            work_dir.clone(),
-            allow_shell,
+        // `delegate_task` is always exposed — even with no configured
+        // profiles the orchestrator can define an ephemeral subagent inline.
+        // It's built from a snapshot of the registry taken *before* it
+        // registers itself, so subagents structurally never see
+        // `delegate_task` and can't delegate recursively.
+        let agents_dir = app_config
+            .data_dir
+            .as_deref()
+            .expect("data_dir is resolved by OpenheimBuilder::build before AgentState::new")
+            .join("agents");
+        let profiles = SubagentLoader::with_dir(agents_dir).load()?;
+        let base: Arc<dyn ToolExecutor> = Arc::new(sys_executor.clone());
+        sys_executor.register(Box::new(DelegateTool::new(
+            base,
             profiles,
             llm.clone(),
             app_config.clone(),
             config.clone(),
-        );
+        )));
+        let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
 
         Ok(Self {
             llm,
             executor,
             config,
             app_config,
-            rag,
+            memory,
+            #[cfg(feature = "rag")]
+            long_term_memory,
             mcp_statuses,
             work_dir,
-            allow_shell,
             sessions: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
-    pub async fn acp_new_session(
+    pub async fn new_session(
         &self,
         model: Option<&str>,
         skills: Vec<String>,
@@ -124,12 +137,13 @@ impl AgentState {
     ) -> Result<String> {
         let chat_id = Uuid::new_v4();
         let session_key = chat_id.to_string();
-        let config = model
-            .and_then(|m| self.app_config.resolve(Some(m)).ok())
-            .unwrap_or_else(|| self.config.clone());
+        let config = match model {
+            Some(m) => self.app_config.resolve(Some(m))?,
+            None => self.config.clone(),
+        };
         // No write lease taken here — merely creating/holding a session open
         // doesn't touch history, so it doesn't contend with other processes.
-        // The cross-process write lease is acquired per-turn in `acp_prompt`.
+        // The cross-process write lease is acquired per-turn in `Self::prompt`.
         {
             let mut sessions = self.sessions.write().await;
             sessions.insert(
@@ -187,7 +201,7 @@ impl AgentState {
         Ok((provider_name, model_name))
     }
 
-    pub async fn acp_update_session_model(
+    pub async fn switch_model(
         &self,
         session_id: &str,
         provider: &str,
@@ -197,7 +211,7 @@ impl AgentState {
         self.apply_session_config(session_id, new_config).await
     }
 
-    pub async fn acp_set_session_model(
+    pub async fn set_session_model(
         &self,
         session_id: &str,
         model_id: &str,
@@ -206,7 +220,7 @@ impl AgentState {
         self.apply_session_config(session_id, new_config).await
     }
 
-    pub async fn acp_set_session_mode(&self, session_id: &str, mode_id: &str) -> Result<()> {
+    pub async fn set_session_mode(&self, session_id: &str, mode_id: &str) -> Result<()> {
         let mode = AgentMode::parse(mode_id)?;
         let mut sessions = self.sessions.write().await;
         let s = sessions
@@ -217,32 +231,13 @@ impl AgentState {
         Ok(())
     }
 
-    pub fn session_model_state(&self, current_model: &str) -> SessionModelState {
-        let available_models = self
-            .app_config
-            .providers
-            .iter()
-            .flat_map(|(provider_name, p)| {
-                p.models.iter().map(move |m| {
-                    let mut meta = serde_json::Map::new();
-                    meta.insert(
-                        "provider".to_string(),
-                        serde_json::Value::String(provider_name.clone()),
-                    );
-                    ModelInfo::new(m.clone(), m.clone()).meta(meta)
-                })
-            })
-            .collect();
-        SessionModelState::new(current_model.to_string(), available_models)
-    }
-
     /// Persists `conv`'s full current state off the async runtime thread,
     /// logging (not propagating) any failure — history durability is
     /// best-effort and must never fail a turn that otherwise succeeded.
     /// `context` is folded into the warning log line to identify which of
     /// this method's call sites failed.
     async fn persist_conversation(&self, conv: &Conversation, context: &str) {
-        let history = self.rag.history.clone();
+        let history = self.memory.history.clone();
         let conv = conv.clone();
         if let Err(e) = tokio::task::spawn_blocking(move || history.save_conversation(&conv))
             .await
@@ -253,19 +248,25 @@ impl AgentState {
     }
 
     /// Runs one prompt turn to completion and returns why it stopped, so the
-    /// caller can map it to an ACP [`agent_client_protocol::schema::StopReason`]
+    /// caller can map it to an ACP `agent_client_protocol::schema::StopReason`
     /// directly instead of having to reverse-engineer it (e.g. by polling
     /// session state for cancellation after the fact).
-    pub async fn acp_prompt<F>(
+    ///
+    /// `on_update` sees every [`StreamEvent`] the turn produces, including
+    /// ones with no ACP wire equivalent (`IterationStart`, `Usage`,
+    /// `Finished`, `MessageAppended`) — mapping onto ACP's `SessionUpdate` is
+    /// the caller's concern (see `acp::util::stream_event_to_session_update`),
+    /// not this runtime's.
+    pub async fn prompt<F>(
         &self,
         session_id: &str,
-        prompt: Vec<AcpContentBlock>,
+        prompt: Vec<ContentBlock>,
         permission_gate: Arc<dyn PermissionGate>,
         client_io: Arc<dyn ClientIo>,
         mut on_update: F,
     ) -> Result<CoreStopReason>
     where
-        F: FnMut(SessionUpdate) + Send,
+        F: FnMut(StreamEvent) + Send,
     {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| Error::ParseError("invalid session id format".to_string()))?;
@@ -293,27 +294,24 @@ impl AgentState {
             s.cancel = CancellationToken::new();
             s.last_active = Instant::now();
             let llm = crate::config::client_for_config(&s.config, &self.config, &self.llm)?;
-            let base: Arc<dyn ToolExecutor> = if s.mode == AgentMode::Architect {
-                Arc::new(ScopedExecutor::new(
-                    self.executor.clone(),
-                    vec![
-                        "read_file".to_string(),
-                        "list_dir".to_string(),
-                        "search".to_string(),
-                    ],
-                ))
+            let executor: Arc<dyn ToolExecutor> = if s.mode == AgentMode::Architect {
+                // Every read-only tool is available in Architect mode — built-in
+                // or custom — derived from each `ToolHandler`'s own declared
+                // `capabilities()` instead of a hand-maintained name list.
+                let read_only: Vec<String> = self
+                    .executor
+                    .list_tools()
+                    .into_iter()
+                    .map(|t| t.function.name)
+                    .filter(|name| self.executor.capabilities(name).read_only)
+                    .collect();
+                Arc::new(ScopedExecutor::new(self.executor.clone(), read_only))
             } else {
                 self.executor.clone()
             };
-            let sandboxed = Arc::new(SandboxedExecutor::new(
-                base,
-                self.work_dir.clone(),
-                self.allow_shell,
-                client_io,
-            )) as Arc<dyn ToolExecutor>;
             (
                 llm,
-                sandboxed,
+                executor,
                 s.config.clone(),
                 s.chat_id,
                 s.skills.clone(),
@@ -323,7 +321,7 @@ impl AgentState {
             )
         };
 
-        // Cross-process write lease for this turn only (see `rag::lease`).
+        // Cross-process write lease for this turn only (see `memory::lease`).
         // Held until this function returns — success, error, or cancellation
         // — via `_lease` staying in scope for the whole body, so an
         // overlapping `session/prompt` on this session from *another*
@@ -332,9 +330,9 @@ impl AgentState {
         // loading/holding a session open never takes this lease — see
         // `SessionState::prompt_lock`'s doc comment — only an in-flight turn
         // does, in any process.
-        let _lease = self.rag.history.acquire_lease(&uuid)?;
+        let _lease = self.memory.history.acquire_lease(&uuid)?;
 
-        let (mut conversation, prompt_builder) = self.rag.prepare(
+        let (mut conversation, prompt_builder) = self.memory.prepare(
             Some(chat_id),
             &skills,
             Some(config.model.clone()),
@@ -344,23 +342,25 @@ impl AgentState {
         conversation.meta.cwd = Some(cwd);
         conversation.messages.push(Message {
             role: Role::User,
-            content: convert_prompt_blocks(&prompt)?,
+            content: prompt,
         });
 
         // Full checkpoint before the turn starts: durably records this
         // turn's new user message even if the turn crashes before producing
-        // anything else, and — since `save_conversation` always rewrites the
-        // message log from scratch — transparently upgrades a pre-split-
-        // format conversation (see `rag::history::HistoryManager`'s doc
-        // comment) so the `append_message` calls below have a `.jsonl` log
-        // that already reflects everything up to this point to append onto.
+        // anything else, so the `append_message` calls below have a `.jsonl`
+        // log that already reflects everything up to this point to append
+        // onto.
         self.persist_conversation(&conversation, "persist conversation before turn start")
             .await;
 
-        let history_for_append = self.rag.history.clone();
+        let history_for_append = self.memory.history.clone();
+        // The work-directory boundary and client I/O hook reach every tool
+        // through this context; there is no per-session executor wrapper.
         let turn = TurnContext {
             cancel: &cancel,
             permission_gate: &permission_gate,
+            work_dir: &self.work_dir,
+            client_io: &*client_io,
         };
         let run_result = run_agent_streaming_with_history(
             llm,
@@ -369,7 +369,7 @@ impl AgentState {
             &mut conversation.messages,
             Some(&prompt_builder),
             &turn,
-            move |event| match event {
+            move |event| {
                 // Blocking I/O called synchronously (not via `spawn_blocking`)
                 // deliberately: appends must land in the log in the same
                 // order messages are produced, and this closure already runs
@@ -377,56 +377,12 @@ impl AgentState {
                 // small, fast local-disk append here doesn't race anything —
                 // spawning it would only risk two concurrent appends landing
                 // out of order.
-                StreamEvent::MessageAppended { message } => {
-                    if let Err(e) = history_for_append.append_message(&chat_id, &message) {
-                        tracing::warn!("failed to append message to history: {e}");
-                    }
+                if let StreamEvent::MessageAppended { message } = &event
+                    && let Err(e) = history_for_append.append_message(&chat_id, message)
+                {
+                    tracing::warn!("failed to append message to history: {e}");
                 }
-                StreamEvent::LlmResponse { content } => {
-                    on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                        AcpContentBlock::from(content),
-                    )));
-                }
-                StreamEvent::ThinkingContent { content } => {
-                    on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                        AcpContentBlock::Text(thinking_chunk(content)),
-                    )));
-                }
-                StreamEvent::ToolCall {
-                    id,
-                    tool_name,
-                    arguments,
-                } => {
-                    // Pending, not InProgress: the permission gate (invoked by the
-                    // agent loop right after this event) hasn't authorized
-                    // execution yet at this point.
-                    let raw_input = serde_json::from_str(&arguments).ok();
-                    on_update(SessionUpdate::ToolCall(
-                        AcpToolCall::new(id, &*tool_name)
-                            .kind(tool_kind_for(&tool_name))
-                            .status(ToolCallStatus::Pending)
-                            .raw_input(raw_input),
-                    ));
-                }
-                StreamEvent::ToolResult {
-                    id,
-                    result,
-                    is_error,
-                    ..
-                } => {
-                    let status = if is_error {
-                        ToolCallStatus::Failed
-                    } else {
-                        ToolCallStatus::Completed
-                    };
-                    on_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                        id,
-                        ToolCallUpdateFields::new()
-                            .status(status)
-                            .raw_output(serde_json::Value::String(result)),
-                    )));
-                }
-                _ => {}
+                on_update(event);
             },
         )
         .await;
@@ -452,43 +408,35 @@ impl AgentState {
         run_result.map(|r| r.stop_reason)
     }
 
-    pub async fn acp_list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<SessionInfo>> {
-        let history = self.rag.history.clone();
+    /// Persisted session metadata (all or filtered by `cwd`); the ACP
+    /// `SessionInfo` shape is the caller's concern.
+    pub async fn list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<ConversationMeta>> {
+        let history = self.memory.history.clone();
         let metas = tokio::task::spawn_blocking(move || history.list_conversations())
             .await
             .map_err(Error::from)??;
         Ok(metas
-            .iter()
+            .into_iter()
             .filter(|m| cwd.is_none_or(|filter| m.cwd.as_deref() == Some(filter)))
-            .map(|m| {
-                let path = m.cwd.clone().unwrap_or_else(|| PathBuf::from("/"));
-                let mut info = SessionInfo::new(m.id.to_string(), path);
-                if let Some(t) = &m.title {
-                    info = info.title(t.clone());
-                }
-                info.updated_at(m.updated_at.to_rfc3339())
-            })
             .collect())
     }
 
-    pub async fn acp_load_session<F>(
-        &self,
-        session_id: &str,
-        cwd: PathBuf,
-        mut on_update: F,
-    ) -> Result<AgentMode>
-    where
-        F: FnMut(SessionUpdate) + Send,
-    {
+    /// Loads a persisted session as the active session for `session_id`,
+    /// returning the mode it's live under, its full message history (for the
+    /// caller to replay in whatever form its transport needs), and a
+    /// warning to surface if the session's saved provider no longer
+    /// resolves.
+    pub async fn load_session(&self, session_id: &str, cwd: PathBuf) -> Result<LoadedSession> {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| Error::ParseError("invalid session id format".to_string()))?;
 
-        let history = self.rag.history.clone();
+        let history = self.memory.history.clone();
         let conversation = tokio::task::spawn_blocking(move || history.load_conversation(&uuid))
             .await
             .map_err(Error::from)??;
 
         let mut session_config = self.config.clone();
+        let mut warning = None;
         if let Some(provider_name) = &conversation.meta.provider {
             // Same resolution (and validation) as every other config path;
             // a session whose saved provider/model no longer resolves —
@@ -501,13 +449,10 @@ impl AgentState {
             match resolved {
                 Ok(config) => session_config = config,
                 Err(e) => {
-                    let warning = format!(
+                    warning = Some(format!(
                         "[warning] Could not restore this session's provider '{}' ({e}). Falling back to the default provider '{}'.",
                         provider_name, session_config.provider_name
-                    );
-                    on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                        AcpContentBlock::from(warning),
-                    )));
+                    ));
                 }
             }
         } else if let Some(model) = &conversation.meta.model {
@@ -563,20 +508,34 @@ impl AgentState {
             // above); reject the load instead of handing this connection a
             // history snapshot that's already stale and will never catch up.
             if prompt_in_flight(live) {
-                return Err(Error::Other(format!(
-                    "a prompt is already in flight for session {session_id}; retry once it completes"
-                )));
+                return Err(Error::SessionBusy {
+                    session_id: session_id.to_string(),
+                });
             }
             // Read back the mode so the response reflects whatever
-            // `acp_prompt` is actually enforcing for it, not the
+            // `Self::prompt` is actually enforcing for it, not the
             // fresh-session default.
             live.mode
         };
 
-        replay_history_messages(&conversation.messages, &mut on_update);
-
-        Ok(mode)
+        Ok(LoadedSession {
+            mode,
+            messages: conversation.messages,
+            warning,
+        })
     }
+}
+
+/// The result of [`AgentState::load_session`]: enough to both replay the
+/// conversation in whatever wire form the caller needs (see
+/// `acp::util::replay_history_messages` for the ACP shape) and reflect the
+/// mode it's now live under.
+pub struct LoadedSession {
+    pub mode: AgentMode,
+    pub messages: Vec<Message>,
+    /// Set if the session's saved provider/model no longer resolves and the
+    /// load fell back to the default provider.
+    pub warning: Option<String>,
 }
 
 #[cfg(test)]
@@ -585,7 +544,7 @@ mod prompt_lease_ordering_tests {
 
     use tempfile::tempdir;
 
-    use crate::rag::history::HistoryManager;
+    use crate::memory::history::HistoryManager;
 
     use super::*;
 
@@ -609,14 +568,13 @@ mod prompt_lease_ordering_tests {
         }
     }
 
-    // Regression test for the ordering `acp_prompt` relies on: the
-    // in-process `prompt_lock` must be acquired (and fail fast on an
-    // overlapping call) *before* the cross-process `SessionLease` is
-    // acquired. Getting this backwards let an overlapping, rejected
-    // `session/prompt` call create its own lease guard and then drop it
-    // (`SessionLease::drop` can't tell that apart from a legitimately
-    // superseded one) — deleting the still-running accepted turn's lockfile
-    // out from under it.
+    // The ordering `Self::prompt` relies on: the in-process `prompt_lock`
+    // must be acquired (and fail fast on an overlapping call) *before* the
+    // cross-process `SessionLease` is acquired. Getting this backwards lets
+    // an overlapping, rejected `session/prompt` call create its own lease
+    // guard and then drop it (`SessionLease::drop` can't tell that apart
+    // from a legitimately superseded one) — deleting the still-running
+    // accepted turn's lockfile out from under it.
     #[test]
     fn overlapping_prompt_in_same_process_never_touches_the_accepted_turns_lease() {
         let dir = tempdir().unwrap();
@@ -625,7 +583,7 @@ mod prompt_lease_ordering_tests {
         let lock_path = dir.path().join(format!("{chat_id}.lock"));
         let state = sample_session_state(chat_id);
 
-        // Turn A: accepted, in the same order `acp_prompt` now uses.
+        // Turn A: accepted, in the order `Self::prompt` uses.
         let _prompt_guard_a = state.try_acquire_prompt_lock("s1").unwrap();
         let _lease_a = history.acquire_lease(&chat_id).unwrap();
         assert!(lock_path.exists());
@@ -648,5 +606,73 @@ mod prompt_lease_ordering_tests {
             !lock_path.exists(),
             "turn A's own lease still releases normally"
         );
+    }
+}
+
+#[cfg(test)]
+mod new_session_tests {
+    use std::collections::BTreeMap;
+
+    use tempfile::tempdir;
+
+    use crate::config::{ProviderConfig, TuiConfig};
+
+    use super::*;
+
+    /// A minimal, network-free `AgentState`: one provider/model, empty MCP
+    /// servers, everything rooted at a temp `data_dir`.
+    async fn sample_state(dir: &std::path::Path) -> AgentState {
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "mock".to_string(),
+            ProviderConfig {
+                api_base: "https://example.com".into(),
+                default_model: "mock-model".into(),
+                models: vec!["mock-model".into()],
+                env_var: None,
+                api_key: Some("key".into()),
+                timeout_secs: None,
+                max_tokens: None,
+                thinking: None,
+            },
+        );
+        let app_config = AppConfig {
+            default_provider: "mock".into(),
+            max_iterations: 5,
+            tui: TuiConfig::default(),
+            providers,
+            mcp_servers: BTreeMap::new(),
+            default_skills: vec![],
+            work_dir: Some(dir.to_path_buf()),
+            allow_shell: false,
+            memory: None,
+            data_dir: Some(dir.to_path_buf()),
+            config_path: PathBuf::new(),
+        };
+        let agent_config = AgentConfig::new(
+            "mock".into(),
+            "https://example.com".into(),
+            "key".into(),
+            "mock-model".into(),
+            5,
+        );
+        let memory = MemoryContext::new(vec![], dir).unwrap();
+        AgentState::new(agent_config, app_config, memory, vec![])
+            .await
+            .unwrap()
+    }
+
+    // Regression test for `new_session` swallowing a bad `model` override:
+    // it used to fall back to the session default silently
+    // (`resolve(model).ok().unwrap_or_else(default)`) instead of surfacing
+    // the `ConfigError` `resolve` returns for an unknown model.
+    #[tokio::test]
+    async fn bad_model_override_is_an_error() {
+        let dir = tempdir().unwrap();
+        let state = sample_state(dir.path()).await;
+        let result = state
+            .new_session(Some("nope"), vec![], dir.path().to_path_buf())
+            .await;
+        assert!(result.is_err(), "{result:?}");
     }
 }

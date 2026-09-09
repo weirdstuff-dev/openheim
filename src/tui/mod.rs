@@ -7,7 +7,6 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::schema::{ContentBlock, SessionUpdate, ToolCallStatus};
 use crossterm::{
     cursor::Show,
     event::{
@@ -21,11 +20,11 @@ use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
-use crate::{client::OpenheimClient, config::load_config, core::permission::PermissionGate};
+use crate::{client::OpenheimClient, core::permission::PermissionGate};
 
 use app::App;
 use permission::TuiPermissionGate;
-use types::AgentUpdate;
+use types::{AgentUpdate, ChatItem};
 
 struct TerminalGuard {
     kbd_enhanced: bool,
@@ -42,55 +41,72 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
-    let app_config = load_config()?;
-    let agent_config = app_config.resolve(None)?;
-
-    let client = OpenheimClient::builder().build().await?;
+/// Runs the TUI against `client` — caller-built, so an embedder with custom
+/// tools or a custom `LlmClient` can use this transport too.
+pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::Result<()> {
+    // Snapshots for `:config`/`:models` — read once here instead of a second
+    // `load_config()` duplicating the one `OpenheimClient::builder().build()`
+    // the caller did.
+    let agent_config = client.state().config.clone();
+    let app_config = client.state().app_config.clone();
 
     let (permission_tx, mut permission_rx) =
         mpsc::unbounded_channel::<permission::PermissionRequest>();
-    let permission_gate: Arc<dyn PermissionGate> = Arc::new(TuiPermissionGate::new(permission_tx));
+    let permission_gate: Arc<dyn PermissionGate> = Arc::new(TuiPermissionGate::new(
+        permission_tx,
+        client.state().executor.clone(),
+    ));
 
     let session = client
         .new_session()
         .skills(skills.clone())
         .start()
         .await?
-        .permission_gate(permission_gate);
+        .permission_gate(permission_gate.clone());
 
     let (update_tx, mut update_rx) = mpsc::unbounded_channel::<AgentUpdate>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<String>();
     let (switch_model_tx, mut switch_model_rx) = mpsc::unbounded_channel::<(String, String)>();
     let (switch_session_tx, mut switch_session_rx) =
         mpsc::unbounded_channel::<(String, std::path::PathBuf)>();
+    let (list_sessions_tx, mut list_sessions_rx) = mpsc::unbounded_channel::<()>();
+    let (new_session_tx, mut new_session_rx) = mpsc::unbounded_channel::<()>();
 
     let agent_handle = {
         let update_tx = update_tx.clone();
+        // Captured separately from the `skills` moved into `App::new` below —
+        // this copy lives inside the agent task so a `:new` command can spin
+        // up another session with the same skills, matching startup.
+        let session_skills = skills.clone();
+        // `client.new_session()` always starts from the client's original
+        // default config (see `AgentState::new_session`'s fallback), not
+        // whatever `:model`/`:models` had switched this session to — tracked
+        // here so a `:new` replacement can re-apply it instead of silently
+        // regressing to the default.
+        let default_provider = agent_config.provider_name.clone();
+        let default_model = agent_config.model.clone();
         tokio::spawn(async move {
             let mut session = session;
+            let mut current_provider = default_provider.clone();
+            let mut current_model = default_model.clone();
             loop {
                 tokio::select! {
                     maybe_prompt = prompt_rx.recv() => {
                         match maybe_prompt {
                             Some(prompt) => {
                                 let tx_cb = update_tx.clone();
+                                // `StreamEvent::Finished`/`Usage` arrive as part of
+                                // this stream and drive the status/footer directly
+                                // (see `App::handle_stream_event`) — no separate
+                                // "done" signal or post-turn context-usage re-read
+                                // needed here.
                                 let result = session
-                                    .prompt(&prompt, move |update| convert_update(&tx_cb, update))
+                                    .prompt_events(&prompt, move |event| {
+                                        let _ = tx_cb.send(AgentUpdate::Stream(event));
+                                    })
                                     .await;
-                                match result {
-                                    Ok(()) => {
-                                        // Best-effort: a session whose turn just
-                                        // succeeded should always have a context
-                                        // usage snapshot to read back, but this
-                                        // must never block reporting the turn as
-                                        // done.
-                                        if let Ok(usage) = session.context_usage().await {
-                                            let _ = update_tx.send(AgentUpdate::Usage(usage));
-                                        }
-                                        let _ = update_tx.send(AgentUpdate::Done);
-                                    }
-                                    Err(e) => { let _ = update_tx.send(AgentUpdate::Error(e.to_string())); }
+                                if let Err(e) = result {
+                                    let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
                                 }
                             }
                             None => break,
@@ -101,6 +117,8 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                             Some((provider, model)) => {
                                 match session.switch_model(&provider, &model).await {
                                     Ok((provider, model)) => {
+                                        current_provider = provider.clone();
+                                        current_model = model.clone();
                                         let _ = update_tx.send(AgentUpdate::ModelChanged { provider, model });
                                     }
                                     Err(e) => {
@@ -114,8 +132,23 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                     maybe_switch = switch_session_rx.recv() => {
                         match maybe_switch {
                             Some((session_id, cwd)) => {
-                                match session.restore(&session_id, cwd).await {
-                                    Ok(restored) => {
+                                // Collected rather than streamed one at a time: a
+                                // history replay isn't "live" the way a turn is,
+                                // and batching means the app only clears/repaints
+                                // once instead of on every historical message.
+                                match session.resume(&session_id, cwd).await {
+                                    Ok((restored, loaded)) => {
+                                        let mut history = Vec::new();
+                                        if let Some(warning) = loaded.warning {
+                                            history.push(ChatItem::AssistantMessage(warning));
+                                        }
+                                        for msg in &loaded.messages {
+                                            history.extend(message_to_chat_items(msg));
+                                        }
+                                        history.push(ChatItem::SystemInfo(
+                                            "─── session restored".to_string(),
+                                        ));
+                                        let _ = update_tx.send(AgentUpdate::History(history));
                                         // Refreshes the footer's context size to
                                         // the restored session's own snapshot
                                         // instead of leaving the previous
@@ -127,6 +160,63 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
                                             let _ = update_tx.send(AgentUpdate::Usage(usage));
                                         }
                                         session = restored;
+                                    }
+                                    Err(e) => {
+                                        let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
+                                    }
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                    maybe_new = new_session_rx.recv() => {
+                        match maybe_new {
+                            Some(()) => {
+                                match client
+                                    .new_session()
+                                    .skills(session_skills.clone())
+                                    .start()
+                                    .await
+                                {
+                                    Ok(new_session) => {
+                                        let new_session =
+                                            new_session.permission_gate(permission_gate.clone());
+                                        // Re-apply the active model on top of the
+                                        // fresh session's default. If it's no
+                                        // longer valid (e.g. removed from the
+                                        // config file since startup), fall back to
+                                        // the default and let the UI know so the
+                                        // footer doesn't keep showing the stale one.
+                                        match new_session.switch_model(&current_provider, &current_model).await {
+                                            Ok(_) => {}
+                                            Err(_) => {
+                                                current_provider = default_provider.clone();
+                                                current_model = default_model.clone();
+                                                let _ = update_tx.send(AgentUpdate::ModelChanged {
+                                                    provider: default_provider.clone(),
+                                                    model: default_model.clone(),
+                                                });
+                                            }
+                                        }
+                                        session = new_session;
+                                        let _ = update_tx.send(AgentUpdate::NewSession(vec![
+                                            ChatItem::SystemInfo("─── new session".to_string()),
+                                        ]));
+                                    }
+                                    Err(e) => {
+                                        let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
+                                    }
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                    maybe_list = list_sessions_rx.recv() => {
+                        match maybe_list {
+                            Some(()) => {
+                                match client.list_sessions(None).await {
+                                    Ok(metas) => {
+                                        let _ = update_tx.send(AgentUpdate::SessionList(metas));
                                     }
                                     Err(e) => {
                                         let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
@@ -148,6 +238,8 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
         prompt_tx,
         switch_model_tx,
         switch_session_tx,
+        list_sessions_tx,
+        new_session_tx,
     );
 
     enable_raw_mode()?;
@@ -222,48 +314,59 @@ pub async fn run(skills: Vec<String>) -> crate::error::Result<()> {
     Ok(())
 }
 
-fn convert_update(tx: &mpsc::UnboundedSender<AgentUpdate>, update: SessionUpdate) {
-    match update {
-        SessionUpdate::AgentMessageChunk(chunk) => {
-            if let ContentBlock::Text(t) = chunk.content {
-                let is_thinking = t
-                    .meta
-                    .as_ref()
-                    .and_then(|m| m.get("kind"))
-                    .and_then(|v| v.as_str())
-                    == Some("thinking");
-                if is_thinking {
-                    let _ = tx.send(AgentUpdate::ThinkingChunk(t.text));
-                } else {
-                    let _ = tx.send(AgentUpdate::TextChunk(t.text));
+/// Converts one persisted [`Message`](crate::core::models::Message) from a
+/// history replay (`SessionHandle::resume`'s `LoadedSession::messages`) into
+/// the `ChatItem`s a live turn would have produced for the equivalent
+/// content — the same mapping `App::handle_stream_event` applies to a live
+/// turn's `StreamEvent`s, just walking the message's content blocks directly
+/// instead of decoding ACP's `SessionUpdate` vocabulary (there's no live
+/// `StreamEvent` for "here's a message from a past turn"), so this works
+/// without the `acp` feature. An image attachment isn't silently dropped —
+/// it renders as a placeholder line, since the terminal can't inline it.
+fn message_to_chat_items(msg: &crate::core::models::Message) -> Vec<ChatItem> {
+    use crate::core::models::{ContentBlock, Role};
+
+    let mut items = Vec::new();
+    match msg.role {
+        Role::User => {
+            // Every block, not just `msg.text()` (which only concatenates
+            // `Text` blocks), so an image attached to the prompt is
+            // restored alongside the text instead of silently dropped.
+            for block in &msg.content {
+                match block {
+                    ContentBlock::Text { text } => items.push(ChatItem::UserMessage(text.clone())),
+                    ContentBlock::Image { .. } => {
+                        items.push(ChatItem::SystemInfo("[image attached]".to_string()));
+                    }
+                    _ => {}
                 }
             }
         }
-        SessionUpdate::ToolCall(tc) => {
-            let args = tc
-                .raw_input
-                .as_ref()
-                .map(|v| v.to_string())
-                .unwrap_or_default();
-            let _ = tx.send(AgentUpdate::ToolCall {
-                name: tc.title.clone(),
-                args,
-            });
-        }
-        SessionUpdate::ToolCallUpdate(tcu) => {
-            if matches!(
-                tcu.fields.status,
-                Some(ToolCallStatus::Completed) | Some(ToolCallStatus::Failed)
-            ) {
-                let is_error = matches!(tcu.fields.status, Some(ToolCallStatus::Failed));
-                let result = match tcu.fields.raw_output {
-                    Some(serde_json::Value::String(s)) => s,
-                    Some(v) => v.to_string(),
-                    None => String::new(),
-                };
-                let _ = tx.send(AgentUpdate::ToolResult { result, is_error });
+        Role::Assistant => {
+            for block in &msg.content {
+                if let ContentBlock::Thinking { thinking, .. } = block {
+                    items.push(ChatItem::Thinking(thinking.clone()));
+                }
+            }
+            if let Some(text) = msg.text() {
+                items.push(ChatItem::AssistantMessage(text));
+            }
+            for tc in msg.tool_calls() {
+                items.push(ChatItem::ToolCall {
+                    name: tc.name,
+                    args: tc.arguments,
+                });
             }
         }
-        _ => {}
+        Role::Tool => {
+            if let Some(tr) = msg.tool_result_block() {
+                items.push(ChatItem::ToolResult {
+                    result: tr.content,
+                    is_error: tr.is_error,
+                });
+            }
+        }
+        Role::System => {}
     }
+    items
 }

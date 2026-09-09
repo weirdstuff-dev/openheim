@@ -7,7 +7,7 @@ use crate::core::llm::{LlmChunk, LlmClient};
 use crate::core::models::*;
 use crate::core::turn::TurnContext;
 use crate::error::Result;
-use crate::rag::PromptBuilder;
+use crate::memory::PromptBuilder;
 use crate::tools::ToolExecutor;
 
 async fn call_llm(
@@ -73,7 +73,6 @@ where
     F: FnMut(StreamEvent) + Send,
 {
     let tools = tool_executor.list_tools();
-    let mut steps = Vec::new();
     let mut final_response = String::new();
     let mut iterations_used = 0;
     let mut context_usage: Option<Usage> = None;
@@ -186,7 +185,7 @@ where
 
             // Phase 1b: collect every call's permission decision
             // concurrently, mirroring Phase 2's execution model — an
-            // interactive gate now sees every request up front instead of
+            // interactive gate sees every request up front instead of
             // one at a time. The ACP gate can answer them independently and
             // out of order; the TUI gate queues concurrent requests instead
             // of dropping them (see `App::handle_permission_request`), so
@@ -266,15 +265,8 @@ where
             // `break 'turn` on cancellation), so message history and the
             // callback's `MessageAppended` stream stay deterministic
             // regardless of which call actually finished first.
-            let mut tool_results = Vec::with_capacity(tool_calls.len());
             for (tool_call, outcome) in tool_calls.iter().zip(outcomes) {
                 let (result, is_error) = outcome.expect("every outcome is filled before Phase 3");
-
-                tool_results.push(ToolExecutionResult {
-                    tool_name: tool_call.name.clone(),
-                    arguments: tool_call.arguments.clone(),
-                    result: result.clone(),
-                });
 
                 let tool_result_message = Message::tool_result(
                     tool_call.id.clone(),
@@ -290,12 +282,6 @@ where
                 messages.push(tool_result_message);
             }
 
-            steps.push(AgentStep {
-                iteration: iter_num,
-                message: "Tool calls executed".to_string(),
-                tool_calls: Some(tool_results),
-            });
-
             // Exit immediately rather than relying on next iteration's
             // top-of-loop check, which would never run if this was the
             // last allowed iteration and would misreport `MaxIterations`.
@@ -306,13 +292,7 @@ where
         } else if let Some(content) = choice.message.text() {
             // LlmResponse chunks already fired per-token from the streaming select
             // loop above; just record the final text here.
-            final_response = content.clone();
-
-            steps.push(AgentStep {
-                iteration: iter_num,
-                message: content,
-                tool_calls: None,
-            });
+            final_response = content;
 
             if choice.finish_reason == Some(FinishReason::Stop) {
                 if let Some(cb) = callback.as_mut() {
@@ -324,7 +304,6 @@ where
 
                 return Ok(AgentResult {
                     final_response,
-                    steps,
                     iterations_used: iter_num,
                     stop_reason: StopReason::EndTurn,
                     context_usage,
@@ -349,7 +328,6 @@ where
 
     Ok(AgentResult {
         final_response,
-        steps,
         iterations_used,
         stop_reason,
         context_usage,
@@ -421,6 +399,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::client_io::NoClientIo;
     use crate::core::permission::{AllowAll, PermissionDecision, PermissionGate};
     use crate::error::Error;
     use async_trait::async_trait;
@@ -602,6 +581,8 @@ mod tests {
             &TurnContext {
                 cancel: &CancellationToken::new(),
                 permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
         )
         .await
@@ -609,7 +590,6 @@ mod tests {
 
         assert_eq!(result.final_response, "done");
         assert_eq!(result.iterations_used, 1);
-        assert_eq!(result.steps.len(), 1);
         assert_eq!(result.stop_reason, StopReason::EndTurn);
     }
 
@@ -632,6 +612,8 @@ mod tests {
             &TurnContext {
                 cancel: &CancellationToken::new(),
                 permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
         )
         .await
@@ -674,6 +656,8 @@ mod tests {
             &TurnContext {
                 cancel: &CancellationToken::new(),
                 permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
             move |event| {
                 if let StreamEvent::ToolResult { tool_name, .. } = event {
@@ -715,6 +699,8 @@ mod tests {
             &TurnContext {
                 cancel: &CancellationToken::new(),
                 permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
         )
         .await
@@ -744,6 +730,8 @@ mod tests {
             &TurnContext {
                 cancel: &CancellationToken::new(),
                 permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
             |event| events.push(event),
         )
@@ -813,6 +801,8 @@ mod tests {
             &TurnContext {
                 cancel: &CancellationToken::new(),
                 permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
         )
         .await
@@ -856,6 +846,8 @@ mod tests {
             &TurnContext {
                 cancel: &cancel,
                 permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
             move |event| {
                 if matches!(event, StreamEvent::ToolResult { .. }) {
@@ -874,7 +866,7 @@ mod tests {
         assert_eq!(result.stop_reason, StopReason::Cancelled);
     }
 
-    /// LLM that never resolves on its own; used to prove cancellation aborts
+    /// LLM that never resolves on its own; proves cancellation aborts
     /// an in-flight call instead of waiting for it to finish.
     struct SlowLlm;
 
@@ -908,6 +900,8 @@ mod tests {
                 &TurnContext {
                     cancel: &cancel,
                     permission_gate: &allow_all(),
+                    work_dir: std::path::Path::new("."),
+                    client_io: &NoClientIo,
                 },
                 move |event| {
                     if matches!(event, StreamEvent::IterationStart { .. }) {
@@ -926,7 +920,7 @@ mod tests {
         assert_eq!(result.stop_reason, StopReason::Cancelled);
     }
 
-    /// ToolExecutor that never resolves; used to prove cancellation aborts an
+    /// ToolExecutor that never resolves; proves cancellation aborts an
     /// in-flight tool call (Phase 2) instead of waiting for it to finish.
     struct SlowToolExecutor;
 
@@ -968,6 +962,8 @@ mod tests {
                 &TurnContext {
                     cancel: &cancel,
                     permission_gate: &allow_all(),
+                    work_dir: std::path::Path::new("."),
+                    client_io: &NoClientIo,
                 },
                 move |event| {
                     if matches!(event, StreamEvent::ToolCall { .. }) {
@@ -1008,6 +1004,8 @@ mod tests {
                 &TurnContext {
                     cancel: &cancel,
                     permission_gate: &allow_all(),
+                    work_dir: std::path::Path::new("."),
+                    client_io: &NoClientIo,
                 },
             ),
         )
@@ -1047,6 +1045,8 @@ mod tests {
             &TurnContext {
                 cancel: &CancellationToken::new(),
                 permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
         )
         .await
@@ -1101,6 +1101,8 @@ mod tests {
                 &TurnContext {
                     cancel: &cancel,
                     permission_gate: &gate,
+                    work_dir: std::path::Path::new("."),
+                    client_io: &NoClientIo,
                 },
             ),
         )
@@ -1144,6 +1146,8 @@ mod tests {
             &TurnContext {
                 cancel: &CancellationToken::new(),
                 permission_gate: &(Arc::new(RejectPermissionGate) as Arc<dyn PermissionGate>),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
             },
         )
         .await

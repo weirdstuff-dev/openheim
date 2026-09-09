@@ -1,6 +1,6 @@
 //! Server transport implementations for the Openheim agent runtime.
 //!
-//! Each module wraps the same [`acp::serve`] loop in a different I/O layer:
+//! Each module wraps the same [`crate::acp::serve`] loop in a different I/O layer:
 //!
 //! | Module | Transport | Use case |
 //! |--------|-----------|----------|

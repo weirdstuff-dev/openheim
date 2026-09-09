@@ -8,7 +8,7 @@ use crate::core::models::Tool;
 use crate::core::turn::TurnContext;
 use crate::error::Result;
 
-use super::ToolExecutor;
+use super::{ToolCapabilities, ToolExecutor};
 
 /// Wraps an inner [`ToolExecutor`] and restricts it to a fixed set of tool names.
 ///
@@ -53,12 +53,15 @@ impl ToolExecutor for ScopedExecutor {
         }
         self.inner.execute(name, args_json, turn).await
     }
+
+    fn capabilities(&self, name: &str) -> ToolCapabilities {
+        self.inner.capabilities(name)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::models::FunctionDefinition;
     use crate::error::Error;
     use crate::tools::test_support::TurnHarness;
 
@@ -69,13 +72,12 @@ mod tests {
         fn list_tools(&self) -> Vec<Tool> {
             self.0
                 .iter()
-                .map(|name| Tool {
-                    tool_type: "function".to_string(),
-                    function: FunctionDefinition {
-                        name: name.to_string(),
-                        description: String::new(),
-                        parameters: serde_json::json!({"type": "object", "properties": {}}),
-                    },
+                .map(|name| {
+                    Tool::function(
+                        name.to_string(),
+                        String::new(),
+                        serde_json::json!({"type": "object", "properties": {}}),
+                    )
                 })
                 .collect()
         }
@@ -92,6 +94,23 @@ mod tests {
                 Err(Error::ToolExecutionError(format!("unknown tool: {name}")))
             }
         }
+
+        fn capabilities(&self, name: &str) -> ToolCapabilities {
+            ToolCapabilities {
+                read_only: name == "read_file",
+                ..Default::default()
+            }
+        }
+    }
+
+    #[test]
+    fn capabilities_delegates_to_the_inner_executor_regardless_of_allowlist() {
+        let inner = Arc::new(FixedExecutor(vec!["read_file", "write_file"]));
+        // Note: "write_file" isn't in the allowlist, but `capabilities` still
+        // answers for it — it's informational, not gated by `is_allowed`.
+        let scoped = ScopedExecutor::new(inner, vec!["read_file".to_string()]);
+        assert!(scoped.capabilities("read_file").read_only);
+        assert!(!scoped.capabilities("write_file").read_only);
     }
 
     #[test]
