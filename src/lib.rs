@@ -74,7 +74,7 @@
 //! - [`SessionHandle`] — send prompts and receive streaming events (`StreamEvent`, or ACP's `SessionUpdate` with feature `acp`)
 //! - [`LlmClient`] — implement to add a custom provider
 //! - [`MemoryContext`] — conversation history, skills, and system identity
-//! - [`rag::LongTermMemory`] — tool-driven long-term memory: FTS5 keyword search, optionally sqlite-vec semantic search (feature `rag`)
+//! - `rag::LongTermMemory` — tool-driven long-term memory: FTS5 keyword search, optionally sqlite-vec semantic search (feature `rag`)
 //! - [`Error`] / [`Result`] — unified error type
 
 #[cfg(feature = "acp")]

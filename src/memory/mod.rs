@@ -4,7 +4,7 @@
 //! This module is *not* retrieval-augmented generation — nothing here embeds
 //! or searches anything. It is the agent's record of its own sessions plus
 //! the static instructions it is given. Tool-driven long-term memory
-//! (`remember` / `search_memory` / `forget`) lives in [`crate::rag`].
+//! (`remember` / `search_memory` / `forget`) lives in `crate::rag` (needs the `rag` feature).
 //!
 //! | Submodule | Responsibility |
 //! |-----------|----------------|

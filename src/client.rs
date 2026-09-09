@@ -89,7 +89,7 @@ impl OpenheimClient {
     /// (as `SessionUpdate::UserMessageChunk` / `AgentMessageChunk`) so callers
     /// can replay the conversation in their UI.
     ///
-    /// Delegates to [`SessionHandle::restore`] on a default-configured handle:
+    /// Delegates to `SessionHandle::restore` (needs the `acp` feature) on a default-configured handle:
     /// the returned handle starts from the default permission gate
     /// ([`AllowAll`]) and client I/O ([`NoClientIo`]) — apply
     /// [`SessionHandle::permission_gate`]/[`SessionHandle::client_io`] to it
@@ -97,7 +97,7 @@ impl OpenheimClient {
     /// inherits that handle's gate/client_io. Doesn't require the `acp`
     /// feature — replay is entirely up to the caller, via the returned
     /// [`LoadedSession`]'s `messages`. The ACP-typed counterpart, built on
-    /// this, is [`Self::load_session`].
+    /// this, is `Self::load_session` (needs the `acp` feature).
     pub async fn resume_session(
         &self,
         session_id: &str,
@@ -305,8 +305,8 @@ impl SessionHandle {
             .await
     }
 
-    /// [`Self::prompt_events`] with images — see [`Self::prompt_with_images`]
-    /// for the image argument shape.
+    /// [`Self::prompt_events`] with images — see `Self::prompt_with_images`
+    /// (needs the `acp` feature) for the image argument shape.
     pub async fn prompt_events_with_images(
         &self,
         text: &str,
@@ -382,7 +382,7 @@ impl SessionHandle {
     /// that history is entirely up to the caller. Doesn't require the `acp`
     /// feature. The load-and-defaults counterpart is
     /// [`OpenheimClient::resume_session`]; the ACP-typed wrapper around this
-    /// is [`Self::restore`].
+    /// is `Self::restore` (needs the `acp` feature).
     pub async fn resume(
         &self,
         session_id: &str,

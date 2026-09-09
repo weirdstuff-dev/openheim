@@ -248,7 +248,7 @@ impl AgentState {
     }
 
     /// Runs one prompt turn to completion and returns why it stopped, so the
-    /// caller can map it to an ACP [`agent_client_protocol::schema::StopReason`]
+    /// caller can map it to an ACP `agent_client_protocol::schema::StopReason`
     /// directly instead of having to reverse-engineer it (e.g. by polling
     /// session state for cancellation after the fact).
     ///

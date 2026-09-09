@@ -23,7 +23,7 @@ fn validate_skill_name(name: &str) -> Result<()> {
 /// Manages Markdown skill files stored in `~/.openheim/skills/`.
 ///
 /// A skill is a named Markdown file (`{name}.md`) containing system-level
-/// instructions. Skills are loaded by [`PromptBuilder::add_skill`] and injected
+/// instructions. Skills are loaded by [`crate::memory::prompt::PromptBuilder::add_skill`] and injected
 /// into the LLM prompt as a system message, letting users extend the agent's
 /// behaviour without modifying code.
 ///
@@ -42,7 +42,7 @@ impl SkillsManager {
     /// Loads the content of a single skill by name.
     ///
     /// Reads `{skills_dir}/{name}.md`. Returns an error if the file does not
-    /// exist or the name is invalid (see [`validate_skill_name`]). The path is
+    /// exist or the name is invalid (see `validate_skill_name`). The path is
     /// canonicalized and checked for containment so a symlink inside the
     /// skills directory cannot redirect the read outside it; the canonical
     /// (fully resolved) path is what gets read.

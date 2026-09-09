@@ -68,7 +68,7 @@ impl Default for RunCommandOptions<'_> {
 /// - **Output cap** — each stream stops at `opts.max_output_bytes` and is
 ///   returned with a truncation marker; the closed pipe makes further writes
 ///   fail with `SIGPIPE`/`EPIPE` instead of buffering without bound.
-/// - **Cancellation** — an fired [`CancellationToken`](opts.cancel) kills the
+/// - **Cancellation** — a fired `opts.cancel` [`CancellationToken`] kills the
 ///   command the same way the timeout does.
 /// - **Process group + reaping** — the child leads its own process group
 ///   (Unix), so `sh -c "sleep 999 &"` grandchildren die with it, and the exit

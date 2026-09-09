@@ -3,7 +3,7 @@
 //!
 //! This mirrors [`crate::core::llm::LlmClient`] and [`crate::tools::ToolExecutor`]:
 //! a protocol-agnostic trait defined here, with the ACP-specific implementation
-//! (backed by `session/request_permission`) living in [`crate::acp`].
+//! (backed by `session/request_permission`) living in `crate::acp` (needs the `acp` feature).
 
 use async_trait::async_trait;
 

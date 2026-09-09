@@ -3,10 +3,10 @@
 //! The runtime core — [`crate::core::runtime::AgentState`], its session map,
 //! and [`crate::core::runtime::AgentMode`] — lives outside this module now;
 //! everything left here is specific to speaking ACP over the
-//! `agent-client-protocol` crate: [`permission`]/[`client_io`] adapt ACP's
+//! `agent-client-protocol` crate: `permission`/`client_io` adapt ACP's
 //! `session/request_permission` and `fs/*` requests to `core`'s
-//! `PermissionGate`/`ClientIo` traits; [`convert`] maps ACP content blocks to
-//! `core::models::ContentBlock`; [`util`] is shared ACP vocabulary (session
+//! `PermissionGate`/`ClientIo` traits; `convert` maps ACP content blocks to
+//! `core::models::ContentBlock`; `util` is shared ACP vocabulary (session
 //! modes, stop-reason/tool-kind mapping, history replay) plus the
 //! `StreamEvent → SessionUpdate` mapping for a live turn — the one place ACP
 //! decodes `core::models::StreamEvent`, used by both `serve` and the library

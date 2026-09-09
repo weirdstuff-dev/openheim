@@ -39,7 +39,7 @@ pub struct SessionState {
     pub prompt_lock: Arc<Mutex<()>>,
     /// Last time this session was used (prompt, cancel, model/mode switch,
     /// load). Drives least-recently-active ordering in
-    /// [`evict_idle_sessions`]; bumped under the sessions map's write lock.
+    /// `evict_idle_sessions`; bumped under the sessions map's write lock.
     pub last_active: Instant,
 }
 

@@ -64,24 +64,18 @@ struct ConversationEnvelope {
 /// Manages persisted conversation history on disk.
 ///
 /// Each conversation is stored as two files in `~/.openheim/history/` (or a
-/// custom directory when constructed with [`HistoryManager::with_dir`]):
-/// `{uuid}.json` holds [`ConversationMeta`] (small, rewritten wholesale on
-/// every change), and `{uuid}.jsonl` holds the message log, one JSON-encoded
-/// [`Message`] per line, appended to as the conversation grows rather than
-/// rewritten — see [`Self::append_message`]. This means a crash mid-turn
-/// loses at most the one message that was mid-write, not every message
-/// appended since the conversation was created, and keeps per-message
-/// persistence O(1) instead of rewriting the entire message array into one
-/// JSON blob on every save.
+/// custom directory via [`HistoryManager::with_dir`]): `{uuid}.json` holds
+/// [`ConversationMeta`], rewritten wholesale on every change; `{uuid}.jsonl`
+/// holds the message log, one [`Message`] per line, appended rather than
+/// rewritten (see [`Self::append_message`]). This bounds crash loss to the
+/// one message mid-write and keeps per-message persistence O(1).
 ///
-/// Both files are written atomically (temp file + rename) so a crash mid-write
-/// can't corrupt the previous, already-saved content.
+/// Both files are written atomically (temp file + rename).
 ///
-/// Conversations in the legacy single-file format (a single `{uuid}.json`
-/// containing both `meta` and the full `messages` array, no `.jsonl`
-/// sibling) still load correctly — see [`Self::load_conversation`] — and
-/// are transparently upgraded to the split layout the next time they're
-/// saved.
+/// Conversations in the legacy single-file format (`{uuid}.json` holding both
+/// `meta` and the full `messages` array, no `.jsonl` sibling) still load —
+/// see [`Self::load_conversation`] — and are upgraded to the split layout on
+/// next save.
 #[derive(Clone)]
 pub struct HistoryManager {
     history_dir: PathBuf,
@@ -176,7 +170,7 @@ impl HistoryManager {
     /// Creates a new conversation, persists it immediately, and returns it.
     ///
     /// The conversation starts with no messages and no title. The title is derived
-    /// from the first user message when [`save_conversation`] is later called.
+    /// from the first user message when [`Self::save_conversation`] is later called.
     pub fn create_conversation(
         &self,
         model: Option<String>,
@@ -235,7 +229,7 @@ impl HistoryManager {
     /// If the conversation has no title yet and contains at least one user message,
     /// the title is set to the first 80 characters of that message.
     ///
-    /// Rewrites the *entire* message log (see [`Self::write_message_log`]);
+    /// Rewrites the *entire* message log (see `write_message_log`);
     /// this is the right call for creating a conversation or for an
     /// end-of-turn consistency checkpoint, but a turn that wants to persist
     /// messages as they're produced should call [`Self::append_message`]

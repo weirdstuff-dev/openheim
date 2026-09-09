@@ -4,7 +4,7 @@
 //!
 //! Mirrors [`crate::core::permission`]: a protocol-agnostic trait here, with
 //! the ACP-specific implementation (backed by `fs/read_text_file` and
-//! `fs/write_text_file`) living in [`crate::acp`].
+//! `fs/write_text_file`) living in `crate::acp` (needs the `acp` feature).
 
 use std::path::Path;
 

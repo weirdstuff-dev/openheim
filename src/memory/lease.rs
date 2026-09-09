@@ -1,7 +1,7 @@
 //! Advisory, per-session write lease so two `openheim` processes sharing the
 //! same `~/.openheim/history/` (the desktop app's embedded core and an
 //! independently-spawned CLI, in particular) don't both write the same
-//! conversation at once — see `PLAN.md` §1.
+//! conversation at once.
 //!
 //! The lease is turn-scoped, not session-scoped: `core::runtime::AgentState::prompt`
 //! acquires it right before running a turn and holds it only for that turn's
@@ -131,7 +131,7 @@ fn create_lease_exclusively(path: &Path, contents: &str) -> std::io::Result<()> 
 /// exactly the duration of a single turn, so normal release just means "the
 /// turn finished" (or was cancelled, or errored) — no eviction or process
 /// exit required. A crash (or `kill -9`) mid-turn skips this and leaves the
-/// lockfile behind for the next [`acquire`] to find and take over as stale.
+/// lockfile behind for the next `acquire` call to find and take over as stale.
 #[derive(Debug)]
 pub struct SessionLease {
     path: PathBuf,

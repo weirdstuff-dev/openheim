@@ -26,6 +26,12 @@ jobs:
       - run: cargo clippy --no-default-features --features tui -- -D warnings
       - run: cargo clippy --no-default-features --features server -- -D warnings
       - run: cargo build
+      # Doc comments are published on docs.rs — broken/dead intra-doc links
+      # must fail CI, across the same feature matrix as clippy above.
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-default-features --no-deps
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-default-features --features tui --no-deps
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-default-features --features server --no-deps
 
   test:
     name: Test
