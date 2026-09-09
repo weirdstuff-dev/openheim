@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-09
+
 ### Added
 
 - **`OpenheimClient::resume_session` / `SessionHandle::resume`**, ungated (no `acp` feature needed). Returns `(SessionHandle, LoadedSession)` for the caller to replay however it likes, instead of ACP's `SessionUpdate`. The TUI no longer implies `acp` as a result.
