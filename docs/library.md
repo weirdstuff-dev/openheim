@@ -175,13 +175,15 @@ let client = OpenheimClient::builder()
         ],
         env: HashMap::new(),
         url: None,
+        headers: HashMap::new(),
     })
-    // Streamable HTTP MCP server
+    // Streamable HTTP MCP server, with an auth header
     .mcp_server("my-tools", McpServerConfig {
         command: None,
         args: vec![],
         env: HashMap::new(),
-        url: Some("http://localhost:8080/mcp".into()),
+        url: Some("https://my-tools.example.com/mcp".into()),
+        headers: HashMap::from([("Authorization".into(), "Bearer my-key".into())]),
     })
     .build()
     .await?;
@@ -562,6 +564,7 @@ async fn main() -> openheim::Result<()> {
             ],
             env: HashMap::new(),
             url: None,
+            headers: HashMap::new(),
         })
         .build()
         .await?;

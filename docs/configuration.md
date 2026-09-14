@@ -108,6 +108,9 @@ Use either `command` (stdio transport) or `url` (Streamable HTTP transport), not
 | `args` | string[] | No | Arguments passed to `command` |
 | `env` | table | No | Extra environment variables for the spawned process |
 | `url` | string | HTTP only | Base URL for Streamable HTTP transport |
+| `headers` | table | No | Extra HTTP headers sent with every request, e.g. auth (HTTP only) |
+
+`env` and `headers` are inline tables, so a server with credentials still fits on one `[mcp_servers.<name>]` block — no separate `[mcp_servers.<name>.env]` section needed:
 
 ```toml
 # stdio — spawn a local process
@@ -115,16 +118,25 @@ Use either `command` (stdio transport) or `url` (Streamable HTTP transport), not
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
 
-# stdio with env vars
+# stdio with env vars (child-process environment)
 [mcp_servers.my-db]
 command = "uvx"
 args = ["mcp-server-postgres"]
 env = { DATABASE_URL = "postgresql://localhost/mydb" }
 
-# Streamable HTTP
+# Streamable HTTP, no auth
 [mcp_servers.remote-tools]
 url = "http://localhost:8080/mcp"
+
+# Streamable HTTP with auth — headers is the HTTP equivalent of env,
+# same inline-table shape, applied to what an HTTP server actually
+# consumes (a request header, not a process env var)
+[mcp_servers.firecrawl]
+url = "https://api.firecrawl.dev/mcp"
+headers = { Authorization = "Bearer my-key" }
 ```
+
+`headers` is rejected over a plain `http://` URL — credentials must not be sent unencrypted; use `https://` or drop the headers for a keyless local server.
 
 The `name` key is sanitized when building tool names: hyphens and spaces become underscores. So `my-db` → `my_db__query_table`.
 

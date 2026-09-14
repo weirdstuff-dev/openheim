@@ -91,7 +91,7 @@ Returns the public server configuration. API keys and sensitive env vars are str
 }
 ```
 
-> **Note:** `api_key` fields are never included. `env` values inside `mcp_servers` are replaced with `"<redacted>"`.
+> **Note:** `api_key` fields are never included. `env` and `headers` values inside `mcp_servers` are replaced with `"<redacted>"`.
 
 ---
 
@@ -1553,6 +1553,7 @@ interface McpServerConfig {
   args?: string[];
   env?: Record<string, string>;
   url?: string;
+  headers?: Record<string, string>; // e.g. { Authorization: "Bearer <token>" } (HTTP only)
 }
 
 interface ProviderModels {
