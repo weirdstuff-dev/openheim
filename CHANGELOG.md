@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`[mcp_servers.<name>].headers`** — custom HTTP headers (e.g. `Authorization = "Bearer <token>"`) sent with every request to a Streamable HTTP MCP server. Rejected over a plain `http://` URL, same as a provider API key. `McpServerConfig` gains a `headers: HashMap<String, String>` field.
+
 ## [0.10.0] - 2026-09-09
 
 ### Added
