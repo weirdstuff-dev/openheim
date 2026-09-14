@@ -141,6 +141,12 @@ pub struct McpServerConfig {
     pub env: HashMap<String, String>,
     /// Base URL for Streamable HTTP transport (e.g. `"http://localhost:8080/mcp"`).
     pub url: Option<String>,
+    /// Extra HTTP headers sent with every request to an HTTP server, e.g.
+    /// `headers = { Authorization = "Bearer <token>" }`. The stdio equivalent
+    /// of this is `env` — same inline-table shape, applied to what an HTTP
+    /// server actually consumes (headers, not process env vars).
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
 fn default_max_iterations() -> usize {
@@ -188,9 +194,11 @@ impl AppConfig {
         }
         if let Some(servers) = val.get_mut("mcp_servers").and_then(|v| v.as_object_mut()) {
             for s in servers.values_mut() {
-                if let Some(env) = s.get_mut("env").and_then(|v| v.as_object_mut()) {
-                    for v in env.values_mut() {
-                        *v = serde_json::Value::String("<redacted>".to_string());
+                for field in ["env", "headers"] {
+                    if let Some(map) = s.get_mut(field).and_then(|v| v.as_object_mut()) {
+                        for v in map.values_mut() {
+                            *v = serde_json::Value::String("<redacted>".to_string());
+                        }
                     }
                 }
             }
@@ -491,6 +499,10 @@ mod tests {
             command = "npx"
             env = { API_TOKEN = "also-secret" }
 
+            [mcp_servers.remote]
+            url = "https://example.com/mcp"
+            headers = { Authorization = "Bearer also-secret" }
+
             [memory]
             embedding_provider = "openai"
             embedding_model = "text-embedding-3-small"
@@ -504,6 +516,10 @@ mod tests {
         assert_eq!(val["work_dir"], "/work/dir");
         assert!(val["providers"]["openai"].get("api_key").is_none());
         assert_eq!(val["mcp_servers"]["demo"]["env"]["API_TOKEN"], "<redacted>");
+        assert_eq!(
+            val["mcp_servers"]["remote"]["headers"]["Authorization"],
+            "<redacted>"
+        );
 
         // db_path is a local filesystem path, not a secret the client needs;
         // it's stripped, while the rest of the [memory] section survives.

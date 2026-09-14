@@ -1732,6 +1732,7 @@ dependencies = [
  "dirs",
  "futures",
  "grep",
+ "http",
  "ignore",
  "nix 0.29.0",
  "notify",
