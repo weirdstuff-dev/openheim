@@ -22,7 +22,7 @@
 //! available; there is no separate sandbox wrapper.
 //!
 //! With the `rag` feature, `AgentState` also registers `remember`,
-//! `search_memory`, and `forget` (see `crate::rag::tool`), and
+//! `search_memory`, `edit_memory`, and `forget` (see `crate::rag::tool`), and
 //! `delegate_task` ([`DelegateTool`]) is always registered.
 //!
 //! Additional tools are loaded from MCP servers and registered under the

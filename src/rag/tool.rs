@@ -1,6 +1,7 @@
-//! Built-in tools: `remember`, `search_memory`, and `forget` — the agent's
-//! long-term memory, used only when it decides to (typically because the
-//! user asked it to remember, recall, or drop something).
+//! Built-in tools: `remember`, `search_memory`, `edit_memory`, and `forget` —
+//! the agent's long-term memory, used only when it decides to (typically
+//! because the user asked it to remember, recall, correct, or drop
+//! something).
 
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ use super::store::SearchMethod;
 
 pub const REMEMBER_TOOL_NAME: &str = "remember";
 pub const SEARCH_MEMORY_TOOL_NAME: &str = "search_memory";
+pub const EDIT_MEMORY_TOOL_NAME: &str = "edit_memory";
 pub const FORGET_TOOL_NAME: &str = "forget";
 
 /// Hard ceiling on `top_k` a model may request, so one call can't dump the
@@ -178,6 +180,73 @@ impl ToolHandler for SearchMemoryTool {
     }
 }
 
+/// Replaces the content of an existing note in long-term memory.
+pub struct EditMemoryTool {
+    memory: Arc<LongTermMemory>,
+}
+
+impl EditMemoryTool {
+    pub fn new(memory: Arc<LongTermMemory>) -> Self {
+        Self { memory }
+    }
+}
+
+#[async_trait]
+impl ToolHandler for EditMemoryTool {
+    fn definition(&self) -> Tool {
+        Tool::function(
+            EDIT_MEMORY_TOOL_NAME,
+            "Replace the content of an existing note in long-term memory by its \
+             id (the `#N` shown by `search_memory` or returned by `remember`). \
+             Use it when a stored fact or preference has changed rather than \
+             `forget`-ing it and `remember`-ing a new one. Search first if you \
+             don't know the id.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "integer",
+                        "description": "Id of the memory to edit"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": format!("The note's new content (max {MAX_NOTE_CHARS} characters)")
+                    }
+                },
+                "required": ["id", "content"]
+            }),
+        )
+    }
+
+    async fn execute(&self, args: &str, _turn: &TurnContext<'_>) -> Result<String> {
+        let args = parse_args(args)?;
+        let id = args["id"]
+            .as_i64()
+            .ok_or_else(|| Error::ParseError("Missing or non-integer 'id' argument".to_string()))?;
+        let content = args["content"]
+            .as_str()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .ok_or_else(|| Error::ParseError("Missing 'content' argument".to_string()))?;
+        if content.chars().count() > MAX_NOTE_CHARS {
+            return Err(Error::ToolExecutionError(format!(
+                "note is longer than {MAX_NOTE_CHARS} characters; split it into smaller notes"
+            )));
+        }
+        match self.memory.edit(id, content).await? {
+            Some(_) => Ok(format!("Updated memory #{id}.")),
+            None => Ok(format!("No memory #{id} exists; nothing to edit.")),
+        }
+    }
+
+    fn capabilities(&self) -> ToolCapabilities {
+        ToolCapabilities {
+            kind: ToolKindHint::Edit,
+            ..Default::default()
+        }
+    }
+}
+
 /// Deletes a note from long-term memory by id.
 pub struct ForgetTool {
     memory: Arc<LongTermMemory>,
@@ -264,6 +333,12 @@ mod tests {
         assert_eq!(search.function.name, "search_memory");
         assert_eq!(search.function.parameters["required"], json!(["query"]));
         assert!(search.function.description.contains("semantic"));
+        let edit = EditMemoryTool::new(m.clone()).definition();
+        assert_eq!(edit.function.name, "edit_memory");
+        assert_eq!(
+            edit.function.parameters["required"],
+            json!(["id", "content"])
+        );
         let forget = ForgetTool::new(m).definition();
         assert_eq!(forget.function.name, "forget");
         assert_eq!(forget.function.parameters["required"], json!(["id"]));
@@ -387,5 +462,48 @@ mod tests {
 
         assert!(forget.execute(r#"{}"#, &turn).await.is_err());
         assert!(forget.execute(r#"{"id":"seven"}"#, &turn).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn edit_replaces_content_and_reports_unknown_ids() {
+        let harness = TurnHarness::new();
+        let turn = harness.turn();
+        let m = semantic();
+        let out = RememberTool::new(m.clone())
+            .execute(r#"{"content":"The user prefers tabs over spaces."}"#, &turn)
+            .await
+            .unwrap();
+        let id: i64 = out
+            .trim_start_matches("Remembered as memory #")
+            .trim_end_matches('.')
+            .parse()
+            .unwrap();
+
+        let edit = EditMemoryTool::new(m.clone());
+        let args = json!({ "id": id, "content": "The user prefers spaces over tabs." }).to_string();
+        assert_eq!(
+            edit.execute(&args, &turn).await.unwrap(),
+            format!("Updated memory #{id}.")
+        );
+
+        let search = SearchMemoryTool::new(m.clone())
+            .execute(r#"{"query":"tabs or spaces preference","top_k":1}"#, &turn)
+            .await
+            .unwrap();
+        assert!(search.contains("spaces over tabs"), "{search}");
+        assert!(!search.contains("tabs over spaces"), "{search}");
+
+        let missing_args = json!({ "id": 999, "content": "anything" }).to_string();
+        assert!(
+            edit.execute(&missing_args, &turn)
+                .await
+                .unwrap()
+                .contains("nothing to edit")
+        );
+
+        assert!(edit.execute(r#"{"id":1}"#, &turn).await.is_err());
+        assert!(edit.execute(r#"{"content":"x"}"#, &turn).await.is_err());
+        let huge = json!({ "id": 1, "content": "x".repeat(MAX_NOTE_CHARS + 1) }).to_string();
+        assert!(edit.execute(&huge, &turn).await.is_err());
     }
 }

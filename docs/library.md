@@ -28,7 +28,7 @@ openheim = { version = "0.9", default-features = false }
 # optionally: features = ["acp"]     # ACP vocabulary + ACP-typed facade methods (agent-client-protocol)
 # optionally: features = ["server"]  # axum WS/REST server (openheim::transport::ws)
 # optionally: features = ["tui"]     # ratatui terminal UI (openheim::tui)
-# optionally: features = ["rag"]     # remember/search_memory/forget long-term memory (rusqlite FTS5 + sqlite-vec)
+# optionally: features = ["rag"]     # remember/search_memory/edit_memory/forget long-term memory (rusqlite FTS5 + sqlite-vec)
 ```
 
 Everything else — the client facade, agent loop, providers, tools, MCP, and
@@ -175,13 +175,15 @@ let client = OpenheimClient::builder()
         ],
         env: HashMap::new(),
         url: None,
+        headers: HashMap::new(),
     })
-    // Streamable HTTP MCP server
+    // Streamable HTTP MCP server, with an auth header
     .mcp_server("my-tools", McpServerConfig {
         command: None,
         args: vec![],
         env: HashMap::new(),
-        url: Some("http://localhost:8080/mcp".into()),
+        url: Some("https://my-tools.example.com/mcp".into()),
+        headers: HashMap::from([("Authorization".into(), "Bearer my-key".into())]),
     })
     .build()
     .await?;
@@ -482,7 +484,7 @@ println!("{content}");
 
 ## Long-term memory
 
-With the `rag` feature, `client.long_term_memory()` returns the `LongTermMemory` behind the `remember` / `search_memory` / `forget` tools. It is keyword search (FTS5) unless the config's `[memory]` section names an embedding provider, in which case search is semantic. You can drive it directly, for example to seed memories or build a memory browser:
+With the `rag` feature, `client.long_term_memory()` returns the `LongTermMemory` behind the `remember` / `search_memory` / `edit_memory` / `forget` tools. It is keyword search (FTS5) unless the config's `[memory]` section names an embedding provider, in which case search is semantic. You can drive it directly, for example to seed memories or build a memory browser:
 
 ```rust
 let memory = client.long_term_memory();
@@ -493,10 +495,11 @@ for hit in memory.search("where is staging?", Some(3)).await? {
     println!("#{} {} ({:?} {:.2})\n{}", hit.record.id, hit.record.created_at, hit.method, hit.score, hit.record.content);
 }
 
+memory.edit(note.id, "The user's staging cluster is eu-west-2.").await?;
 memory.forget(note.id).await?;
 ```
 
-To use a custom embeddings backend, implement `openheim::rag::EmbeddingClient` and build `LongTermMemory::new(VectorStore::open(path)?, Some(Arc::new(my_embedder)), top_k)` yourself; wrap it in `RememberTool` / `SearchMemoryTool` / `ForgetTool` and register them via `OpenheimBuilder::tool` if the agent should be able to call them.
+To use a custom embeddings backend, implement `openheim::rag::EmbeddingClient` and build `LongTermMemory::new(VectorStore::open(path)?, Some(Arc::new(my_embedder)), top_k)` yourself; wrap it in `RememberTool` / `SearchMemoryTool` / `EditMemoryTool` / `ForgetTool` and register them via `OpenheimBuilder::tool` if the agent should be able to call them.
 
 ---
 
@@ -562,6 +565,7 @@ async fn main() -> openheim::Result<()> {
             ],
             env: HashMap::new(),
             url: None,
+            headers: HashMap::new(),
         })
         .build()
         .await?;

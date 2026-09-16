@@ -1,8 +1,16 @@
+use std::collections::HashMap;
+
+use http::{HeaderName, HeaderValue};
 use rmcp::{
     ServiceExt,
     model::{CallToolRequestParams, Content, RawContent, ResourceContents, Tool},
     service::{RoleClient, RunningService},
-    transport::{TokioChildProcess, streamable_http_client::StreamableHttpClientTransport},
+    transport::{
+        TokioChildProcess,
+        streamable_http_client::{
+            StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+        },
+    },
 };
 
 use crate::{
@@ -27,7 +35,35 @@ impl McpClient {
     /// - Neither set → returns [`Error::ConfigError`].
     pub async fn connect(name: &str, config: &McpServerConfig) -> Result<Self> {
         if let Some(ref url) = config.url {
-            let transport = StreamableHttpClientTransport::from_uri(url.as_str());
+            let mut http_config = StreamableHttpClientTransportConfig::with_uri(url.as_str());
+            if !config.headers.is_empty() {
+                if url.starts_with("http://") {
+                    return Err(Error::ConfigError(format!(
+                        "MCP server '{}' url '{}' uses http:// but has headers configured; \
+                         credentials must not be sent over an unencrypted connection. Use https:// \
+                         or drop the headers for keyless local servers",
+                        name, url
+                    )));
+                }
+                let mut custom_headers = HashMap::with_capacity(config.headers.len());
+                for (key, value) in &config.headers {
+                    let name = HeaderName::try_from(key.as_str()).map_err(|e| {
+                        Error::ConfigError(format!(
+                            "MCP server '{}' has an invalid header name '{}': {}",
+                            name, key, e
+                        ))
+                    })?;
+                    let value = HeaderValue::try_from(value.as_str()).map_err(|e| {
+                        Error::ConfigError(format!(
+                            "MCP server '{}' has an invalid value for header '{}': {}",
+                            name, key, e
+                        ))
+                    })?;
+                    custom_headers.insert(name, value);
+                }
+                http_config = http_config.custom_headers(custom_headers);
+            }
+            let transport = StreamableHttpClientTransport::from_config(http_config);
             let service = ().serve(transport).await.map_err(|e| {
                 Error::Other(format!("MCP HTTP connect to '{}' failed: {}", name, e))
             })?;

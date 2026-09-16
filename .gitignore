@@ -2,3 +2,4 @@
 config.toml
 /target
 /workspace
+.codegraph
