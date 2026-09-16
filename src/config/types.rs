@@ -40,7 +40,8 @@ pub struct AppConfig {
     /// Defaults to `false`. Set to `true` to explicitly opt in to shell access.
     #[serde(default = "default_allow_shell")]
     pub allow_shell: bool,
-    /// Long-term memory (`remember` / `search_memory` / `forget` tools).
+    /// Long-term memory (`remember` / `search_memory` / `edit_memory` /
+    /// `forget` tools).
     /// Optional: without it memory still works, keyword-only, in
     /// `~/.openheim/memory.db`. Set `embedding_provider` / `embedding_model`
     /// to make `search_memory` semantic.

@@ -2,10 +2,11 @@
 //! search by default and semantic search when an embeddings provider is
 //! configured.
 //!
-//! Nothing is stored or retrieved automatically. The agent gets three tools —
-//! `remember`, `search_memory`, and `forget` ([`RememberTool`],
-//! [`SearchMemoryTool`], [`ForgetTool`]) — and uses them when the user asks
-//! it to keep, recall, or drop something. Notes live in a SQLite file
+//! Nothing is stored or retrieved automatically. The agent gets four tools —
+//! `remember`, `search_memory`, `edit_memory`, and `forget` ([`RememberTool`],
+//! [`SearchMemoryTool`], [`EditMemoryTool`], [`ForgetTool`]) — and uses them
+//! when the user asks it to keep, recall, correct, or drop something. Notes
+//! live in a SQLite file
 //! (`~/.openheim/memory.db`) with an FTS5 index, so memory works with zero
 //! configuration and no network. Adding `embedding_provider` /
 //! `embedding_model` to the `[memory]` config section upgrades
@@ -17,14 +18,15 @@
 //! |-----------|----------------|
 //! | [`embedding`] | `EmbeddingClient` trait + OpenAI-compatible and Gemini implementations |
 //! | [`store`]     | `VectorStore` — SQLite schema, FTS5 index, sqlite-vec table, both queries |
-//! | [`tool`]      | The `remember` / `search_memory` / `forget` [`crate::tools::ToolHandler`]s |
+//! | [`tool`]      | The `remember` / `search_memory` / `edit_memory` / `forget` [`crate::tools::ToolHandler`]s |
 //!
 //! ```text
-//! remember(content)     ──▶ [embed] ──▶ memories (+ memories_fts, + vec_memories)
-//!                                                       ▲
-//! search_memory(query)  ──▶ embedder configured? ──yes──▶ KNN (cosine)
-//!                                          └───no───▶ FTS5 BM25
-//! forget(id)            ──▶ delete note (+ vector)
+//! remember(content)          ──▶ [embed] ──▶ memories (+ memories_fts, + vec_memories)
+//!                                                            ▲
+//! search_memory(query)       ──▶ embedder configured? ──yes──▶ KNN (cosine)
+//!                                               └───no───▶ FTS5 BM25
+//! edit_memory(id, content)   ──▶ [embed] ──▶ replace note text (+ vector)
+//! forget(id)                 ──▶ delete note (+ vector)
 //! ```
 //!
 //! Conversation transcripts, skills, and the system identity are a different
@@ -42,8 +44,8 @@ use crate::error::Result;
 pub use embedding::{EmbeddingClient, GeminiEmbeddingClient, OpenAiEmbeddingClient};
 pub use store::{MemoryHit, MemoryRecord, SearchMethod, StoreStats, VectorStore};
 pub use tool::{
-    FORGET_TOOL_NAME, ForgetTool, REMEMBER_TOOL_NAME, RememberTool, SEARCH_MEMORY_TOOL_NAME,
-    SearchMemoryTool,
+    EDIT_MEMORY_TOOL_NAME, EditMemoryTool, FORGET_TOOL_NAME, ForgetTool, REMEMBER_TOOL_NAME,
+    RememberTool, SEARCH_MEMORY_TOOL_NAME, SearchMemoryTool,
 };
 
 /// Default result count when the `[memory]` section doesn't set `top_k`.
@@ -183,6 +185,19 @@ impl LongTermMemory {
     pub async fn forget(&self, id: i64) -> Result<bool> {
         let store = Arc::clone(&self.store);
         tokio::task::spawn_blocking(move || store.delete(id)).await?
+    }
+
+    /// Replaces a note's content (re-embedding it first when an embedder is
+    /// configured), keeping its id and creation date. Returns `None` if `id`
+    /// doesn't exist.
+    pub async fn edit(&self, id: i64, content: &str) -> Result<Option<MemoryRecord>> {
+        let vector = match &self.embedder {
+            Some(e) => Some(self.embed_ready(e.as_ref(), content).await?),
+            None => None,
+        };
+        let store = Arc::clone(&self.store);
+        let content = content.to_string();
+        tokio::task::spawn_blocking(move || store.update(id, &content, vector.as_deref())).await?
     }
 
     pub async fn stats(&self) -> Result<StoreStats> {

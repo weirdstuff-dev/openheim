@@ -45,8 +45,9 @@ pub struct AgentState {
     pub config: AgentConfig,
     pub app_config: AppConfig,
     pub memory: MemoryContext,
-    /// Long-term memory behind the `remember` / `search_memory` / `forget`
-    /// tools (keyword-only unless `[memory]` names an embedding provider).
+    /// Long-term memory behind the `remember` / `search_memory` /
+    /// `edit_memory` / `forget` tools (keyword-only unless `[memory]` names
+    /// an embedding provider).
     #[cfg(feature = "rag")]
     pub long_term_memory: Arc<crate::rag::LongTermMemory>,
     pub mcp_statuses: Vec<crate::mcp::McpServerStatus>,
@@ -91,6 +92,7 @@ impl AgentState {
             let m = &long_term_memory;
             sys_executor.register(Box::new(crate::rag::RememberTool::new(m.clone())));
             sys_executor.register(Box::new(crate::rag::SearchMemoryTool::new(m.clone())));
+            sys_executor.register(Box::new(crate::rag::EditMemoryTool::new(m.clone())));
             sys_executor.register(Box::new(crate::rag::ForgetTool::new(m.clone())));
         }
 

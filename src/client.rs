@@ -147,8 +147,9 @@ impl OpenheimClient {
         &self.state.memory
     }
 
-    /// The long-term memory behind the `remember` / `search_memory` / `forget`
-    /// tools. Keyword-only unless `[memory]` names an embedding provider.
+    /// The long-term memory behind the `remember` / `search_memory` /
+    /// `edit_memory` / `forget` tools. Keyword-only unless `[memory]` names
+    /// an embedding provider.
     #[cfg(feature = "rag")]
     pub fn long_term_memory(&self) -> &Arc<crate::rag::LongTermMemory> {
         &self.state.long_term_memory

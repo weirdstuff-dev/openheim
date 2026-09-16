@@ -276,6 +276,58 @@ impl VectorStore {
         })
     }
 
+    /// Rewrites a note's text (and its vector, when one is available).
+    /// Returns `None` if `id` doesn't exist, otherwise the updated record.
+    /// Passing a vector requires [`Self::ensure_embedding_space`] to have run.
+    pub fn update(
+        &self,
+        id: i64,
+        content: &str,
+        embedding: Option<&[f32]>,
+    ) -> Result<Option<MemoryRecord>> {
+        let mut conn = self.lock()?;
+        if embedding.is_some() && !Self::has_vec_table(&conn)? {
+            return Err(Error::DatabaseError(
+                "vector table not initialised; call ensure_embedding_space first".into(),
+            ));
+        }
+        let tx = conn.transaction()?;
+        let updated = tx.execute(
+            "UPDATE memories SET content = ?1 WHERE id = ?2",
+            params![content, id],
+        )?;
+        if updated == 0 {
+            tx.commit()?;
+            return Ok(None);
+        }
+        let created_at = Self::created_at(&tx, id)?;
+        if Self::has_vec_table(&tx)? {
+            tx.execute("DELETE FROM vec_memories WHERE memory_id = ?1", [id])?;
+        }
+        if let Some(embedding) = embedding {
+            tx.execute(
+                "INSERT INTO vec_memories (memory_id, embedding) VALUES (?1, ?2)",
+                params![id, vector_blob(embedding)],
+            )?;
+        }
+        tx.commit()?;
+        Ok(Some(MemoryRecord {
+            id,
+            content: content.to_string(),
+            created_at,
+        }))
+    }
+
+    fn created_at(conn: &Connection, id: i64) -> Result<DateTime<Utc>> {
+        let raw: String =
+            conn.query_row("SELECT created_at FROM memories WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })?;
+        DateTime::parse_from_rfc3339(&raw)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| Error::DatabaseError(format!("invalid created_at timestamp: {e}")))
+    }
+
     /// (Re-)writes the vector for an existing note.
     pub fn set_embedding(&self, id: i64, embedding: &[f32]) -> Result<()> {
         let conn = self.lock()?;
@@ -467,6 +519,38 @@ mod tests {
             Some("\"a\" OR \"b\" OR \"c\"")
         );
         assert_eq!(fts_query("!!!"), None);
+    }
+
+    #[test]
+    fn update_keeps_id_and_created_at_but_changes_content() {
+        let store = VectorStore::open_in_memory().unwrap();
+        let rec = store.insert("original note", None).unwrap();
+        let updated = store.update(rec.id, "revised note", None).unwrap().unwrap();
+        assert_eq!(updated.id, rec.id);
+        assert_eq!(updated.created_at, rec.created_at);
+        assert_eq!(updated.content, "revised note");
+        assert_eq!(store.search_keyword("revised", 5).unwrap().len(), 1);
+        assert!(store.search_keyword("original", 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn update_missing_id_returns_none() {
+        let store = VectorStore::open_in_memory().unwrap();
+        assert!(store.update(999, "content", None).unwrap().is_none());
+    }
+
+    #[test]
+    fn update_replaces_vector() {
+        let store = VectorStore::open_in_memory().unwrap();
+        store.ensure_embedding_space("m", 3).unwrap();
+        let rec = store.insert("note", Some(&unit(0, 3))).unwrap();
+        store
+            .update(rec.id, "note", Some(&unit(1, 3)))
+            .unwrap()
+            .unwrap();
+        let hits = store.search_semantic(&unit(1, 3), 1).unwrap();
+        assert_eq!(hits[0].record.id, rec.id);
+        assert!(hits[0].score > 0.99);
     }
 
     #[test]

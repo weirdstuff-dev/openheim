@@ -57,7 +57,7 @@
 //! | `tui`    | via `cli`  | The `tui` module (ratatui/crossterm terminal UI). Doesn't need `acp`. |
 //! | `acp`    | via `cli`  | The `acp` and `transport` modules (Agent Client Protocol: `serve`, `stdio`, `run`, `ws`). |
 //! | `server` | via `cli`  | The `transport::ws` WebSocket/REST server (axum). Implies `acp`. |
-//! | `rag`    | via `cli`  | The `rag` module and `remember`/`search_memory`/`forget` tools (rusqlite with FTS5 + sqlite-vec). |
+//! | `rag`    | via `cli`  | The `rag` module and `remember`/`search_memory`/`edit_memory`/`forget` tools (rusqlite with FTS5 + sqlite-vec). |
 //!
 //! Everything else — the client facade, agent loop, providers, tools, MCP,
 //! and config — is always available. Embedders that don't need ACP, the
