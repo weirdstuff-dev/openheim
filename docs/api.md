@@ -333,6 +333,21 @@ Returns all registered tool definitions (built-in + MCP). Each tool follows the 
   {
     "type": "function",
     "function": {
+      "name": "edit_memory",
+      "description": "Replace the content of an existing note in long-term memory by its id (the `#N` shown by `search_memory` or returned by `remember`). Use it when a stored fact or preference has changed rather than `forget`-ing it and `remember`-ing a new one. Search first if you don't know the id.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer", "description": "Id of the memory to edit" },
+          "content": { "type": "string", "description": "The note's new content (max 4000 characters)" }
+        },
+        "required": ["id", "content"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "forget",
       "description": "Permanently delete a note from long-term memory by its id (the `#N` shown by `search_memory` or returned by `remember`). Use it when the user asks you to forget something or when a note is outdated and being replaced. Search first if you don't know the id.",
       "parameters": {
@@ -355,7 +370,7 @@ Returns all registered tool definitions (built-in + MCP). Each tool follows the 
 ]
 ```
 
-> `delegate_task` is always registered. `remember`/`search_memory`/`forget` are registered with the `rag` feature (on by default for the binary) — see configuration.md for the `[memory]` section. MCP tools are namespaced as `{server_name}__{tool_name}` (double underscore); the server name is sanitized: hyphens and spaces become underscores.
+> `delegate_task` is always registered. `remember`/`search_memory`/`edit_memory`/`forget` are registered with the `rag` feature (on by default for the binary) — see configuration.md for the `[memory]` section. MCP tools are namespaced as `{server_name}__{tool_name}` (double underscore); the server name is sanitized: hyphens and spaces become underscores.
 
 ---
 

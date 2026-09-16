@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **`edit_memory` tool** — replaces the content of an existing long-term memory note by id (re-embedding it when semantic search is configured), so the agent can correct a stored fact or preference in place instead of `forget`-ing and `remember`-ing it. Registered alongside `remember` / `search_memory` / `forget` behind the `rag` feature.
 - **`[mcp_servers.<name>].headers`** — custom HTTP headers (e.g. `Authorization = "Bearer <token>"`) sent with every request to a Streamable HTTP MCP server. Rejected over a plain `http://` URL, same as a provider API key. `McpServerConfig` gains a `headers: HashMap<String, String>` field.
 
 ## [0.10.0] - 2026-09-09

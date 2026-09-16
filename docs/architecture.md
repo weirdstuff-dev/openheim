@@ -64,10 +64,10 @@ src/
 │   └── prompt.rs       PromptBuilder — assembles structured system message
 │
 ├── rag/                Long-term memory via tool calls (feature `rag`)
-│   ├── mod.rs          LongTermMemory — remember / search / forget facade
+│   ├── mod.rs          LongTermMemory — remember / search / edit / forget facade
 │   ├── embedding/      EmbeddingClient trait, OpenAI-compatible + Gemini clients
 │   ├── store.rs        VectorStore — SQLite: FTS5 keyword index + sqlite-vec (vec0, cosine KNN)
-│   └── tool.rs         remember, search_memory, and forget tools
+│   └── tool.rs         remember, search_memory, edit_memory, and forget tools
 │
 ├── subagents/          Subagent profiles — delegated, isolated agent personas
 │   └── mod.rs          AgentProfile, SubagentLoader — Markdown files in ~/.openheim/agents/
@@ -189,6 +189,7 @@ User / Client
                       │    web_fetch         │
                       │    remember          │
                       │    search_memory     │
+                      │    edit_memory       │
                       │    forget            │
                       │    delegate_task     │
                       │  MCP tools:          │
@@ -221,9 +222,9 @@ All persistence lives under `~/.openheim/` by default.
 
 ### Long-term memory
 
-`core::runtime::AgentState::new` always opens `memory.db` and registers three tools. `remember(content)` inserts a note into a `memories` table; an FTS5 external-content index (`memories_fts`) tracks it via triggers. `search_memory(query)` runs an FTS5 BM25 query (each word quoted and OR-ed, so user input can't inject query syntax) and returns the best notes with their date. `forget(id)` deletes a note. Nothing is stored or injected automatically: the model calls the tools when the user asks it to remember, recall, or drop something, or when it judges a stored preference relevant.
+`core::runtime::AgentState::new` always opens `memory.db` and registers four tools. `remember(content)` inserts a note into a `memories` table; an FTS5 external-content index (`memories_fts`) tracks it via triggers. `search_memory(query)` runs an FTS5 BM25 query (each word quoted and OR-ed, so user input can't inject query syntax) and returns the best notes with their date. `edit_memory(id, content)` overwrites a note's text in place, keeping its id and creation date. `forget(id)` deletes a note. Nothing is stored or injected automatically: the model calls the tools when the user asks it to remember, recall, correct, or drop something, or when it judges a stored preference relevant.
 
-When `[memory]` names an `embedding_provider` and `embedding_model`, the same store gains a `vec0` virtual table with cosine distance: `remember` embeds the note (OpenAI-compatible `/embeddings` or Gemini `batchEmbedContents`) and `search_memory` becomes a KNN `MATCH` over embeddings instead of keyword search. Notes written before embeddings were enabled are back-filled on the next call. The store records the embedding model and dimension; if either changes, the vectors are dropped and every note is re-embedded from its stored text, since vectors from different models aren't comparable.
+When `[memory]` names an `embedding_provider` and `embedding_model`, the same store gains a `vec0` virtual table with cosine distance: `remember` and `edit_memory` embed the note (OpenAI-compatible `/embeddings` or Gemini `batchEmbedContents`) and `search_memory` becomes a KNN `MATCH` over embeddings instead of keyword search. Notes written before embeddings were enabled are back-filled on the next call. The store records the embedding model and dimension; if either changes, the vectors are dropped and every note is re-embedded from its stored text, since vectors from different models aren't comparable.
 
 ---
 

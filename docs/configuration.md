@@ -144,7 +144,7 @@ The `name` key is sanitized when building tool names: hyphens and spaces become 
 
 ## `[memory]`
 
-Optional, as is every field in it. The agent always has the `remember`, `search_memory`, and `forget` tools (with the `rag` cargo feature, on by default for the binary; library users with `default-features = false` add `features = ["rag"]`). Nothing is stored or retrieved unless the model calls them. Without an embedding provider, `search_memory` is keyword search over SQLite's FTS5 index — no network, no API key. Set `embedding_provider` and `embedding_model` to make it semantic.
+Optional, as is every field in it. The agent always has the `remember`, `search_memory`, `edit_memory`, and `forget` tools (with the `rag` cargo feature, on by default for the binary; library users with `default-features = false` add `features = ["rag"]`). Nothing is stored or retrieved unless the model calls them. Without an embedding provider, `search_memory` is keyword search over SQLite's FTS5 index — no network, no API key. Set `embedding_provider` and `embedding_model` to make it semantic.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -159,7 +159,7 @@ embedding_provider = "openai"
 embedding_model = "text-embedding-3-small"
 ```
 
-Notes are capped at 4000 characters each. Enabling embeddings later back-fills vectors for existing notes, and changing `embedding_model` (or a model returning a different vector size) re-embeds every note on the next tool call, so switching is safe. In `architect` mode only `search_memory` is available; `remember` and `forget` are treated as writes.
+Notes are capped at 4000 characters each. Enabling embeddings later back-fills vectors for existing notes, and changing `embedding_model` (or a model returning a different vector size) re-embeds every note on the next tool call, so switching is safe. In `architect` mode only `search_memory` is available; `remember`, `edit_memory`, and `forget` are treated as writes.
 
 ---
 
