@@ -82,8 +82,12 @@ pub(crate) async fn run_command(command: &str, opts: &RunCommandOptions<'_>) -> 
     };
     #[cfg(target_family = "windows")]
     let mut cmd = {
+        use std::os::windows::process::CommandExt;
+        // Without this, spawning `cmd` allocates and briefly flashes a
+        // console window even though stdio is fully piped below.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let mut c = Command::new("cmd");
-        c.arg("/C").arg(command);
+        c.arg("/C").arg(command).creation_flags(CREATE_NO_WINDOW);
         c
     };
 

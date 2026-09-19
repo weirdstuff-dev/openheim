@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-09-19
+
+### Fixed
+
+- **`execute_command` no longer flashes a console window on Windows.** Spawning `cmd` now sets `CREATE_NO_WINDOW`, since stdio is already fully piped.
+
 ## [0.11.0] - 2026-09-16
 
 ### Added
