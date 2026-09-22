@@ -5,7 +5,7 @@
 //! writes responses to stdout using the line-delimited JSON framing defined by
 //! the Agent Client Protocol.
 
-use agent_client_protocol_tokio::Stdio;
+use agent_client_protocol::Stdio;
 
 use crate::{acp, client::OpenheimClient};
 

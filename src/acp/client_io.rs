@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use agent_client_protocol::{
     Client, ConnectionTo,
-    schema::{
+    schema::v1::{
         ClientCapabilities, ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest,
         WriteTextFileResponse,
     },

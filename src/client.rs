@@ -5,7 +5,7 @@ use std::{
 };
 
 #[cfg(feature = "acp")]
-use agent_client_protocol::schema::SessionUpdate;
+use agent_client_protocol::schema::v1::SessionUpdate;
 use uuid::Uuid;
 
 #[cfg(feature = "acp")]
@@ -418,8 +418,8 @@ impl SessionHandle {
         let (handle, loaded) = self.resume(session_id, cwd).await?;
         if let Some(warning) = loaded.warning {
             on_history(SessionUpdate::AgentMessageChunk(
-                agent_client_protocol::schema::ContentChunk::new(
-                    agent_client_protocol::schema::ContentBlock::from(warning),
+                agent_client_protocol::schema::v1::ContentChunk::new(
+                    agent_client_protocol::schema::v1::ContentBlock::from(warning),
                 ),
             ));
         }
