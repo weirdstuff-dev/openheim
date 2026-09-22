@@ -10,10 +10,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Dependencies updated across the board**, including `agent-client-protocol` 0.11.1 → 2.2.0 and `rmcp` 1.7 → 3.4. On the ACP side, `agent-client-protocol-tokio` is gone (folded into the main crate), and ACP's model-selection method changed from `session/set_model` to the protocol's new generic `session/set_config_option` (a `SessionConfigOption` with category `model`) — ACP clients that only know the old method name won't see a model selector until they support the new one. No other user-facing behavior change.
 
-### Fixed
-
-- **`url`-configured MCP servers (Streamable HTTP) no longer fail to connect over HTTPS to certificates lacking an OCSP responder or CRL** — notably Let's Encrypt's newer short-lived certificate profile. On Android, `rustls-platform-verifier`'s certificate verifier hard-fails these as "revoked" instead of soft-failing, even though the certificate is valid. MCP's HTTP client now builds its own `reqwest` client with a `webpki-roots`-based TLS config instead of going through the platform verifier, trading OS-level trust-store integration and revocation checking (for this connection only — LLM provider calls are unaffected) for working against valid, unrevoked certificates that omit OCSP/CRL info.
-
 ## [0.11.1] - 2026-09-19
 
 ### Fixed
