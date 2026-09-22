@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **Dependencies updated across the board**, including `agent-client-protocol` 0.11.1 → 2.2.0 and `rmcp` 1.7 → 3.4. On the ACP side, `agent-client-protocol-tokio` is gone (folded into the main crate), and ACP's model-selection method changed from `session/set_model` to the protocol's new generic `session/set_config_option` (a `SessionConfigOption` with category `model`) — ACP clients that only know the old method name won't see a model selector until they support the new one. No other user-facing behavior change.
+
 ## [0.11.1] - 2026-09-19
 
 ### Fixed

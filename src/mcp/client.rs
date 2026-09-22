@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use http::{HeaderName, HeaderValue};
 use rmcp::{
     ServiceExt,
-    model::{CallToolRequestParams, Content, RawContent, ResourceContents, Tool},
+    model::{CallToolRequestParams, ContentBlock, ResourceContents, Tool},
     service::{RoleClient, RunningService},
     transport::{
         TokioChildProcess,
@@ -143,14 +143,14 @@ fn build_call_params(name: &str, args_json: &str) -> Result<CallToolRequestParam
     Ok(CallToolRequestParams::new(name.to_string()).with_arguments(map))
 }
 
-fn extract_text_content(content: &[Content]) -> String {
+fn extract_text_content(content: &[ContentBlock]) -> String {
     content
         .iter()
-        .map(|item| match &**item {
-            RawContent::Text(t) => t.text.clone(),
-            RawContent::Image(i) => format!("[image: {}]", i.mime_type),
-            RawContent::Audio(a) => format!("[audio: {}]", a.mime_type),
-            RawContent::Resource(r) => match &r.resource {
+        .map(|item| match item {
+            ContentBlock::Text(t) => t.text.clone(),
+            ContentBlock::Image(i) => format!("[image: {}]", i.mime_type),
+            ContentBlock::Audio(a) => format!("[audio: {}]", a.mime_type),
+            ContentBlock::Resource(r) => match &r.resource {
                 ResourceContents::TextResourceContents { text, .. } => text.clone(),
                 ResourceContents::BlobResourceContents { uri, mime_type, .. } => {
                     format!(
@@ -159,8 +159,10 @@ fn extract_text_content(content: &[Content]) -> String {
                         mime_type.as_deref().unwrap_or("unknown")
                     )
                 }
+                _ => String::new(),
             },
-            RawContent::ResourceLink(l) => format!("[resource: {}]", l.uri),
+            ContentBlock::ResourceLink(l) => format!("[resource: {}]", l.uri),
+            _ => String::new(),
         })
         .collect::<Vec<_>>()
         .join("\n")

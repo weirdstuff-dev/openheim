@@ -8,7 +8,7 @@
 //! import anywhere in this module. `prompt` takes `core::models::ContentBlock`
 //! directly and streams `core::models::StreamEvent`; `load_session` returns
 //! the persisted `Message`s as-is. Mapping any of that onto ACP's wire
-//! vocabulary (`SessionUpdate`, `SessionInfo`, `SessionModelState`,
+//! vocabulary (`SessionUpdate`, `SessionInfo`, `SessionConfigOption`,
 //! `convert_prompt_blocks`, `replay_history_messages`) is entirely the
 //! caller's concern — `acp::serve` and the library facade (`client.rs`) do
 //! it at their own edges.

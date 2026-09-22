@@ -2,10 +2,11 @@
 //! session modes, stop-reason/tool-kind mapping, history replay, and the
 //! `StreamEvent → SessionUpdate` mapping for a live turn.
 
-use agent_client_protocol::schema::{
-    ContentBlock as AcpContentBlock, ContentChunk, ImageContent, ModelInfo, SessionInfo,
-    SessionMode, SessionModeState, SessionModelState, SessionUpdate, StopReason, TextContent,
-    ToolCall as AcpToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+use agent_client_protocol::schema::v1::{
+    ContentBlock as AcpContentBlock, ContentChunk, ImageContent, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOption, SessionInfo, SessionMode,
+    SessionModeState, SessionUpdate, StopReason, TextContent, ToolCall as AcpToolCall,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 
 use crate::{
@@ -18,14 +19,18 @@ use crate::{
     tools::{ToolExecutor, ToolKindHint},
 };
 
+/// `session/set_config_option` id for the model selector.
+pub(super) const MODEL_CONFIG_ID: &str = "model";
+
 /// Every model configured across every provider, tagged with `provider` in
-/// each entry's `_meta` — the shape `session/new` and `session/set_model`
-/// advertise available models in.
-pub(super) fn session_model_state(
+/// each entry's `_meta` — the `session/new`, `session/load`, and
+/// `session/set_config_option` shape for advertising available models as a
+/// `select`-kind session config option.
+pub(super) fn session_model_config_option(
     app_config: &AppConfig,
     current_model: &str,
-) -> SessionModelState {
-    let available_models = app_config
+) -> SessionConfigOption {
+    let available_models: Vec<SessionConfigSelectOption> = app_config
         .providers
         .iter()
         .flat_map(|(provider_name, p)| {
@@ -35,11 +40,17 @@ pub(super) fn session_model_state(
                     "provider".to_string(),
                     serde_json::Value::String(provider_name.clone()),
                 );
-                ModelInfo::new(m.clone(), m.clone()).meta(meta)
+                SessionConfigSelectOption::new(m.clone(), m.clone()).meta(meta)
             })
         })
         .collect();
-    SessionModelState::new(current_model.to_string(), available_models)
+    SessionConfigOption::select(
+        MODEL_CONFIG_ID,
+        "Model",
+        current_model.to_string(),
+        available_models,
+    )
+    .category(SessionConfigOptionCategory::Model)
 }
 
 /// Maps persisted session metadata onto the ACP `SessionInfo` shape

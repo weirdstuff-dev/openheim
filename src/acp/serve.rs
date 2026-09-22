@@ -6,13 +6,13 @@ use std::sync::Arc;
 use agent_client_protocol::{
     Agent, Client, ConnectTo, ConnectionTo, Dispatch, Handled, on_receive_dispatch,
     on_receive_notification, on_receive_request,
-    schema::{
+    schema::v1::{
         AgentCapabilities, CancelNotification, ClientCapabilities, ContentBlock as AcpContentBlock,
         ContentChunk, Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
         ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
         NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse, SessionCapabilities,
-        SessionListCapabilities, SessionNotification, SessionUpdate, SetSessionModeRequest,
-        SetSessionModeResponse, SetSessionModelRequest, SetSessionModelResponse,
+        SessionListCapabilities, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+        SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
     },
     util::internal_error,
 };
@@ -30,8 +30,9 @@ use super::{
     convert::convert_prompt_blocks,
     permission::AcpPermissionGate,
     util::{
-        conversation_metas_to_session_info, map_stop_reason, replay_history_messages,
-        session_mode_state, session_model_state, stream_event_to_session_update,
+        MODEL_CONFIG_ID, conversation_metas_to_session_info, map_stop_reason,
+        replay_history_messages, session_mode_state, session_model_config_option,
+        stream_event_to_session_update,
     },
 };
 
@@ -124,7 +125,8 @@ pub async fn serve(
                     .as_deref()
                     .unwrap_or(&state_session.config.model)
                     .to_string();
-                let model_state = session_model_state(&state_session.app_config, &current_model);
+                let model_config =
+                    session_model_config_option(&state_session.app_config, &current_model);
 
                 match state_session
                     .new_session(model.as_deref(), skills, req.cwd)
@@ -132,7 +134,7 @@ pub async fn serve(
                 {
                     Ok(session_key) => responder.respond(
                         NewSessionResponse::new(session_key)
-                            .models(model_state)
+                            .config_options(vec![model_config])
                             .modes(session_mode_state(AgentMode::Code)),
                     ),
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
@@ -255,8 +257,12 @@ pub async fn serve(
                                 ));
                             },
                         );
+                        let model_config =
+                            session_model_config_option(&state_load.app_config, &loaded.model);
                         responder.respond(
-                            LoadSessionResponse::new().modes(session_mode_state(loaded.mode)),
+                            LoadSessionResponse::new()
+                                .config_options(vec![model_config])
+                                .modes(session_mode_state(loaded.mode)),
                         )
                     }
                     Err(e) => responder.respond_with_error(to_acp_error(&e)),
@@ -265,14 +271,32 @@ pub async fn serve(
             on_receive_request!(),
         )
         .on_receive_request(
-            async move |req: SetSessionModelRequest, responder, _cx: ConnectionTo<Client>| {
+            async move |req: SetSessionConfigOptionRequest,
+                        responder,
+                        _cx: ConnectionTo<Client>| {
                 let session_id = req.session_id.0.as_ref().to_string();
-                let model_id = req.model_id.0.as_ref();
+                if req.config_id.0.as_ref() != MODEL_CONFIG_ID {
+                    return responder.respond_with_error(internal_error(format!(
+                        "unknown session config option '{}'",
+                        req.config_id.0
+                    )));
+                }
+                let Some(model_id) = req.value.as_value_id().cloned() else {
+                    return responder.respond_with_error(internal_error(
+                        "model config option requires a value id",
+                    ));
+                };
                 match state_set_model
-                    .set_session_model(&session_id, model_id)
+                    .set_session_model(&session_id, model_id.0.as_ref())
                     .await
                 {
-                    Ok(_) => responder.respond(SetSessionModelResponse::new()),
+                    Ok(_) => {
+                        let config = session_model_config_option(
+                            &state_set_model.app_config,
+                            model_id.0.as_ref(),
+                        );
+                        responder.respond(SetSessionConfigOptionResponse::new(vec![config]))
+                    }
                     Err(e) => responder.respond_with_internal_error(e.to_string()),
                 }
             },
@@ -308,13 +332,19 @@ pub async fn serve(
                 // response into an error delivered to whatever is awaiting
                 // it — so those must be declined, not rejected, letting the
                 // crate's own default handling forward the real result.
-                if matches!(message, Dispatch::Response(..)) {
-                    return Ok(Handled::No {
-                        message,
-                        retry: false,
-                    });
+                match message {
+                    Dispatch::Response(..) => {
+                        return Ok(Handled::No {
+                            message,
+                            retry: false,
+                        });
+                    }
+                    Dispatch::Request(_, responder) => {
+                        responder.respond_with_error(internal_error("unsupported method"))?;
+                    }
+                    Dispatch::Notification(_) => {}
                 }
-                message.respond_with_error(internal_error("unsupported method"), cx)?;
+                let _ = cx;
                 Ok(Handled::Yes)
             },
             on_receive_dispatch!(),
