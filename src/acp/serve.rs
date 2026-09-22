@@ -257,8 +257,12 @@ pub async fn serve(
                                 ));
                             },
                         );
+                        let model_config =
+                            session_model_config_option(&state_load.app_config, &loaded.model);
                         responder.respond(
-                            LoadSessionResponse::new().modes(session_mode_state(loaded.mode)),
+                            LoadSessionResponse::new()
+                                .config_options(vec![model_config])
+                                .modes(session_mode_state(loaded.mode)),
                         )
                     }
                     Err(e) => responder.respond_with_error(to_acp_error(&e)),
