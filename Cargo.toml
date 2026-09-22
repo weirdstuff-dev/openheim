@@ -74,8 +74,6 @@ grep = "0.4.1"
 ignore = "0.4.33"
 rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 sqlite-vec = { version = "0.1.9", optional = true }
-rustls = { version = "0.23.45", default-features = false, features = ["aws-lc-rs", "std", "tls12", "logging"] }
-webpki-roots = "1.0.9"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal"] }

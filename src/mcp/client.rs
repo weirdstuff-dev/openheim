@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::LazyLock;
 
 use http::{HeaderName, HeaderValue};
 use rmcp::{
@@ -18,42 +17,6 @@ use crate::{
     config::McpServerConfig,
     error::{Error, Result},
 };
-
-/// The `reqwest` client used for `url`-configured (Streamable HTTP) MCP
-/// servers — built once and reused across every connection.
-///
-/// Deliberately *not* `reqwest::Client::new()` / `StreamableHttpClientTransport::from_config`'s
-/// own default: those pull in `rustls-platform-verifier` (via the crate's
-/// `default-tls` → `rustls` feature chain), which on Android checks
-/// certificate revocation status and — per its own documented limitation —
-/// treats a certificate that doesn't specify an OCSP responder or CRL as
-/// **revoked** rather than "unknown", hard-failing the handshake even
-/// though the certificate is perfectly valid. A remote MCP server not
-/// stapling OCSP is common and not something this client can fix, so this
-/// builds a plain webpki-roots-based `rustls::ClientConfig` instead —
-/// static Mozilla root list, no OS integration, no revocation checking, and
-/// no platform-specific surprises. Trade-off: this won't honor OS-level
-/// trust decisions (an admin-installed corporate root CA, or a CA the OS
-/// has since distrusted) the way the platform verifier would.
-static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    reqwest::Client::builder()
-        .use_preconfigured_tls(tls_config)
-        // Mirrors `StreamableHttpClientTransport`'s own default client
-        // (see rmcp's `default_http_client`): avoids a ~40ms stall from TCP
-        // Delayed ACK on Linux when pooling a connection whose previous
-        // response body wasn't fully drained, and disables auto-redirects
-        // so a caller-supplied custom header (e.g. `Authorization`) can't
-        // get replayed to a redirect target.
-        .pool_max_idle_per_host(0)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("webpki-roots TLS config is always valid for building a reqwest client")
-});
 
 /// Low-level MCP client wrapping an active [`rmcp`] service connection.
 ///
@@ -100,8 +63,7 @@ impl McpClient {
                 }
                 http_config = http_config.custom_headers(custom_headers);
             }
-            let transport =
-                StreamableHttpClientTransport::with_client(HTTP_CLIENT.clone(), http_config);
+            let transport = StreamableHttpClientTransport::from_config(http_config);
             let service = ().serve(transport).await.map_err(|e| {
                 Error::Other(format!("MCP HTTP connect to '{}' failed: {}", name, e))
             })?;
