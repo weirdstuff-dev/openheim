@@ -461,7 +461,7 @@ impl AgentState {
             session_config.model = model.clone();
         }
 
-        let mode = {
+        let (mode, model) = {
             let mut sessions = self.sessions.write().await;
             // A second connection attaching to an already-live session
             // must not replace its control state — a fresh `cancel` token
@@ -514,15 +514,17 @@ impl AgentState {
                     session_id: session_id.to_string(),
                 });
             }
-            // Read back the mode so the response reflects whatever
-            // `Self::prompt` is actually enforcing for it, not the
-            // fresh-session default.
-            live.mode
+            // Read back the mode and model so the response reflects whatever
+            // is actually live for this session (e.g. a prior
+            // `session/set_config_option`), not the fresh-session default or
+            // the just-loaded disk snapshot.
+            (live.mode, live.config.model.clone())
         };
 
         Ok(LoadedSession {
             mode,
             messages: conversation.messages,
+            model,
             warning,
         })
     }
@@ -535,6 +537,10 @@ impl AgentState {
 pub struct LoadedSession {
     pub mode: AgentMode,
     pub messages: Vec<Message>,
+    /// The session's active model after resolution (falls back to the
+    /// default provider's model if the saved provider/model no longer
+    /// resolves — see `warning`).
+    pub model: String,
     /// Set if the session's saved provider/model no longer resolves and the
     /// load fell back to the default provider.
     pub warning: Option<String>,

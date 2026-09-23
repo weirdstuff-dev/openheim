@@ -1,6 +1,6 @@
 //! Converting ACP wire content into core [`ContentBlock`]s.
 
-use agent_client_protocol::schema::ContentBlock as AcpContentBlock;
+use agent_client_protocol::schema::v1::ContentBlock as AcpContentBlock;
 
 use crate::{
     core::models::ContentBlock,
@@ -59,7 +59,7 @@ pub(crate) fn convert_prompt_blocks(blocks: &[AcpContentBlock]) -> Result<Vec<Co
 #[cfg(test)]
 mod prompt_block_tests {
     use super::*;
-    use agent_client_protocol::schema::{
+    use agent_client_protocol::schema::v1::{
         AudioContent, EmbeddedResource, EmbeddedResourceResource, ImageContent, ResourceLink,
         TextContent, TextResourceContents,
     };

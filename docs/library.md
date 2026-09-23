@@ -17,7 +17,7 @@ tokio = { version = "1", features = ["full"] }
 
 By default the `openheim` dependency also builds the CLI/TUI binary stack
 (`clap`, `ratatui`, `crossterm`, `tracing-subscriber`), the ACP stack
-(`agent-client-protocol`, `agent-client-protocol-tokio`), and the WebSocket
+(`agent-client-protocol`), and the WebSocket
 server stack (`axum`, `tower-http`, `notify`, `walkdir`). Embedders that
 drive the agent through `OpenheimClient` (or their own ACP wiring) usually
 don't need those. `futures` is not behind any feature — the agent loop uses

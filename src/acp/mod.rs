@@ -26,4 +26,4 @@ pub use serve::serve;
 // `SessionHandle`/`OpenheimClient` methods (`prompt`, `prompt_with_images`,
 // `restore`, `load_session`) without a direct `agent-client-protocol`
 // dependency.
-pub use agent_client_protocol::schema;
+pub use agent_client_protocol::schema::v1 as schema;
