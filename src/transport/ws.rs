@@ -67,7 +67,7 @@ enum WsInbound {
     #[serde(rename = "agent")]
     Agent(Value),
     #[serde(rename = "fs")]
-    Fs(FsRequest),
+    Fs(FsRequestEnvelope),
 }
 
 #[derive(Serialize)]
@@ -76,7 +76,35 @@ enum WsOutbound {
     #[serde(rename = "agent")]
     Agent(Value),
     #[serde(rename = "fs")]
-    Fs(FsResponse),
+    Fs(FsReply),
+}
+
+/// An fs request plus an optional client-chosen `id`, which is echoed on its
+/// reply so a client with several requests in flight can tell which reply
+/// (or error) belongs to which: `{"action": "read", "path": "a.txt", "id": 7}`.
+#[derive(Debug, Deserialize)]
+pub struct FsRequestEnvelope {
+    #[serde(default)]
+    pub id: Option<Value>,
+    #[serde(flatten)]
+    pub request: FsRequest,
+}
+
+/// An fs message to the client. `id` is the request's, for a reply; absent
+/// for unsolicited messages (the connection greeting, watcher events, an
+/// unparseable payload).
+#[derive(Debug, Serialize)]
+pub struct FsReply {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<Value>,
+    #[serde(flatten)]
+    pub response: FsResponse,
+}
+
+impl FsReply {
+    fn unsolicited(response: FsResponse) -> WsOutbound {
+        WsOutbound::Fs(Self { id: None, response })
+    }
 }
 
 /// Entry in the file tree
@@ -319,7 +347,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AgentState>) {
     // FS sidecar: events and responses going back to the WS client
     let (fs_tx, mut fs_rx) = mpsc::unbounded::<WsOutbound>();
 
-    let _ = fs_tx.unbounded_send(WsOutbound::Fs(FsResponse::Connected {
+    let _ = fs_tx.unbounded_send(FsReply::unsolicited(FsResponse::Connected {
         message: "Connected to Openheim".to_string(),
     }));
 
@@ -363,12 +391,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AgentState>) {
                     let line = serde_json::to_string(&val).unwrap_or_default();
                     let _ = acp_in_tx.unbounded_send(Ok(line));
                 }
-                Ok(WsInbound::Fs(req)) => {
-                    fs_state.handle(req, fs_tx.clone()).await;
+                Ok(WsInbound::Fs(FsRequestEnvelope { id, request })) => {
+                    let response = fs_state.handle(request, fs_tx.clone()).await;
+                    let _ = fs_tx.unbounded_send(WsOutbound::Fs(FsReply { id, response }));
                 }
                 Err(e) => {
                     tracing::warn!("invalid WS payload: {e}");
-                    let _ = fs_tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
+                    let _ = fs_tx.unbounded_send(FsReply::unsolicited(FsResponse::Error {
                         message: format!("Invalid payload: {e}"),
                     }));
                 }
@@ -421,186 +450,148 @@ struct FsState {
     /// Sandbox boundary shared with the agent's own tools: every fs request
     /// is validated against this root, never against a client-chosen path.
     work_dir: PathBuf,
-    _watcher: Option<RecommendedWatcher>,
+    /// The active `watch`, if any; dropping it stops the watch.
+    watcher: Option<RecommendedWatcher>,
+}
+
+/// Shorthand for an error reply.
+fn fs_error(message: impl Into<String>) -> FsResponse {
+    FsResponse::Error {
+        message: message.into(),
+    }
 }
 
 impl FsState {
     fn new(work_dir: PathBuf) -> Self {
         Self {
             work_dir,
-            _watcher: None,
+            watcher: None,
         }
     }
 
-    /// Validates `path` against `work_dir` via the shared sandbox validator.
-    /// On rejection the error is reported to the client and `None` returned.
-    fn validate(&self, path: &str, tx: &UnboundedSender<WsOutbound>) -> Option<PathBuf> {
-        match validate_path(path, &self.work_dir) {
-            Ok(validated) => Some(validated),
-            Err(e) => {
-                let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
-                    message: e.to_string(),
-                }));
-                None
-            }
-        }
+    /// Validates `path` against `work_dir` via the shared sandbox validator,
+    /// or returns the error reply to send.
+    fn validate(&self, path: &str) -> Result<PathBuf, FsResponse> {
+        validate_path(path, &self.work_dir).map_err(|e| fs_error(e.to_string()))
     }
 
-    async fn handle(&mut self, req: FsRequest, tx: UnboundedSender<WsOutbound>) {
-        match req {
-            FsRequest::Watch { path } => self.start_watching(path, tx),
+    /// Carries out one request and returns its reply. `events` is where a
+    /// `watch` sends its (unsolicited) change events from then on.
+    async fn handle(&mut self, req: FsRequest, events: UnboundedSender<WsOutbound>) -> FsResponse {
+        self.try_handle(req, events)
+            .await
+            .unwrap_or_else(|error_reply| error_reply)
+    }
+
+    async fn try_handle(
+        &mut self,
+        req: FsRequest,
+        events: UnboundedSender<WsOutbound>,
+    ) -> Result<FsResponse, FsResponse> {
+        Ok(match req {
+            FsRequest::Watch { path } => self.start_watching(path, events)?,
             FsRequest::Unwatch => {
-                self.stop_watching();
-                let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Unwatched));
+                self.watcher = None;
+                FsResponse::Unwatched
             }
             FsRequest::List { path, recursive } => {
-                if let Some(validated) = self.validate(&path, &tx) {
-                    let entries = list_directory(&validated, recursive.unwrap_or(false)).await;
-                    let _ =
-                        tx.unbounded_send(WsOutbound::Fs(FsResponse::FileList { path, entries }));
-                }
+                let validated = self.validate(&path)?;
+                let entries = list_directory(&validated, recursive.unwrap_or(false)).await;
+                FsResponse::FileList { path, entries }
             }
             FsRequest::Read { path } => {
-                if let Some(validated) = self.validate(&path, &tx) {
-                    let resp = match fs::read_to_string(&validated).await {
-                        Ok(content) => FsResponse::FileContent { path, content },
-                        Err(e) => FsResponse::Error {
-                            message: format!("Failed to read: {e}"),
-                        },
-                    };
-                    let _ = tx.unbounded_send(WsOutbound::Fs(resp));
-                }
+                let validated = self.validate(&path)?;
+                let content = fs::read_to_string(&validated)
+                    .await
+                    .map_err(|e| fs_error(format!("Failed to read: {e}")))?;
+                FsResponse::FileContent { path, content }
             }
             FsRequest::Write { path, content } => {
-                if let Some(validated) = self.validate(&path, &tx) {
-                    if let Some(parent) = validated.parent()
-                        && !parent.exists()
-                        && let Err(e) = fs::create_dir_all(parent).await
-                    {
-                        let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
-                            message: format!("Failed to create dirs: {e}"),
-                        }));
-                        return;
-                    }
-                    let resp = match fs::write(&validated, content).await {
-                        Ok(()) => FsResponse::WriteSuccess { path },
-                        Err(e) => FsResponse::Error {
-                            message: format!("Failed to write: {e}"),
-                        },
-                    };
-                    let _ = tx.unbounded_send(WsOutbound::Fs(resp));
+                let validated = self.validate(&path)?;
+                if let Some(parent) = validated.parent()
+                    && !parent.exists()
+                {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| fs_error(format!("Failed to create dirs: {e}")))?;
                 }
+                fs::write(&validated, content)
+                    .await
+                    .map_err(|e| fs_error(format!("Failed to write: {e}")))?;
+                FsResponse::WriteSuccess { path }
             }
             FsRequest::Mkdir { path } => {
-                if let Some(validated) = self.validate(&path, &tx) {
-                    let resp = match fs::create_dir_all(&validated).await {
-                        Ok(()) => FsResponse::MkdirSuccess { path },
-                        Err(e) => FsResponse::Error {
-                            message: format!("Failed to mkdir: {e}"),
-                        },
-                    };
-                    let _ = tx.unbounded_send(WsOutbound::Fs(resp));
-                }
+                let validated = self.validate(&path)?;
+                fs::create_dir_all(&validated)
+                    .await
+                    .map_err(|e| fs_error(format!("Failed to mkdir: {e}")))?;
+                FsResponse::MkdirSuccess { path }
             }
             FsRequest::Delete { path } => {
-                if let Some(validated) = self.validate(&path, &tx) {
-                    let resp = if validated.is_dir() {
-                        match fs::remove_dir_all(&validated).await {
-                            Ok(()) => FsResponse::DeleteSuccess { path },
-                            Err(e) => FsResponse::Error {
-                                message: format!("Failed to delete dir: {e}"),
-                            },
-                        }
-                    } else {
-                        match fs::remove_file(&validated).await {
-                            Ok(()) => FsResponse::DeleteSuccess { path },
-                            Err(e) => FsResponse::Error {
-                                message: format!("Failed to delete file: {e}"),
-                            },
-                        }
-                    };
-                    let _ = tx.unbounded_send(WsOutbound::Fs(resp));
+                let validated = self.validate(&path)?;
+                if validated.is_dir() {
+                    fs::remove_dir_all(&validated)
+                        .await
+                        .map_err(|e| fs_error(format!("Failed to delete dir: {e}")))?;
+                } else {
+                    fs::remove_file(&validated)
+                        .await
+                        .map_err(|e| fs_error(format!("Failed to delete file: {e}")))?;
                 }
+                FsResponse::DeleteSuccess { path }
             }
             FsRequest::Rename { from, to } => {
-                if let (Some(vf), Some(vt)) = (self.validate(&from, &tx), self.validate(&to, &tx)) {
-                    let resp = match fs::rename(&vf, &vt).await {
-                        Ok(()) => FsResponse::RenameSuccess { from, to },
-                        Err(e) => FsResponse::Error {
-                            message: format!("Failed to rename: {e}"),
-                        },
-                    };
-                    let _ = tx.unbounded_send(WsOutbound::Fs(resp));
-                }
+                let (vf, vt) = (self.validate(&from)?, self.validate(&to)?);
+                fs::rename(&vf, &vt)
+                    .await
+                    .map_err(|e| fs_error(format!("Failed to rename: {e}")))?;
+                FsResponse::RenameSuccess { from, to }
             }
-        }
+        })
     }
 
-    fn start_watching(&mut self, path: String, tx: UnboundedSender<WsOutbound>) {
-        let Some(validated) = self.validate(&path, &tx) else {
-            return;
-        };
+    fn start_watching(
+        &mut self,
+        path: String,
+        events: UnboundedSender<WsOutbound>,
+    ) -> Result<FsResponse, FsResponse> {
+        let validated = self.validate(&path)?;
         if !validated.is_dir() {
-            let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
-                message: format!("Invalid directory: {path}"),
-            }));
-            return;
+            return Err(fs_error(format!("Invalid directory: {path}")));
         }
 
-        self.stop_watching();
+        self.watcher = None;
 
         let (notify_tx, mut notify_rx) = mpsc::unbounded::<notify::Result<Event>>();
-        let tx_clone = tx.clone();
         tokio::spawn(async move {
             while let Some(res) = notify_rx.next().await {
-                match res {
-                    Ok(event) => {
-                        let _ = tx_clone.unbounded_send(WsOutbound::Fs(FsResponse::FsEvent {
-                            event_kind: format!("{:?}", event.kind),
-                            paths: event
-                                .paths
-                                .iter()
-                                .map(|p| p.to_string_lossy().to_string())
-                                .collect(),
-                        }));
-                    }
-                    Err(e) => {
-                        let _ = tx_clone.unbounded_send(WsOutbound::Fs(FsResponse::Error {
-                            message: format!("Watcher error: {e}"),
-                        }));
-                    }
-                }
+                let response = match res {
+                    Ok(event) => FsResponse::FsEvent {
+                        event_kind: format!("{:?}", event.kind),
+                        paths: event
+                            .paths
+                            .iter()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .collect(),
+                    },
+                    Err(e) => fs_error(format!("Watcher error: {e}")),
+                };
+                let _ = events.unbounded_send(FsReply::unsolicited(response));
             }
         });
 
-        let watcher_result = RecommendedWatcher::new(
+        let mut watcher = RecommendedWatcher::new(
             move |res| {
                 let _ = notify_tx.unbounded_send(res);
             },
             Config::default().with_poll_interval(Duration::from_secs(1)),
-        );
-
-        match watcher_result {
-            Ok(mut watcher) => {
-                if let Err(e) = watcher.watch(&validated, RecursiveMode::Recursive) {
-                    let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
-                        message: format!("Failed to watch: {e}"),
-                    }));
-                    return;
-                }
-                self._watcher = Some(watcher);
-                let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Watching { path }));
-            }
-            Err(e) => {
-                let _ = tx.unbounded_send(WsOutbound::Fs(FsResponse::Error {
-                    message: format!("Failed to create watcher: {e}"),
-                }));
-            }
-        }
-    }
-
-    fn stop_watching(&mut self) {
-        self._watcher = None;
+        )
+        .map_err(|e| fs_error(format!("Failed to create watcher: {e}")))?;
+        watcher
+            .watch(&validated, RecursiveMode::Recursive)
+            .map_err(|e| fs_error(format!("Failed to watch: {e}")))?;
+        self.watcher = Some(watcher);
+        Ok(FsResponse::Watching { path })
     }
 }
 
@@ -660,15 +651,10 @@ mod tests {
         FsState::new(work_dir.to_path_buf())
     }
 
-    /// Runs one fs request and returns the first response sent to the client.
+    /// Runs one fs request and returns its reply.
     async fn run_request(state: &mut FsState, req: FsRequest) -> FsResponse {
-        let (tx, mut rx) = mpsc::unbounded::<WsOutbound>();
-        state.handle(req, tx).await;
-        // `tx` was dropped inside `handle`, so this yields the response or None.
-        match rx.next().await {
-            Some(WsOutbound::Fs(resp)) => resp,
-            _ => panic!("expected an fs response"),
-        }
+        let (events, _) = mpsc::unbounded::<WsOutbound>();
+        state.handle(req, events).await
     }
 
     // Both socket handlers talk to ACP only through `spawn_acp_server`, so a
@@ -819,7 +805,7 @@ mod tests {
         )
         .await;
         assert!(matches!(resp, FsResponse::Error { .. }));
-        assert!(state._watcher.is_none());
+        assert!(state.watcher.is_none());
     }
 
     #[tokio::test]
@@ -839,7 +825,33 @@ mod tests {
             matches!(resp, FsResponse::Watching { .. }),
             "unexpected response: {resp:?}"
         );
-        assert!(state._watcher.is_some());
+        assert!(state.watcher.is_some());
+    }
+
+    #[test]
+    fn fs_request_id_is_optional_and_echoed_on_the_reply() {
+        let with_id: FsRequestEnvelope =
+            serde_json::from_str(r#"{"action": "read", "path": "a.txt", "id": 7}"#).unwrap();
+        assert_eq!(with_id.id, Some(serde_json::json!(7)));
+        assert!(matches!(with_id.request, FsRequest::Read { path } if path == "a.txt"));
+
+        let without_id: FsRequestEnvelope =
+            serde_json::from_str(r#"{"action": "unwatch"}"#).unwrap();
+        assert!(without_id.id.is_none());
+
+        let reply = WsOutbound::Fs(FsReply {
+            id: with_id.id,
+            response: fs_error("nope"),
+        });
+        let json = serde_json::to_value(&reply).unwrap();
+        assert_eq!(json["channel"], "fs");
+        assert_eq!(json["data"]["id"], 7);
+        assert_eq!(json["data"]["type"], "error");
+        assert_eq!(json["data"]["message"], "nope");
+
+        // Unsolicited messages carry no `id` key at all.
+        let json = serde_json::to_value(FsReply::unsolicited(FsResponse::Unwatched)).unwrap();
+        assert!(json["data"].get("id").is_none(), "{json}");
     }
 
     #[test]
