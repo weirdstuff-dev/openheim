@@ -675,8 +675,8 @@ The agent channel uses the **Agent Client Protocol (ACP)**, which is JSON-RPC 2.
   "jsonrpc": "2.0",
   "id": 1,
   "error": {
-    "code": -32603,
-    "message": "Internal error",
+    "code": -32002,
+    "message": "Resource not found",
     "data": "session not found: abc123"
   }
 }
@@ -978,8 +978,8 @@ The flow is:
     "jsonrpc": "2.0",
     "id": 4,
     "error": {
-      "code": -32603,
-      "message": "Internal error",
+      "code": -32002,
+      "message": "Resource not found",
       "data": "Conversation 550e8400-... not found at ..."
     }
   }
@@ -1043,7 +1043,7 @@ Send a user message to the agent within a session. The agent will stream back re
 
 **Errors specific to `session/prompt` and `session/load`:**
 
-Both requests can fail with one of two structured errors, in addition to the generic `{"code": -32603, "message": "Internal error", "data": "<string>"}` shape used elsewhere (e.g. session not found). Both carry a machine-readable `data.kind` so a client can offer a "busy, retry" UX instead of surfacing a generic failure.
+Both requests can fail with one of two structured errors, in addition to the plain-string errors listed under [Common JSON-RPC error codes](#6-error-handling) (e.g. `-32002` for a session that doesn't exist). Both carry a machine-readable `data.kind` so a client can offer a "busy, retry" UX instead of surfacing a generic failure.
 
 **`session_busy`** — another turn is already in flight for this session, in this process (only one `session/prompt` runs per session at a time). Retry once it completes; unlike `session_locked` below, this is expected under normal concurrent use and not a hard failure.
 
@@ -2056,9 +2056,9 @@ All REST endpoints return `200` with JSON body on success. If the server is misc
     "jsonrpc": "2.0",
     "id": 3,
     "error": {
-      "code": -32603,
-      "message": "Internal error",
-      "data": "session not found: invalid-session-id"
+      "code": -32602,
+      "message": "Invalid params",
+      "data": "Parse error: invalid session id format"
     }
   }
 }
@@ -2070,9 +2070,12 @@ All REST endpoints return `200` with JSON body on success. If the server is misc
 |---|---|
 | `-32700` | Parse error (invalid JSON) |
 | `-32600` | Invalid request |
-| `-32601` | Method not found |
-| `-32602` | Invalid params |
-| `-32603` | Internal error |
+| `-32601` | Method not found (a method openheim doesn't implement) |
+| `-32602` | Invalid params (malformed session id, unknown model, mode, or config option) |
+| `-32603` | Internal error (anything else, plus the structured `session_busy` / `session_locked` errors) |
+| `-32002` | Resource not found (the session or conversation doesn't exist) |
+
+Except for `session_busy` / `session_locked`, `data` is a human-readable string describing the problem.
 
 ### Connection Lifecycle
 

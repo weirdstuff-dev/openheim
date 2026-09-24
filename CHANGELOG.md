@@ -22,6 +22,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **ACP errors now use the matching JSON-RPC code instead of always `-32603 Internal error`:**
+  - `-32002 Resource not found` for a session or conversation that doesn't exist.
+  - `-32602 Invalid params` for a malformed session id, or an unknown model, mode or config option.
+  - `-32601 Method not found` for methods openheim doesn't implement.
+
+  `session/new`, `session/list`, `session/set_config_option` and `session/set_mode` now go through the same mapping as `session/prompt`/`session/load`. The structured `session_busy`/`session_locked` errors are unchanged. A client that looked for `-32603` specifically to detect failures needs to handle the new codes too; one that treats any error response as a failure is unaffected.
 - **`GET /api/config` no longer leaks MCP command-line arguments or credentials embedded in URLs.** The response used to be the whole config with known secrets removed afterwards, so MCP `args` (often `--token …`) went out as-is, as did credentials in a provider's `api_base` or an MCP `url` (`user:pass@`, `?key=…`). The response is now built from an explicit list of safe fields: `args` is omitted, URLs are shown without userinfo, query string or fragment, and any field added to the config in future stays private unless it's added to the list. Providers now include their resolved `kind`, and unset optional fields are omitted rather than sent as `null`. In the library, `AppConfig::to_public_json` is replaced by `AppConfig::to_public`, which returns a typed `PublicConfig`.
 - **An Anthropic or Gemini provider registered under a custom name no longer silently gets the OpenAI-compatible client.** The client used to be picked from the provider's name, so `[providers.claude-work]` sent OpenAI-format requests to Anthropic. The same applied to the thinking default and to rejecting Anthropic as an embeddings provider. All three now follow `kind`. `ProviderConfig::resolve_thinking` now takes a `ProviderKind` instead of the provider name.
 - **Subagents without their own `model` now run on the session's current model.** `delegate_task` was bound to the model the process started with, so after switching a session's model, subagents that set no model kept using the old one. Subagent profiles and inline subagents that set `model`/`provider` are unaffected.
