@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **`kind` on `[providers.<name>]` entries** (`"openai"`, `"anthropic"`, `"gemini"`, `"openai_compatible"`) picks the API client explicitly, so a provider can have any name, e.g. two Anthropic accounts as `claude-work` and `claude-personal`. It's optional and inferred from the name when omitted, so existing configs behave as before. The library exposes it as `ProviderKind`, on `ProviderConfig`, `AgentConfig` and `EmbeddingConfig`.
+
 ### Changed
 
 - **Anthropic's default `max_tokens` is now 16000 (was 4096).** Adaptive thinking is on by default and spends from the same budget, so 4096 regularly cut replies short. An explicit `max_tokens` in `[providers.<name>]` still wins.
@@ -13,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **An Anthropic or Gemini provider registered under a custom name no longer silently gets the OpenAI-compatible client.** The client used to be picked from the provider's name, so `[providers.claude-work]` sent OpenAI-format requests to Anthropic. The same applied to the thinking default and to rejecting Anthropic as an embeddings provider. All three now follow `kind`. `ProviderConfig::resolve_thinking` now takes a `ProviderKind` instead of the provider name.
 - **Subagents without their own `model` now run on the session's current model.** `delegate_task` was bound to the model the process started with, so after switching a session's model, subagents that set no model kept using the old one. Subagent profiles and inline subagents that set `model`/`provider` are unaffected.
 - **The agent loop no longer re-calls the model after a truncated, refused, or otherwise non-`stop` reply.** Only a normal `stop` used to end the turn. Any other finish on a reply without tool calls resent the history, which then ended in that reply, until `max_iterations` ran out. That made the model repeat itself, and current Anthropic models reject such a request outright. The turn now ends with `MaxTokens`, `Refusal`, or `EndTurn`. Anthropic's `pause_turn` still resumes. The TUI, `openheim run` (on stderr), and `delegate_task` results now say when a turn stopped for one of these reasons.
 
