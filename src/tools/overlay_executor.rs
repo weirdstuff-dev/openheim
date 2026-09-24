@@ -34,14 +34,14 @@ impl OverlayExecutor {
 
 #[async_trait]
 impl ToolExecutor for OverlayExecutor {
+    /// The inner list with the overlaid tool's definition swapped in at the
+    /// same position, so the order matches the inner executor's.
     fn list_tools(&self) -> Vec<Tool> {
-        let mut tools: Vec<Tool> = self
-            .inner
-            .list_tools()
-            .into_iter()
-            .filter(|t| t.function.name != self.name)
-            .collect();
-        tools.push(self.handler.definition());
+        let mut tools = self.inner.list_tools();
+        match tools.iter_mut().find(|t| t.function.name == self.name) {
+            Some(existing) => *existing = self.handler.definition(),
+            None => tools.push(self.handler.definition()),
+        }
         tools
     }
 

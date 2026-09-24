@@ -111,7 +111,7 @@ mod search;
 mod web_fetch;
 mod write_file;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -184,14 +184,17 @@ pub trait ToolExecutor: Send + Sync {
 /// registration, so subagents can never delegate recursively.
 #[derive(Clone)]
 pub struct SystemToolExecutor {
-    handlers: HashMap<String, Arc<dyn ToolHandler>>,
+    /// Ordered so `list_tools` returns the same order in every process: the
+    /// tool list leads each LLM request, so a stable order keeps the
+    /// provider's prompt cache reusable across restarts and resumed sessions.
+    handlers: BTreeMap<String, Arc<dyn ToolHandler>>,
 }
 
 impl SystemToolExecutor {
     /// Creates an empty executor with no registered tools.
     pub fn new() -> Self {
         Self {
-            handlers: HashMap::new(),
+            handlers: BTreeMap::new(),
         }
     }
 
@@ -439,6 +442,20 @@ mod tests {
         let caps = executor.capabilities("nonexistent_tool");
         assert!(!caps.read_only);
         assert_eq!(caps.approval_scope, ApprovalScope::ToolName);
+    }
+
+    #[test]
+    fn tools_are_listed_in_name_order() {
+        let mut executor = SystemToolExecutor::new();
+        executor.register_builtins(true);
+        let names: Vec<String> = executor
+            .list_tools()
+            .into_iter()
+            .map(|t| t.function.name)
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
     }
 
     #[test]
