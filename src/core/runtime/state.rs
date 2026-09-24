@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    config::{AgentConfig, AppConfig, build_http_client, create_client},
+    config::{AgentConfig, AppConfig, RuntimePaths, build_http_client, create_client},
     core::{
         agent::run_agent_streaming_with_history,
         client_io::ClientIo,
@@ -61,6 +61,8 @@ pub struct AgentState {
     pub mcp_statuses: Vec<crate::mcp::McpServerStatus>,
     /// Resolved work directory used as the sandbox boundary for every session.
     pub work_dir: PathBuf,
+    /// Resolved data directory and config file (read via [`Self::paths`]).
+    paths: RuntimePaths,
     sessions: Sessions,
     /// The `delegate_task` registered in `executor`, bound to the startup
     /// model. `prompt` rebinds a copy to the session's live model each turn
@@ -73,9 +75,12 @@ impl AgentState {
     /// `read_file`, `write_file`, …) and any MCP-sourced tools. Every handler
     /// receives the turn's [`TurnContext`] — `work_dir`, cancel token, client
     /// I/O — so custom tools can enforce the same boundary the built-ins do.
+    /// `paths` says where subagent profiles and (by default) the memory
+    /// database live; `memory` should already be rooted at `paths.data_dir`.
     pub async fn new(
         config: AgentConfig,
         app_config: AppConfig,
+        paths: RuntimePaths,
         memory: MemoryContext,
         custom_tools: Vec<Box<dyn ToolHandler>>,
     ) -> Result<Self> {
@@ -96,7 +101,10 @@ impl AgentState {
             sys_executor.register(tool);
         }
         #[cfg(feature = "rag")]
-        let long_term_memory = Arc::new(crate::rag::LongTermMemory::from_config(&app_config)?);
+        let long_term_memory = Arc::new(crate::rag::LongTermMemory::from_config(
+            &app_config,
+            &paths.data_dir,
+        )?);
         #[cfg(feature = "rag")]
         {
             let m = &long_term_memory;
@@ -111,12 +119,7 @@ impl AgentState {
         // It's built from a snapshot of the registry taken *before* it
         // registers itself, so subagents structurally never see
         // `delegate_task` and can't delegate recursively.
-        let agents_dir = app_config
-            .data_dir
-            .as_deref()
-            .expect("data_dir is resolved by OpenheimBuilder::build before AgentState::new")
-            .join("agents");
-        let profiles = SubagentLoader::with_dir(agents_dir).load()?;
+        let profiles = SubagentLoader::with_dir(paths.data_dir.join("agents")).load()?;
         let base: Arc<dyn ToolExecutor> = Arc::new(sys_executor.clone());
         let delegate = DelegateTool::new(
             base,
@@ -138,6 +141,7 @@ impl AgentState {
             long_term_memory,
             mcp_statuses,
             work_dir,
+            paths,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             delegate,
         })
@@ -146,6 +150,11 @@ impl AgentState {
     /// The default model/provider new sessions start on.
     pub fn config(&self) -> &AgentConfig {
         &self.config
+    }
+
+    /// The data directory and config file this client resolved at build time.
+    pub fn paths(&self) -> &RuntimePaths {
+        &self.paths
     }
 
     pub async fn new_session(
@@ -657,44 +666,25 @@ mod prompt_lease_ordering_tests {
 
 #[cfg(test)]
 mod new_session_tests {
-    use std::collections::BTreeMap;
-
     use tempfile::tempdir;
 
-    use crate::config::{ProviderConfig, TuiConfig};
+    use crate::config::ProviderConfig;
 
     use super::*;
 
     /// A minimal, network-free `AgentState`: one provider/model, empty MCP
     /// servers, everything rooted at a temp `data_dir`.
     async fn sample_state(dir: &std::path::Path) -> AgentState {
-        let mut providers = BTreeMap::new();
-        providers.insert(
+        let mut app_config = AppConfig::for_tests("mock");
+        app_config.max_iterations = 5;
+        app_config.work_dir = Some(dir.to_path_buf());
+        app_config.providers.insert(
             "mock".to_string(),
-            ProviderConfig {
-                kind: None,
-                api_base: "https://example.com".into(),
-                default_model: "mock-model".into(),
-                models: vec!["mock-model".into(), "other-model".into()],
-                env_var: None,
-                api_key: Some("key".into()),
-                timeout_secs: None,
-                max_tokens: None,
-                thinking: None,
-            },
+            ProviderConfig::for_tests("https://example.com", &["mock-model", "other-model"]),
         );
-        let app_config = AppConfig {
-            default_provider: "mock".into(),
-            max_iterations: 5,
-            tui: TuiConfig::default(),
-            providers,
-            mcp_servers: BTreeMap::new(),
-            default_skills: vec![],
-            work_dir: Some(dir.to_path_buf()),
-            allow_shell: false,
-            memory: None,
-            data_dir: Some(dir.to_path_buf()),
-            config_path: PathBuf::new(),
+        let paths = RuntimePaths {
+            data_dir: dir.to_path_buf(),
+            config_path: dir.join("config.toml"),
         };
         let agent_config = AgentConfig::new(
             "mock".into(),
@@ -704,7 +694,7 @@ mod new_session_tests {
             5,
         );
         let memory = MemoryContext::new(vec![], dir).unwrap();
-        AgentState::new(agent_config, app_config, memory, vec![])
+        AgentState::new(agent_config, app_config, paths, memory, vec![])
             .await
             .unwrap()
     }

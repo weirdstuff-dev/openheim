@@ -10,7 +10,7 @@ pub use public::{
 pub(crate) use types::default_timeout_secs;
 pub use types::{
     AgentConfig, AppConfig, EmbeddingConfig, McpServerConfig, MemoryConfig, ModelsInfo,
-    ProviderConfig, ProviderKind, ProviderModels, TuiConfig,
+    ProviderConfig, ProviderKind, ProviderModels, RuntimePaths, TuiConfig,
 };
 
 use std::path::PathBuf;

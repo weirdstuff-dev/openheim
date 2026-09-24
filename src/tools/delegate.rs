@@ -353,25 +353,12 @@ mod tests {
     use crate::error::Error;
     use crate::tools::SystemToolExecutor;
     use crate::tools::test_support::TurnHarness;
-    use std::collections::BTreeMap;
     use std::path::Path;
     use std::sync::Mutex;
     use tokio_util::sync::CancellationToken;
 
     fn sample_app_config() -> AppConfig {
-        AppConfig {
-            default_provider: "mock".into(),
-            max_iterations: 10,
-            tui: crate::config::TuiConfig::default(),
-            providers: BTreeMap::new(),
-            mcp_servers: BTreeMap::new(),
-            default_skills: vec![],
-            work_dir: None,
-            allow_shell: false,
-            memory: None,
-            data_dir: None,
-            config_path: std::path::PathBuf::new(),
-        }
+        AppConfig::for_tests("mock")
     }
 
     fn sample_agent_config() -> AgentConfig {

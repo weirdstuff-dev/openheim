@@ -49,21 +49,30 @@ pub struct AppConfig {
     pub memory: Option<MemoryConfig>,
     /// Overrides where history, skills, `system.md`, subagent profiles, and
     /// (absent an explicit `memory.db_path`) the memory database live.
-    /// `None` in the TOML shape means "default to `~/.openheim`"; filled in
-    /// with the resolved directory by [`crate::client::OpenheimBuilder::build`],
-    /// so `AgentState` and everything downstream can always assume `Some`.
+    /// `None` means "default to `~/.openheim`". This is only the setting as
+    /// written; the directory actually in use is [`RuntimePaths::data_dir`].
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
-    /// The file this config was loaded from (or would be written to for a
-    /// programmatic config). Not part of the TOML shape — filled in by
-    /// `OpenheimBuilder::build` alongside `data_dir`, so config-file writers
-    /// like `:theme` target the file the running client actually used.
-    #[serde(skip)]
-    pub config_path: PathBuf,
 }
 
 fn default_allow_shell() -> bool {
     false
+}
+
+/// Paths a running client resolved once, at `OpenheimBuilder::build`, and
+/// everything downstream uses as-is (see `AgentState::paths`). Kept out of
+/// [`AppConfig`], which is the config file's shape, where they could only be
+/// `Option`s that "are always set by the time anyone reads them".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePaths {
+    /// Where history, skills, `system.md`, subagent profiles and (by default)
+    /// the memory database live: the builder's or config's `data_dir`, else
+    /// `~/.openheim`.
+    pub data_dir: PathBuf,
+    /// The config file this client was loaded from, or would write to for a
+    /// programmatic config, so config writers like the TUI's `:theme` target
+    /// the file actually in use.
+    pub config_path: PathBuf,
 }
 
 /// The `[tui]` section: terminal UI display preferences. Every field is
@@ -372,21 +381,56 @@ impl Default for AgentConfig {
     }
 }
 
+/// Shared test fixtures, so a new field on these structs is added here once
+/// instead of in every test module that builds one by hand.
+#[cfg(test)]
+impl AppConfig {
+    /// A config with no providers, MCP servers or skills, and every optional
+    /// setting unset. Set fields on the result for what a test needs.
+    pub(crate) fn for_tests(default_provider: &str) -> Self {
+        Self {
+            default_provider: default_provider.to_string(),
+            max_iterations: default_max_iterations(),
+            tui: TuiConfig::default(),
+            providers: BTreeMap::new(),
+            mcp_servers: BTreeMap::new(),
+            default_skills: vec![],
+            work_dir: None,
+            allow_shell: false,
+            memory: None,
+            data_dir: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl ProviderConfig {
+    /// A provider entry serving `models` (the first is the default) with an
+    /// inline API key and everything else unset.
+    pub(crate) fn for_tests(api_base: &str, models: &[&str]) -> Self {
+        Self {
+            kind: None,
+            api_base: api_base.to_string(),
+            default_model: models[0].to_string(),
+            models: models.iter().map(|m| m.to_string()).collect(),
+            env_var: None,
+            api_key: Some("key".to_string()),
+            timeout_secs: None,
+            max_tokens: None,
+            thinking: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn sample_provider(env_var: Option<&str>, api_key: Option<&str>) -> ProviderConfig {
         ProviderConfig {
-            kind: None,
-            api_base: "https://api.example.com".into(),
-            default_model: "model-1".into(),
-            models: vec!["model-1".into()],
             env_var: env_var.map(String::from),
             api_key: api_key.map(String::from),
-            timeout_secs: None,
-            max_tokens: None,
-            thinking: None,
+            ..ProviderConfig::for_tests("https://api.example.com", &["model-1"])
         }
     }
 

@@ -36,6 +36,7 @@ pub mod embedding;
 pub mod store;
 pub mod tool;
 
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::config::{AppConfig, build_http_client};
@@ -77,19 +78,15 @@ impl LongTermMemory {
     }
 
     /// Builds the memory described by `config.memory` (all of it optional):
-    /// opens `db_path`, or `memory.db` under `config.data_dir`, or
-    /// `~/.openheim/memory.db`, and attaches an embedder when
-    /// `embedding_provider` / `embedding_model` are set. Does not touch the
-    /// network.
-    pub fn from_config(config: &AppConfig) -> Result<Self> {
+    /// opens `db_path`, or `memory.db` under `data_dir` (the resolved
+    /// [`RuntimePaths::data_dir`](crate::config::RuntimePaths::data_dir)),
+    /// and attaches an embedder when `embedding_provider` / `embedding_model`
+    /// are set. Does not touch the network.
+    pub fn from_config(config: &AppConfig, data_dir: &Path) -> Result<Self> {
         let memory = config.memory.as_ref();
         let db_path = match memory.and_then(|m| m.db_path.clone()) {
             Some(p) => p,
-            None => config
-                .data_dir
-                .as_deref()
-                .expect("data_dir is resolved by OpenheimBuilder::build before AgentState::new")
-                .join("memory.db"),
+            None => data_dir.join("memory.db"),
         };
         let embedder = match config.resolve_embedding()? {
             Some(embedding) => {
@@ -348,8 +345,26 @@ mod tests {
         ))
         .unwrap();
 
-        let memory = LongTermMemory::from_config(&config).unwrap();
+        let memory = LongTermMemory::from_config(&config, dir.path()).unwrap();
         assert_eq!(memory.top_k, DEFAULT_TOP_K);
+    }
+
+    #[test]
+    fn from_config_defaults_the_database_to_the_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config: AppConfig = toml::from_str(
+            r#"
+            default_provider = "openai"
+            [providers.openai]
+            api_base = "https://api.openai.com/v1"
+            default_model = "gpt-4o"
+            models = ["gpt-4o"]
+        "#,
+        )
+        .unwrap();
+
+        LongTermMemory::from_config(&config, dir.path()).unwrap();
+        assert!(dir.path().join("memory.db").exists());
     }
 
     #[test]
@@ -371,7 +386,7 @@ mod tests {
         ))
         .unwrap();
 
-        let memory = LongTermMemory::from_config(&config).unwrap();
+        let memory = LongTermMemory::from_config(&config, dir.path()).unwrap();
         assert_eq!(memory.top_k, 7);
     }
 }

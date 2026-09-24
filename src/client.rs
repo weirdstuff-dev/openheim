@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::acp::util::{replay_history_messages, stream_event_to_session_update};
 use crate::{
     config::{
-        AgentConfig, AppConfig, McpServerConfig, ProviderConfig, TuiConfig, config_dir,
-        config_path, load_config, load_config_from,
+        AgentConfig, AppConfig, McpServerConfig, ProviderConfig, RuntimePaths, TuiConfig,
+        config_dir, config_path, load_config, load_config_from,
     },
     core::{
         client_io::{ClientIo, NoClientIo},
@@ -633,21 +633,21 @@ impl OpenheimBuilder {
         if let Some(shell) = self.allow_shell {
             app_config.allow_shell = shell;
         }
-        if let Some(dir) = self.data_dir {
-            app_config.data_dir = Some(dir);
-        }
-        app_config.data_dir.get_or_insert(config_dir()?);
-        app_config.config_path = match self.config_path {
-            Some(path) => path,
-            None => config_path()?,
+        // Resolved once here; everything downstream reads `RuntimePaths`.
+        let paths = RuntimePaths {
+            data_dir: match self.data_dir.or_else(|| app_config.data_dir.clone()) {
+                Some(dir) => dir,
+                None => config_dir()?,
+            },
+            config_path: match self.config_path {
+                Some(path) => path,
+                None => config_path()?,
+            },
         };
 
-        let data_dir = app_config
-            .data_dir
-            .clone()
-            .expect("data_dir was just defaulted above");
-        let memory = MemoryContext::new(app_config.default_skills.clone(), &data_dir)?;
-        let state = Arc::new(AgentState::new(agent_config, app_config, memory, self.tools).await?);
+        let memory = MemoryContext::new(app_config.default_skills.clone(), &paths.data_dir)?;
+        let state =
+            Arc::new(AgentState::new(agent_config, app_config, paths, memory, self.tools).await?);
         Ok(OpenheimClient { state })
     }
 }
@@ -698,7 +698,6 @@ fn build_programmatic(
         allow_shell: false,
         memory: None,
         data_dir: None,
-        config_path: std::path::PathBuf::new(),
     };
 
     // Funnels through the same `AppConfig::agent_config` assembly every
@@ -712,14 +711,12 @@ fn build_programmatic(
 mod tests {
     use super::*;
 
-    /// Regression guard for the `data_dir`/`config_path` resolution `build()`
-    /// does once: every downstream reader (`MemoryContext`, `AgentState`,
-    /// `LongTermMemory::from_config`, the TUI's `:skills`/`:theme`) assumes
-    /// both are always populated after `build()` succeeds, never `None`/empty.
-    /// Uses the programmatic path (`provider`/`api_key`/`model` set) so this
-    /// stays mock-free — no config file, no MCP servers, no network.
+    /// `build()` resolves `RuntimePaths` once: the builder's `data_dir` wins,
+    /// and `config_path` falls back to the default location. Uses the
+    /// programmatic path (`provider`/`api_key`/`model` set) so this stays
+    /// mock-free — no config file, no MCP servers, no network.
     #[tokio::test]
-    async fn build_resolves_data_dir_and_config_path() {
+    async fn build_resolves_runtime_paths() {
         let dir = tempfile::tempdir().unwrap();
         let client = OpenheimClient::builder()
             .provider("openai")
@@ -729,11 +726,11 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert_eq!(
-            client.state.app_config.data_dir,
-            Some(dir.path().to_path_buf())
-        );
-        assert!(!client.state.app_config.config_path.as_os_str().is_empty());
+        let paths = client.state.paths();
+        assert_eq!(paths.data_dir, dir.path());
+        assert_eq!(paths.config_path, config_path().unwrap());
+        // The data dir is actually used, not just recorded.
+        assert!(dir.path().join("history").is_dir());
     }
 
     /// `resume_session` (and by extension `SessionHandle::resume`) works

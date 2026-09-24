@@ -11,7 +11,7 @@ use ratatui::{
 use tokio::sync::mpsc;
 
 use crate::{
-    config::{AgentConfig, AppConfig},
+    config::{AgentConfig, AppConfig, RuntimePaths},
     core::{models::StreamEvent, permission::PermissionDecision},
     memory::{ConversationMeta, SkillsManager},
 };
@@ -44,6 +44,8 @@ pub(super) struct App {
     pre_picker_screen: Screen,
     agent_config: AgentConfig,
     app_config: AppConfig,
+    /// Where `:skills` looks and `:theme` writes.
+    paths: RuntimePaths,
     skills: Vec<String>,
     sessions: Vec<ConversationMeta>,
     cached_lines: Vec<Line<'static>>,
@@ -83,6 +85,7 @@ impl App {
     pub(super) fn new(
         agent_config: AgentConfig,
         app_config: AppConfig,
+        paths: RuntimePaths,
         skills: Vec<String>,
         prompt_tx: mpsc::UnboundedSender<String>,
         switch_model_tx: mpsc::UnboundedSender<(String, String)>,
@@ -110,6 +113,7 @@ impl App {
             pre_picker_screen: Screen::Welcome,
             agent_config,
             app_config,
+            paths,
             skills,
             sessions: Vec::new(),
             cached_lines: Vec::new(),
@@ -431,7 +435,7 @@ impl App {
         self.theme_color_name = name.to_string();
         self.cached_width = 0;
         self.app_config.tui.theme_color = Some(name.to_string());
-        match crate::config::save_theme_to_config_at(&self.app_config.config_path, name) {
+        match crate::config::save_theme_to_config_at(&self.paths.config_path, name) {
             Ok(()) => self.push(ChatItem::SystemInfo(format!("theme set to {name}"))),
             Err(e) => self.push(ChatItem::SystemInfo(format!(
                 "theme set to {name} (could not save: {e})"
@@ -720,12 +724,7 @@ impl App {
                 }
             }
             "skills" => {
-                let data_dir = self
-                    .app_config
-                    .data_dir
-                    .clone()
-                    .expect("data_dir is resolved by OpenheimBuilder::build");
-                match SkillsManager::with_dir(data_dir.join("skills")).list_skills() {
+                match SkillsManager::with_dir(self.paths.data_dir.join("skills")).list_skills() {
                     Ok(names) if names.is_empty() => {
                         self.push(ChatItem::SystemInfo(
                             "no skills available\n\
@@ -979,27 +978,13 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use tokio::sync::oneshot;
 
     use super::*;
     use crate::config::AgentConfig;
 
     fn test_app_config() -> AppConfig {
-        AppConfig {
-            default_provider: "mock".into(),
-            max_iterations: 10,
-            tui: crate::config::TuiConfig::default(),
-            providers: BTreeMap::new(),
-            mcp_servers: BTreeMap::new(),
-            default_skills: vec![],
-            work_dir: None,
-            allow_shell: false,
-            memory: None,
-            data_dir: None,
-            config_path: std::path::PathBuf::new(),
-        }
+        AppConfig::for_tests("mock")
     }
 
     fn test_app() -> App {
@@ -1011,6 +996,10 @@ mod tests {
         App::new(
             AgentConfig::default(),
             test_app_config(),
+            RuntimePaths {
+                data_dir: "/nonexistent/openheim".into(),
+                config_path: "/nonexistent/openheim/config.toml".into(),
+            },
             vec![],
             prompt_tx,
             switch_model_tx,

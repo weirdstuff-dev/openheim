@@ -49,6 +49,7 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
     // the caller did.
     let agent_config = client.state().config().clone();
     let app_config = client.state().app_config.clone();
+    let paths = client.state().paths().clone();
 
     let (permission_tx, mut permission_rx) =
         mpsc::unbounded_channel::<permission::PermissionRequest>();
@@ -239,6 +240,7 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
     let mut app = App::new(
         agent_config,
         app_config,
+        paths,
         skills,
         prompt_tx,
         switch_model_tx,

@@ -162,51 +162,30 @@ impl AppConfig {
 mod tests {
     use super::*;
     use crate::config::ProviderConfig;
-    use std::collections::BTreeMap;
 
     fn sample_config() -> AppConfig {
-        let mut providers = BTreeMap::new();
-        providers.insert(
+        let mut config = AppConfig::for_tests("openai");
+        config.max_iterations = 5;
+        config.providers.insert(
             "openai".into(),
             ProviderConfig {
-                kind: None,
-                api_base: "https://api.openai.com/v1".into(),
-                default_model: "gpt-4".into(),
-                models: vec!["gpt-4".into(), "gpt-3.5-turbo".into()],
-                env_var: None,
                 api_key: Some("test-key".into()),
                 timeout_secs: Some(60),
                 max_tokens: Some(4096),
-                thinking: None,
+                ..ProviderConfig::for_tests(
+                    "https://api.openai.com/v1",
+                    &["gpt-4", "gpt-3.5-turbo"],
+                )
             },
         );
-        providers.insert(
+        config.providers.insert(
             "anthropic".into(),
             ProviderConfig {
-                kind: None,
-                api_base: "https://api.anthropic.com/v1".into(),
-                default_model: "claude-3".into(),
-                models: vec!["claude-3".into()],
-                env_var: None,
                 api_key: Some("anthropic-key".into()),
-                timeout_secs: None,
-                max_tokens: None,
-                thinking: None,
+                ..ProviderConfig::for_tests("https://api.anthropic.com/v1", &["claude-3"])
             },
         );
-        AppConfig {
-            default_provider: "openai".into(),
-            max_iterations: 5,
-            tui: crate::config::TuiConfig::default(),
-            providers,
-            mcp_servers: BTreeMap::new(),
-            default_skills: vec![],
-            work_dir: None,
-            allow_shell: true,
-            memory: None,
-            data_dir: None,
-            config_path: std::path::PathBuf::new(),
-        }
+        config
     }
 
     #[test]
@@ -240,35 +219,13 @@ mod tests {
 
     #[test]
     fn resolve_default_errors_when_provider_missing() {
-        let config = AppConfig {
-            default_provider: "nonexistent".into(),
-            max_iterations: 10,
-            tui: crate::config::TuiConfig::default(),
-            providers: BTreeMap::new(),
-            mcp_servers: BTreeMap::new(),
-            default_skills: vec![],
-            work_dir: None,
-            allow_shell: true,
-            memory: None,
-            data_dir: None,
-            config_path: std::path::PathBuf::new(),
-        };
+        let config = AppConfig::for_tests("nonexistent");
         let err = config.resolve(None).unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
     }
 
     fn provider_with_base(api_base: &str) -> ProviderConfig {
-        ProviderConfig {
-            kind: None,
-            api_base: api_base.into(),
-            default_model: "gpt-4".into(),
-            models: vec!["gpt-4".into()],
-            env_var: None,
-            api_key: Some("key".into()),
-            timeout_secs: None,
-            max_tokens: None,
-            thinking: None,
-        }
+        ProviderConfig::for_tests(api_base, &["gpt-4"])
     }
 
     #[test]
