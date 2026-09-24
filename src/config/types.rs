@@ -362,26 +362,61 @@ impl ProviderConfig {
 
 /// Runtime configuration passed to agent/LLM code
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(from = "AgentConfigWire")]
 pub struct AgentConfig {
     /// The `[providers.<name>]` key this config was resolved from; used for
     /// display, persistence, and model-switch lookups — never to pick a
     /// client (that's `kind`).
     pub provider_name: String,
     /// Wire protocol, i.e. which client [`crate::config::create_client`] builds.
-    #[serde(default)]
     pub kind: ProviderKind,
     pub api_base: String,
     pub api_key: String,
     pub model: String,
     pub max_iterations: usize,
-    #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
     /// Maximum output tokens for LLM responses (provider-specific defaults if not set)
     pub max_tokens: Option<u32>,
     /// Whether to request extended thinking (`AnthropicClient` only); see
     /// [`ProviderConfig::resolve_thinking`].
-    #[serde(default)]
     pub thinking: bool,
+}
+
+/// `AgentConfig`'s deserialization shape. `kind` is optional so data written
+/// before it existed resolves it from `provider_name`, the same inference
+/// config resolution uses, instead of silently becoming OpenAI-compatible.
+#[derive(Deserialize)]
+struct AgentConfigWire {
+    provider_name: String,
+    #[serde(default)]
+    kind: Option<ProviderKind>,
+    api_base: String,
+    api_key: String,
+    model: String,
+    max_iterations: usize,
+    #[serde(default = "default_timeout_secs")]
+    timeout_secs: u64,
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    thinking: bool,
+}
+
+impl From<AgentConfigWire> for AgentConfig {
+    fn from(wire: AgentConfigWire) -> Self {
+        Self {
+            kind: wire
+                .kind
+                .unwrap_or_else(|| ProviderKind::infer_from_name(&wire.provider_name)),
+            provider_name: wire.provider_name,
+            api_base: wire.api_base,
+            api_key: wire.api_key,
+            model: wire.model,
+            max_iterations: wire.max_iterations,
+            timeout_secs: wire.timeout_secs,
+            max_tokens: wire.max_tokens,
+            thinking: wire.thinking,
+        }
+    }
 }
 
 impl std::fmt::Debug for AgentConfig {
@@ -625,6 +660,36 @@ mod tests {
         let memory = bare.memory.unwrap();
         assert!(memory.embedding_provider.is_none());
         assert_eq!(memory.top_k, 5);
+    }
+
+    // Regression test (PR #61 review): `AgentConfig` data from before `kind`
+    // existed deserialized as OpenAI-compatible whatever the provider.
+    #[test]
+    fn agent_config_without_kind_infers_it_from_the_provider_name() {
+        let json = |provider: &str| {
+            serde_json::json!({
+                "provider_name": provider,
+                "api_base": "https://example.com",
+                "api_key": "k",
+                "model": "m",
+                "max_iterations": 5,
+                "max_tokens": null,
+            })
+        };
+        let anthropic: AgentConfig = serde_json::from_value(json("anthropic")).unwrap();
+        assert_eq!(anthropic.kind, ProviderKind::Anthropic);
+        let custom: AgentConfig = serde_json::from_value(json("ollama")).unwrap();
+        assert_eq!(custom.kind, ProviderKind::OpenAiCompatible);
+
+        // An explicit kind still wins, and a round trip preserves it.
+        let mut explicit = json("claude-work");
+        explicit["kind"] = serde_json::json!("anthropic");
+        let config: AgentConfig = serde_json::from_value(explicit).unwrap();
+        assert_eq!(config.kind, ProviderKind::Anthropic);
+        let round_trip: AgentConfig =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(round_trip.kind, ProviderKind::Anthropic);
+        assert_eq!(round_trip.timeout_secs, default_timeout_secs());
     }
 
     #[test]
