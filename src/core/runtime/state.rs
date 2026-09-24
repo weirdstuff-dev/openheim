@@ -5,7 +5,10 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Instant,
 };
 
@@ -24,7 +27,7 @@ use crate::{
     },
     error::{Error, Result},
     llm::LlmClient,
-    memory::{Conversation, ConversationMeta, MemoryContext},
+    memory::{ConversationMeta, HistoryManager, MemoryContext},
     subagents::SubagentLoader,
     tools::{
         DelegateTool, OverlayExecutor, ScopedExecutor, SystemToolExecutor, ToolExecutor,
@@ -259,19 +262,25 @@ impl AgentState {
         Ok(())
     }
 
-    /// Persists `conv`'s full current state off the async runtime thread,
-    /// logging (not propagating) any failure — history durability is
-    /// best-effort and must never fail a turn that otherwise succeeded.
-    /// `context` is folded into the warning log line to identify which of
-    /// this method's call sites failed.
-    async fn persist_conversation(&self, conv: &Conversation, context: &str) {
+    /// Runs the history write `write` off the async runtime thread, logging
+    /// (not propagating) any failure — history durability is best-effort and
+    /// must never fail a turn that otherwise succeeded. Returns whether it
+    /// succeeded. `context` names the write in the warning log line.
+    async fn persist(
+        &self,
+        context: &str,
+        write: impl FnOnce(&HistoryManager) -> Result<()> + Send + 'static,
+    ) -> bool {
         let history = self.memory.history.clone();
-        let conv = conv.clone();
-        if let Err(e) = tokio::task::spawn_blocking(move || history.save_conversation(&conv))
+        match tokio::task::spawn_blocking(move || write(&history))
             .await
             .unwrap_or_else(|e| Err(Error::from(e)))
         {
-            tracing::warn!("failed to {context}: {e}");
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("failed to {context}: {e}");
+                false
+            }
         }
     }
 
@@ -376,35 +385,47 @@ impl AgentState {
         // does, in any process.
         let _lease = self.memory.history.acquire_lease(&uuid)?;
 
-        let (mut conversation, prompt_builder) = self.memory.prepare(
-            Some(chat_id),
-            &skills,
-            Some(config.model.clone()),
-            Some(config.provider_name.clone()),
-        )?;
+        // Loads the conversation, `system.md` and skills from disk, so it runs
+        // off the async runtime like every other history read.
+        let memory = self.memory.clone();
+        let (model, provider) = (config.model.clone(), config.provider_name.clone());
+        let (mut conversation, prompt_builder) = tokio::task::spawn_blocking(move || {
+            memory.prepare(Some(chat_id), &skills, Some(model), Some(provider))
+        })
+        .await
+        .map_err(Error::from)??;
 
         conversation.meta.cwd = Some(cwd);
         // `prepare` only applies model/provider when it creates the
         // conversation; an existing one comes back with whatever was saved
         // before. Overwrite with the session's live values so a mid-session
-        // model switch is persisted by the checkpoint below and survives a
-        // reload instead of reverting to the original model.
+        // model switch is persisted below and survives a reload instead of
+        // reverting to the original model.
         conversation.meta.model = Some(config.model.clone());
         conversation.meta.provider = Some(config.provider_name.clone());
-        conversation.messages.push(Message {
+        let user_message = Message {
             role: Role::User,
             content: prompt,
-        });
+        };
+        conversation.meta.fill_title_from(&user_message);
+        conversation.messages.push(user_message.clone());
 
-        // Full checkpoint before the turn starts: durably records this
-        // turn's new user message even if the turn crashes before producing
-        // anything else, so the `append_message` calls below have a `.jsonl`
-        // log that already reflects everything up to this point to append
-        // onto.
-        self.persist_conversation(&conversation, "persist conversation before turn start")
+        // Record the turn's metadata and user message before the turn starts,
+        // so both survive a crash mid-turn. Everything earlier is already in
+        // the log, so this appends rather than rewriting it. `log_complete`
+        // tracks whether every write so far landed; if one didn't, the end of
+        // the turn falls back to a full rewrite.
+        let meta = conversation.meta.clone();
+        let mut log_complete = self
+            .persist("record turn start", move |history| {
+                history.save_meta(&meta)?;
+                history.append_message(&chat_id, &user_message)
+            })
             .await;
 
         let history_for_append = self.memory.history.clone();
+        let append_failed = AtomicBool::new(false);
+        let append_failed_flag = &append_failed;
         // The work-directory boundary and client I/O hook reach every tool
         // through this context; there is no per-session executor wrapper.
         let turn = TurnContext {
@@ -432,6 +453,7 @@ impl AgentState {
                     && let Err(e) = history_for_append.append_message(&chat_id, message)
                 {
                     tracing::warn!("failed to append message to history: {e}");
+                    append_failed_flag.store(true, Ordering::Relaxed);
                 }
                 on_update(event);
             },
@@ -449,12 +471,25 @@ impl AgentState {
             conversation.meta.context_usage = r.context_usage;
         }
 
-        // Final full checkpoint: reconciles whatever `append_message` calls
-        // landed above into one consistent, complete log, and is the only
-        // save at all for a turn that produced no messages (cancelled or
-        // errored before the first LLM response).
-        self.persist_conversation(&conversation, "save conversation")
+        // Every message is normally in the log by now, so only the metadata
+        // (context usage, `updated_at`) needs writing. If any write above
+        // failed, rewrite the whole log from memory instead, which
+        // `save_conversation` refuses to do if another process has written
+        // to it meanwhile.
+        log_complete &= !append_failed.load(Ordering::Relaxed);
+        if log_complete {
+            let meta = conversation.meta.clone();
+            self.persist("save conversation metadata", move |history| {
+                history.save_meta(&meta)
+            })
             .await;
+        } else {
+            self.persist(
+                "rewrite conversation after a failed write",
+                move |history| history.save_conversation(&conversation),
+            )
+            .await;
+        }
 
         run_result.map(|r| r.stop_reason)
     }
@@ -732,6 +767,89 @@ mod new_session_tests {
         }
     }
 
+    /// Runs one "hi" turn on `session_id`, allowing every tool call.
+    async fn run_turn(state: &AgentState, session_id: &str) {
+        state
+            .prompt(
+                session_id,
+                vec![ContentBlock::from("hi")],
+                Arc::new(crate::core::permission::AllowAll),
+                Arc::new(crate::core::client_io::NoClientIo),
+                |_| {},
+            )
+            .await
+            .unwrap();
+    }
+
+    /// A state answering every turn with `EndTurnLlm`, plus a fresh session.
+    async fn state_with_session(dir: &std::path::Path) -> (AgentState, String) {
+        std::fs::write(dir.join("system.md"), "You are a test agent.").unwrap();
+        let mut state = sample_state(dir).await;
+        state.llm = Arc::new(EndTurnLlm);
+        let session_id = state
+            .new_session(None, vec![], dir.to_path_buf())
+            .await
+            .unwrap();
+        (state, session_id)
+    }
+
+    // A turn appends to the message log instead of rewriting it: a rewrite
+    // replaces the file (temp file + rename), which gives it a new inode.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn turn_appends_to_the_log_instead_of_rewriting_it() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempdir().unwrap();
+        let (state, session_id) = state_with_session(dir.path()).await;
+        let log = dir
+            .path()
+            .join("history")
+            .join(format!("{session_id}.jsonl"));
+
+        run_turn(&state, &session_id).await;
+        let inode = std::fs::metadata(&log).unwrap().ino();
+        run_turn(&state, &session_id).await;
+        assert_eq!(
+            std::fs::metadata(&log).unwrap().ino(),
+            inode,
+            "the second turn must append, not rewrite the log"
+        );
+
+        let uuid = Uuid::parse_str(&session_id).unwrap();
+        let saved = state.memory.history.load_conversation(&uuid).unwrap();
+        let texts: Vec<_> = saved.messages.iter().filter_map(Message::text).collect();
+        assert_eq!(texts, ["hi", "ok", "hi", "ok"]);
+        assert_eq!(saved.meta.title.as_deref(), Some("hi"));
+        assert_eq!(saved.meta.model.as_deref(), Some("mock-model"));
+    }
+
+    // If an append fails, the end of the turn rewrites the whole log from
+    // memory, so the history still ends up complete.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_append_falls_back_to_a_full_rewrite() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let (state, session_id) = state_with_session(dir.path()).await;
+        let log = dir
+            .path()
+            .join("history")
+            .join(format!("{session_id}.jsonl"));
+
+        run_turn(&state, &session_id).await;
+        // Appends open the log for writing, so they now fail; the rewrite
+        // replaces the file through its (still writable) directory.
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o444)).unwrap();
+        run_turn(&state, &session_id).await;
+
+        let uuid = Uuid::parse_str(&session_id).unwrap();
+        let saved = state.memory.history.load_conversation(&uuid).unwrap();
+        let texts: Vec<_> = saved.messages.iter().filter_map(Message::text).collect();
+        assert_eq!(texts, ["hi", "ok", "hi", "ok"]);
+    }
+
     // Regression test: a model switched after the conversation's first turn
     // was never written to its meta file (`resolve_conversation` returns an
     // existing conversation as saved), so reloading the session brought
@@ -747,18 +865,6 @@ mod new_session_tests {
             .new_session(None, vec![], dir.path().to_path_buf())
             .await
             .unwrap();
-        async fn run_turn(state: &AgentState, session_id: &str) {
-            state
-                .prompt(
-                    session_id,
-                    vec![ContentBlock::from("hi")],
-                    Arc::new(crate::core::permission::AllowAll),
-                    Arc::new(crate::core::client_io::NoClientIo),
-                    |_| {},
-                )
-                .await
-                .unwrap();
-        }
 
         // First turn creates the conversation on disk under the default model.
         run_turn(&state, &session_id).await;
