@@ -137,7 +137,7 @@ pub async fn serve(
                             .config_options(vec![model_config])
                             .modes(session_mode_state(AgentMode::Code)),
                     ),
-                    Err(e) => responder.respond_with_internal_error(e.to_string()),
+                    Err(e) => responder.respond_with_error(to_acp_error(&e)),
                 }
             },
             on_receive_request!(),
@@ -223,7 +223,7 @@ pub async fn serve(
                     Ok(metas) => responder.respond(ListSessionsResponse::new(
                         conversation_metas_to_session_info(metas),
                     )),
-                    Err(e) => responder.respond_with_internal_error(e.to_string()),
+                    Err(e) => responder.respond_with_error(to_acp_error(&e)),
                 }
             },
             on_receive_request!(),
@@ -276,15 +276,18 @@ pub async fn serve(
                         _cx: ConnectionTo<Client>| {
                 let session_id = req.session_id.0.as_ref().to_string();
                 if req.config_id.0.as_ref() != MODEL_CONFIG_ID {
-                    return responder.respond_with_error(internal_error(format!(
-                        "unknown session config option '{}'",
-                        req.config_id.0
-                    )));
+                    return responder.respond_with_error(
+                        agent_client_protocol::Error::invalid_params().data(format!(
+                            "unknown session config option '{}'",
+                            req.config_id.0
+                        )),
+                    );
                 }
                 let Some(model_id) = req.value.as_value_id().cloned() else {
-                    return responder.respond_with_error(internal_error(
-                        "model config option requires a value id",
-                    ));
+                    return responder.respond_with_error(
+                        agent_client_protocol::Error::invalid_params()
+                            .data("model config option requires a value id"),
+                    );
                 };
                 match state_set_model
                     .set_session_model(&session_id, model_id.0.as_ref())
@@ -297,7 +300,7 @@ pub async fn serve(
                         );
                         responder.respond(SetSessionConfigOptionResponse::new(vec![config]))
                     }
-                    Err(e) => responder.respond_with_internal_error(e.to_string()),
+                    Err(e) => responder.respond_with_error(to_acp_error(&e)),
                 }
             },
             on_receive_request!(),
@@ -308,7 +311,7 @@ pub async fn serve(
                 let mode_id = req.mode_id.0.as_ref();
                 match state_set_mode.set_session_mode(&session_id, mode_id).await {
                     Ok(()) => responder.respond(SetSessionModeResponse::new()),
-                    Err(e) => responder.respond_with_internal_error(e.to_string()),
+                    Err(e) => responder.respond_with_error(to_acp_error(&e)),
                 }
             },
             on_receive_request!(),
@@ -323,7 +326,7 @@ pub async fn serve(
         )
         .on_receive_dispatch(
             async move |message: Dispatch,
-                        cx: ConnectionTo<Client>|
+                        _cx: ConnectionTo<Client>|
                         -> agent_client_protocol::Result<Handled<Dispatch>> {
                 // Responses to requests *this agent* sent (e.g.
                 // session/request_permission, fs/read_text_file) are also
@@ -340,11 +343,11 @@ pub async fn serve(
                         });
                     }
                     Dispatch::Request(_, responder) => {
-                        responder.respond_with_error(internal_error("unsupported method"))?;
+                        responder
+                            .respond_with_error(agent_client_protocol::Error::method_not_found())?;
                     }
                     Dispatch::Notification(_) => {}
                 }
-                let _ = cx;
                 Ok(Handled::Yes)
             },
             on_receive_dispatch!(),
@@ -353,14 +356,28 @@ pub async fn serve(
         .await
 }
 
-/// Maps an `Error` onto the ACP JSON-RPC error to send back. `SessionLocked`/
-/// `SessionBusy` carry structured fields a caller needs to build a "busy,
-/// retry" UX instead of a generic failure — encoded into the error's `data`
-/// so they survive the trip back to the client instead of collapsing to
-/// `e.to_string()`. Shared by `PromptRequest` and `LoadSessionRequest`, the
-/// two handlers either error can come from.
+/// Maps an `Error` onto the ACP JSON-RPC error to send back; every handler
+/// goes through here so the same error always gets the same code.
+///
+/// - `NotFound` (unknown session, …) → `resource_not_found` (-32002).
+/// - `ParseError` / `ConfigError` → `invalid_params` (-32602): at this
+///   boundary they come from what the client sent (a malformed session id,
+///   an unknown model or mode).
+/// - `SessionLocked` / `SessionBusy` carry structured fields a caller needs
+///   to build a "busy, retry" UX instead of a generic failure, encoded into
+///   `data` so they survive the trip instead of collapsing to
+///   `e.to_string()`.
+/// - Anything else → `internal_error` (-32603).
+///
+/// Every case but the structured two puts `e.to_string()` in `data`.
 fn to_acp_error(e: &Error) -> agent_client_protocol::Error {
     match e {
+        Error::NotFound(_) => {
+            agent_client_protocol::Error::resource_not_found(None).data(e.to_string())
+        }
+        Error::ParseError(_) | Error::ConfigError(_) => {
+            agent_client_protocol::Error::invalid_params().data(e.to_string())
+        }
         Error::SessionLocked {
             session_id,
             pid,
@@ -417,11 +434,40 @@ mod to_acp_error_tests {
     }
 
     #[test]
-    fn other_errors_fall_back_to_the_display_string() {
+    fn not_found_is_resource_not_found() {
         let e = Error::NotFound("session not found: abc".to_string());
         let acp_error = to_acp_error(&e);
-        // `util::internal_error` puts the message in `data` (as a plain
-        // string, not the structured objects the two cases above use).
+        assert_eq!(
+            acp_error.code,
+            agent_client_protocol::Error::resource_not_found(None).code
+        );
+        assert_eq!(acp_error.data, Some(serde_json::json!(e.to_string())));
+    }
+
+    #[test]
+    fn bad_client_input_is_invalid_params() {
+        for e in [
+            Error::ParseError("invalid session id format".to_string()),
+            Error::ConfigError("Model 'nope' not found".to_string()),
+        ] {
+            let acp_error = to_acp_error(&e);
+            assert_eq!(
+                acp_error.code,
+                agent_client_protocol::Error::invalid_params().code,
+                "{e}"
+            );
+            assert_eq!(acp_error.data, Some(serde_json::json!(e.to_string())));
+        }
+    }
+
+    #[test]
+    fn other_errors_are_internal_with_the_display_string() {
+        let e = Error::Other("disk on fire".to_string());
+        let acp_error = to_acp_error(&e);
+        assert_eq!(
+            acp_error.code,
+            agent_client_protocol::Error::internal_error().code
+        );
         assert_eq!(acp_error.data, Some(serde_json::json!(e.to_string())));
     }
 }
