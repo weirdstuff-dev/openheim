@@ -177,47 +177,6 @@ impl AppConfig {
                 .collect(),
         }
     }
-
-    /// Serializes the config for clients, redacting secrets. `work_dir` is
-    /// overlaid with the *resolved* sandbox root (`AgentState::work_dir`)
-    /// rather than the raw `Option<PathBuf>` config value, since the latter
-    /// is `None` unless `work_dir` was explicitly set in `config.toml`.
-    pub fn to_public_json(&self, work_dir: &std::path::Path) -> serde_json::Value {
-        let mut val = serde_json::to_value(self).unwrap_or_default();
-        if let Some(obj) = val.as_object_mut() {
-            obj.insert(
-                "work_dir".to_string(),
-                serde_json::Value::String(work_dir.display().to_string()),
-            );
-        }
-        if let Some(providers) = val.get_mut("providers").and_then(|v| v.as_object_mut()) {
-            for p in providers.values_mut() {
-                if let Some(obj) = p.as_object_mut() {
-                    obj.remove("api_key");
-                }
-            }
-        }
-        if let Some(servers) = val.get_mut("mcp_servers").and_then(|v| v.as_object_mut()) {
-            for s in servers.values_mut() {
-                for field in ["env", "headers"] {
-                    if let Some(map) = s.get_mut(field).and_then(|v| v.as_object_mut()) {
-                        for v in map.values_mut() {
-                            *v = serde_json::Value::String("<redacted>".to_string());
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(memory) = val.get_mut("memory").and_then(|v| v.as_object_mut()) {
-            memory.remove("db_path");
-        }
-        if let Some(obj) = val.as_object_mut() {
-            // Local filesystem path, not something an unauthenticated client
-            // needs; internal serialization (e.g. persisted config) keeps it.
-            obj.remove("data_dir");
-        }
-        val
-    }
 }
 
 /// Extended-thinking mode for a provider. Only [`AnthropicClient`](crate::core::llm::AnthropicClient)
@@ -547,58 +506,5 @@ mod tests {
         let memory = bare.memory.unwrap();
         assert!(memory.embedding_provider.is_none());
         assert_eq!(memory.top_k, 5);
-    }
-
-    #[test]
-    fn to_public_json_redacts_secrets_and_local_paths() {
-        let toml_str = r#"
-            default_provider = "openai"
-            data_dir = "/Users/alice/.openheim"
-            [providers.openai]
-            api_base = "https://api.openai.com/v1"
-            default_model = "gpt-4"
-            models = ["gpt-4"]
-            api_key = "sk-super-secret"
-
-            [mcp_servers.demo]
-            command = "npx"
-            env = { API_TOKEN = "also-secret" }
-
-            [mcp_servers.remote]
-            url = "https://example.com/mcp"
-            headers = { Authorization = "Bearer also-secret" }
-
-            [memory]
-            embedding_provider = "openai"
-            embedding_model = "text-embedding-3-small"
-            db_path = "/Users/alice/.openheim/memory.db"
-            top_k = 7
-        "#;
-        let cfg: AppConfig = toml::from_str(toml_str).unwrap();
-
-        let val = cfg.to_public_json(std::path::Path::new("/work/dir"));
-
-        assert_eq!(val["work_dir"], "/work/dir");
-        assert!(val["providers"]["openai"].get("api_key").is_none());
-        assert_eq!(val["mcp_servers"]["demo"]["env"]["API_TOKEN"], "<redacted>");
-        assert_eq!(
-            val["mcp_servers"]["remote"]["headers"]["Authorization"],
-            "<redacted>"
-        );
-
-        // db_path is a local filesystem path, not a secret the client needs;
-        // it's stripped, while the rest of the [memory] section survives.
-        assert!(val["memory"].get("db_path").is_none());
-        assert_eq!(val["memory"]["embedding_provider"], "openai");
-        assert_eq!(val["memory"]["embedding_model"], "text-embedding-3-small");
-        assert_eq!(val["memory"]["top_k"], 7);
-
-        // data_dir is a local filesystem path, not something an
-        // unauthenticated client needs; it's stripped from the public view.
-        assert!(val.get("data_dir").is_none());
-        assert_eq!(
-            cfg.data_dir,
-            Some(std::path::PathBuf::from("/Users/alice/.openheim"))
-        );
     }
 }

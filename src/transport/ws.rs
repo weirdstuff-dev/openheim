@@ -222,7 +222,7 @@ pub async fn serve(client: OpenheimClient, host: String, port: u16) -> crate::er
 }
 
 async fn config_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
-    Json(state.app_config.to_public_json(&state.work_dir))
+    Json(state.app_config.to_public(&state.work_dir))
 }
 
 async fn models_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
