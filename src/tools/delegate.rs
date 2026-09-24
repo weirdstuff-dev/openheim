@@ -43,6 +43,13 @@ pub const DELEGATE_TOOL_NAME: &str = "delegate_task";
 /// built from this delegate-free view, so `delegate_task` is structurally
 /// absent from their own tool list. This rules out recursive delegation by
 /// construction — no depth counters or runtime checks are needed.
+///
+/// `llm`/`base_config` are the model a subagent runs on when its profile
+/// sets no `model`/`provider` of its own. `AgentState` registers one bound to
+/// the startup default (so tool listings include `delegate_task`), then
+/// rebinds a copy to the session's live model every turn via
+/// [`Self::for_session`], so a mid-session model switch reaches subagents too.
+#[derive(Clone)]
 pub struct DelegateTool {
     base_executor: Arc<dyn ToolExecutor>,
     profiles: Vec<AgentProfile>,
@@ -65,6 +72,18 @@ impl DelegateTool {
             llm,
             app_config,
             base_config,
+        }
+    }
+
+    /// This tool with subagents falling back to `llm`/`config` (a session's
+    /// live model) instead of the one it was built with.
+    pub fn for_session(&self, llm: Arc<dyn LlmClient>, config: AgentConfig) -> Self {
+        Self {
+            base_executor: self.base_executor.clone(),
+            profiles: self.profiles.clone(),
+            llm,
+            app_config: self.app_config.clone(),
+            base_config: config,
         }
     }
 

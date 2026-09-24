@@ -26,7 +26,10 @@ use crate::{
     llm::LlmClient,
     memory::{Conversation, ConversationMeta, MemoryContext},
     subagents::SubagentLoader,
-    tools::{DelegateTool, ScopedExecutor, SystemToolExecutor, ToolExecutor, ToolHandler},
+    tools::{
+        DelegateTool, OverlayExecutor, ScopedExecutor, SystemToolExecutor, ToolExecutor,
+        ToolHandler,
+    },
 };
 
 use super::{
@@ -56,6 +59,10 @@ pub struct AgentState {
     /// `pub(crate)` (not private) so `acp::AcpPermissionGate` — which lives
     /// outside this module — can read remembered approvals directly.
     pub(crate) sessions: Sessions,
+    /// The `delegate_task` registered in `executor`, bound to the startup
+    /// model. `prompt` rebinds a copy to the session's live model each turn
+    /// (see [`DelegateTool::for_session`]).
+    delegate: DelegateTool,
 }
 
 impl AgentState {
@@ -108,13 +115,14 @@ impl AgentState {
             .join("agents");
         let profiles = SubagentLoader::with_dir(agents_dir).load()?;
         let base: Arc<dyn ToolExecutor> = Arc::new(sys_executor.clone());
-        sys_executor.register(Box::new(DelegateTool::new(
+        let delegate = DelegateTool::new(
             base,
             profiles,
             llm.clone(),
             app_config.clone(),
             config.clone(),
-        )));
+        );
+        sys_executor.register(Box::new(delegate.clone()));
         let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
 
         Ok(Self {
@@ -128,6 +136,7 @@ impl AgentState {
             mcp_statuses,
             work_dir,
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            delegate,
         })
     }
 
@@ -309,7 +318,15 @@ impl AgentState {
                     .collect();
                 Arc::new(ScopedExecutor::new(self.executor.clone(), read_only))
             } else {
-                self.executor.clone()
+                // Subagents without a model of their own fall back to this
+                // session's model, not the one `delegate_task` was built
+                // with at startup. (Architect mode needs no override:
+                // `delegate_task` isn't read-only, so it's filtered out.)
+                let delegate = self.delegate.for_session(llm.clone(), s.config.clone());
+                Arc::new(OverlayExecutor::new(
+                    self.executor.clone(),
+                    Arc::new(delegate),
+                ))
             };
             (
                 llm,
@@ -755,5 +772,89 @@ mod new_session_tests {
         let saved = state.memory.history.load_conversation(&uuid).unwrap();
         assert_eq!(saved.meta.model.as_deref(), Some("other-model"));
         assert_eq!(saved.meta.provider.as_deref(), Some("mock"));
+    }
+
+    /// Answers each call with the next scripted choice, whoever makes it —
+    /// the orchestrator and any subagent share it when they share a client.
+    struct ScriptedLlm(std::sync::Mutex<std::collections::VecDeque<crate::core::models::Choice>>);
+
+    #[async_trait::async_trait]
+    impl LlmClient for ScriptedLlm {
+        async fn send(
+            &self,
+            _messages: &[Message],
+            _tools: &[crate::core::models::Tool],
+        ) -> Result<crate::core::models::Choice> {
+            self.0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| Error::Other("script exhausted".into()))
+        }
+    }
+
+    // Regression test: `delegate_task` captured the startup model/client, so
+    // a subagent with no model of its own ignored the session's model switch.
+    // Here the startup client is a real HTTP client (never reachable from
+    // the test) and the session's client is the script, so the subagent's
+    // answer only comes back if it ran on the session's client.
+    #[tokio::test]
+    async fn subagent_without_model_override_runs_on_the_sessions_model() {
+        use crate::core::models::{Choice, FinishReason};
+
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
+        let mut state = sample_state(dir.path()).await;
+
+        let delegate_call = Choice {
+            message: Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: crate::tools::DELEGATE_TOOL_NAME.into(),
+                    arguments: r#"{"system_prompt":"You are a helper.","task":"say hi"}"#.into(),
+                }],
+            },
+            finish_reason: Some(FinishReason::ToolCalls),
+            usage: None,
+        };
+        let text = |t: &str| Choice {
+            message: Message::assistant(t),
+            finish_reason: Some(FinishReason::Stop),
+            usage: None,
+        };
+        state.llm = Arc::new(ScriptedLlm(std::sync::Mutex::new(
+            [delegate_call, text("hi from the subagent"), text("done")].into(),
+        )));
+
+        let session_id = state
+            .new_session(None, vec![], dir.path().to_path_buf())
+            .await
+            .unwrap();
+        state
+            .set_session_model(&session_id, "other-model")
+            .await
+            .unwrap();
+        // Same alignment as the test above: keeps the session's turn on
+        // `state.llm` (the script) instead of building a real client.
+        state.config = state.app_config.resolve(Some("other-model")).unwrap();
+
+        let mut tool_results = Vec::new();
+        state
+            .prompt(
+                &session_id,
+                vec![ContentBlock::from("delegate something")],
+                Arc::new(crate::core::permission::AllowAll),
+                Arc::new(crate::core::client_io::NoClientIo),
+                |event| {
+                    if let StreamEvent::ToolResult { result, .. } = event {
+                        tool_results.push(result);
+                    }
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(tool_results, vec!["hi from the subagent".to_string()]);
     }
 }

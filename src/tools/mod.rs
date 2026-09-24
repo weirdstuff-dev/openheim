@@ -98,6 +98,7 @@ pub mod delegate;
 mod edit_file;
 mod execute_command;
 mod list_dir;
+mod overlay_executor;
 mod read_file;
 pub mod sandbox;
 mod scoped_executor;
@@ -117,6 +118,7 @@ use crate::error::{Error, Result};
 
 pub use capabilities::{ApprovalScope, ToolCapabilities, ToolKindHint};
 pub use delegate::{DELEGATE_TOOL_NAME, DelegateTool};
+pub(crate) use overlay_executor::OverlayExecutor;
 pub use scoped_executor::ScopedExecutor;
 
 #[async_trait]
