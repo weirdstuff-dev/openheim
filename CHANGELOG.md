@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Long subagent replies no longer time out.** `delegate_task` subagents, and anything else calling `run_agent_with_history`, made non-streaming requests. The HTTP timeout is per read (120s by default), and a non-streaming response sends nothing until the whole reply is generated, so a subagent reply that took longer than that failed. The agent loop now always streams, and `run_agent_with_history` only differs by not reporting events. `LlmClient`s that implement only `send` are unaffected, since the default `send_streaming` calls it.
 - **A streamed reply could fail with "stream ended prematurely" when the client closed its chunk channel before the reply was done.** The agent loop now waits for the reply itself, not the channel. None of the built-in providers do this, but a custom `LlmClient` may.
 - **TUI: Esc could get stuck on a popup after a permission prompt.** If a tool-approval prompt appeared while a popup (model picker, theme picker, …) was open, answering it left Esc "returning" to that popup, so it could only be closed by picking an entry. Permission prompts now sit on top of everything without replacing what's underneath, and Esc always closes a popup back to the chat.
 - **ACP errors now use the matching JSON-RPC code instead of always `-32603 Internal error`:**

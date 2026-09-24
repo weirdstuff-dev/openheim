@@ -16,7 +16,7 @@ pub trait LlmClient: Send + Sync {
 
 `messages` is the full conversation history (user, assistant, tool-result turns). `tools` is the list of currently registered tools in JSON-schema format. Return the model's next `Choice` — either a text response or a set of tool calls.
 
-`send_streaming` is a second trait method with a default implementation that calls `send` and forwards the whole response as one `LlmChunk::Text`. Override it if your provider supports token-by-token streaming; otherwise the default is fine.
+`send_streaming` is a second trait method with a default implementation that calls `send` and forwards the whole response as one `LlmChunk::Text`. The agent loop always calls `send_streaming`, including `run_agent_with_history` and `delegate_task` subagents, because openheim's HTTP timeout is per read: a streamed reply keeps bytes arriving, while a non-streamed one sends nothing until it's done and can time out on long generations. Override it if your provider supports token-by-token streaming; otherwise the default is fine. Your `send_streaming` may drop its `chunk_tx` before returning; the loop waits for the returned reply, not the channel.
 
 ---
 
