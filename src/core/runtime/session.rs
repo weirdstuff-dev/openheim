@@ -23,7 +23,7 @@ pub struct SessionState {
     /// Remembered `AllowAlways`/`RejectAlways` decisions, so the same tool
     /// call isn't asked about again for the rest of the session, whichever
     /// front-end's gate answered it. Each turn's
-    /// [`crate::core::permission::RememberingGate`] reads and writes it; see
+    /// `RememberingGate` (in `core::permission`) reads and writes it; see
     /// [`crate::core::permission::approval_key`] for how calls are keyed.
     pub approved_tools: Approvals,
     /// Set via `session/set_mode`. Controls which tools are offered to the LLM.

@@ -38,7 +38,7 @@ pub struct PublicTuiConfig {
 }
 
 /// A provider entry without its API key. `api_base` has any credentials or
-/// query string removed (see [`scrub_url`]).
+/// query string removed.
 #[derive(Debug, Clone, Serialize)]
 pub struct PublicProviderConfig {
     /// Resolved, so it's present even when the config infers it from the name.
