@@ -306,7 +306,7 @@ impl AgentState {
         F: FnMut(StreamEvent) + Send,
     {
         let uuid = Uuid::parse_str(session_id)
-            .map_err(|_| Error::ParseError("invalid session id format".to_string()))?;
+            .map_err(|_| Error::InvalidArgument("invalid session id format".to_string()))?;
 
         let (llm, executor, config, chat_id, skills, cwd, cancel, approvals, _prompt_guard) = {
             // Write lock: each new prompt turn gets a fresh cancellation token,
@@ -412,20 +412,23 @@ impl AgentState {
 
         // Record the turn's metadata and user message before the turn starts,
         // so both survive a crash mid-turn. Everything earlier is already in
-        // the log, so this appends rather than rewriting it. `log_complete`
-        // tracks whether every write so far landed; if one didn't, the end of
-        // the turn falls back to a full rewrite.
+        // the log, so this appends rather than rewriting it.
         let meta = conversation.meta.clone();
-        let mut log_complete = self
+        let started_ok = self
             .persist("record turn start", move |history| {
                 history.save_meta(&meta)?;
                 history.append_message(&chat_id, &user_message)
             })
             .await;
 
+        // Set once any write fails; from then on nothing more is appended and
+        // the end of the turn rewrites the whole log instead. Appending past
+        // a failure would leave a gap in the log (or bury a half-written line
+        // mid-file), and `save_conversation` then refuses the rewrite, or
+        // can't read the log at all, so the history could never recover.
+        let write_failed = AtomicBool::new(!started_ok);
+        let write_failed_flag = &write_failed;
         let history_for_append = self.memory.history.clone();
-        let append_failed = AtomicBool::new(false);
-        let append_failed_flag = &append_failed;
         // The work-directory boundary and client I/O hook reach every tool
         // through this context; there is no per-session executor wrapper.
         let turn = TurnContext {
@@ -450,10 +453,11 @@ impl AgentState {
                 // spawning it would only risk two concurrent appends landing
                 // out of order.
                 if let StreamEvent::MessageAppended { message } = &event
+                    && !write_failed_flag.load(Ordering::Relaxed)
                     && let Err(e) = history_for_append.append_message(&chat_id, message)
                 {
                     tracing::warn!("failed to append message to history: {e}");
-                    append_failed_flag.store(true, Ordering::Relaxed);
+                    write_failed_flag.store(true, Ordering::Relaxed);
                 }
                 on_update(event);
             },
@@ -476,8 +480,7 @@ impl AgentState {
         // failed, rewrite the whole log from memory instead, which
         // `save_conversation` refuses to do if another process has written
         // to it meanwhile.
-        log_complete &= !append_failed.load(Ordering::Relaxed);
-        if log_complete {
+        if !write_failed.load(Ordering::Relaxed) {
             let meta = conversation.meta.clone();
             self.persist("save conversation metadata", move |history| {
                 history.save_meta(&meta)
@@ -514,7 +517,7 @@ impl AgentState {
     /// resolves.
     pub async fn load_session(&self, session_id: &str, cwd: PathBuf) -> Result<LoadedSession> {
         let uuid = Uuid::parse_str(session_id)
-            .map_err(|_| Error::ParseError("invalid session id format".to_string()))?;
+            .map_err(|_| Error::InvalidArgument("invalid session id format".to_string()))?;
 
         let history = self.memory.history.clone();
         let conversation = tokio::task::spawn_blocking(move || history.load_conversation(&uuid))
@@ -842,6 +845,52 @@ mod new_session_tests {
         // Appends open the log for writing, so they now fail; the rewrite
         // replaces the file through its (still writable) directory.
         std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o444)).unwrap();
+        run_turn(&state, &session_id).await;
+
+        let uuid = Uuid::parse_str(&session_id).unwrap();
+        let saved = state.memory.history.load_conversation(&uuid).unwrap();
+        let texts: Vec<_> = saved.messages.iter().filter_map(Message::text).collect();
+        assert_eq!(texts, ["hi", "ok", "hi", "ok"]);
+    }
+
+    /// Makes the message log writable again, then replies "ok": a write
+    /// failure that clears up partway through a turn.
+    #[cfg(unix)]
+    struct RestoreLogPermissionsLlm(std::path::PathBuf);
+
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl LlmClient for RestoreLogPermissionsLlm {
+        async fn send(
+            &self,
+            messages: &[Message],
+            tools: &[crate::core::models::Tool],
+        ) -> Result<crate::core::models::Choice> {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o644)).unwrap();
+            EndTurnLlm.send(messages, tools).await
+        }
+    }
+
+    // Regression test (PR #61 review): after one failed write, later appends
+    // kept going. Here the user message's append fails but the reply's would
+    // succeed, which left a gap in the log that the end-of-turn rewrite then
+    // refused to overwrite, losing the user message for good.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_transient_write_failure_still_ends_with_a_complete_log() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let (mut state, session_id) = state_with_session(dir.path()).await;
+        let log = dir
+            .path()
+            .join("history")
+            .join(format!("{session_id}.jsonl"));
+
+        run_turn(&state, &session_id).await;
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o444)).unwrap();
+        state.llm = Arc::new(RestoreLogPermissionsLlm(log.clone()));
         run_turn(&state, &session_id).await;
 
         let uuid = Uuid::parse_str(&session_id).unwrap();
