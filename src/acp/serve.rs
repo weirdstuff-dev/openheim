@@ -360,9 +360,12 @@ pub async fn serve(
 /// goes through here so the same error always gets the same code.
 ///
 /// - `NotFound` (unknown session, …) → `resource_not_found` (-32002).
-/// - `ParseError` / `ConfigError` → `invalid_params` (-32602): at this
-///   boundary they come from what the client sent (a malformed session id,
-///   an unknown model or mode).
+/// - `InvalidArgument` / `ConfigError` → `invalid_params` (-32602): the
+///   client sent something invalid (a malformed session id, unsupported
+///   prompt content, an unknown model or mode). `ParseError` is *not* here:
+///   it means openheim failed to parse something itself (e.g. the model's
+///   own tool-call JSON when converting history), which is a server-side
+///   failure.
 /// - `SessionLocked` / `SessionBusy` carry structured fields a caller needs
 ///   to build a "busy, retry" UX instead of a generic failure, encoded into
 ///   `data` so they survive the trip instead of collapsing to
@@ -375,7 +378,7 @@ fn to_acp_error(e: &Error) -> agent_client_protocol::Error {
         Error::NotFound(_) => {
             agent_client_protocol::Error::resource_not_found(None).data(e.to_string())
         }
-        Error::ParseError(_) | Error::ConfigError(_) => {
+        Error::InvalidArgument(_) | Error::ConfigError(_) => {
             agent_client_protocol::Error::invalid_params().data(e.to_string())
         }
         Error::SessionLocked {
@@ -447,7 +450,7 @@ mod to_acp_error_tests {
     #[test]
     fn bad_client_input_is_invalid_params() {
         for e in [
-            Error::ParseError("invalid session id format".to_string()),
+            Error::InvalidArgument("invalid session id format".to_string()),
             Error::ConfigError("Model 'nope' not found".to_string()),
         ] {
             let acp_error = to_acp_error(&e);
@@ -458,6 +461,20 @@ mod to_acp_error_tests {
             );
             assert_eq!(acp_error.data, Some(serde_json::json!(e.to_string())));
         }
+    }
+
+    // Regression test (PR #61 review): a provider failing to convert the
+    // model's own malformed tool-call JSON while building a request surfaced
+    // as `invalid_params`, blaming the client for a server-side failure.
+    #[test]
+    fn parse_failures_inside_a_turn_are_internal_errors() {
+        let e = Error::ParseError(
+            "invalid JSON in tool call arguments for 'read_file': EOF".to_string(),
+        );
+        assert_eq!(
+            to_acp_error(&e).code,
+            agent_client_protocol::Error::internal_error().code
+        );
     }
 
     #[test]

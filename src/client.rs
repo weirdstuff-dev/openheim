@@ -127,7 +127,7 @@ impl OpenheimClient {
     /// Fetch the full `Conversation` (messages + metadata) for a session id.
     pub async fn get_session(&self, session_id: &str) -> Result<Conversation> {
         let uuid = Uuid::parse_str(session_id)
-            .map_err(|_| crate::error::Error::ParseError("invalid session id".to_string()))?;
+            .map_err(|_| crate::error::Error::InvalidArgument("invalid session id".to_string()))?;
         let history = self.state.memory.history.clone();
         tokio::task::spawn_blocking(move || history.load_conversation(&uuid)).await?
     }
@@ -135,7 +135,7 @@ impl OpenheimClient {
     /// Permanently delete a persisted session.
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
         let uuid = Uuid::parse_str(session_id)
-            .map_err(|_| crate::error::Error::ParseError("invalid session id".to_string()))?;
+            .map_err(|_| crate::error::Error::InvalidArgument("invalid session id".to_string()))?;
         let history = self.state.memory.history.clone();
         tokio::task::spawn_blocking(move || history.delete_conversation(&uuid)).await?
     }
@@ -339,7 +339,7 @@ impl SessionHandle {
     /// first turn completes.
     async fn conversation_meta(&self) -> Result<Option<crate::memory::ConversationMeta>> {
         let uuid = Uuid::parse_str(&self.id)
-            .map_err(|_| crate::error::Error::ParseError("invalid session id".to_string()))?;
+            .map_err(|_| crate::error::Error::InvalidArgument("invalid session id".to_string()))?;
         let history = self.state.memory.history.clone();
         match tokio::task::spawn_blocking(move || history.load_conversation(&uuid)).await? {
             Ok(conversation) => Ok(Some(conversation.meta)),
