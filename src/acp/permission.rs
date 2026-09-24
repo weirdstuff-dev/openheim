@@ -10,18 +10,21 @@ use agent_client_protocol::{
     },
 };
 
-use crate::core::{
-    permission::{PermissionDecision, PermissionGate, approval_key},
-    runtime::AgentState,
+use crate::{
+    core::permission::{PermissionDecision, PermissionGate},
+    tools::ToolExecutor,
 };
 
 use super::util::tool_kind_for;
 
 /// Lives here (not in `core`) because it depends on the live client connection.
+/// Only asks: remembering `*Always` answers is `RememberingGate`'s job, which
+/// `AgentState::prompt` wraps around this.
 pub(super) struct AcpPermissionGate {
     pub(super) cx: ConnectionTo<Client>,
     pub(super) session_id: String,
-    pub(super) state: Arc<AgentState>,
+    /// For the tool kind shown in the permission prompt.
+    pub(super) executor: Arc<dyn ToolExecutor>,
 }
 
 #[async_trait::async_trait]
@@ -32,25 +35,12 @@ impl PermissionGate for AcpPermissionGate {
         tool_name: &str,
         arguments: &str,
     ) -> PermissionDecision {
-        let scope = self.state.executor.capabilities(tool_name).approval_scope;
-        let key = approval_key(scope, tool_name, arguments);
-        if let Some(remembered) = self
-            .state
-            .sessions
-            .read()
-            .await
-            .get(&self.session_id)
-            .and_then(|s| s.approved_tools.get(&key).copied())
-        {
-            return remembered;
-        }
-
         let raw_input = serde_json::from_str(arguments).ok();
         let tool_call = ToolCallUpdate::new(
             tool_call_id.to_string(),
             ToolCallUpdateFields::new()
                 .title(tool_name)
-                .kind(tool_kind_for(tool_name, self.state.executor.as_ref()))
+                .kind(tool_kind_for(tool_name, self.executor.as_ref()))
                 .status(ToolCallStatus::Pending)
                 .raw_input(raw_input),
         );
@@ -83,7 +73,7 @@ impl PermissionGate for AcpPermissionGate {
             .block_task()
             .await;
 
-        let decision = match response {
+        match response {
             Ok(RequestPermissionResponse {
                 outcome: RequestPermissionOutcome::Selected(selected),
                 ..
@@ -104,16 +94,6 @@ impl PermissionGate for AcpPermissionGate {
                 tracing::warn!("session/request_permission failed: {e}");
                 PermissionDecision::RejectOnce
             }
-        };
-
-        if matches!(
-            decision,
-            PermissionDecision::AllowAlways | PermissionDecision::RejectAlways
-        ) && let Some(s) = self.state.sessions.write().await.get_mut(&self.session_id)
-        {
-            s.approved_tools.insert(key, decision);
         }
-
-        decision
     }
 }

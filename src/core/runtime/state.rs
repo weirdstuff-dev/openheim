@@ -19,7 +19,7 @@ use crate::{
         agent::run_agent_streaming_with_history,
         client_io::ClientIo,
         models::{ContentBlock, Message, Role, StopReason as CoreStopReason, StreamEvent},
-        permission::PermissionGate,
+        permission::{Approvals, PermissionGate, RememberingGate},
         turn::TurnContext,
     },
     error::{Error, Result},
@@ -56,9 +56,7 @@ pub struct AgentState {
     pub mcp_statuses: Vec<crate::mcp::McpServerStatus>,
     /// Resolved work directory used as the sandbox boundary for every session.
     pub work_dir: PathBuf,
-    /// `pub(crate)` (not private) so `acp::AcpPermissionGate` — which lives
-    /// outside this module — can read remembered approvals directly.
-    pub(crate) sessions: Sessions,
+    sessions: Sessions,
     /// The `delegate_task` registered in `executor`, bound to the startup
     /// model. `prompt` rebinds a copy to the session's live model each turn
     /// (see [`DelegateTool::for_session`]).
@@ -165,7 +163,7 @@ impl AgentState {
                     cwd,
                     skills,
                     cancel: CancellationToken::new(),
-                    approved_tools: HashMap::new(),
+                    approved_tools: Approvals::default(),
                     mode: AgentMode::Code,
                     prompt_lock: Arc::new(Mutex::new(())),
                     last_active: Instant::now(),
@@ -282,7 +280,7 @@ impl AgentState {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| Error::ParseError("invalid session id format".to_string()))?;
 
-        let (llm, executor, config, chat_id, skills, cwd, cancel, _prompt_guard) = {
+        let (llm, executor, config, chat_id, skills, cwd, cancel, approvals, _prompt_guard) = {
             // Write lock: each new prompt turn gets a fresh cancellation token,
             // since a token can only ever transition uncancelled -> cancelled
             // and must not leak a previous turn's cancellation into this one.
@@ -336,9 +334,17 @@ impl AgentState {
                 s.skills.clone(),
                 s.cwd.clone(),
                 s.cancel.clone(),
+                s.approved_tools.clone(),
                 prompt_guard,
             )
         };
+        // The caller's gate only asks; remembering `*Always` answers for the
+        // rest of the session happens here, the same for every front-end.
+        let permission_gate: Arc<dyn PermissionGate> = Arc::new(RememberingGate::new(
+            permission_gate,
+            approvals,
+            executor.clone(),
+        ));
 
         // Cross-process write lease for this turn only (see `memory::lease`).
         // Held until this function returns — success, error, or cancellation
@@ -510,7 +516,7 @@ impl AgentState {
                     cwd,
                     skills: conversation.meta.skills.clone(),
                     cancel: CancellationToken::new(),
-                    approved_tools: HashMap::new(),
+                    approved_tools: Approvals::default(),
                     mode: AgentMode::Code,
                     prompt_lock: Arc::new(Mutex::new(())),
                     last_active: Instant::now(),
@@ -572,8 +578,6 @@ pub struct LoadedSession {
 
 #[cfg(test)]
 mod prompt_lease_ordering_tests {
-    use std::collections::HashMap;
-
     use tempfile::tempdir;
 
     use crate::memory::history::HistoryManager;
@@ -593,7 +597,7 @@ mod prompt_lease_ordering_tests {
             cwd: PathBuf::from("/tmp"),
             skills: vec![],
             cancel: CancellationToken::new(),
-            approved_tools: HashMap::new(),
+            approved_tools: Approvals::default(),
             mode: AgentMode::Code,
             prompt_lock: Arc::new(Mutex::new(())),
             last_active: Instant::now(),

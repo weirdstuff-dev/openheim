@@ -152,7 +152,7 @@ pub async fn serve(
                 let permission_gate = Arc::new(AcpPermissionGate {
                     cx: cx.clone(),
                     session_id: session_key.clone(),
-                    state: state.clone(),
+                    executor: state.executor.clone(),
                 }) as Arc<dyn PermissionGate>;
                 let client_io = Arc::new(AcpClientIo {
                     cx: cx.clone(),
