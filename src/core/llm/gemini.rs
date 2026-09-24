@@ -289,6 +289,9 @@ fn map_finish_reason(reason: &str) -> FinishReason {
     match reason {
         "STOP" => FinishReason::Stop,
         "MAX_TOKENS" => FinishReason::MaxTokens,
+        "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" | "IMAGE_SAFETY" => {
+            FinishReason::Refusal
+        }
         other => FinishReason::Other(other.to_lowercase()),
     }
 }
@@ -569,13 +572,15 @@ mod tests {
     fn map_finish_reason_translates_known_values() {
         assert_eq!(map_finish_reason("STOP"), FinishReason::Stop);
         assert_eq!(map_finish_reason("MAX_TOKENS"), FinishReason::MaxTokens);
+        assert_eq!(map_finish_reason("SAFETY"), FinishReason::Refusal);
+        assert_eq!(map_finish_reason("RECITATION"), FinishReason::Refusal);
     }
 
     #[test]
     fn map_finish_reason_lowercases_unknown_values() {
         assert_eq!(
-            map_finish_reason("SAFETY"),
-            FinishReason::Other("safety".to_string())
+            map_finish_reason("MALFORMED_FUNCTION_CALL"),
+            FinishReason::Other("malformed_function_call".to_string())
         );
     }
 }

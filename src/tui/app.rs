@@ -148,6 +148,9 @@ impl App {
                 self.status = Status::Idle;
                 self.push(ChatItem::Err(e));
             }
+            AgentUpdate::Notice(notice) => {
+                self.push(ChatItem::SystemInfo(notice));
+            }
             AgentUpdate::Usage(usage) => {
                 self.context_usage = usage;
             }

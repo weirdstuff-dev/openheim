@@ -251,6 +251,7 @@ fn map_finish_reason(reason: &str) -> FinishReason {
         "stop" => FinishReason::Stop,
         "tool_calls" => FinishReason::ToolCalls,
         "length" => FinishReason::MaxTokens,
+        "content_filter" => FinishReason::Refusal,
         other => FinishReason::Other(other.to_string()),
     }
 }
@@ -671,6 +672,18 @@ impl LlmClient for OpenAiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_finish_reason_translates_known_values() {
+        assert_eq!(map_finish_reason("stop"), FinishReason::Stop);
+        assert_eq!(map_finish_reason("tool_calls"), FinishReason::ToolCalls);
+        assert_eq!(map_finish_reason("length"), FinishReason::MaxTokens);
+        assert_eq!(map_finish_reason("content_filter"), FinishReason::Refusal);
+        assert_eq!(
+            map_finish_reason("eos"),
+            FinishReason::Other("eos".to_string())
+        );
+    }
 
     #[test]
     fn convert_messages_text_only_user_stays_plain_string() {

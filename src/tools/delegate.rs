@@ -261,14 +261,19 @@ impl ToolHandler for DelegateTool {
         )
         .await?;
 
-        if result.stop_reason == StopReason::MaxIterations {
-            Ok(format!(
+        match result.stop_reason {
+            StopReason::MaxIterations => Ok(format!(
                 "{}\n\n[Note: subagent '{}' reached its iteration limit \
                  ({}) before finishing — this answer may be incomplete.]",
                 result.final_response, profile.name, config.max_iterations
-            ))
-        } else {
-            Ok(result.final_response)
+            )),
+            reason => match reason.notice() {
+                Some(notice) => Ok(format!(
+                    "{}\n\n[Note: subagent '{}' did not finish normally: {notice}.]",
+                    result.final_response, profile.name
+                )),
+                None => Ok(result.final_response),
+            },
         }
     }
 

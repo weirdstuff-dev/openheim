@@ -4,6 +4,10 @@ pub(crate) enum AgentUpdate {
     /// `App::handle_stream_event` for which variants the UI reacts to.
     Stream(crate::core::models::StreamEvent),
     Error(String),
+    /// A turn ended abnormally but without an error (truncated, refused,
+    /// iteration limit, …); shown as a system line under the reply. See
+    /// `StopReason::notice`.
+    Notice(String),
     ModelChanged {
         provider: String,
         model: String,

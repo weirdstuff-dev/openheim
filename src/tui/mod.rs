@@ -105,8 +105,16 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
                                         let _ = tx_cb.send(AgentUpdate::Stream(event));
                                     })
                                     .await;
-                                if let Err(e) = result {
-                                    let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
+                                match result {
+                                    Ok(stop_reason) => {
+                                        if let Some(notice) = stop_reason.notice() {
+                                            let _ = update_tx
+                                                .send(AgentUpdate::Notice(notice.to_string()));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
+                                    }
                                 }
                             }
                             None => break,

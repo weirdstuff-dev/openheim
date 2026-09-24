@@ -41,8 +41,35 @@ async fn call_llm_streaming(
     }
 }
 
-/// Core agent loop: repeatedly calls the LLM and executes tool calls until a
-/// final text response with `finish_reason == FinishReason::Stop` is produced or
+/// How a turn ends when the LLM replies without any tool calls, from the
+/// provider's finish reason and whether the reply had text. `None` means
+/// "keep looping": the provider paused the turn and expects the
+/// conversation resent as-is to resume it.
+///
+/// Any finish reason without a specific mapping (`Other`, a missing one, or
+/// `ToolCalls` with no tool calls attached) ends the turn: resending a
+/// history that ends in an assistant reply would at best make the model
+/// repeat itself, and at worst be rejected outright.
+fn stop_for_reply_without_tools(
+    finish_reason: Option<&FinishReason>,
+    has_text: bool,
+) -> Option<StopReason> {
+    match finish_reason {
+        Some(FinishReason::Paused) => None,
+        Some(FinishReason::MaxTokens) => Some(StopReason::MaxTokens),
+        Some(FinishReason::Refusal) => Some(StopReason::Refusal),
+        _ if !has_text => Some(StopReason::NoContent),
+        Some(FinishReason::Stop) => Some(StopReason::EndTurn),
+        other => {
+            tracing::debug!(finish_reason = ?other, "treating unmapped finish reason as end of turn");
+            Some(StopReason::EndTurn)
+        }
+    }
+}
+
+/// Core agent loop: repeatedly calls the LLM and executes tool calls until
+/// the LLM replies without tool calls (see [`stop_for_reply_without_tools`]
+/// for how that reply's finish reason maps to a [`StopReason`]) or
 /// `config.max_iterations` is reached.
 ///
 /// Appends all assistant and tool-result messages to `messages` in place so the
@@ -57,9 +84,9 @@ async fn call_llm_streaming(
 /// approval (both streaming and non-streaming LLM calls) so a caller (e.g.
 /// the ACP layer reacting to `session/cancel`) can abort a slow or hanging
 /// request — or a turn stuck waiting on user approval — rather than waiting
-/// for it to finish. The loop always returns `Ok`; [`AgentResult::stop_reason`]
-/// reports why it stopped (`EndTurn` / `MaxIterations` / `Cancelled` /
-/// `NoContent`) instead of callers having to reverse-engineer it.
+/// for it to finish. The loop returns `Ok` unless an LLM call fails;
+/// [`AgentResult::stop_reason`] reports why it stopped instead of callers
+/// having to reverse-engineer it.
 async fn run_agent_loop<F>(
     llm: &Arc<dyn LlmClient>,
     tool_executor: &Arc<dyn ToolExecutor>,
@@ -289,33 +316,27 @@ where
                 stop_reason = StopReason::Cancelled;
                 break 'turn;
             }
-        } else if let Some(content) = choice.message.text() {
+        } else {
             // LlmResponse chunks already fired per-token from the streaming select
             // loop above; just record the final text here.
-            final_response = content;
-
-            if choice.finish_reason == Some(FinishReason::Stop) {
-                if let Some(cb) = callback.as_mut() {
-                    cb(StreamEvent::Finished {
-                        final_response: final_response.clone(),
-                        iterations: iter_num,
-                    });
-                }
-
-                return Ok(AgentResult {
-                    final_response,
-                    iterations_used: iter_num,
-                    stop_reason: StopReason::EndTurn,
-                    context_usage,
-                });
+            let text = choice.message.text();
+            let has_text = text.is_some();
+            if let Some(content) = text {
+                final_response = content;
             }
-        } else {
-            tracing::warn!(
-                "Unexpected LLM response at iteration {}: no content or tool_calls",
-                iter_num
-            );
-            stop_reason = StopReason::NoContent;
-            break;
+            match stop_for_reply_without_tools(choice.finish_reason.as_ref(), has_text) {
+                None => continue,
+                Some(reason) => {
+                    if reason == StopReason::NoContent {
+                        tracing::warn!(
+                            "Unexpected LLM response at iteration {}: no content or tool_calls",
+                            iter_num
+                        );
+                    }
+                    stop_reason = reason;
+                    break;
+                }
+            }
         }
     }
 
@@ -1055,6 +1076,109 @@ mod tests {
         assert_eq!(result.final_response, "");
         assert_eq!(result.iterations_used, 1);
         assert_eq!(result.stop_reason, StopReason::NoContent);
+    }
+
+    fn choice_with(content: Vec<ContentBlock>, finish_reason: Option<FinishReason>) -> Choice {
+        Choice {
+            message: Message {
+                role: Role::Assistant,
+                content,
+            },
+            finish_reason,
+            usage: None,
+        }
+    }
+
+    // Regression test: only `FinishReason::Stop` used to end the turn; any
+    // other finish on a tool-free reply resent the history (ending in that
+    // assistant reply) until `max_iterations` ran out.
+    #[tokio::test]
+    async fn reply_without_tools_ends_turn_per_finish_reason() {
+        let text = || vec![ContentBlock::from("partial answer")];
+        let cases = [
+            (text(), Some(FinishReason::Stop), StopReason::EndTurn),
+            (text(), Some(FinishReason::MaxTokens), StopReason::MaxTokens),
+            (text(), Some(FinishReason::Refusal), StopReason::Refusal),
+            (
+                text(),
+                Some(FinishReason::Other("stop_sequence".into())),
+                StopReason::EndTurn,
+            ),
+            (text(), None, StopReason::EndTurn),
+            // A thinking model can spend the whole budget before emitting
+            // any text; that's truncation, not an empty reply.
+            (vec![], Some(FinishReason::MaxTokens), StopReason::MaxTokens),
+            (vec![], Some(FinishReason::Refusal), StopReason::Refusal),
+        ];
+
+        for (content, finish_reason, expected) in cases {
+            let has_text = !content.is_empty();
+            let llm = Arc::new(MockLlm::new(vec![choice_with(
+                content,
+                finish_reason.clone(),
+            )]));
+            let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));
+            let mut messages = vec![Message::user("hi")];
+
+            let result = run_agent_with_history(
+                llm.clone(),
+                executor,
+                &make_config(10),
+                &mut messages,
+                None,
+                &TurnContext {
+                    cancel: &CancellationToken::new(),
+                    permission_gate: &allow_all(),
+                    work_dir: std::path::Path::new("."),
+                    client_io: &NoClientIo,
+                },
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(result.stop_reason, expected, "{finish_reason:?}");
+            assert_eq!(
+                llm.call_count.load(Ordering::SeqCst),
+                1,
+                "{finish_reason:?} must not re-call the LLM"
+            );
+            if has_text {
+                assert_eq!(result.final_response, "partial answer");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn paused_reply_resumes_the_turn() {
+        let llm = Arc::new(MockLlm::new(vec![
+            choice_with(
+                vec![ContentBlock::from("working on it")],
+                Some(FinishReason::Paused),
+            ),
+            text_choice("done"),
+        ]));
+        let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));
+        let mut messages = vec![Message::user("hi")];
+
+        let result = run_agent_with_history(
+            llm.clone(),
+            executor,
+            &make_config(10),
+            &mut messages,
+            None,
+            &TurnContext {
+                cancel: &CancellationToken::new(),
+                permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+        assert_eq!(result.final_response, "done");
+        assert_eq!(llm.call_count.load(Ordering::SeqCst), 2);
     }
 
     struct HangingPermissionGate;

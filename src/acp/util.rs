@@ -309,6 +309,8 @@ pub(super) fn map_stop_reason(reason: CoreStopReason) -> StopReason {
     match reason {
         CoreStopReason::EndTurn => StopReason::EndTurn,
         CoreStopReason::MaxIterations => StopReason::MaxTurnRequests,
+        CoreStopReason::MaxTokens => StopReason::MaxTokens,
+        CoreStopReason::Refusal => StopReason::Refusal,
         CoreStopReason::Cancelled => StopReason::Cancelled,
         // ACP has no "the model returned nothing usable" variant; `EndTurn`
         // is the least misleading fit (it's not cancellation or exhaustion).
