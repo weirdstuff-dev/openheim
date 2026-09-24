@@ -5,6 +5,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
@@ -15,7 +16,7 @@ use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
 use super::ToolHandler;
-use super::args::{parse_args, require_str};
+use super::args::parse;
 use super::capabilities::{ApprovalScope, ToolCapabilities, ToolKindHint};
 
 /// Default hard wall-clock limit on a single command. Anything still running
@@ -273,6 +274,11 @@ async fn kill_and_reap(child: &mut tokio::process::Child) {
 /// sandboxing is required for that.
 pub struct ExecuteCommandTool;
 
+#[derive(Deserialize)]
+struct ExecuteCommandArgs {
+    command: String,
+}
+
 #[async_trait]
 impl ToolHandler for ExecuteCommandTool {
     fn definition(&self) -> Tool {
@@ -293,10 +299,9 @@ impl ToolHandler for ExecuteCommandTool {
     }
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
-        let args = parse_args(args)?;
-        let command = require_str(&args, "command")?;
+        let args: ExecuteCommandArgs = parse(args)?;
         run_command(
-            command,
+            &args.command,
             &RunCommandOptions {
                 cwd: Some(turn.work_dir),
                 cancel: Some(turn.cancel),
@@ -538,6 +543,14 @@ mod tests {
         assert!(
             gone,
             "grandchild `sleep 30` (pid {pid}) survived the group kill"
+        );
+    }
+
+    #[test]
+    fn args_struct_matches_schema() {
+        crate::tools::args::assert_args_match_schema::<ExecuteCommandArgs>(
+            &ExecuteCommandTool,
+            serde_json::json!({"command": "ls"}),
         );
     }
 }

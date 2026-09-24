@@ -32,12 +32,18 @@
 //!
 //! ```rust,no_run
 //! use async_trait::async_trait;
+//! use serde::Deserialize;
 //! use serde_json::json;
 //!
 //! struct GreetTool;
 //!
+//! #[derive(Deserialize)]
+//! struct GreetArgs {
+//!     name: String,
+//! }
+//!
 //! # use openheim::tools::ToolHandler;
-//! # use openheim::tools::args::{parse_args, require_str};
+//! # use openheim::tools::args::parse;
 //! # use openheim::core::models::Tool;
 //! # use openheim::core::turn::TurnContext;
 //! # use openheim::error::Result;
@@ -56,8 +62,7 @@
 //!     }
 //!
 //!     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
-//!         let args = parse_args(args)?;
-//!         let name = require_str(&args, "name")?;
+//!         let GreetArgs { name } = parse(args)?;
 //!         // `turn` carries the cancel token, the work directory, and the
 //!         // client I/O hook; see `TurnContext` for what to do with each.
 //!         Ok(format!("Hello, {name}! (from {})", turn.work_dir.display()))

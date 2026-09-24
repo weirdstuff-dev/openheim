@@ -4,6 +4,7 @@ use std::collections::BinaryHeap;
 use std::path::Path;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::json;
 use tokio::fs;
 
@@ -12,7 +13,7 @@ use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
 use super::ToolHandler;
-use super::args::parse_args;
+use super::args::parse;
 use super::capabilities::{ToolCapabilities, ToolKindHint};
 use super::sandbox::validate_path;
 
@@ -82,6 +83,12 @@ async fn list_dir(path: &Path) -> Result<String> {
 /// be inside the work directory.
 pub struct ListDirTool;
 
+#[derive(Deserialize)]
+struct ListDirArgs {
+    #[serde(default)]
+    path: Option<String>,
+}
+
 #[async_trait]
 impl ToolHandler for ListDirTool {
     fn definition(&self) -> Tool {
@@ -101,9 +108,8 @@ impl ToolHandler for ListDirTool {
     }
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
-        let args = parse_args(args)?;
-        let path = args["path"].as_str().unwrap_or(".");
-        let validated = validate_path(path, turn.work_dir)?;
+        let args: ListDirArgs = parse(args)?;
+        let validated = validate_path(args.path.as_deref().unwrap_or("."), turn.work_dir)?;
         list_dir(&validated).await
     }
 
@@ -217,6 +223,14 @@ mod tests {
         assert!(
             result.contains("5 more entries omitted"),
             "unexpected output: {result}"
+        );
+    }
+
+    #[test]
+    fn args_struct_matches_schema() {
+        crate::tools::args::assert_args_match_schema::<ListDirArgs>(
+            &ListDirTool,
+            serde_json::json!({"path": "src"}),
         );
     }
 }

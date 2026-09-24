@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::config::{AgentConfig, AppConfig, client_for_config};
@@ -22,14 +23,33 @@ use crate::core::agent::run_agent_with_history;
 use crate::core::llm::LlmClient;
 use crate::core::models::{Message, StopReason, Tool};
 use crate::core::turn::TurnContext;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::memory::PromptBuilder;
 use crate::subagents::AgentProfile;
 
-use super::args::{parse_args, require_str};
+use super::args::parse;
 use super::capabilities::ToolCapabilities;
 use super::scoped_executor::ScopedExecutor;
 use super::{ToolExecutor, ToolHandler};
+
+/// `delegate_task`'s arguments; exactly one of `agent`/`system_prompt` must
+/// be set (checked in `execute`, which answers the LLM with how to fix it).
+#[derive(Deserialize)]
+struct DelegateArgs {
+    task: String,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    system_prompt: Option<String>,
+    #[serde(default)]
+    tools: Option<Vec<String>>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    max_iterations: Option<usize>,
+}
 
 /// Name under which [`DelegateTool`] is exposed to the orchestrating LLM.
 pub const DELEGATE_TOOL_NAME: &str = "delegate_task";
@@ -224,10 +244,9 @@ impl ToolHandler for DelegateTool {
     /// the same approval flow, e.g. `session/request_permission`), and the
     /// subagent is confined to the same work directory and client I/O.
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
-        let v = parse_args(args)?;
-        let task = require_str(&v, "task")?;
+        let args: DelegateArgs = parse(args)?;
 
-        let profile = match (v["agent"].as_str(), v["system_prompt"].as_str()) {
+        let profile = match (args.agent.as_deref(), args.system_prompt.as_deref()) {
             (Some(_), Some(_)) => {
                 return Ok(
                     "Provide either 'agent' (a pre-configured subagent) or 'system_prompt' \
@@ -250,7 +269,7 @@ impl ToolHandler for DelegateTool {
                     ));
                 }
             },
-            (None, Some(system_prompt)) => inline_profile(system_prompt, &v)?,
+            (None, Some(system_prompt)) => inline_profile(system_prompt, &args),
             (None, None) => {
                 return Ok(
                     "Missing subagent: provide 'agent' (a pre-configured subagent) or \
@@ -268,7 +287,7 @@ impl ToolHandler for DelegateTool {
         prompt_builder.set_system(profile.system_prompt.clone());
 
         // Fresh, isolated history — the subagent only ever sees its own task.
-        let mut messages = vec![Message::user(task.to_string())];
+        let mut messages = vec![Message::user(args.task.clone())];
 
         let result = run_agent_with_history(
             llm,
@@ -313,35 +332,16 @@ impl ToolHandler for DelegateTool {
 /// same [`DelegateTool::resolve_runtime`]/[`DelegateTool::build_executor`] path
 /// as named profiles, inline subagents get the identical sandbox, permission
 /// gate, and no-recursion guarantees.
-fn inline_profile(system_prompt: &str, v: &serde_json::Value) -> Result<AgentProfile> {
-    let tools = match &v["tools"] {
-        serde_json::Value::Null => None,
-        serde_json::Value::Array(items) => {
-            let mut names = Vec::with_capacity(items.len());
-            for item in items {
-                let name = item.as_str().ok_or_else(|| {
-                    Error::ParseError("'tools' must be an array of strings".to_string())
-                })?;
-                names.push(name.to_string());
-            }
-            Some(names)
-        }
-        _ => {
-            return Err(Error::ParseError(
-                "'tools' must be an array of strings".to_string(),
-            ));
-        }
-    };
-
-    Ok(AgentProfile {
+fn inline_profile(system_prompt: &str, args: &DelegateArgs) -> AgentProfile {
+    AgentProfile {
         name: "inline".to_string(),
         description: String::new(),
-        model: v["model"].as_str().map(str::to_string),
-        provider: v["provider"].as_str().map(str::to_string),
-        tools,
-        max_iterations: v["max_iterations"].as_u64().map(|n| n as usize),
+        model: args.model.clone(),
+        provider: args.provider.clone(),
+        tools: args.tools.clone(),
+        max_iterations: args.max_iterations,
         system_prompt: system_prompt.to_string(),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -350,6 +350,7 @@ mod tests {
     use crate::core::client_io::NoClientIo;
     use crate::core::models::{Choice, ContentBlock, FinishReason, Role};
     use crate::core::permission::{AllowAll, PermissionDecision, PermissionGate};
+    use crate::error::Error;
     use crate::tools::SystemToolExecutor;
     use crate::tools::test_support::TurnHarness;
     use std::collections::BTreeMap;
@@ -743,13 +744,17 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("array of strings"));
+        assert!(
+            err.to_string().contains("failed to parse arguments"),
+            "{err}"
+        );
     }
 
     #[test]
     fn inline_profile_maps_all_optional_fields() {
-        let v: serde_json::Value = serde_json::from_str(
+        let args: DelegateArgs = parse(
             r#"{
+                "task": "go",
                 "tools": ["read_file"],
                 "model": "claude-haiku-4-5",
                 "provider": "anthropic",
@@ -758,7 +763,7 @@ mod tests {
         )
         .unwrap();
 
-        let profile = inline_profile("You are X.", &v).unwrap();
+        let profile = inline_profile("You are X.", &args);
         assert_eq!(profile.name, "inline");
         assert_eq!(profile.system_prompt, "You are X.");
         assert_eq!(profile.tools, Some(vec!["read_file".to_string()]));
@@ -790,5 +795,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, "done");
+    }
+
+    #[test]
+    fn args_struct_matches_schema() {
+        let llm = Arc::new(MockLlm::new(vec![]));
+        crate::tools::args::assert_args_match_schema::<DelegateArgs>(
+            &make_tool(vec![sample_profile("reviewer", "desc")], llm),
+            serde_json::json!({
+                "task": "go",
+                "agent": "reviewer",
+                "system_prompt": "You are X.",
+                "tools": ["read_file"],
+                "model": "m",
+                "provider": "p",
+                "max_iterations": 3
+            }),
+        );
     }
 }

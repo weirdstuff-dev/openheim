@@ -149,22 +149,11 @@ pub(crate) fn replay_history_messages<F>(
                     )));
                 }
                 for tc in msg.tool_calls() {
-                    let raw_input = match serde_json::from_str(&tc.arguments) {
-                        Ok(v) => Some(v),
-                        Err(e) => {
-                            tracing::warn!(
-                                tool_call_id = %tc.id,
-                                tool_name = %tc.name,
-                                "failed to parse tool call arguments: {e}"
-                            );
-                            None
-                        }
-                    };
                     on_update(SessionUpdate::ToolCall(
                         AcpToolCall::new(tc.id.clone(), &tc.name)
                             .kind(tool_kind_for(&tc.name, executor))
                             .status(ToolCallStatus::InProgress)
-                            .raw_input(raw_input),
+                            .raw_input(raw_input(&tc.id, &tc.name, &tc.arguments)),
                     ));
                 }
             }
@@ -247,6 +236,28 @@ mod tool_kind_tests {
     }
 }
 
+/// A tool call's JSON arguments as ACP `raw_input`. Malformed arguments are
+/// the model's mistake, and the tool reports them back to it, so here they
+/// are logged and shown as no input rather than failing the update. The one
+/// place ACP decodes arguments, so every update applies the same policy.
+pub(super) fn raw_input(
+    tool_call_id: &str,
+    tool_name: &str,
+    arguments: &str,
+) -> Option<serde_json::Value> {
+    match serde_json::from_str(arguments) {
+        Ok(value) => Some(value),
+        Err(e) => {
+            tracing::warn!(
+                tool_call_id,
+                tool_name,
+                "failed to parse tool call arguments: {e}"
+            );
+            None
+        }
+    }
+}
+
 /// Maps one core [`StreamEvent`] from a live turn onto the [`SessionUpdate`]
 /// it corresponds to, if any. `IterationStart`, `Usage`, `Finished`, and
 /// `MessageAppended` have no ACP wire equivalent — they're `AgentState`-
@@ -271,7 +282,7 @@ pub(crate) fn stream_event_to_session_update(
             // Pending, not InProgress: the permission gate (invoked by the
             // agent loop right after this event) hasn't authorized
             // execution yet at this point.
-            let raw_input = serde_json::from_str(&arguments).ok();
+            let raw_input = raw_input(&id, &tool_name, &arguments);
             Some(SessionUpdate::ToolCall(
                 AcpToolCall::new(id, &*tool_name)
                     .kind(tool_kind_for(&tool_name, executor))

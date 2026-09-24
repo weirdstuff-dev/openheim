@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::json;
 use tokio::fs;
 
@@ -11,7 +12,7 @@ use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
 use super::ToolHandler;
-use super::args::{parse_args, require_str};
+use super::args::parse;
 use super::capabilities::{ToolCapabilities, ToolKindHint};
 use super::sandbox::validate_path;
 
@@ -41,6 +42,11 @@ pub(crate) async fn read_text(path: &Path, turn: &TurnContext<'_>) -> Result<Str
 /// not exist, cannot be read, or is not valid UTF-8.
 pub struct ReadFileTool;
 
+#[derive(Deserialize)]
+struct ReadFileArgs {
+    path: String,
+}
+
 #[async_trait]
 impl ToolHandler for ReadFileTool {
     fn definition(&self) -> Tool {
@@ -61,9 +67,8 @@ impl ToolHandler for ReadFileTool {
     }
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
-        let args = parse_args(args)?;
-        let path = require_str(&args, "path")?;
-        let validated = validate_path(path, turn.work_dir)?;
+        let args: ReadFileArgs = parse(args)?;
+        let validated = validate_path(&args.path, turn.work_dir)?;
         read_text(&validated, turn).await
     }
 
@@ -201,5 +206,13 @@ mod tests {
         .await
         .expect("cancellation should abort the hanging client_io call");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn args_struct_matches_schema() {
+        crate::tools::args::assert_args_match_schema::<ReadFileArgs>(
+            &ReadFileTool,
+            serde_json::json!({"path": "a.txt"}),
+        );
     }
 }

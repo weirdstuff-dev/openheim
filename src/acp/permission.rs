@@ -15,7 +15,7 @@ use crate::{
     tools::ToolExecutor,
 };
 
-use super::util::tool_kind_for;
+use super::util::{raw_input, tool_kind_for};
 
 /// Lives here (not in `core`) because it depends on the live client connection.
 /// Only asks: remembering `*Always` answers is `RememberingGate`'s job, which
@@ -35,14 +35,13 @@ impl PermissionGate for AcpPermissionGate {
         tool_name: &str,
         arguments: &str,
     ) -> PermissionDecision {
-        let raw_input = serde_json::from_str(arguments).ok();
         let tool_call = ToolCallUpdate::new(
             tool_call_id.to_string(),
             ToolCallUpdateFields::new()
                 .title(tool_name)
                 .kind(tool_kind_for(tool_name, self.executor.as_ref()))
                 .status(ToolCallStatus::Pending)
-                .raw_input(raw_input),
+                .raw_input(raw_input(tool_call_id, tool_name, arguments)),
         );
         let options = vec![
             PermissionOption::new("allow_once", "Allow Once", PermissionOptionKind::AllowOnce),
