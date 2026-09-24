@@ -129,7 +129,7 @@ impl Default for MemoryConfig {
 
 /// Resolved embeddings endpoint, assembled from a [`MemoryConfig`] plus the
 /// provider entry it names (see `AppConfig::resolve_embedding`).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EmbeddingConfig {
     pub provider_name: String,
     /// Wire protocol, i.e. which embeddings client gets built. Never
@@ -141,9 +141,33 @@ pub struct EmbeddingConfig {
     pub timeout_secs: u64,
 }
 
+/// How a secret field shows up in `Debug` output: that it's set, not its
+/// value. The configs holding secrets implement `Debug` by hand with this so
+/// a stray `{:?}` in a log line can't leak a key.
+fn redacted_if_set(secret: &str) -> &'static str {
+    if secret.is_empty() {
+        ""
+    } else {
+        super::public::REDACTED
+    }
+}
+
+impl std::fmt::Debug for EmbeddingConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmbeddingConfig")
+            .field("provider_name", &self.provider_name)
+            .field("kind", &self.kind)
+            .field("api_base", &super::public::scrub_url(&self.api_base))
+            .field("api_key", &redacted_if_set(&self.api_key))
+            .field("model", &self.model)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
+}
+
 /// Configuration for a single MCP server connection.
 /// The map key in `[mcp_servers.<name>]` is used as the server name and tool-name prefix.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Binary to spawn for stdio transport (e.g. `"npx"`, `"uvx"`).
     pub command: Option<String>,
@@ -161,6 +185,25 @@ pub struct McpServerConfig {
     /// server actually consumes (headers, not process env vars).
     #[serde(default)]
     pub headers: HashMap<String, String>,
+}
+
+/// `args` often carry tokens (`--api-key …`), and `env`/`headers` values
+/// are credentials, so only their count or keys are shown.
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn keys(map: &HashMap<String, String>) -> Vec<&String> {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            keys
+        }
+        f.debug_struct("McpServerConfig")
+            .field("command", &self.command)
+            .field("args", &format!("<{} redacted>", self.args.len()))
+            .field("env", &keys(&self.env))
+            .field("url", &self.url.as_deref().map(super::public::scrub_url))
+            .field("headers", &keys(&self.headers))
+            .finish()
+    }
 }
 
 fn default_max_iterations() -> usize {
@@ -235,7 +278,7 @@ impl ProviderKind {
 }
 
 /// Per-provider configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     /// Wire protocol for this provider. Optional: inferred from the
     /// provider's name when unset (see [`ProviderKind::infer_from_name`]),
@@ -262,6 +305,22 @@ pub struct ProviderConfig {
     /// per-model granularity.
     #[serde(default)]
     pub thinking: Option<ThinkingMode>,
+}
+
+impl std::fmt::Debug for ProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderConfig")
+            .field("kind", &self.kind)
+            .field("api_base", &super::public::scrub_url(&self.api_base))
+            .field("default_model", &self.default_model)
+            .field("models", &self.models)
+            .field("env_var", &self.env_var)
+            .field("api_key", &self.api_key.as_deref().map(redacted_if_set))
+            .field("timeout_secs", &self.timeout_secs)
+            .field("max_tokens", &self.max_tokens)
+            .field("thinking", &self.thinking)
+            .finish()
+    }
 }
 
 impl ProviderConfig {
@@ -302,7 +361,7 @@ impl ProviderConfig {
 }
 
 /// Runtime configuration passed to agent/LLM code
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     /// The `[providers.<name>]` key this config was resolved from; used for
     /// display, persistence, and model-switch lookups — never to pick a
@@ -323,6 +382,22 @@ pub struct AgentConfig {
     /// [`ProviderConfig::resolve_thinking`].
     #[serde(default)]
     pub thinking: bool,
+}
+
+impl std::fmt::Debug for AgentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentConfig")
+            .field("provider_name", &self.provider_name)
+            .field("kind", &self.kind)
+            .field("api_base", &super::public::scrub_url(&self.api_base))
+            .field("api_key", &redacted_if_set(&self.api_key))
+            .field("model", &self.model)
+            .field("max_iterations", &self.max_iterations)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("max_tokens", &self.max_tokens)
+            .field("thinking", &self.thinking)
+            .finish()
+    }
 }
 
 /// The one source of truth for the request-timeout default; every path that
@@ -550,5 +625,56 @@ mod tests {
         let memory = bare.memory.unwrap();
         assert!(memory.embedding_provider.is_none());
         assert_eq!(memory.top_k, 5);
+    }
+
+    #[test]
+    fn debug_output_never_contains_secrets() {
+        let app: AppConfig = toml::from_str(
+            r#"
+            default_provider = "openai"
+            [providers.openai]
+            api_base = "https://user:pass-secret@api.example.com/v1?key=query-secret"
+            default_model = "m"
+            models = ["m"]
+            api_key = "sk-key-secret"
+
+            [mcp_servers.demo]
+            command = "npx"
+            args = ["--token", "arg-secret"]
+            env = { TOKEN = "env-secret" }
+
+            [mcp_servers.remote]
+            url = "https://mcp.example.com/?token=url-secret"
+            headers = { Authorization = "Bearer header-secret" }
+            "#,
+        )
+        .unwrap();
+        let agent = app.resolve(None).unwrap();
+        let embedding = EmbeddingConfig {
+            provider_name: "openai".into(),
+            kind: ProviderKind::OpenAi,
+            api_base: "https://api.example.com".into(),
+            api_key: "sk-embed-secret".into(),
+            model: "m".into(),
+            timeout_secs: 10,
+        };
+
+        let debug = format!("{app:?}\n{agent:?}\n{embedding:?}");
+        for secret in [
+            "pass-secret",
+            "query-secret",
+            "sk-key-secret",
+            "arg-secret",
+            "env-secret",
+            "url-secret",
+            "header-secret",
+            "sk-embed-secret",
+        ] {
+            assert!(!debug.contains(secret), "{secret} leaked:\n{debug}");
+        }
+        // Still useful for debugging: the non-secret parts are there.
+        assert!(debug.contains("api.example.com"), "{debug}");
+        assert!(debug.contains("TOKEN"), "{debug}");
+        assert!(debug.contains("<redacted>"), "{debug}");
     }
 }

@@ -13,7 +13,7 @@ use serde::Serialize;
 use super::types::{AppConfig, McpServerConfig, ProviderConfig, ProviderKind};
 
 /// Placeholder for a value that exists but isn't shown.
-const REDACTED: &str = "<redacted>";
+pub(super) const REDACTED: &str = "<redacted>";
 
 /// Public view of [`AppConfig`]. See the module docs for why it's an
 /// allow-list.
@@ -138,7 +138,7 @@ fn public_mcp_server(s: &McpServerConfig) -> PublicMcpServerConfig {
 /// `url` without userinfo, query string, or fragment, the parts where
 /// credentials end up (`https://user:pass@host`, `?api_key=…`). Anything that
 /// doesn't parse as a URL is replaced outright rather than guessed at.
-fn scrub_url(url: &str) -> String {
+pub(super) fn scrub_url(url: &str) -> String {
     let Ok(mut parsed) = reqwest::Url::parse(url) else {
         return REDACTED.to_string();
     };
