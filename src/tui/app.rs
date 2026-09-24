@@ -764,6 +764,27 @@ mod tests {
         assert_eq!(app.input.text(), "y");
     }
 
+    // Regression test (PR #61 review): pruning a stale request *behind* the
+    // prompt on screen reset its highlight to "Allow Once", so after the user
+    // moved to "Reject Once", Enter allowed the call anyway.
+    #[test]
+    fn highlight_survives_a_stale_request_behind_the_prompt() {
+        let mut app = test_app();
+        let (front, front_rx) = permission_request();
+        let (behind, behind_rx) = permission_request();
+        app.handle_permission_request(front);
+        app.handle_permission_request(behind);
+
+        // Allow Once → Allow Always → Reject Once.
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Down));
+        drop(behind_rx); // the request behind the prompt goes stale
+        app.permissions.prune_stale(); // as the next frame's draw would
+        app.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(front_rx.blocking_recv(), Ok(PermissionDecision::RejectOnce));
+    }
+
     #[test]
     fn answering_a_prompt_sends_the_decision_and_shows_the_next() {
         let mut app = test_app();

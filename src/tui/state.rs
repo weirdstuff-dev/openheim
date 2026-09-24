@@ -295,12 +295,18 @@ impl PermissionQueue {
 
     /// Drops requests nobody is waiting on any more (the agent task gave up,
     /// e.g. because the turn was cancelled) so a stale prompt isn't left on
-    /// screen.
+    /// screen. The highlight resets only if the prompt on screen was one of
+    /// them: this runs every frame, and moving the user's highlight (say,
+    /// off "Reject") because a request *behind* it expired would make the
+    /// next Enter do something they didn't choose.
     pub(super) fn prune_stale(&mut self) {
-        let before = self.pending.len();
+        let front_is_stale = self
+            .pending
+            .front()
+            .is_some_and(|request| request.respond_to.is_closed());
         self.pending
             .retain(|request| !request.respond_to.is_closed());
-        if self.pending.len() != before {
+        if front_is_stale {
             self.selected = 0;
         }
     }
