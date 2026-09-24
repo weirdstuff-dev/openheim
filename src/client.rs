@@ -572,16 +572,7 @@ impl OpenheimBuilder {
     pub async fn build(self) -> Result<OpenheimClient> {
         let (agent_config, mut app_config) =
             if self.provider.is_some() || self.api_key.is_some() || self.api_base.is_some() {
-                build_programmatic(
-                    self.provider,
-                    self.api_key,
-                    self.model,
-                    self.api_base,
-                    self.max_iterations,
-                    self.timeout_secs,
-                    self.max_tokens,
-                    self.default_skills.clone(),
-                )?
+                self.programmatic_config()?
             } else {
                 let app_config = match self.config_path {
                     Some(ref path) => load_config_from(path)?,
@@ -650,61 +641,65 @@ impl OpenheimBuilder {
             Arc::new(AgentState::new(agent_config, app_config, paths, memory, self.tools).await?);
         Ok(OpenheimClient { state })
     }
-}
 
-#[allow(clippy::too_many_arguments)]
-fn build_programmatic(
-    provider: Option<String>,
-    api_key: Option<String>,
-    model: Option<String>,
-    api_base: Option<String>,
-    max_iterations: Option<usize>,
-    timeout_secs: Option<u64>,
-    max_tokens: Option<u32>,
-    default_skills: Vec<String>,
-) -> Result<(AgentConfig, AppConfig)> {
-    let provider = provider.unwrap_or_else(|| "openai".to_string());
-    let (default_api_base, default_model) = crate::config::builtin_provider_defaults(&provider);
-    let api_base = api_base.unwrap_or_else(|| default_api_base.to_string());
-    let model = model.unwrap_or_else(|| default_model.to_string());
-    let api_key = api_key.unwrap_or_default();
-    let max_iter = max_iterations.unwrap_or(10);
-    let timeout = timeout_secs.unwrap_or_else(crate::config::default_timeout_secs);
+    /// The config for programmatic mode (no config file): a single provider
+    /// built from this builder's `provider`/`api_key`/`model`/`api_base`,
+    /// with built-in defaults for whatever is unset.
+    fn programmatic_config(&self) -> Result<(AgentConfig, AppConfig)> {
+        let provider = self
+            .provider
+            .clone()
+            .unwrap_or_else(|| "openai".to_string());
+        let (default_api_base, default_model) = crate::config::builtin_provider_defaults(&provider);
+        let api_base = self
+            .api_base
+            .clone()
+            .unwrap_or_else(|| default_api_base.to_string());
+        let model = self
+            .model
+            .clone()
+            .unwrap_or_else(|| default_model.to_string());
+        let api_key = self.api_key.clone().unwrap_or_default();
+        let max_iter = self.max_iterations.unwrap_or(10);
+        let timeout = self
+            .timeout_secs
+            .unwrap_or_else(crate::config::default_timeout_secs);
 
-    let mut providers = BTreeMap::new();
-    providers.insert(
-        provider.clone(),
-        ProviderConfig {
-            kind: None,
-            api_base,
-            default_model: model.clone(),
-            models: vec![model],
-            env_var: None,
-            api_key: Some(api_key),
-            timeout_secs: Some(timeout),
-            max_tokens,
-            thinking: None,
-        },
-    );
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            provider.clone(),
+            ProviderConfig {
+                kind: None,
+                api_base,
+                default_model: model.clone(),
+                models: vec![model],
+                env_var: None,
+                api_key: Some(api_key),
+                timeout_secs: Some(timeout),
+                max_tokens: self.max_tokens,
+                thinking: None,
+            },
+        );
 
-    let app_config = AppConfig {
-        default_provider: provider.clone(),
-        max_iterations: max_iter,
-        tui: TuiConfig::default(),
-        providers,
-        mcp_servers: BTreeMap::new(),
-        default_skills,
-        work_dir: None,
-        allow_shell: false,
-        memory: None,
-        data_dir: None,
-    };
+        let app_config = AppConfig {
+            default_provider: provider.clone(),
+            max_iterations: max_iter,
+            tui: TuiConfig::default(),
+            providers,
+            mcp_servers: BTreeMap::new(),
+            default_skills: self.default_skills.clone(),
+            work_dir: None,
+            allow_shell: false,
+            memory: None,
+            data_dir: None,
+        };
 
-    // Funnels through the same `AppConfig::agent_config` assembly every
-    // file-based `resolve()` path uses, instead of hand-building a second
-    // `AgentConfig` with the same field set alongside it.
-    let agent_config = app_config.resolve_provider_default(&provider)?;
-    Ok((agent_config, app_config))
+        // Funnels through the same `AppConfig::agent_config` assembly every
+        // file-based `resolve()` path uses, instead of hand-building a second
+        // `AgentConfig` with the same field set alongside it.
+        let agent_config = app_config.resolve_provider_default(&provider)?;
+        Ok((agent_config, app_config))
+    }
 }
 
 #[cfg(test)]

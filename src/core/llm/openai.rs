@@ -243,9 +243,8 @@ struct OpenAiStreamFunctionDelta {
 }
 
 /// Maps OpenAI's `finish_reason` vocabulary onto the provider-agnostic
-/// [`FinishReason`]; anything without a known equivalent (e.g.
-/// `content_filter`, the legacy `function_call`) passes through as
-/// [`FinishReason::Other`].
+/// [`FinishReason`]; anything without a known equivalent (e.g. the legacy
+/// `function_call`) passes through as [`FinishReason::Other`].
 fn map_finish_reason(reason: &str) -> FinishReason {
     match reason {
         "stop" => FinishReason::Stop,
@@ -406,247 +405,74 @@ fn convert_tools(tools: &[Tool]) -> Vec<OpenAiTool> {
         .collect()
 }
 
-pub(super) async fn send_openai_style(
-    client: &ReqwestClient,
-    api_base: &str,
-    api_key: &str,
-    model: &str,
-    max_tokens: Option<u32>,
-    messages: &[Message],
-    tools: &[Tool],
-) -> Result<Choice> {
-    let request = OpenAiRequest {
-        model: model.to_string(),
-        messages: convert_messages(messages),
-        tools: convert_tools(tools),
-        max_tokens,
-    };
-
-    let endpoint = format!("{}/chat/completions", api_base.trim_end_matches('/'));
-    let auth = format!("Bearer {api_key}");
-
-    let response = super::http::post_json(
-        client,
-        &endpoint,
-        &[("Authorization", auth.as_str())],
-        &request,
-    )
-    .await?;
-
-    let envelope: OpenAiResponseEnvelope = response.json().await.map_err(Error::ReqwestError)?;
-    let usage = envelope.usage.map(Usage::from);
-
-    let choice = envelope
-        .choices
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::ApiError("No response from LLM".to_string()))?;
-
-    let tool_uses = choice
-        .message
-        .tool_calls
-        .unwrap_or_default()
-        .into_iter()
-        .map(|tc| ContentBlock::ToolUse {
-            id: tc.id,
-            name: tc.function.name,
-            arguments: tc.function.arguments,
-        })
-        .collect();
-    let content = assemble_content(
-        choice.message.reasoning_content,
-        choice.message.content,
-        tool_uses,
-    );
-
-    Ok(Choice {
-        message: Message {
-            role: Role::Assistant,
-            content,
-        },
-        finish_reason: choice.finish_reason.as_deref().map(map_finish_reason),
-        usage,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn send_openai_style_streaming(
-    client: &ReqwestClient,
-    api_base: &str,
-    api_key: &str,
-    model: &str,
-    max_tokens: Option<u32>,
-    messages: &[Message],
-    tools: &[Tool],
-    chunk_tx: mpsc::UnboundedSender<LlmChunk>,
-) -> Result<Choice> {
-    let request = OpenAiRequest {
-        model: model.to_string(),
-        messages: convert_messages(messages),
-        tools: convert_tools(tools),
-        max_tokens,
-    };
-
-    let mut body = serde_json::to_value(&request).map_err(|e| Error::ParseError(e.to_string()))?;
-    body["stream"] = serde_json::Value::Bool(true);
-    // Asks OpenAI (and most OpenAI-compatible backends, which pass unknown
-    // fields through) to emit one extra chunk at the end of the stream
-    // carrying the same `usage` object the non-streaming response has.
-    // Backends that don't understand it just ignore the field — but a few
-    // OpenAI-compatible endpoints validate the request body strictly and
-    // reject the unknown field with a 400, so that specific case is retried
-    // once without it below rather than failing the whole call.
-    body["stream_options"] = serde_json::json!({ "include_usage": true });
-
-    let endpoint = format!("{}/chat/completions", api_base.trim_end_matches('/'));
-    let auth = format!("Bearer {api_key}");
-    let headers = [("Authorization", auth.as_str())];
-
-    let mut response = match super::http::post_json(client, &endpoint, &headers, &body).await {
-        Ok(response) => response,
-        // Only a 400 that actually complains about `stream_options` is
-        // retried without it — any other 400 (bad request, context too
-        // long, …) would otherwise be retried for nothing, doubling its
-        // cost, and return unchanged.
-        Err(Error::HttpError {
-            status,
-            body: err_body,
-        }) if should_retry_without_stream_options(status, &err_body) => {
-            let mut retry_body = body.clone();
-            if let Some(obj) = retry_body.as_object_mut() {
-                obj.remove("stream_options");
-            }
-            super::http::post_json(client, &endpoint, &headers, &retry_body).await?
-        }
-        Err(e) => return Err(e),
-    };
-
-    struct ToolCallAcc {
-        id: String,
-        name: String,
-        args: String,
-    }
-
-    let mut text_buf = String::new();
-    // Accumulated alongside `text_buf` so the final message persists the
-    // reasoning (the live chunks are UI-only); without this, thinking
-    // displayed during a turn vanished on reload.
-    let mut reasoning_buf = String::new();
-    let mut tool_acc: Vec<ToolCallAcc> = Vec::new();
-    let mut finish_reason: Option<FinishReason> = None;
-    let mut usage: Option<Usage> = None;
-    let mut decoder = SseDecoder::new();
-    let mut done = false;
-
-    while !done {
-        let Some(bytes) = response.chunk().await.map_err(Error::ReqwestError)? else {
-            break;
-        };
-        decoder.feed(&bytes);
-
-        while let Some(data) = decoder.next_payload() {
-            if data == "[DONE]" {
-                done = true;
-                break;
-            }
-
-            let Ok(event) = serde_json::from_str::<OpenAiStreamChunk>(&data) else {
-                continue;
-            };
-
-            // The `include_usage` final chunk carries `usage` alongside an
-            // empty `choices` array, so this is checked independently of the
-            // choice fields below rather than folded into that branch.
-            if let Some(u) = event.usage {
-                usage = Some(Usage::from(u));
-            }
-
-            let Some(choice) = event.choices.into_iter().next() else {
-                continue;
-            };
-
-            if let Some(fr) = choice.finish_reason {
-                finish_reason = Some(map_finish_reason(&fr));
-            }
-
-            if let Some(reasoning) = choice.delta.reasoning_content
-                && !reasoning.is_empty()
-            {
-                reasoning_buf.push_str(&reasoning);
-                let _ = chunk_tx.send(LlmChunk::Thinking(reasoning));
-            }
-
-            if let Some(content) = choice.delta.content
-                && !content.is_empty()
-            {
-                text_buf.push_str(&content);
-                let _ = chunk_tx.send(LlmChunk::Text(content));
-            }
-
-            if let Some(tcs) = choice.delta.tool_calls {
-                for tc in tcs {
-                    let idx = tc.index;
-                    while tool_acc.len() <= idx {
-                        tool_acc.push(ToolCallAcc {
-                            id: String::new(),
-                            name: String::new(),
-                            args: String::new(),
-                        });
-                    }
-                    if let Some(id) = tc.id {
-                        tool_acc[idx].id = id;
-                    }
-                    if let Some(function) = tc.function {
-                        if let Some(name) = function.name {
-                            tool_acc[idx].name.push_str(&name);
-                        }
-                        if let Some(args) = function.arguments {
-                            tool_acc[idx].args.push_str(&args);
-                        }
-                    }
-                }
-            }
+impl OpenAiClient {
+    fn request(&self, messages: &[Message], tools: &[Tool]) -> OpenAiRequest {
+        OpenAiRequest {
+            model: self.model.clone(),
+            messages: convert_messages(messages),
+            tools: convert_tools(tools),
+            max_tokens: self.max_tokens,
         }
     }
 
-    let tool_uses = tool_acc
-        .into_iter()
-        .enumerate()
-        .filter(|(_, tc)| !tc.name.is_empty())
-        .map(|(i, tc)| ContentBlock::ToolUse {
-            id: if tc.id.is_empty() {
-                format!("call_{i}")
-            } else {
-                tc.id
-            },
-            name: tc.name,
-            arguments: tc.args,
-        })
-        .collect();
+    fn endpoint(&self) -> String {
+        format!("{}/chat/completions", self.api_base.trim_end_matches('/'))
+    }
 
-    Ok(Choice {
-        message: Message {
-            role: Role::Assistant,
-            content: assemble_content(Some(reasoning_buf), Some(text_buf), tool_uses),
-        },
-        finish_reason,
-        usage,
-    })
+    fn auth_header(&self) -> String {
+        format!("Bearer {}", self.api_key)
+    }
 }
 
 #[async_trait]
 impl LlmClient for OpenAiClient {
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
-        send_openai_style(
+        let request = self.request(messages, tools);
+        let auth = self.auth_header();
+
+        let response = super::http::post_json(
             &self.client,
-            &self.api_base,
-            &self.api_key,
-            &self.model,
-            self.max_tokens,
-            messages,
-            tools,
+            &self.endpoint(),
+            &[("Authorization", auth.as_str())],
+            &request,
         )
-        .await
+        .await?;
+
+        let envelope: OpenAiResponseEnvelope =
+            response.json().await.map_err(Error::ReqwestError)?;
+        let usage = envelope.usage.map(Usage::from);
+
+        let choice = envelope
+            .choices
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::ApiError("No response from LLM".to_string()))?;
+
+        let tool_uses = choice
+            .message
+            .tool_calls
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tc| ContentBlock::ToolUse {
+                id: tc.id,
+                name: tc.function.name,
+                arguments: tc.function.arguments,
+            })
+            .collect();
+        let content = assemble_content(
+            choice.message.reasoning_content,
+            choice.message.content,
+            tool_uses,
+        );
+
+        Ok(Choice {
+            message: Message {
+                role: Role::Assistant,
+                content,
+            },
+            finish_reason: choice.finish_reason.as_deref().map(map_finish_reason),
+            usage,
+        })
     }
 
     async fn send_streaming(
@@ -655,17 +481,155 @@ impl LlmClient for OpenAiClient {
         tools: &[Tool],
         chunk_tx: mpsc::UnboundedSender<LlmChunk>,
     ) -> Result<Choice> {
-        send_openai_style_streaming(
-            &self.client,
-            &self.api_base,
-            &self.api_key,
-            &self.model,
-            self.max_tokens,
-            messages,
-            tools,
-            chunk_tx,
-        )
-        .await
+        let request = self.request(messages, tools);
+
+        let mut body =
+            serde_json::to_value(&request).map_err(|e| Error::ParseError(e.to_string()))?;
+        body["stream"] = serde_json::Value::Bool(true);
+        // Asks OpenAI (and most OpenAI-compatible backends, which pass unknown
+        // fields through) to emit one extra chunk at the end of the stream
+        // carrying the same `usage` object the non-streaming response has.
+        // Backends that don't understand it just ignore the field — but a few
+        // OpenAI-compatible endpoints validate the request body strictly and
+        // reject the unknown field with a 400, so that specific case is retried
+        // once without it below rather than failing the whole call.
+        body["stream_options"] = serde_json::json!({ "include_usage": true });
+
+        let endpoint = self.endpoint();
+        let auth = self.auth_header();
+        let headers = [("Authorization", auth.as_str())];
+
+        let mut response =
+            match super::http::post_json(&self.client, &endpoint, &headers, &body).await {
+                Ok(response) => response,
+                // Only a 400 that actually complains about `stream_options` is
+                // retried without it — any other 400 (bad request, context too
+                // long, …) would otherwise be retried for nothing, doubling its
+                // cost, and return unchanged.
+                Err(Error::HttpError {
+                    status,
+                    body: err_body,
+                }) if should_retry_without_stream_options(status, &err_body) => {
+                    let mut retry_body = body.clone();
+                    if let Some(obj) = retry_body.as_object_mut() {
+                        obj.remove("stream_options");
+                    }
+                    super::http::post_json(&self.client, &endpoint, &headers, &retry_body).await?
+                }
+                Err(e) => return Err(e),
+            };
+
+        struct ToolCallAcc {
+            id: String,
+            name: String,
+            args: String,
+        }
+
+        let mut text_buf = String::new();
+        // Accumulated alongside `text_buf` so the final message persists the
+        // reasoning (the live chunks are UI-only); without this, thinking
+        // displayed during a turn vanished on reload.
+        let mut reasoning_buf = String::new();
+        let mut tool_acc: Vec<ToolCallAcc> = Vec::new();
+        let mut finish_reason: Option<FinishReason> = None;
+        let mut usage: Option<Usage> = None;
+        let mut decoder = SseDecoder::new();
+        let mut done = false;
+
+        while !done {
+            let Some(bytes) = response.chunk().await.map_err(Error::ReqwestError)? else {
+                break;
+            };
+            decoder.feed(&bytes);
+
+            while let Some(data) = decoder.next_payload() {
+                if data == "[DONE]" {
+                    done = true;
+                    break;
+                }
+
+                let Ok(event) = serde_json::from_str::<OpenAiStreamChunk>(&data) else {
+                    continue;
+                };
+
+                // The `include_usage` final chunk carries `usage` alongside an
+                // empty `choices` array, so this is checked independently of the
+                // choice fields below rather than folded into that branch.
+                if let Some(u) = event.usage {
+                    usage = Some(Usage::from(u));
+                }
+
+                let Some(choice) = event.choices.into_iter().next() else {
+                    continue;
+                };
+
+                if let Some(fr) = choice.finish_reason {
+                    finish_reason = Some(map_finish_reason(&fr));
+                }
+
+                if let Some(reasoning) = choice.delta.reasoning_content
+                    && !reasoning.is_empty()
+                {
+                    reasoning_buf.push_str(&reasoning);
+                    let _ = chunk_tx.send(LlmChunk::Thinking(reasoning));
+                }
+
+                if let Some(content) = choice.delta.content
+                    && !content.is_empty()
+                {
+                    text_buf.push_str(&content);
+                    let _ = chunk_tx.send(LlmChunk::Text(content));
+                }
+
+                if let Some(tcs) = choice.delta.tool_calls {
+                    for tc in tcs {
+                        let idx = tc.index;
+                        while tool_acc.len() <= idx {
+                            tool_acc.push(ToolCallAcc {
+                                id: String::new(),
+                                name: String::new(),
+                                args: String::new(),
+                            });
+                        }
+                        if let Some(id) = tc.id {
+                            tool_acc[idx].id = id;
+                        }
+                        if let Some(function) = tc.function {
+                            if let Some(name) = function.name {
+                                tool_acc[idx].name.push_str(&name);
+                            }
+                            if let Some(args) = function.arguments {
+                                tool_acc[idx].args.push_str(&args);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let tool_uses = tool_acc
+            .into_iter()
+            .enumerate()
+            .filter(|(_, tc)| !tc.name.is_empty())
+            .map(|(i, tc)| ContentBlock::ToolUse {
+                id: if tc.id.is_empty() {
+                    format!("call_{i}")
+                } else {
+                    tc.id
+                },
+                name: tc.name,
+                arguments: tc.args,
+            })
+            .collect();
+
+        Ok(Choice {
+            message: Message {
+                role: Role::Assistant,
+                content: assemble_content(Some(reasoning_buf), Some(text_buf), tool_uses),
+            },
+            finish_reason,
+            usage,
+        })
     }
 }
 
@@ -741,9 +705,8 @@ mod tests {
     }
 
     // `convert_messages` is the single conversion point shared by both
-    // `send_openai_style` (non-streaming) and `send_openai_style_streaming`
-    // (see their bodies above), so this covers the continuation request
-    // built by either path.
+    // `OpenAiClient::send` and `send_streaming` (via `OpenAiClient::request`),
+    // so this covers the continuation request built by either path.
     //
     // Thinking is persisted to history and replayed through ACP (see
     // `assemble_content`) so the *user* sees it again, but it is

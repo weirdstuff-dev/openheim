@@ -5,17 +5,15 @@ use tokio::sync::mpsc;
 use crate::core::models::{Choice, Message, Tool};
 use crate::error::Result;
 
-use super::openai::{send_openai_style, send_openai_style_streaming};
+use super::openai::OpenAiClient;
 use super::{LlmChunk, LlmClient};
 
+/// Client for any endpoint speaking OpenAI's Chat Completions format
+/// (Ollama, OpenRouter, Together, vLLM, …). The wire format is exactly
+/// OpenAI's, so this delegates to an [`OpenAiClient`]; it's a separate type
+/// so the two provider kinds stay distinguishable and can diverge later.
 #[derive(Clone)]
-pub struct OpenAiCompatibleClient {
-    client: ReqwestClient,
-    api_base: String,
-    api_key: String,
-    model: String,
-    max_tokens: Option<u32>,
-}
+pub struct OpenAiCompatibleClient(OpenAiClient);
 
 impl OpenAiCompatibleClient {
     pub fn new(
@@ -25,29 +23,16 @@ impl OpenAiCompatibleClient {
         model: String,
         max_tokens: Option<u32>,
     ) -> Self {
-        Self {
-            client,
-            api_base,
-            api_key,
-            model,
-            max_tokens,
-        }
+        Self(OpenAiClient::new(
+            client, api_base, api_key, model, max_tokens,
+        ))
     }
 }
 
 #[async_trait]
 impl LlmClient for OpenAiCompatibleClient {
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
-        send_openai_style(
-            &self.client,
-            &self.api_base,
-            &self.api_key,
-            &self.model,
-            self.max_tokens,
-            messages,
-            tools,
-        )
-        .await
+        self.0.send(messages, tools).await
     }
 
     async fn send_streaming(
@@ -56,16 +41,6 @@ impl LlmClient for OpenAiCompatibleClient {
         tools: &[Tool],
         chunk_tx: mpsc::UnboundedSender<LlmChunk>,
     ) -> Result<Choice> {
-        send_openai_style_streaming(
-            &self.client,
-            &self.api_base,
-            &self.api_key,
-            &self.model,
-            self.max_tokens,
-            messages,
-            tools,
-            chunk_tx,
-        )
-        .await
+        self.0.send_streaming(messages, tools, chunk_tx).await
     }
 }
