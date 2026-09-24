@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Subagents without their own `model` now run on the session's current model.** `delegate_task` was bound to the model the process started with, so after switching a session's model, subagents that set no model kept using the old one. Subagent profiles and inline subagents that set `model`/`provider` are unaffected.
 - **The agent loop no longer re-calls the model after a truncated, refused, or otherwise non-`stop` reply.** Only a normal `stop` used to end the turn. Any other finish on a reply without tool calls resent the history, which then ended in that reply, until `max_iterations` ran out. That made the model repeat itself, and current Anthropic models reject such a request outright. The turn now ends with `MaxTokens`, `Refusal`, or `EndTurn`. Anthropic's `pause_turn` still resumes. The TUI, `openheim run` (on stderr), and `delegate_task` results now say when a turn stopped for one of these reasons.
 
 - **Switching a session's model mid-conversation is now saved.** The model/provider stored with a conversation was only written when the conversation was created, so after a switch (`switch_model`, ACP `session/set_config_option`, the TUI's `:models`) a reloaded session came back on its original model and the session list showed the stale one. Each turn now records the session's current model and provider.
