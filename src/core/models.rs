@@ -227,10 +227,18 @@ pub enum FinishReason {
     Stop,
     /// The model wants to invoke one or more tools.
     ToolCalls,
-    /// The response was truncated because it hit the token limit.
+    /// The response was truncated because it hit the token limit (or, for
+    /// Anthropic, the context window).
     MaxTokens,
+    /// The model declined to answer or the provider filtered the output
+    /// (Anthropic's `refusal`, OpenAI's `content_filter`, Gemini's
+    /// `SAFETY`/`RECITATION`/…).
+    Refusal,
+    /// The provider paused a long-running turn and expects the conversation
+    /// to be resent as-is to resume it (Anthropic's `pause_turn`).
+    Paused,
     /// A provider-specific reason with no equivalent above (e.g. Anthropic's
-    /// `refusal`, Gemini's `SAFETY`/`RECITATION`), passed through verbatim.
+    /// `stop_sequence`), passed through verbatim.
     Other(String),
 }
 
@@ -275,14 +283,40 @@ impl Usage {
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
-    /// The LLM produced a final response with `finish_reason == "stop"`.
+    /// The LLM produced a final text response: [`FinishReason::Stop`], or a
+    /// finish reason with no more specific mapping below.
     EndTurn,
     /// `config.max_iterations` was reached without the LLM stopping on its own.
     MaxIterations,
+    /// The final response was cut off at the output token limit
+    /// ([`FinishReason::MaxTokens`]).
+    MaxTokens,
+    /// The model declined to answer or its output was filtered
+    /// ([`FinishReason::Refusal`]).
+    Refusal,
     /// The turn was cancelled via `TurnContext::cancel`.
     Cancelled,
     /// The LLM returned a response with neither text content nor tool calls.
     NoContent,
+}
+
+impl StopReason {
+    /// A short, user-facing explanation for a turn that didn't end normally,
+    /// for front-ends to show under the reply. `None` for `EndTurn` and
+    /// `Cancelled`, where the user already knows why the turn stopped.
+    pub fn notice(self) -> Option<&'static str> {
+        match self {
+            StopReason::EndTurn | StopReason::Cancelled => None,
+            StopReason::MaxIterations => {
+                Some("stopped at the iteration limit (max_iterations) before finishing")
+            }
+            StopReason::MaxTokens => {
+                Some("the response was cut off at the output token limit (max_tokens)")
+            }
+            StopReason::Refusal => Some("the model declined to respond"),
+            StopReason::NoContent => Some("the model returned an empty response"),
+        }
+    }
 }
 
 /// Final output of a completed agent run.

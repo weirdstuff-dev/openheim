@@ -74,7 +74,7 @@ src/
 │
 ├── tools/              Tool abstraction and built-in implementations
 │   ├── mod.rs          ToolHandler / ToolExecutor traits, SystemToolExecutor
-│   ├── args.rs         parse_args / require_str — shared argument decoding
+│   ├── args.rs         parse::<T> / NonEmptyString — shared argument decoding
 │   ├── sandbox.rs      validate_path — work_dir boundary used by every file tool
 │   ├── execute_command.rs
 │   ├── read_file.rs
@@ -164,15 +164,16 @@ User / Client
 │    │      append tool result message     │  │
 │    │      emit StreamEvent::ToolCall/    │  │
 │    │        ToolResult/MessageAppended   │  │
-│    │    else if finish_reason == Stop:   │  │
-│    │      emit StreamEvent::Finished     │  │
-│    │      break                          │  │
+│    │    else: map finish_reason to a     │  │
+│    │      StopReason, emit Finished,     │  │
+│    │      break (Paused: loop again)     │  │
 │    └─────────────────────────────────────┘  │
 │                                             │
 │  AgentState::prompt appends each            │
 │  MessageAppended event to history.jsonl,    │
-│  then rewrites the full log once more       │
-│  after the loop (history.save_conversation) │
+│  then saves only the metadata after the     │
+│  loop (history.save_meta); a failed append  │
+│  falls back to a full save_conversation     │
 └──────────┬──────────────────┬───────────────┘
            │                  │
            ▼                  ▼

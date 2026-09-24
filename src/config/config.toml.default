@@ -26,11 +26,18 @@ max_iterations = 10
 
 # --- Provider Configuration ---
 #
-# The provider name determines which API client is used:
-#   "openai"    -> OpenAI API (api.openai.com)
-#   "anthropic" -> Anthropic Messages API (api.anthropic.com)
-#   "gemini"    -> Google Gemini API (generativelanguage.googleapis.com)
-#   Any other   -> OpenAI-compatible API (works with Ollama, Together, etc.)
+# `kind` selects which API client is used:
+#   kind = "openai"            -> OpenAI API (api.openai.com)
+#   kind = "anthropic"         -> Anthropic Messages API (api.anthropic.com)
+#   kind = "gemini"            -> Google Gemini API (generativelanguage.googleapis.com)
+#   kind = "openai_compatible" -> OpenAI-compatible API (Ollama, Together, etc.)
+#
+# `kind` is optional. When omitted, it's inferred from the provider name:
+# [providers.openai], [providers.anthropic] and [providers.gemini] get their
+# own kind, and any other name is OpenAI-compatible. Set it explicitly to
+# register the same API more than once, e.g.
+#   [providers.claude-work]
+#   kind = "anthropic"
 
 # OpenAI
 [providers.openai]

@@ -32,12 +32,18 @@
 //!
 //! ```rust,no_run
 //! use async_trait::async_trait;
+//! use serde::Deserialize;
 //! use serde_json::json;
 //!
 //! struct GreetTool;
 //!
+//! #[derive(Deserialize)]
+//! struct GreetArgs {
+//!     name: String,
+//! }
+//!
 //! # use openheim::tools::ToolHandler;
-//! # use openheim::tools::args::{parse_args, require_str};
+//! # use openheim::tools::args::parse;
 //! # use openheim::core::models::Tool;
 //! # use openheim::core::turn::TurnContext;
 //! # use openheim::error::Result;
@@ -56,8 +62,7 @@
 //!     }
 //!
 //!     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
-//!         let args = parse_args(args)?;
-//!         let name = require_str(&args, "name")?;
+//!         let GreetArgs { name } = parse(args)?;
 //!         // `turn` carries the cancel token, the work directory, and the
 //!         // client I/O hook; see `TurnContext` for what to do with each.
 //!         Ok(format!("Hello, {name}! (from {})", turn.work_dir.display()))
@@ -98,6 +103,7 @@ pub mod delegate;
 mod edit_file;
 mod execute_command;
 mod list_dir;
+mod overlay_executor;
 mod read_file;
 pub mod sandbox;
 mod scoped_executor;
@@ -105,7 +111,7 @@ mod search;
 mod web_fetch;
 mod write_file;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -117,6 +123,7 @@ use crate::error::{Error, Result};
 
 pub use capabilities::{ApprovalScope, ToolCapabilities, ToolKindHint};
 pub use delegate::{DELEGATE_TOOL_NAME, DelegateTool};
+pub(crate) use overlay_executor::OverlayExecutor;
 pub use scoped_executor::ScopedExecutor;
 
 #[async_trait]
@@ -177,14 +184,17 @@ pub trait ToolExecutor: Send + Sync {
 /// registration, so subagents can never delegate recursively.
 #[derive(Clone)]
 pub struct SystemToolExecutor {
-    handlers: HashMap<String, Arc<dyn ToolHandler>>,
+    /// Ordered so `list_tools` returns the same order in every process: the
+    /// tool list leads each LLM request, so a stable order keeps the
+    /// provider's prompt cache reusable across restarts and resumed sessions.
+    handlers: BTreeMap<String, Arc<dyn ToolHandler>>,
 }
 
 impl SystemToolExecutor {
     /// Creates an empty executor with no registered tools.
     pub fn new() -> Self {
         Self {
-            handlers: HashMap::new(),
+            handlers: BTreeMap::new(),
         }
     }
 
@@ -432,6 +442,20 @@ mod tests {
         let caps = executor.capabilities("nonexistent_tool");
         assert!(!caps.read_only);
         assert_eq!(caps.approval_scope, ApprovalScope::ToolName);
+    }
+
+    #[test]
+    fn tools_are_listed_in_name_order() {
+        let mut executor = SystemToolExecutor::new();
+        executor.register_builtins(true);
+        let names: Vec<String> = executor
+            .list_tools()
+            .into_iter()
+            .map(|t| t.function.name)
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
     }
 
     #[test]

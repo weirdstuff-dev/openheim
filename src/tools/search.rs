@@ -12,6 +12,7 @@ use grep::regex::RegexMatcherBuilder;
 use grep::searcher::sinks::UTF8;
 use grep::searcher::{BinaryDetection, SearcherBuilder};
 use ignore::WalkBuilder;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::core::models::Tool;
@@ -19,7 +20,7 @@ use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
 use super::ToolHandler;
-use super::args::{parse_args, require_str};
+use super::args::parse;
 use super::capabilities::{ToolCapabilities, ToolKindHint};
 use super::sandbox::validate_path;
 
@@ -126,6 +127,17 @@ fn search_blocking(pattern: &str, root: &Path, case_insensitive: bool) -> Result
 /// must be inside the work directory.
 pub struct SearchTool;
 
+#[derive(Deserialize)]
+struct SearchArgs {
+    pattern: String,
+    #[serde(default)]
+    path: Option<String>,
+    /// `Option` rather than a defaulted `bool` so an explicit `null` (which
+    /// models do send for optional flags) means "unset", not a parse error.
+    #[serde(default)]
+    case_insensitive: Option<bool>,
+}
+
 #[async_trait]
 impl ToolHandler for SearchTool {
     fn definition(&self) -> Tool {
@@ -154,12 +166,14 @@ impl ToolHandler for SearchTool {
     }
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
-        let args = parse_args(args)?;
-        let pattern = require_str(&args, "pattern")?;
-        let path = args["path"].as_str().unwrap_or(".");
-        let case_insensitive = args["case_insensitive"].as_bool().unwrap_or(false);
-        let validated = validate_path(path, turn.work_dir)?;
-        search(pattern, &validated, case_insensitive).await
+        let args: SearchArgs = parse(args)?;
+        let validated = validate_path(args.path.as_deref().unwrap_or("."), turn.work_dir)?;
+        search(
+            &args.pattern,
+            &validated,
+            args.case_insensitive.unwrap_or(false),
+        )
+        .await
     }
 
     fn capabilities(&self) -> ToolCapabilities {
@@ -305,6 +319,14 @@ mod tests {
         assert!(
             err.to_string().contains("outside the work directory"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn args_struct_matches_schema() {
+        crate::tools::args::assert_args_match_schema::<SearchArgs>(
+            &SearchTool,
+            serde_json::json!({"pattern": "fn", "path": "src", "case_insensitive": true}),
         );
     }
 }

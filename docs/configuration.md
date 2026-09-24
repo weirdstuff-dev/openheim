@@ -48,10 +48,11 @@ work_dir = "/home/user/projects/myproject"
 
 ## `[providers.<name>]`
 
-Each key under `[providers]` defines a provider. The key name is used as the provider identifier (e.g. `"openai"`, `"anthropic"`, `"ollama"`).
+Each key under `[providers]` defines a provider. The key name is the provider identifier (e.g. `"openai"`, `"anthropic"`, `"ollama"`). Which API client talks to it comes from `kind`, which is inferred from the name when omitted, so the name can be anything (e.g. two Anthropic accounts as `[providers.claude-work]` and `[providers.claude-personal]`, both with `kind = "anthropic"`).
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `kind` | `"openai"` \| `"anthropic"` \| `"gemini"` \| `"openai_compatible"` | No | Which API the provider speaks. Omitted = inferred from the name: `openai`, `anthropic` and `gemini` get their own kind, any other name is `"openai_compatible"`. |
 | `api_base` | string | Yes | Base URL for the API |
 | `default_model` | string | Yes | Model used when none is specified for this provider |
 | `models` | string[] | Yes | List of available models (used for validation and the `/api/models` endpoint) |
@@ -59,7 +60,7 @@ Each key under `[providers]` defines a provider. The key name is used as the pro
 | `api_key` | string | No | Inline API key — `env_var` takes precedence if both are set |
 | `timeout_secs` | integer | `120` | Connect and idle-read timeout in seconds — bounds the connect phase and the maximum gap between body reads, not total request duration, so long streaming responses are not cut off mid-stream |
 | `max_tokens` | integer | No | Maximum output tokens per response (provider default if omitted) |
-| `thinking` | `"adaptive"` \| `"off"` | `"adaptive"` for a provider named `anthropic`, `"off"` otherwise | Extended thinking. Only the Anthropic client reads this — other providers ignore it. Applies to every model under this entry, so set it to `"off"` if `default_model`/`models` includes one that doesn't support adaptive thinking (e.g. `claude-haiku-4-5`, `claude-3-7-sonnet`) — use a second `[providers.<other-name>]` entry for that model if you need both. |
+| `thinking` | `"adaptive"` \| `"off"` | `"adaptive"` for an Anthropic-kind provider, `"off"` otherwise | Extended thinking. Only the Anthropic client reads this — other providers ignore it. Applies to every model under this entry, so set it to `"off"` if `default_model`/`models` includes one that doesn't support adaptive thinking (e.g. `claude-haiku-4-5`, `claude-3-7-sonnet`) — use a second `[providers.<other-name>]` entry with `kind = "anthropic"` for that model if you need both. |
 
 Key resolution order: `env_var` (if set and non-empty) → `api_key` → empty string (for keyless providers like Ollama).
 
@@ -148,7 +149,7 @@ Optional, as is every field in it. The agent always has the `remember`, `search_
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `embedding_provider` | string | unset | A `[providers.<name>]` entry whose `api_base` and API key serve the embeddings endpoint. `"gemini"` speaks Gemini's `batchEmbedContents`; anything else is OpenAI-compatible `/embeddings` (OpenAI, Ollama, Together, …). `"anthropic"` is rejected — it has no embeddings API. Unset means keyword search. |
+| `embedding_provider` | string | unset | A `[providers.<name>]` entry whose `api_base` and API key serve the embeddings endpoint. A Gemini-kind provider speaks Gemini's `batchEmbedContents`; any other kind is OpenAI-compatible `/embeddings` (OpenAI, Ollama, Together, …). Anthropic-kind providers are rejected, since Anthropic has no embeddings API. Unset means keyword search. |
 | `embedding_model` | string | unset | Embedding model, e.g. `text-embedding-3-small`, `gemini-embedding-001`, `nomic-embed-text`. Required when `embedding_provider` is set. |
 | `db_path` | path | `~/.openheim/memory.db` | SQLite file holding notes, the FTS5 index, and vectors. Absolute path; `~` is not expanded. |
 | `top_k` | integer | `5` | Default number of notes a `search_memory` call returns (the model may ask for up to 20) |

@@ -49,21 +49,30 @@ pub struct AppConfig {
     pub memory: Option<MemoryConfig>,
     /// Overrides where history, skills, `system.md`, subagent profiles, and
     /// (absent an explicit `memory.db_path`) the memory database live.
-    /// `None` in the TOML shape means "default to `~/.openheim`"; filled in
-    /// with the resolved directory by [`crate::client::OpenheimBuilder::build`],
-    /// so `AgentState` and everything downstream can always assume `Some`.
+    /// `None` means "default to `~/.openheim`". This is only the setting as
+    /// written; the directory actually in use is [`RuntimePaths::data_dir`].
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
-    /// The file this config was loaded from (or would be written to for a
-    /// programmatic config). Not part of the TOML shape — filled in by
-    /// `OpenheimBuilder::build` alongside `data_dir`, so config-file writers
-    /// like `:theme` target the file the running client actually used.
-    #[serde(skip)]
-    pub config_path: PathBuf,
 }
 
 fn default_allow_shell() -> bool {
     false
+}
+
+/// Paths a running client resolved once, at `OpenheimBuilder::build`, and
+/// everything downstream uses as-is (see `AgentState::paths`). Kept out of
+/// [`AppConfig`], which is the config file's shape, where they could only be
+/// `Option`s that "are always set by the time anyone reads them".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePaths {
+    /// Where history, skills, `system.md`, subagent profiles and (by default)
+    /// the memory database live: the builder's or config's `data_dir`, else
+    /// `~/.openheim`.
+    pub data_dir: PathBuf,
+    /// The config file this client was loaded from, or would write to for a
+    /// programmatic config, so config writers like the TUI's `:theme` target
+    /// the file actually in use.
+    pub config_path: PathBuf,
 }
 
 /// The `[tui]` section: terminal UI display preferences. Every field is
@@ -82,9 +91,10 @@ pub struct TuiConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
     /// Name of a `[providers.<name>]` entry whose `api_base` / API key serve
-    /// the embeddings endpoint. `"gemini"` speaks Gemini's `embedContent`
-    /// API; anything else is treated as OpenAI-compatible `/embeddings`
-    /// (OpenAI, Ollama, Together, …). Anthropic has no embeddings API.
+    /// the embeddings endpoint. A Gemini-kind provider speaks Gemini's
+    /// `embedContent` API; any other kind is treated as OpenAI-compatible
+    /// `/embeddings` (OpenAI, Ollama, Together, …). Anthropic-kind providers
+    /// are rejected: Anthropic has no embeddings API.
     /// Unset means keyword (FTS5) search only.
     #[serde(default)]
     pub embedding_provider: Option<String>,
@@ -119,18 +129,45 @@ impl Default for MemoryConfig {
 
 /// Resolved embeddings endpoint, assembled from a [`MemoryConfig`] plus the
 /// provider entry it names (see `AppConfig::resolve_embedding`).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EmbeddingConfig {
     pub provider_name: String,
+    /// Wire protocol, i.e. which embeddings client gets built. Never
+    /// [`ProviderKind::Anthropic`] (`resolve_embedding` rejects it).
+    pub kind: ProviderKind,
     pub api_base: String,
     pub api_key: String,
     pub model: String,
     pub timeout_secs: u64,
 }
 
+/// How a secret field shows up in `Debug` output: that it's set, not its
+/// value. The configs holding secrets implement `Debug` by hand with this so
+/// a stray `{:?}` in a log line can't leak a key.
+fn redacted_if_set(secret: &str) -> &'static str {
+    if secret.is_empty() {
+        ""
+    } else {
+        super::public::REDACTED
+    }
+}
+
+impl std::fmt::Debug for EmbeddingConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmbeddingConfig")
+            .field("provider_name", &self.provider_name)
+            .field("kind", &self.kind)
+            .field("api_base", &super::public::scrub_url(&self.api_base))
+            .field("api_key", &redacted_if_set(&self.api_key))
+            .field("model", &self.model)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
+}
+
 /// Configuration for a single MCP server connection.
 /// The map key in `[mcp_servers.<name>]` is used as the server name and tool-name prefix.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Binary to spawn for stdio transport (e.g. `"npx"`, `"uvx"`).
     pub command: Option<String>,
@@ -148,6 +185,25 @@ pub struct McpServerConfig {
     /// server actually consumes (headers, not process env vars).
     #[serde(default)]
     pub headers: HashMap<String, String>,
+}
+
+/// `args` often carry tokens (`--api-key …`), and `env`/`headers` values
+/// are credentials, so only their count or keys are shown.
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn keys(map: &HashMap<String, String>) -> Vec<&String> {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            keys
+        }
+        f.debug_struct("McpServerConfig")
+            .field("command", &self.command)
+            .field("args", &format!("<{} redacted>", self.args.len()))
+            .field("env", &keys(&self.env))
+            .field("url", &self.url.as_deref().map(super::public::scrub_url))
+            .field("headers", &keys(&self.headers))
+            .finish()
+    }
 }
 
 fn default_max_iterations() -> usize {
@@ -173,47 +229,6 @@ impl AppConfig {
                 .collect(),
         }
     }
-
-    /// Serializes the config for clients, redacting secrets. `work_dir` is
-    /// overlaid with the *resolved* sandbox root (`AgentState::work_dir`)
-    /// rather than the raw `Option<PathBuf>` config value, since the latter
-    /// is `None` unless `work_dir` was explicitly set in `config.toml`.
-    pub fn to_public_json(&self, work_dir: &std::path::Path) -> serde_json::Value {
-        let mut val = serde_json::to_value(self).unwrap_or_default();
-        if let Some(obj) = val.as_object_mut() {
-            obj.insert(
-                "work_dir".to_string(),
-                serde_json::Value::String(work_dir.display().to_string()),
-            );
-        }
-        if let Some(providers) = val.get_mut("providers").and_then(|v| v.as_object_mut()) {
-            for p in providers.values_mut() {
-                if let Some(obj) = p.as_object_mut() {
-                    obj.remove("api_key");
-                }
-            }
-        }
-        if let Some(servers) = val.get_mut("mcp_servers").and_then(|v| v.as_object_mut()) {
-            for s in servers.values_mut() {
-                for field in ["env", "headers"] {
-                    if let Some(map) = s.get_mut(field).and_then(|v| v.as_object_mut()) {
-                        for v in map.values_mut() {
-                            *v = serde_json::Value::String("<redacted>".to_string());
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(memory) = val.get_mut("memory").and_then(|v| v.as_object_mut()) {
-            memory.remove("db_path");
-        }
-        if let Some(obj) = val.as_object_mut() {
-            // Local filesystem path, not something an unauthenticated client
-            // needs; internal serialization (e.g. persisted config) keeps it.
-            obj.remove("data_dir");
-        }
-        val
-    }
 }
 
 /// Extended-thinking mode for a provider. Only [`AnthropicClient`](crate::core::llm::AnthropicClient)
@@ -227,9 +242,50 @@ pub enum ThinkingMode {
     Off,
 }
 
+/// Which wire protocol a provider speaks, i.e. which client talks to it.
+/// Set per provider with `kind = "…"`; when omitted it is inferred from the
+/// provider's name (see [`Self::infer_from_name`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ProviderKind {
+    /// OpenAI's Chat Completions API.
+    #[serde(rename = "openai")]
+    OpenAi,
+    /// Anthropic's Messages API.
+    #[serde(rename = "anthropic")]
+    Anthropic,
+    /// Google's Gemini `generateContent` API.
+    #[serde(rename = "gemini")]
+    Gemini,
+    /// Any endpoint speaking OpenAI's Chat Completions format (Ollama,
+    /// OpenRouter, Together, vLLM, …).
+    #[default]
+    #[serde(rename = "openai_compatible")]
+    OpenAiCompatible,
+}
+
+impl ProviderKind {
+    /// The kind a provider gets when its config sets none: the built-in
+    /// names map to their own kind, anything else is OpenAI-compatible.
+    /// Kept so configs written before `kind` existed behave as they did.
+    pub fn infer_from_name(provider_name: &str) -> Self {
+        match provider_name {
+            "openai" => ProviderKind::OpenAi,
+            "anthropic" => ProviderKind::Anthropic,
+            "gemini" => ProviderKind::Gemini,
+            _ => ProviderKind::OpenAiCompatible,
+        }
+    }
+}
+
 /// Per-provider configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
+    /// Wire protocol for this provider. Optional: inferred from the
+    /// provider's name when unset (see [`ProviderKind::infer_from_name`]),
+    /// so it's only needed when the name isn't `openai`/`anthropic`/`gemini`
+    /// but the API is, e.g. `[providers.claude-work] kind = "anthropic"`.
+    #[serde(default)]
+    pub kind: Option<ProviderKind>,
     pub api_base: String,
     pub default_model: String,
     pub models: Vec<String>,
@@ -242,13 +298,29 @@ pub struct ProviderConfig {
     /// Maximum output tokens for LLM responses
     pub max_tokens: Option<u32>,
     /// Extended thinking (`"adaptive"` or `"off"`). Defaults to `adaptive`
-    /// for a provider named `anthropic`, `off` for everything else — see
+    /// for an Anthropic-kind provider, `off` for everything else — see
     /// [`Self::resolve_thinking`]. Set explicitly to `"off"` for an Anthropic
     /// model that doesn't support adaptive thinking (e.g. `claude-haiku-4-5`,
     /// `claude-3-7-sonnet`), since a single `[providers.<name>]` entry has no
     /// per-model granularity.
     #[serde(default)]
     pub thinking: Option<ThinkingMode>,
+}
+
+impl std::fmt::Debug for ProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderConfig")
+            .field("kind", &self.kind)
+            .field("api_base", &super::public::scrub_url(&self.api_base))
+            .field("default_model", &self.default_model)
+            .field("models", &self.models)
+            .field("env_var", &self.env_var)
+            .field("api_key", &self.api_key.as_deref().map(redacted_if_set))
+            .field("timeout_secs", &self.timeout_secs)
+            .field("max_tokens", &self.max_tokens)
+            .field("thinking", &self.thinking)
+            .finish()
+    }
 }
 
 impl ProviderConfig {
@@ -269,35 +341,98 @@ impl ProviderConfig {
         self.api_key.clone().unwrap_or_default()
     }
 
+    /// This provider's [`ProviderKind`]: the configured `kind`, or the one
+    /// inferred from `provider_name` (the key it's registered under).
+    pub fn resolve_kind(&self, provider_name: &str) -> ProviderKind {
+        self.kind
+            .unwrap_or_else(|| ProviderKind::infer_from_name(provider_name))
+    }
+
     /// Whether extended thinking should be requested, given this provider's
-    /// `thinking` setting and `provider_name` (the key it's registered
-    /// under). Unset defaults to `true` only when `provider_name` is
-    /// `"anthropic"` — the only client that reads this.
-    pub fn resolve_thinking(&self, provider_name: &str) -> bool {
+    /// `thinking` setting and its resolved `kind`. Unset defaults to `true`
+    /// only for [`ProviderKind::Anthropic`] — the only client that reads this.
+    pub fn resolve_thinking(&self, kind: ProviderKind) -> bool {
         match self.thinking {
             Some(ThinkingMode::Adaptive) => true,
             Some(ThinkingMode::Off) => false,
-            None => provider_name == "anthropic",
+            None => kind == ProviderKind::Anthropic,
         }
     }
 }
 
 /// Runtime configuration passed to agent/LLM code
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(from = "AgentConfigWire")]
 pub struct AgentConfig {
+    /// The `[providers.<name>]` key this config was resolved from; used for
+    /// display, persistence, and model-switch lookups — never to pick a
+    /// client (that's `kind`).
     pub provider_name: String,
+    /// Wire protocol, i.e. which client [`crate::config::create_client`] builds.
+    pub kind: ProviderKind,
     pub api_base: String,
     pub api_key: String,
     pub model: String,
     pub max_iterations: usize,
-    #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
     /// Maximum output tokens for LLM responses (provider-specific defaults if not set)
     pub max_tokens: Option<u32>,
     /// Whether to request extended thinking (`AnthropicClient` only); see
     /// [`ProviderConfig::resolve_thinking`].
-    #[serde(default)]
     pub thinking: bool,
+}
+
+/// `AgentConfig`'s deserialization shape. `kind` is optional so data written
+/// before it existed resolves it from `provider_name`, the same inference
+/// config resolution uses, instead of silently becoming OpenAI-compatible.
+#[derive(Deserialize)]
+struct AgentConfigWire {
+    provider_name: String,
+    #[serde(default)]
+    kind: Option<ProviderKind>,
+    api_base: String,
+    api_key: String,
+    model: String,
+    max_iterations: usize,
+    #[serde(default = "default_timeout_secs")]
+    timeout_secs: u64,
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    thinking: bool,
+}
+
+impl From<AgentConfigWire> for AgentConfig {
+    fn from(wire: AgentConfigWire) -> Self {
+        Self {
+            kind: wire
+                .kind
+                .unwrap_or_else(|| ProviderKind::infer_from_name(&wire.provider_name)),
+            provider_name: wire.provider_name,
+            api_base: wire.api_base,
+            api_key: wire.api_key,
+            model: wire.model,
+            max_iterations: wire.max_iterations,
+            timeout_secs: wire.timeout_secs,
+            max_tokens: wire.max_tokens,
+            thinking: wire.thinking,
+        }
+    }
+}
+
+impl std::fmt::Debug for AgentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentConfig")
+            .field("provider_name", &self.provider_name)
+            .field("kind", &self.kind)
+            .field("api_base", &super::public::scrub_url(&self.api_base))
+            .field("api_key", &redacted_if_set(&self.api_key))
+            .field("model", &self.model)
+            .field("max_iterations", &self.max_iterations)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("max_tokens", &self.max_tokens)
+            .field("thinking", &self.thinking)
+            .finish()
+    }
 }
 
 /// The one source of truth for the request-timeout default; every path that
@@ -308,6 +443,9 @@ pub(crate) fn default_timeout_secs() -> u64 {
 }
 
 impl AgentConfig {
+    /// `kind` is inferred from `provider_name` (see
+    /// [`ProviderKind::infer_from_name`]); set the field afterwards to
+    /// override it.
     pub fn new(
         provider_name: String,
         api_base: String,
@@ -315,8 +453,10 @@ impl AgentConfig {
         model: String,
         max_iterations: usize,
     ) -> Self {
+        let kind = ProviderKind::infer_from_name(&provider_name);
         Self {
-            thinking: provider_name == "anthropic",
+            thinking: kind == ProviderKind::Anthropic,
+            kind,
             provider_name,
             api_base,
             api_key,
@@ -339,6 +479,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             provider_name: String::new(),
+            kind: ProviderKind::default(),
             api_base: String::new(),
             api_key: String::new(),
             model: String::new(),
@@ -350,20 +491,56 @@ impl Default for AgentConfig {
     }
 }
 
+/// Shared test fixtures, so a new field on these structs is added here once
+/// instead of in every test module that builds one by hand.
+#[cfg(test)]
+impl AppConfig {
+    /// A config with no providers, MCP servers or skills, and every optional
+    /// setting unset. Set fields on the result for what a test needs.
+    pub(crate) fn for_tests(default_provider: &str) -> Self {
+        Self {
+            default_provider: default_provider.to_string(),
+            max_iterations: default_max_iterations(),
+            tui: TuiConfig::default(),
+            providers: BTreeMap::new(),
+            mcp_servers: BTreeMap::new(),
+            default_skills: vec![],
+            work_dir: None,
+            allow_shell: false,
+            memory: None,
+            data_dir: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl ProviderConfig {
+    /// A provider entry serving `models` (the first is the default) with an
+    /// inline API key and everything else unset.
+    pub(crate) fn for_tests(api_base: &str, models: &[&str]) -> Self {
+        Self {
+            kind: None,
+            api_base: api_base.to_string(),
+            default_model: models[0].to_string(),
+            models: models.iter().map(|m| m.to_string()).collect(),
+            env_var: None,
+            api_key: Some("key".to_string()),
+            timeout_secs: None,
+            max_tokens: None,
+            thinking: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn sample_provider(env_var: Option<&str>, api_key: Option<&str>) -> ProviderConfig {
         ProviderConfig {
-            api_base: "https://api.example.com".into(),
-            default_model: "model-1".into(),
-            models: vec!["model-1".into()],
             env_var: env_var.map(String::from),
             api_key: api_key.map(String::from),
-            timeout_secs: None,
-            max_tokens: None,
-            thinking: None,
+            ..ProviderConfig::for_tests("https://api.example.com", &["model-1"])
         }
     }
 
@@ -485,56 +662,84 @@ mod tests {
         assert_eq!(memory.top_k, 5);
     }
 
+    // Regression test (PR #61 review): `AgentConfig` data from before `kind`
+    // existed deserialized as OpenAI-compatible whatever the provider.
     #[test]
-    fn to_public_json_redacts_secrets_and_local_paths() {
-        let toml_str = r#"
+    fn agent_config_without_kind_infers_it_from_the_provider_name() {
+        let json = |provider: &str| {
+            serde_json::json!({
+                "provider_name": provider,
+                "api_base": "https://example.com",
+                "api_key": "k",
+                "model": "m",
+                "max_iterations": 5,
+                "max_tokens": null,
+            })
+        };
+        let anthropic: AgentConfig = serde_json::from_value(json("anthropic")).unwrap();
+        assert_eq!(anthropic.kind, ProviderKind::Anthropic);
+        let custom: AgentConfig = serde_json::from_value(json("ollama")).unwrap();
+        assert_eq!(custom.kind, ProviderKind::OpenAiCompatible);
+
+        // An explicit kind still wins, and a round trip preserves it.
+        let mut explicit = json("claude-work");
+        explicit["kind"] = serde_json::json!("anthropic");
+        let config: AgentConfig = serde_json::from_value(explicit).unwrap();
+        assert_eq!(config.kind, ProviderKind::Anthropic);
+        let round_trip: AgentConfig =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(round_trip.kind, ProviderKind::Anthropic);
+        assert_eq!(round_trip.timeout_secs, default_timeout_secs());
+    }
+
+    #[test]
+    fn debug_output_never_contains_secrets() {
+        let app: AppConfig = toml::from_str(
+            r#"
             default_provider = "openai"
-            data_dir = "/Users/alice/.openheim"
             [providers.openai]
-            api_base = "https://api.openai.com/v1"
-            default_model = "gpt-4"
-            models = ["gpt-4"]
-            api_key = "sk-super-secret"
+            api_base = "https://user:pass-secret@api.example.com/v1?key=query-secret"
+            default_model = "m"
+            models = ["m"]
+            api_key = "sk-key-secret"
 
             [mcp_servers.demo]
             command = "npx"
-            env = { API_TOKEN = "also-secret" }
+            args = ["--token", "arg-secret"]
+            env = { TOKEN = "env-secret" }
 
             [mcp_servers.remote]
-            url = "https://example.com/mcp"
-            headers = { Authorization = "Bearer also-secret" }
+            url = "https://mcp.example.com/?token=url-secret"
+            headers = { Authorization = "Bearer header-secret" }
+            "#,
+        )
+        .unwrap();
+        let agent = app.resolve(None).unwrap();
+        let embedding = EmbeddingConfig {
+            provider_name: "openai".into(),
+            kind: ProviderKind::OpenAi,
+            api_base: "https://api.example.com".into(),
+            api_key: "sk-embed-secret".into(),
+            model: "m".into(),
+            timeout_secs: 10,
+        };
 
-            [memory]
-            embedding_provider = "openai"
-            embedding_model = "text-embedding-3-small"
-            db_path = "/Users/alice/.openheim/memory.db"
-            top_k = 7
-        "#;
-        let cfg: AppConfig = toml::from_str(toml_str).unwrap();
-
-        let val = cfg.to_public_json(std::path::Path::new("/work/dir"));
-
-        assert_eq!(val["work_dir"], "/work/dir");
-        assert!(val["providers"]["openai"].get("api_key").is_none());
-        assert_eq!(val["mcp_servers"]["demo"]["env"]["API_TOKEN"], "<redacted>");
-        assert_eq!(
-            val["mcp_servers"]["remote"]["headers"]["Authorization"],
-            "<redacted>"
-        );
-
-        // db_path is a local filesystem path, not a secret the client needs;
-        // it's stripped, while the rest of the [memory] section survives.
-        assert!(val["memory"].get("db_path").is_none());
-        assert_eq!(val["memory"]["embedding_provider"], "openai");
-        assert_eq!(val["memory"]["embedding_model"], "text-embedding-3-small");
-        assert_eq!(val["memory"]["top_k"], 7);
-
-        // data_dir is a local filesystem path, not something an
-        // unauthenticated client needs; it's stripped from the public view.
-        assert!(val.get("data_dir").is_none());
-        assert_eq!(
-            cfg.data_dir,
-            Some(std::path::PathBuf::from("/Users/alice/.openheim"))
-        );
+        let debug = format!("{app:?}\n{agent:?}\n{embedding:?}");
+        for secret in [
+            "pass-secret",
+            "query-secret",
+            "sk-key-secret",
+            "arg-secret",
+            "env-secret",
+            "url-secret",
+            "header-secret",
+            "sk-embed-secret",
+        ] {
+            assert!(!debug.contains(secret), "{secret} leaked:\n{debug}");
+        }
+        // Still useful for debugging: the non-secret parts are there.
+        assert!(debug.contains("api.example.com"), "{debug}");
+        assert!(debug.contains("TOKEN"), "{debug}");
+        assert!(debug.contains("<redacted>"), "{debug}");
     }
 }

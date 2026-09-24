@@ -16,7 +16,7 @@ pub trait LlmClient: Send + Sync {
 
 `messages` is the full conversation history (user, assistant, tool-result turns). `tools` is the list of currently registered tools in JSON-schema format. Return the model's next `Choice` — either a text response or a set of tool calls.
 
-`send_streaming` is a second trait method with a default implementation that calls `send` and forwards the whole response as one `LlmChunk::Text`. Override it if your provider supports token-by-token streaming; otherwise the default is fine.
+`send_streaming` is a second trait method with a default implementation that calls `send` and forwards the whole response as one `LlmChunk::Text`. The agent loop always calls `send_streaming`, including `run_agent_with_history` and `delegate_task` subagents, because openheim's HTTP timeout is per read: a streamed reply keeps bytes arriving, while a non-streamed one sends nothing until it's done and can time out on long generations. Override it if your provider supports token-by-token streaming; otherwise the default is fine. Your `send_streaming` may drop its `chunk_tx` before returning; the loop waits for the returned reply, not the channel.
 
 ---
 
@@ -59,6 +59,8 @@ pub enum FinishReason {
     Stop,               // normal completion
     ToolCalls,          // model wants to invoke tools
     MaxTokens,          // truncated at the token limit
+    Refusal,            // model declined, or output was filtered
+    Paused,             // provider paused the turn; resend as-is to resume
     Other(String),      // provider-specific reason with no equivalent above
 }
 
@@ -81,7 +83,7 @@ and constructors for building your own:
 - `Message::user(text)`, `Message::assistant(text)` — single-`Text`-block message
 - `Message::tool_result(tool_call_id, tool_name, content, is_error)` — single-`ToolResult`-block message
 
-The agent loop treats `finish_reason == Some(FinishReason::Stop)` as the signal to end the conversation. Any other finish reason with no tool calls also ends the loop (with a warning). If `message.tool_calls()` is non-empty, the loop executes them and continues.
+If `message.tool_calls()` is non-empty, the loop executes them and continues. Otherwise the finish reason decides how the turn ends: `MaxTokens` → `StopReason::MaxTokens`, `Refusal` → `StopReason::Refusal`, `Paused` → the loop calls the model again with the history unchanged. Anything else (`Stop`, `Other`, or `None`) → `StopReason::EndTurn` if the reply has text, or `StopReason::NoContent` if it has none. Map your provider's truncation and content-filter values onto `MaxTokens`/`Refusal` so front-ends can tell the user why a reply stopped.
 
 `usage` is optional — set it if your API returns token counts, otherwise leave it `None`. When present, it's surfaced to embedders as the session's current context-size snapshot (`SessionHandle::context_usage()` / `ConversationMeta.context_usage`); leaving it `None` just means that feature has nothing to report for this provider.
 

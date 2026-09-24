@@ -14,8 +14,17 @@ pub enum Error {
     #[error("Tool execution error: {0}")]
     ToolExecutionError(String),
 
+    /// Something failed to parse while openheim was doing its own work (a
+    /// provider reply, a subagent profile, the model's tool-call JSON). Not
+    /// for rejecting what a caller sent; that's [`Error::InvalidArgument`].
     #[error("Parse error: {0}")]
     ParseError(String),
+
+    /// A caller passed something invalid: a malformed session id, an
+    /// unknown mode, unsupported prompt content. Transports report it as the
+    /// caller's mistake (ACP `invalid_params`), unlike [`Error::ParseError`].
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
 
     #[error("Config error: {0}")]
     ConfigError(String),

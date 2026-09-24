@@ -10,21 +10,12 @@ use crate::error::Result;
 use crate::memory::PromptBuilder;
 use crate::tools::ToolExecutor;
 
-async fn call_llm(
-    llm: &Arc<dyn LlmClient>,
-    messages: &[Message],
-    tools: &[Tool],
-    prompt_builder: Option<&PromptBuilder>,
-) -> Result<Choice> {
-    match prompt_builder {
-        Some(builder) => {
-            let built = builder.build(messages);
-            llm.send(&built, tools).await
-        }
-        None => llm.send(messages, tools).await,
-    }
-}
-
+/// Every LLM call streams, even when nobody watches the chunks: the HTTP
+/// client's timeout is per read, not per request (see `build_http_client`),
+/// so a non-streaming reply that takes longer than `timeout_secs` to
+/// generate fails with nothing sent yet, while a streaming one keeps bytes
+/// arriving. Clients that implement only `send` still work: the default
+/// `send_streaming` wraps it.
 async fn call_llm_streaming(
     llm: &Arc<dyn LlmClient>,
     messages: &[Message],
@@ -41,25 +32,59 @@ async fn call_llm_streaming(
     }
 }
 
-/// Core agent loop: repeatedly calls the LLM and executes tool calls until a
-/// final text response with `finish_reason == FinishReason::Stop` is produced or
+/// Passes one streamed chunk to the caller's callback as the matching event.
+fn forward_chunk<F: FnMut(StreamEvent)>(callback: &mut F, chunk: LlmChunk) {
+    match chunk {
+        LlmChunk::Text(text) => callback(StreamEvent::LlmResponse { content: text }),
+        LlmChunk::Thinking(thought) => callback(StreamEvent::ThinkingContent { content: thought }),
+    }
+}
+
+/// How a turn ends when the LLM replies without any tool calls, from the
+/// provider's finish reason and whether the reply had text. `None` means
+/// "keep looping": the provider paused the turn and expects the
+/// conversation resent as-is to resume it.
+///
+/// Any finish reason without a specific mapping (`Other`, a missing one, or
+/// `ToolCalls` with no tool calls attached) ends the turn: resending a
+/// history that ends in an assistant reply would at best make the model
+/// repeat itself, and at worst be rejected outright.
+fn stop_for_reply_without_tools(
+    finish_reason: Option<&FinishReason>,
+    has_text: bool,
+) -> Option<StopReason> {
+    match finish_reason {
+        Some(FinishReason::Paused) => None,
+        Some(FinishReason::MaxTokens) => Some(StopReason::MaxTokens),
+        Some(FinishReason::Refusal) => Some(StopReason::Refusal),
+        _ if !has_text => Some(StopReason::NoContent),
+        Some(FinishReason::Stop) => Some(StopReason::EndTurn),
+        other => {
+            tracing::debug!(finish_reason = ?other, "treating unmapped finish reason as end of turn");
+            Some(StopReason::EndTurn)
+        }
+    }
+}
+
+/// Core agent loop: repeatedly calls the LLM and executes tool calls until
+/// the LLM replies without tool calls (see [`stop_for_reply_without_tools`]
+/// for how that reply's finish reason maps to a [`StopReason`]) or
 /// `config.max_iterations` is reached.
 ///
 /// Appends all assistant and tool-result messages to `messages` in place so the
 /// caller retains a complete history after this returns.
 ///
-/// If `callback` is `Some`, a [`StreamEvent`] is emitted for each significant
-/// step: iteration start, tool calls, tool results, LLM text responses, and
-/// the final completion.
+/// `callback` receives a [`StreamEvent`] for each significant step: iteration
+/// start, streamed text and thinking, tool calls, tool results, and the final
+/// completion.
 ///
 /// `cancel` is checked between iterations and before each tool call, and is
 /// also raced against the in-flight LLM call and the pending permission-gate
-/// approval (both streaming and non-streaming LLM calls) so a caller (e.g.
-/// the ACP layer reacting to `session/cancel`) can abort a slow or hanging
-/// request — or a turn stuck waiting on user approval — rather than waiting
-/// for it to finish. The loop always returns `Ok`; [`AgentResult::stop_reason`]
-/// reports why it stopped (`EndTurn` / `MaxIterations` / `Cancelled` /
-/// `NoContent`) instead of callers having to reverse-engineer it.
+/// approval so a caller (e.g. the ACP layer reacting to `session/cancel`) can
+/// abort a slow or hanging request — or a turn stuck waiting on user approval
+/// — rather than waiting for it to finish. The loop returns `Ok` unless an LLM call fails;
+/// [`AgentResult::stop_reason`] reports why it stopped instead of callers
+/// having to reverse-engineer it.
 async fn run_agent_loop<F>(
     llm: &Arc<dyn LlmClient>,
     tool_executor: &Arc<dyn ToolExecutor>,
@@ -67,7 +92,7 @@ async fn run_agent_loop<F>(
     messages: &mut Vec<Message>,
     prompt_builder: Option<&PromptBuilder>,
     turn: &TurnContext<'_>,
-    mut callback: Option<F>,
+    mut callback: F,
 ) -> Result<AgentResult>
 where
     F: FnMut(StreamEvent) + Send,
@@ -89,77 +114,54 @@ where
         let iter_num = iteration + 1;
         iterations_used = iter_num;
 
-        if let Some(cb) = callback.as_mut() {
-            cb(StreamEvent::IterationStart {
-                iteration: iter_num,
-            });
-        }
+        callback(StreamEvent::IterationStart {
+            iteration: iter_num,
+        });
 
-        let choice = if callback.is_some() {
+        // Scoped so the in-flight request's borrow of `messages` ends before
+        // the reply is pushed onto it.
+        let choice = {
             let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<LlmChunk>();
             let choice_fut = call_llm_streaming(llm, messages, &tools, prompt_builder, chunk_tx);
             tokio::pin!(choice_fut);
 
-            let mut maybe_choice: Option<Result<Choice>> = None;
+            // The reply ends the wait, not the chunk channel: a client may close
+            // its sender before its request finishes, and one that leaks the
+            // sender somewhere must not keep the turn waiting.
+            let mut chunks_open = true;
             loop {
                 tokio::select! {
                     _ = turn.cancel.cancelled() => {
-                        // Dropping `choice_fut` here aborts the in-flight
-                        // LLM request rather than waiting for it to finish.
+                        // Dropping `choice_fut` here aborts the in-flight LLM
+                        // request rather than waiting for it to finish.
                         stop_reason = StopReason::Cancelled;
                         break 'turn;
                     }
-                    result = &mut choice_fut, if maybe_choice.is_none() => {
-                        maybe_choice = Some(result);
-                    }
-                    maybe_chunk = chunk_rx.recv() => {
-                        match maybe_chunk {
-                            Some(LlmChunk::Text(text)) => {
-                                if let Some(cb) = callback.as_mut() {
-                                    cb(StreamEvent::LlmResponse { content: text });
-                                }
-                            }
-                            Some(LlmChunk::Thinking(thought)) => {
-                                if let Some(cb) = callback.as_mut() {
-                                    cb(StreamEvent::ThinkingContent { content: thought });
-                                }
-                            }
-                            None => break,
+                    result = &mut choice_fut => {
+                        // Chunks sent before the reply completed may still be
+                        // buffered; forward them, in order, before moving on.
+                        while let Ok(chunk) = chunk_rx.try_recv() {
+                            forward_chunk(&mut callback, chunk);
                         }
+                        break result;
                     }
+                    maybe_chunk = chunk_rx.recv(), if chunks_open => match maybe_chunk {
+                        Some(chunk) => forward_chunk(&mut callback, chunk),
+                        None => chunks_open = false,
+                    },
                 }
-            }
-            maybe_choice.unwrap_or_else(|| {
-                Err(crate::error::Error::Other(
-                    "stream ended prematurely".into(),
-                ))
-            })?
-        } else {
-            let result: Result<Choice> = tokio::select! {
-                _ = turn.cancel.cancelled() => {
-                    // Dropping the `call_llm` future here aborts the
-                    // in-flight LLM request rather than waiting for it.
-                    stop_reason = StopReason::Cancelled;
-                    break 'turn;
-                }
-                result = call_llm(llm, messages, &tools, prompt_builder) => result,
-            };
-            result?
+            }?
         };
         messages.push(choice.message.clone());
-        if let Some(cb) = callback.as_mut() {
-            cb(StreamEvent::MessageAppended {
-                message: choice.message.clone(),
-            });
-        }
+        callback(StreamEvent::MessageAppended {
+            message: choice.message.clone(),
+        });
         if let Some(usage) = choice.usage {
             // Overwritten (not summed) every iteration: the latest call's
             // usage is what "context size right now" means, since each call
             // resends the full history as its prompt.
             context_usage = Some(usage);
-            if let Some(cb) = callback.as_mut() {
-                cb(StreamEvent::Usage { usage });
-            }
+            callback(StreamEvent::Usage { usage });
         }
 
         let tool_calls = choice.message.tool_calls();
@@ -174,13 +176,11 @@ where
                     break 'turn;
                 }
 
-                if let Some(cb) = callback.as_mut() {
-                    cb(StreamEvent::ToolCall {
-                        id: tool_call.id.clone(),
-                        tool_name: tool_call.name.clone(),
-                        arguments: tool_call.arguments.clone(),
-                    });
-                }
+                callback(StreamEvent::ToolCall {
+                    id: tool_call.id.clone(),
+                    tool_name: tool_call.name.clone(),
+                    arguments: tool_call.arguments.clone(),
+                });
             }
 
             // Phase 1b: collect every call's permission decision
@@ -247,14 +247,12 @@ where
                             break;
                         };
                         let tool_call = &tool_calls[index];
-                        if let Some(cb) = callback.as_mut() {
-                            cb(StreamEvent::ToolResult {
-                                id: tool_call.id.clone(),
-                                tool_name: tool_call.name.clone(),
-                                result: result.clone(),
-                                is_error,
-                            });
-                        }
+                        callback(StreamEvent::ToolResult {
+                            id: tool_call.id.clone(),
+                            tool_name: tool_call.name.clone(),
+                            result: result.clone(),
+                            is_error,
+                        });
                         outcomes[index] = Some((result, is_error));
                     }
                 }
@@ -274,11 +272,9 @@ where
                     result,
                     is_error,
                 );
-                if let Some(cb) = callback.as_mut() {
-                    cb(StreamEvent::MessageAppended {
-                        message: tool_result_message.clone(),
-                    });
-                }
+                callback(StreamEvent::MessageAppended {
+                    message: tool_result_message.clone(),
+                });
                 messages.push(tool_result_message);
             }
 
@@ -289,42 +285,34 @@ where
                 stop_reason = StopReason::Cancelled;
                 break 'turn;
             }
-        } else if let Some(content) = choice.message.text() {
+        } else {
             // LlmResponse chunks already fired per-token from the streaming select
             // loop above; just record the final text here.
-            final_response = content;
-
-            if choice.finish_reason == Some(FinishReason::Stop) {
-                if let Some(cb) = callback.as_mut() {
-                    cb(StreamEvent::Finished {
-                        final_response: final_response.clone(),
-                        iterations: iter_num,
-                    });
-                }
-
-                return Ok(AgentResult {
-                    final_response,
-                    iterations_used: iter_num,
-                    stop_reason: StopReason::EndTurn,
-                    context_usage,
-                });
+            let text = choice.message.text();
+            let has_text = text.is_some();
+            if let Some(content) = text {
+                final_response = content;
             }
-        } else {
-            tracing::warn!(
-                "Unexpected LLM response at iteration {}: no content or tool_calls",
-                iter_num
-            );
-            stop_reason = StopReason::NoContent;
-            break;
+            match stop_for_reply_without_tools(choice.finish_reason.as_ref(), has_text) {
+                None => continue,
+                Some(reason) => {
+                    if reason == StopReason::NoContent {
+                        tracing::warn!(
+                            "Unexpected LLM response at iteration {}: no content or tool_calls",
+                            iter_num
+                        );
+                    }
+                    stop_reason = reason;
+                    break;
+                }
+            }
         }
     }
 
-    if let Some(cb) = callback.as_mut() {
-        cb(StreamEvent::Finished {
-            final_response: final_response.clone(),
-            iterations: iterations_used,
-        });
-    }
+    callback(StreamEvent::Finished {
+        final_response: final_response.clone(),
+        iterations: iterations_used,
+    });
 
     Ok(AgentResult {
         final_response,
@@ -334,7 +322,10 @@ where
     })
 }
 
-/// Runs the agent loop against an existing message history without streaming.
+/// Runs the agent loop against an existing message history, without
+/// reporting progress events. (The LLM calls themselves still stream; see
+/// `call_llm_streaming`. Use [`run_agent_streaming_with_history`] to watch
+/// the events.)
 ///
 /// `messages` is extended in place with the full conversation turn — assistant
 /// messages and tool results. The caller is responsible for persisting the
@@ -355,14 +346,14 @@ pub async fn run_agent_with_history(
     prompt_builder: Option<&PromptBuilder>,
     turn: &TurnContext<'_>,
 ) -> Result<AgentResult> {
-    run_agent_loop::<fn(StreamEvent)>(
+    run_agent_loop(
         &llm,
         &tool_executor,
         config,
         messages,
         prompt_builder,
         turn,
-        None,
+        |_| {},
     )
     .await
 }
@@ -391,7 +382,7 @@ where
         messages,
         prompt_builder,
         turn,
-        Some(callback),
+        callback,
     )
     .await
 }
@@ -980,7 +971,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_aborts_in_flight_llm_call_non_streaming() {
+    async fn cancel_aborts_in_flight_llm_call_without_a_callback() {
         let llm = Arc::new(SlowLlm);
         let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));
         let config = make_config(10);
@@ -1055,6 +1046,201 @@ mod tests {
         assert_eq!(result.final_response, "");
         assert_eq!(result.iterations_used, 1);
         assert_eq!(result.stop_reason, StopReason::NoContent);
+    }
+
+    fn choice_with(content: Vec<ContentBlock>, finish_reason: Option<FinishReason>) -> Choice {
+        Choice {
+            message: Message {
+                role: Role::Assistant,
+                content,
+            },
+            finish_reason,
+            usage: None,
+        }
+    }
+
+    // Regression test: only `FinishReason::Stop` used to end the turn; any
+    // other finish on a tool-free reply resent the history (ending in that
+    // assistant reply) until `max_iterations` ran out.
+    #[tokio::test]
+    async fn reply_without_tools_ends_turn_per_finish_reason() {
+        let text = || vec![ContentBlock::from("partial answer")];
+        let cases = [
+            (text(), Some(FinishReason::Stop), StopReason::EndTurn),
+            (text(), Some(FinishReason::MaxTokens), StopReason::MaxTokens),
+            (text(), Some(FinishReason::Refusal), StopReason::Refusal),
+            (
+                text(),
+                Some(FinishReason::Other("stop_sequence".into())),
+                StopReason::EndTurn,
+            ),
+            (text(), None, StopReason::EndTurn),
+            // A thinking model can spend the whole budget before emitting
+            // any text; that's truncation, not an empty reply.
+            (vec![], Some(FinishReason::MaxTokens), StopReason::MaxTokens),
+            (vec![], Some(FinishReason::Refusal), StopReason::Refusal),
+        ];
+
+        for (content, finish_reason, expected) in cases {
+            let has_text = !content.is_empty();
+            let llm = Arc::new(MockLlm::new(vec![choice_with(
+                content,
+                finish_reason.clone(),
+            )]));
+            let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));
+            let mut messages = vec![Message::user("hi")];
+
+            let result = run_agent_with_history(
+                llm.clone(),
+                executor,
+                &make_config(10),
+                &mut messages,
+                None,
+                &TurnContext {
+                    cancel: &CancellationToken::new(),
+                    permission_gate: &allow_all(),
+                    work_dir: std::path::Path::new("."),
+                    client_io: &NoClientIo,
+                },
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(result.stop_reason, expected, "{finish_reason:?}");
+            assert_eq!(
+                llm.call_count.load(Ordering::SeqCst),
+                1,
+                "{finish_reason:?} must not re-call the LLM"
+            );
+            if has_text {
+                assert_eq!(result.final_response, "partial answer");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn paused_reply_resumes_the_turn() {
+        let llm = Arc::new(MockLlm::new(vec![
+            choice_with(
+                vec![ContentBlock::from("working on it")],
+                Some(FinishReason::Paused),
+            ),
+            text_choice("done"),
+        ]));
+        let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));
+        let mut messages = vec![Message::user("hi")];
+
+        let result = run_agent_with_history(
+            llm.clone(),
+            executor,
+            &make_config(10),
+            &mut messages,
+            None,
+            &TurnContext {
+                cancel: &CancellationToken::new(),
+                permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+        assert_eq!(result.final_response, "done");
+        assert_eq!(llm.call_count.load(Ordering::SeqCst), 2);
+    }
+
+    /// Streams one chunk, closes its sender, and only then finishes the
+    /// request — legal for an `LlmClient`, since nothing requires the sender
+    /// to live until the reply is returned.
+    struct EarlyCloseLlm;
+
+    #[async_trait]
+    impl LlmClient for EarlyCloseLlm {
+        async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> Result<Choice> {
+            unreachable!("the streaming path is under test")
+        }
+
+        async fn send_streaming(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            chunk_tx: mpsc::UnboundedSender<LlmChunk>,
+        ) -> Result<Choice> {
+            chunk_tx.send(LlmChunk::Text("hel".into())).unwrap();
+            drop(chunk_tx);
+            // Let the agent loop observe the closed channel before the
+            // reply is ready.
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            Ok(text_choice("hello"))
+        }
+    }
+
+    // Regression test: the loop gave up as soon as the chunk channel
+    // closed, failing the turn with "stream ended prematurely" even though
+    // the reply was still on its way.
+    #[tokio::test]
+    async fn reply_arriving_after_the_chunk_channel_closes_still_completes() {
+        let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));
+        let mut messages = vec![Message::user("hi")];
+        let mut chunks = Vec::new();
+
+        let result = run_agent_streaming_with_history(
+            Arc::new(EarlyCloseLlm),
+            executor,
+            &make_config(10),
+            &mut messages,
+            None,
+            &TurnContext {
+                cancel: &CancellationToken::new(),
+                permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
+            },
+            |event| {
+                if let StreamEvent::LlmResponse { content } = event {
+                    chunks.push(content);
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+        assert_eq!(result.final_response, "hello");
+        assert_eq!(chunks, vec!["hel".to_string()]);
+    }
+
+    // Regression test: a run without a callback (what `delegate_task`
+    // subagents use) made non-streaming requests, which send no bytes until
+    // the whole reply is generated and so hit the per-read timeout on long
+    // replies. `EarlyCloseLlm::send` panics, so this only passes if the
+    // request streamed.
+    #[tokio::test]
+    async fn runs_without_a_callback_still_stream() {
+        let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));
+        let mut messages = vec![Message::user("hi")];
+
+        let result = run_agent_with_history(
+            Arc::new(EarlyCloseLlm),
+            executor,
+            &make_config(10),
+            &mut messages,
+            None,
+            &TurnContext {
+                cancel: &CancellationToken::new(),
+                permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.final_response, "hello");
     }
 
     struct HangingPermissionGate;

@@ -1,6 +1,7 @@
 mod app;
 mod permission;
 mod render;
+mod state;
 mod types;
 
 use std::io;
@@ -24,6 +25,7 @@ use crate::{client::OpenheimClient, core::permission::PermissionGate};
 
 use app::App;
 use permission::TuiPermissionGate;
+use state::AgentChannels;
 use types::{AgentUpdate, ChatItem};
 
 struct TerminalGuard {
@@ -47,15 +49,13 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
     // Snapshots for `:config`/`:models` — read once here instead of a second
     // `load_config()` duplicating the one `OpenheimClient::builder().build()`
     // the caller did.
-    let agent_config = client.state().config.clone();
+    let agent_config = client.state().config().clone();
     let app_config = client.state().app_config.clone();
+    let paths = client.state().paths().clone();
 
     let (permission_tx, mut permission_rx) =
         mpsc::unbounded_channel::<permission::PermissionRequest>();
-    let permission_gate: Arc<dyn PermissionGate> = Arc::new(TuiPermissionGate::new(
-        permission_tx,
-        client.state().executor.clone(),
-    ));
+    let permission_gate: Arc<dyn PermissionGate> = Arc::new(TuiPermissionGate::new(permission_tx));
 
     let session = client
         .new_session()
@@ -105,8 +105,16 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
                                         let _ = tx_cb.send(AgentUpdate::Stream(event));
                                     })
                                     .await;
-                                if let Err(e) = result {
-                                    let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
+                                match result {
+                                    Ok(stop_reason) => {
+                                        if let Some(notice) = stop_reason.notice() {
+                                            let _ = update_tx
+                                                .send(AgentUpdate::Notice(notice.to_string()));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
+                                    }
                                 }
                             }
                             None => break,
@@ -234,12 +242,15 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
     let mut app = App::new(
         agent_config,
         app_config,
+        paths,
         skills,
-        prompt_tx,
-        switch_model_tx,
-        switch_session_tx,
-        list_sessions_tx,
-        new_session_tx,
+        AgentChannels {
+            prompt: prompt_tx,
+            switch_model: switch_model_tx,
+            switch_session: switch_session_tx,
+            list_sessions: list_sessions_tx,
+            new_session: new_session_tx,
+        },
     );
 
     enable_raw_mode()?;
@@ -292,7 +303,7 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         app.handle_key(key);
                     }
-                    Some(Ok(Event::Resize(_, _))) => app.cached_width = 0,
+                    Some(Ok(Event::Resize(_, _))) => app.transcript.invalidate(),
                     Some(Err(_)) | None => break,
                     _ => {}
                 }

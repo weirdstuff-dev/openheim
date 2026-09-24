@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::config::AgentConfig;
-use crate::core::permission::PermissionDecision;
+use crate::core::permission::Approvals;
 use crate::core::runtime::AgentMode;
 use crate::error::{Error, Result};
 
@@ -20,13 +20,12 @@ pub struct SessionState {
     /// Cancelled when a `session/cancel` notification arrives for this session,
     /// so an in-flight prompt turn (running in its own spawned task) can stop.
     pub cancel: CancellationToken,
-    /// Remembered `AllowAlways`/`RejectAlways` decisions from prior
-    /// `session/request_permission` prompts, so the same tool call isn't
-    /// re-prompted for the rest of the session. Keyed by tool name for most
-    /// tools; see
-    /// [`crate::core::permission::approval_key`] for `execute_command`'s
-    /// exact-command-string scoping.
-    pub approved_tools: HashMap<String, PermissionDecision>,
+    /// Remembered `AllowAlways`/`RejectAlways` decisions, so the same tool
+    /// call isn't asked about again for the rest of the session, whichever
+    /// front-end's gate answered it. Each turn's
+    /// `RememberingGate` (in `core::permission`) reads and writes it; see
+    /// [`crate::core::permission::approval_key`] for how calls are keyed.
+    pub approved_tools: Approvals,
     /// Set via `session/set_mode`. Controls which tools are offered to the LLM.
     pub mode: AgentMode,
     /// Held for the duration of a `session/prompt` turn so a second, overlapping
@@ -166,7 +165,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             skills: vec![],
             cancel: CancellationToken::new(),
-            approved_tools: HashMap::new(),
+            approved_tools: Approvals::default(),
             mode: AgentMode::Code,
             prompt_lock: Arc::new(Mutex::new(())),
             last_active: Instant::now(),
@@ -210,10 +209,10 @@ mod tests {
     #[test]
     fn insert_or_keep_live_preserves_the_live_entrys_control_state() {
         let mut sessions = HashMap::new();
-        let mut live = sample_state();
+        let live = sample_state();
         let live_cancel = live.cancel.clone();
         let live_lock = Arc::clone(&live.prompt_lock);
-        live.approved_tools.insert(
+        live.approved_tools.remember(
             "execute_command:git status".to_string(),
             PermissionDecision::AllowAlways,
         );
@@ -229,7 +228,7 @@ mod tests {
         assert!(Arc::ptr_eq(&kept.prompt_lock, &live_lock));
         assert_eq!(
             kept.approved_tools.get("execute_command:git status"),
-            Some(&PermissionDecision::AllowAlways)
+            Some(PermissionDecision::AllowAlways)
         );
     }
 
