@@ -88,8 +88,10 @@ struct EditFileArgs {
     path: String,
     old_string: String,
     new_string: String,
+    /// `Option` rather than a defaulted `bool` so an explicit `null` (which
+    /// models do send for optional flags) means "unset", not a parse error.
     #[serde(default)]
-    replace_all: bool,
+    replace_all: Option<bool>,
 }
 
 #[async_trait]
@@ -132,7 +134,7 @@ impl ToolHandler for EditFileTool {
             &content,
             &args.old_string,
             &args.new_string,
-            args.replace_all,
+            args.replace_all.unwrap_or(false),
         )?;
         write_text(&validated, &edited, turn).await?;
         Ok(success_message(&validated, count))

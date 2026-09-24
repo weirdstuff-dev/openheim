@@ -69,8 +69,10 @@ impl<'de> Deserialize<'de> for NonEmptyString {
 /// Test helper keeping a tool's hand-written JSON schema and its args struct
 /// `T` in sync. `example` must set every property the schema declares. Checks
 /// that the example parses, that the schema and the example name the same
-/// properties, and that dropping a property fails to parse exactly when the
-/// schema lists it under `required`.
+/// properties, that dropping a property fails to parse exactly when the
+/// schema lists it under `required`, and that every optional property also
+/// accepts an explicit `null` (models send that for "unset", so an optional
+/// field must be an `Option`, not a `#[serde(default)]` plain value).
 #[cfg(test)]
 pub(crate) fn assert_args_match_schema<T: DeserializeOwned>(
     tool: &dyn super::ToolHandler,
@@ -114,6 +116,14 @@ pub(crate) fn assert_args_match_schema<T: DeserializeOwned>(
             "{name}: dropping '{key}' should {} parsing, per the schema's `required`",
             if is_required { "fail" } else { "not fail" },
         );
+
+        if !is_required {
+            let mut null = example.clone();
+            null.insert(key.clone(), Value::Null);
+            if let Err(e) = parse::<T>(&Value::Object(null).to_string()) {
+                panic!("{name}: optional '{key}' must accept null: {e}");
+            }
+        }
     }
 }
 

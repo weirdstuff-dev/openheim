@@ -132,8 +132,10 @@ struct SearchArgs {
     pattern: String,
     #[serde(default)]
     path: Option<String>,
+    /// `Option` rather than a defaulted `bool` so an explicit `null` (which
+    /// models do send for optional flags) means "unset", not a parse error.
     #[serde(default)]
-    case_insensitive: bool,
+    case_insensitive: Option<bool>,
 }
 
 #[async_trait]
@@ -166,7 +168,12 @@ impl ToolHandler for SearchTool {
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
         let args: SearchArgs = parse(args)?;
         let validated = validate_path(args.path.as_deref().unwrap_or("."), turn.work_dir)?;
-        search(&args.pattern, &validated, args.case_insensitive).await
+        search(
+            &args.pattern,
+            &validated,
+            args.case_insensitive.unwrap_or(false),
+        )
+        .await
     }
 
     fn capabilities(&self) -> ToolCapabilities {
