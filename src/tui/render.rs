@@ -8,6 +8,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use super::state::InputLine;
 use super::types::{ChatItem, ConfigRow};
 
 pub(crate) const THEME_COLORS: &[&str] = &[
@@ -308,26 +309,33 @@ pub(crate) fn render_welcome(
     f.render_widget(Paragraph::new(lines), area);
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The two labels on the input bar's top border: the activity spinner on the
+/// left (absent when idle) and the provider/model/context summary on the right.
+pub(crate) struct FooterLabels {
+    pub(crate) left: Option<String>,
+    pub(crate) right: String,
+}
+
+/// Draws the input bar; `show_cursor` is false while a popup or permission
+/// prompt has focus.
 pub(crate) fn render_input_bar(
     f: &mut Frame,
     area: Rect,
-    input: &str,
-    cursor: usize,
-    left_label: Option<&str>,
-    right_label: &str,
+    input: &InputLine,
+    labels: &FooterLabels,
     show_cursor: bool,
     theme: Color,
 ) {
     let dim = Style::default().fg(theme);
     let mut block = Block::default().borders(Borders::TOP).border_style(dim);
 
-    if let Some(left) = left_label {
+    if let Some(left) = &labels.left {
         block =
             block.title_top(Line::from(Span::styled(format!("─── {left} "), dim)).left_aligned());
     }
     block = block
-        .title_top(Line::from(Span::styled(format!(" {right_label} ───"), dim)).right_aligned());
+        .title_top(Line::from(Span::styled(format!(" {} ───", labels.right), dim)).right_aligned());
+    let (input, cursor) = (input.text(), input.cursor());
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -582,7 +590,12 @@ pub(crate) fn render_config_viewer(
     scroll: usize,
     theme: Color,
 ) {
-    render_rows_popup(f, area, rows, scroll, " config ", 36, "  ", theme);
+    const STYLE: RowsPopupStyle = RowsPopupStyle {
+        title: " config ",
+        min_width: 36,
+        entry_prefix: "  ",
+    };
+    render_rows_popup(f, area, rows, scroll, &STYLE, theme);
 }
 
 pub(crate) fn render_mcp_viewer(
@@ -592,20 +605,35 @@ pub(crate) fn render_mcp_viewer(
     scroll: usize,
     theme: Color,
 ) {
-    render_rows_popup(f, area, rows, scroll, " mcp servers ", 40, "    ", theme);
+    const STYLE: RowsPopupStyle = RowsPopupStyle {
+        title: " mcp servers ",
+        min_width: 40,
+        entry_prefix: "    ",
+    };
+    render_rows_popup(f, area, rows, scroll, &STYLE, theme);
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What differs between the popups `render_rows_popup` draws.
+struct RowsPopupStyle {
+    title: &'static str,
+    min_width: u16,
+    /// Indent before each `ConfigRow::Entry` key.
+    entry_prefix: &'static str,
+}
+
 fn render_rows_popup(
     f: &mut Frame,
     area: Rect,
     rows: &[ConfigRow],
     scroll: usize,
-    title: &'static str,
-    min_popup_w: u16,
-    entry_prefix: &'static str,
+    style: &RowsPopupStyle,
     theme: Color,
 ) {
+    let RowsPopupStyle {
+        title,
+        min_width: min_popup_w,
+        entry_prefix,
+    } = *style;
     let (entry_key_w, entry_val_w, item_w, header_w) =
         rows.iter()
             .fold((0, 0, 0, 0), |(ek, ev, iw, hw), row| match row {

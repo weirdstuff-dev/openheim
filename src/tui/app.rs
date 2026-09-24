@@ -1,14 +1,8 @@
-use std::collections::VecDeque;
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
 };
-use tokio::sync::mpsc;
 
 use crate::{
     config::{AgentConfig, AppConfig, RuntimePaths},
@@ -16,8 +10,9 @@ use crate::{
     memory::{ConversationMeta, SkillsManager},
 };
 
-use super::permission::{PERMISSION_OPTIONS, PermissionRequest};
-use super::render;
+use super::permission::PermissionRequest;
+use super::render::{self, FooterLabels};
+use super::state::{AgentChannels, InputLine, Overlay, PermissionQueue, Theme, Transcript};
 use super::types::{AgentUpdate, ChatItem, ConfigRow, Screen, Status};
 
 /// Formats a token count for the footer: exact below 1000, `k`-suffixed with
@@ -31,47 +26,45 @@ fn format_token_count(tokens: u64) -> String {
     }
 }
 
+/// Moves a list selection up or down within `len` entries.
+fn move_selection(selected: &mut usize, len: usize, code: KeyCode) {
+    match code {
+        KeyCode::Up => *selected = selected.saturating_sub(1),
+        KeyCode::Down => *selected = (*selected + 1).min(len.saturating_sub(1)),
+        _ => {}
+    }
+}
+
+/// Scrolls a read-only viewer.
+fn move_scroll(scroll: &mut usize, code: KeyCode) {
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
+        KeyCode::PageUp => *scroll = scroll.saturating_sub(5),
+        KeyCode::PageDown => *scroll = scroll.saturating_add(5),
+        _ => {}
+    }
+}
+
+/// The terminal UI's state: a base screen (welcome or chat), at most one
+/// popup over it, and the permission-prompt queue over everything.
 pub(super) struct App {
-    pub(super) items: Vec<ChatItem>,
-    pub(super) input: String,
-    pub(super) cursor: usize,
-    pub(super) scroll: usize,
-    pub(super) pinned: bool,
+    pub(super) transcript: Transcript,
+    input: InputLine,
     pub(super) spinner_frame: usize,
     pub(super) status: Status,
     pub(super) should_quit: bool,
+    /// The screen under any popup.
     screen: Screen,
-    pre_picker_screen: Screen,
+    overlay: Option<Overlay>,
+    permissions: PermissionQueue,
     agent_config: AgentConfig,
     app_config: AppConfig,
     /// Where `:skills` looks and `:theme` writes.
     paths: RuntimePaths,
     skills: Vec<String>,
-    sessions: Vec<ConversationMeta>,
-    cached_lines: Vec<Line<'static>>,
-    pub(super) cached_width: u16,
-    prompt_tx: mpsc::UnboundedSender<String>,
-    switch_model_tx: mpsc::UnboundedSender<(String, String)>,
-    switch_session_tx: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
-    list_sessions_tx: mpsc::UnboundedSender<()>,
-    new_session_tx: mpsc::UnboundedSender<()>,
-    picker_items: Vec<(String, String)>,
-    picker_selected: usize,
-    config_rows: Vec<ConfigRow>,
-    config_scroll: usize,
-    skills_items: Vec<String>,
-    skills_scroll: usize,
-    mcp_rows: Vec<ConfigRow>,
-    mcp_scroll: usize,
-    theme_color: Color,
-    theme_color_name: String,
-    theme_selected: usize,
-    /// A queue rather than a single slot — with tool calls now checked
-    /// concurrently (see agent.rs's Phase 1b), several requests can arrive
-    /// before the first is answered. Shown one at a time; the rest wait
-    /// their turn instead of overwriting (and orphaning) an earlier one.
-    pending_permissions: VecDeque<PermissionRequest>,
-    permission_selected: usize,
+    theme: Theme,
+    channels: AgentChannels,
     /// Current context size: the most recent LLM call's usage, i.e. how
     /// full the context window is right now — not a cumulative session
     /// total. Refreshed after each completed turn and on session switch.
@@ -81,68 +74,35 @@ pub(super) struct App {
 }
 
 impl App {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         agent_config: AgentConfig,
         app_config: AppConfig,
         paths: RuntimePaths,
         skills: Vec<String>,
-        prompt_tx: mpsc::UnboundedSender<String>,
-        switch_model_tx: mpsc::UnboundedSender<(String, String)>,
-        switch_session_tx: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
-        list_sessions_tx: mpsc::UnboundedSender<()>,
-        new_session_tx: mpsc::UnboundedSender<()>,
+        channels: AgentChannels,
     ) -> Self {
-        let theme_name = app_config
-            .tui
-            .theme_color
-            .as_deref()
-            .unwrap_or("gray")
-            .to_string();
-        let theme_color = render::theme_color(&theme_name);
+        let theme = Theme::named(app_config.tui.theme_color.as_deref().unwrap_or("gray"));
         Self {
-            items: Vec::new(),
-            input: String::new(),
-            cursor: 0,
-            scroll: 0,
-            pinned: true,
+            transcript: Transcript::new(),
+            input: InputLine::default(),
             spinner_frame: 0,
             status: Status::Idle,
             should_quit: false,
             screen: Screen::Welcome,
-            pre_picker_screen: Screen::Welcome,
+            overlay: None,
+            permissions: PermissionQueue::default(),
             agent_config,
             app_config,
             paths,
             skills,
-            sessions: Vec::new(),
-            cached_lines: Vec::new(),
-            cached_width: 0,
-            prompt_tx,
-            switch_model_tx,
-            switch_session_tx,
-            list_sessions_tx,
-            new_session_tx,
-            picker_items: Vec::new(),
-            picker_selected: 0,
-            config_rows: Vec::new(),
-            config_scroll: 0,
-            skills_items: Vec::new(),
-            skills_scroll: 0,
-            mcp_rows: Vec::new(),
-            mcp_scroll: 0,
-            theme_color,
-            theme_color_name: theme_name,
-            theme_selected: 0,
-            pending_permissions: VecDeque::new(),
-            permission_selected: 0,
+            theme,
+            channels,
             context_usage: None,
         }
     }
 
-    pub(super) fn push(&mut self, item: ChatItem) {
-        self.items.push(item);
-        self.cached_width = 0;
+    fn push(&mut self, item: ChatItem) {
+        self.transcript.push(item);
     }
 
     pub(super) fn handle_update(&mut self, update: AgentUpdate) {
@@ -165,20 +125,20 @@ impl App {
                     "switched to {provider} / {model}"
                 )));
             }
-            AgentUpdate::SessionList(metas) => {
-                if metas.is_empty() {
+            AgentUpdate::SessionList(sessions) => {
+                if sessions.is_empty() {
                     self.push(ChatItem::SystemInfo("no sessions yet".to_string()));
                 } else {
-                    self.sessions = metas;
-                    self.picker_selected = 0;
-                    self.push_screen(Screen::SessionPicker);
+                    self.overlay = Some(Overlay::SessionPicker {
+                        sessions,
+                        selected: 0,
+                    });
                 }
             }
-            // Appended, not replacing `self.items` — `open_session` already
-            // cleared the transcript and pushed the header/warning
-            // synchronously, so this is just the replayed message history
-            // (plus a trailing "restored" marker) arriving once the load
-            // completes.
+            // Appended, not replacing the transcript — `open_session` already
+            // cleared it and pushed the header/warning synchronously, so this
+            // is just the replayed message history (plus a trailing
+            // "restored" marker) arriving once the load completes.
             AgentUpdate::History(items) => {
                 for item in items {
                     self.push(item);
@@ -187,9 +147,7 @@ impl App {
             // Only now — creation confirmed — is it safe to drop the old
             // session's transcript; see `start_new_session`.
             AgentUpdate::NewSession(items) => {
-                self.items.clear();
-                self.scroll = 0;
-                self.pinned = true;
+                self.transcript.clear();
                 self.context_usage = None;
                 self.status = Status::Idle;
                 for item in items {
@@ -205,19 +163,11 @@ impl App {
         match event {
             StreamEvent::LlmResponse { content } => {
                 self.status = Status::Streaming;
-                match self.items.last_mut() {
-                    Some(ChatItem::AssistantMessage(existing)) => existing.push_str(&content),
-                    _ => self.items.push(ChatItem::AssistantMessage(content)),
-                }
-                self.cached_width = 0;
+                self.transcript.append_assistant_text(content);
             }
             StreamEvent::ThinkingContent { content } => {
                 self.status = Status::Streaming;
-                match self.items.last_mut() {
-                    Some(ChatItem::Thinking(existing)) => existing.push_str(&content),
-                    _ => self.items.push(ChatItem::Thinking(content)),
-                }
-                self.cached_width = 0;
+                self.transcript.append_thinking(content);
             }
             StreamEvent::ToolCall {
                 tool_name,
@@ -248,337 +198,167 @@ impl App {
         }
     }
 
-    fn handle_session_picker_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
-            KeyCode::Up => {
-                self.picker_selected = self.picker_selected.saturating_sub(1);
-            }
-            KeyCode::Down => {
-                if !self.sessions.is_empty() {
-                    self.picker_selected = (self.picker_selected + 1).min(self.sessions.len() - 1);
-                }
-            }
-            KeyCode::Enter => {
-                if let Some(meta) = self.sessions.get(self.picker_selected).cloned() {
-                    self.screen = Screen::Chat;
-                    self.open_session(&meta);
-                }
-            }
-            KeyCode::Esc => {
-                self.screen = self.pre_picker_screen;
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_scroll_key(
-        key: KeyEvent,
-        scroll: &mut usize,
-        should_quit: &mut bool,
-        screen: &mut Screen,
-        prev: Screen,
-    ) {
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                *should_quit = true;
-            }
-            KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
-            KeyCode::PageUp => *scroll = scroll.saturating_sub(5),
-            KeyCode::PageDown => *scroll = scroll.saturating_add(5),
-            KeyCode::Esc => *screen = prev,
-            _ => {}
-        }
-    }
-
-    fn handle_config_viewer_key(&mut self, key: KeyEvent) {
-        Self::handle_scroll_key(
-            key,
-            &mut self.config_scroll,
-            &mut self.should_quit,
-            &mut self.screen,
-            self.pre_picker_screen,
-        );
-    }
-
-    fn handle_skills_viewer_key(&mut self, key: KeyEvent) {
-        Self::handle_scroll_key(
-            key,
-            &mut self.skills_scroll,
-            &mut self.should_quit,
-            &mut self.screen,
-            self.pre_picker_screen,
-        );
-    }
-
-    fn handle_mcp_viewer_key(&mut self, key: KeyEvent) {
-        Self::handle_scroll_key(
-            key,
-            &mut self.mcp_scroll,
-            &mut self.should_quit,
-            &mut self.screen,
-            self.pre_picker_screen,
-        );
-    }
-
-    fn handle_theme_picker_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
-            KeyCode::Up => {
-                self.theme_selected = self.theme_selected.saturating_sub(1);
-            }
-            KeyCode::Down => {
-                self.theme_selected = (self.theme_selected + 1).min(render::THEME_COLORS.len() - 1);
-            }
-            KeyCode::Enter => {
-                let name = render::THEME_COLORS[self.theme_selected].to_string();
-                self.screen = Screen::Chat;
-                self.apply_theme(&name);
-            }
-            KeyCode::Esc => {
-                self.screen = self.pre_picker_screen;
-            }
-            _ => {}
-        }
-    }
-
     pub(super) fn handle_permission_request(&mut self, request: PermissionRequest) {
-        // Only the first arrival needs to switch screens (and remember what
-        // to return to) — later ones just join the queue behind it and
-        // surface once the ones ahead are resolved.
-        let already_showing = !self.pending_permissions.is_empty();
-        self.pending_permissions.push_back(request);
-        if !already_showing {
-            self.permission_selected = 0;
-            self.push_screen(Screen::PermissionPrompt);
-        }
+        self.permissions.push(request);
     }
 
-    /// Answers the front-of-queue request (if any), then either advances to
-    /// the next queued one or returns to the prior screen once the queue is
-    /// empty. A dropped `respond_to` (send fails) means the agent task
-    /// already gave up waiting — nothing to do beyond discarding the request.
+    /// Answers the permission prompt on screen and notes the decision in the
+    /// transcript.
     fn resolve_permission(&mut self, decision: PermissionDecision) {
-        if let Some(request) = self.pending_permissions.pop_front() {
+        if let Some(tool_name) = self.permissions.resolve(decision) {
             let label = match decision {
                 PermissionDecision::AllowOnce => "allowed",
                 PermissionDecision::AllowAlways => "always allowed",
                 PermissionDecision::RejectOnce => "rejected",
                 PermissionDecision::RejectAlways => "always rejected",
             };
-            self.push(ChatItem::SystemInfo(format!(
-                "{label} '{}'",
-                request.tool_name
-            )));
-            let _ = request.respond_to.send(decision);
-        }
-        if self.pending_permissions.is_empty() {
-            self.screen = self.pre_picker_screen;
-        } else {
-            self.permission_selected = 0;
+            self.push(ChatItem::SystemInfo(format!("{label} '{tool_name}'")));
         }
     }
 
-    /// Drops queued requests whose `respond_to` receiver is already gone —
-    /// the agent task gave up waiting (e.g. the turn was cancelled) before
-    /// the user ever answered. Restores the screen shown before the prompt
-    /// popped up if that empties the queue, instead of leaving a stale
-    /// prompt on screen with nothing left to resolve.
-    fn prune_stale_permissions(&mut self) {
-        let before = self.pending_permissions.len();
-        self.pending_permissions
-            .retain(|request| !request.respond_to.is_closed());
-        if self.pending_permissions.len() == before {
+    pub(super) fn handle_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.should_quit = true;
             return;
         }
-        if self.pending_permissions.is_empty() {
-            self.screen = self.pre_picker_screen;
+        // Topmost layer first: a permission prompt, then a popup, then the
+        // input line.
+        self.permissions.prune_stale();
+        if !self.permissions.is_empty() {
+            self.handle_permission_key(key);
+        } else if self.overlay.is_some() {
+            self.handle_overlay_key(key);
         } else {
-            self.permission_selected = 0;
+            self.handle_input_key(key);
         }
     }
 
-    fn handle_permission_prompt_key(&mut self, key: KeyEvent) {
-        self.prune_stale_permissions();
+    fn handle_permission_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
-            KeyCode::Up => {
-                self.permission_selected = self.permission_selected.saturating_sub(1);
-            }
-            KeyCode::Down => {
-                self.permission_selected =
-                    (self.permission_selected + 1).min(PERMISSION_OPTIONS.len() - 1);
-            }
-            KeyCode::Enter => {
-                let (_, decision) = PERMISSION_OPTIONS[self.permission_selected];
-                self.resolve_permission(decision);
-            }
+            KeyCode::Up => self.permissions.select_previous(),
+            KeyCode::Down => self.permissions.select_next(),
+            KeyCode::Enter => self.resolve_permission(self.permissions.selected_decision()),
             KeyCode::Char('y') => self.resolve_permission(PermissionDecision::AllowOnce),
             KeyCode::Char('a') => self.resolve_permission(PermissionDecision::AllowAlways),
             KeyCode::Char('n') => self.resolve_permission(PermissionDecision::RejectOnce),
             KeyCode::Char('r') => self.resolve_permission(PermissionDecision::RejectAlways),
-            // No Esc-to-dismiss: unlike other overlays, a permission prompt
-            // needs an explicit decision — the agent task is blocked on it.
+            // No Esc-to-dismiss: unlike popups, a permission prompt needs an
+            // explicit decision — the agent task is blocked on it.
             _ => {}
         }
     }
 
-    fn apply_theme(&mut self, name: &str) {
-        self.theme_color = render::theme_color(name);
-        self.theme_color_name = name.to_string();
-        self.cached_width = 0;
-        self.app_config.tui.theme_color = Some(name.to_string());
-        match crate::config::save_theme_to_config_at(&self.paths.config_path, name) {
-            Ok(()) => self.push(ChatItem::SystemInfo(format!("theme set to {name}"))),
-            Err(e) => self.push(ChatItem::SystemInfo(format!(
-                "theme set to {name} (could not save: {e})"
-            ))),
+    /// Esc closes any popup; Enter in a picker acts on the selection and
+    /// closes it too. The popup is taken out of `self` while handling so the
+    /// actions below can use the rest of `App` freely.
+    fn handle_overlay_key(&mut self, key: KeyEvent) {
+        let Some(mut overlay) = self.overlay.take() else {
+            return;
+        };
+        if key.code == KeyCode::Esc {
+            return;
         }
-    }
-
-    fn handle_model_picker_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
-            KeyCode::Up => {
-                self.picker_selected = self.picker_selected.saturating_sub(1);
-            }
-            KeyCode::Down => {
-                if !self.picker_items.is_empty() {
-                    self.picker_selected =
-                        (self.picker_selected + 1).min(self.picker_items.len() - 1);
+        let keep_open = match &mut overlay {
+            Overlay::ModelPicker { items, selected } => {
+                if key.code == KeyCode::Enter {
+                    if let Some((provider, model)) = items.get(*selected) {
+                        let _ = self
+                            .channels
+                            .switch_model
+                            .send((provider.clone(), model.clone()));
+                    }
+                    self.screen = Screen::Chat;
+                    false
+                } else {
+                    move_selection(selected, items.len(), key.code);
+                    true
                 }
             }
-            KeyCode::Enter => {
-                if let Some((provider, model)) = self.picker_items.get(self.picker_selected) {
-                    let _ = self.switch_model_tx.send((provider.clone(), model.clone()));
+            Overlay::SessionPicker { sessions, selected } => {
+                if key.code == KeyCode::Enter {
+                    if let Some(meta) = sessions.get(*selected).cloned() {
+                        self.screen = Screen::Chat;
+                        self.open_session(&meta);
+                        false
+                    } else {
+                        true
+                    }
+                } else {
+                    move_selection(selected, sessions.len(), key.code);
+                    true
                 }
-                self.screen = Screen::Chat;
             }
-            KeyCode::Esc => {
-                self.screen = self.pre_picker_screen;
+            Overlay::ThemePicker { selected } => {
+                if key.code == KeyCode::Enter {
+                    let name = render::THEME_COLORS[*selected];
+                    self.screen = Screen::Chat;
+                    self.apply_theme(name);
+                    false
+                } else {
+                    move_selection(selected, render::THEME_COLORS.len(), key.code);
+                    true
+                }
             }
-            _ => {}
+            Overlay::ConfigViewer { scroll, .. }
+            | Overlay::McpViewer { scroll, .. }
+            | Overlay::SkillsViewer { scroll, .. } => {
+                move_scroll(scroll, key.code);
+                true
+            }
+        };
+        if keep_open {
+            self.overlay = Some(overlay);
         }
     }
 
-    fn push_screen(&mut self, next: Screen) {
-        self.pre_picker_screen = self.screen;
-        self.screen = next;
-    }
-
-    pub(super) fn handle_key(&mut self, key: KeyEvent) {
-        match self.screen {
-            Screen::ModelPicker => {
-                self.handle_model_picker_key(key);
-                return;
-            }
-            Screen::ConfigViewer => {
-                self.handle_config_viewer_key(key);
-                return;
-            }
-            Screen::SessionPicker => {
-                self.handle_session_picker_key(key);
-                return;
-            }
-            Screen::SkillsViewer => {
-                self.handle_skills_viewer_key(key);
-                return;
-            }
-            Screen::McpViewer => {
-                self.handle_mcp_viewer_key(key);
-                return;
-            }
-            Screen::ThemePicker => {
-                self.handle_theme_picker_key(key);
-                return;
-            }
-            Screen::PermissionPrompt => {
-                self.handle_permission_prompt_key(key);
-                return;
-            }
-            Screen::Welcome | Screen::Chat => {}
-        }
+    fn handle_input_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.input.clear();
-                self.cursor = 0;
             }
             KeyCode::Enter => {
                 if self.status != Status::Idle {
                     return;
                 }
-                let line = self.input.trim().to_string();
+                let line = self.input.text().trim().to_string();
                 if line.is_empty() {
                     return;
                 }
                 self.input.clear();
-                self.cursor = 0;
                 self.screen = Screen::Chat;
                 if let Some(rest) = line.strip_prefix(':') {
                     self.handle_command(rest.trim());
                 } else {
                     self.push(ChatItem::UserMessage(line.clone()));
                     self.status = Status::Thinking;
-                    self.pinned = true;
-                    let _ = self.prompt_tx.send(line);
+                    self.transcript.pin();
+                    let _ = self.channels.prompt.send(line);
                 }
             }
-            KeyCode::Char(c) => {
-                self.input.insert(self.cursor, c);
-                self.cursor += c.len_utf8();
-            }
-            KeyCode::Backspace => {
-                if self.cursor > 0 {
-                    let prev = self.input.floor_char_boundary(self.cursor - 1);
-                    self.input.drain(prev..self.cursor);
-                    self.cursor = prev;
-                }
-            }
-            KeyCode::Delete => {
-                if self.cursor < self.input.len() {
-                    let next = self.input.ceil_char_boundary(self.cursor + 1);
-                    self.input.drain(self.cursor..next);
-                }
-            }
-            KeyCode::Left => {
-                if self.cursor > 0 {
-                    self.cursor = self.input.floor_char_boundary(self.cursor - 1);
-                }
-            }
-            KeyCode::Right => {
-                if self.cursor < self.input.len() {
-                    self.cursor = self.input.ceil_char_boundary(self.cursor + 1);
-                }
-            }
-            KeyCode::Home => self.cursor = 0,
-            KeyCode::End => self.cursor = self.input.len(),
-            KeyCode::Up if self.screen == Screen::Chat => {
-                self.scroll = self.scroll.saturating_sub(1);
-                self.pinned = false;
-            }
-            KeyCode::Down if self.screen == Screen::Chat => {
-                self.scroll = self.scroll.saturating_add(1);
-            }
-            KeyCode::PageUp if self.screen == Screen::Chat => {
-                self.scroll = self.scroll.saturating_sub(20);
-                self.pinned = false;
-            }
-            KeyCode::PageDown if self.screen == Screen::Chat => {
-                self.scroll = self.scroll.saturating_add(20);
-            }
+            KeyCode::Char(c) => self.input.insert(c),
+            KeyCode::Backspace => self.input.backspace(),
+            KeyCode::Delete => self.input.delete(),
+            KeyCode::Left => self.input.left(),
+            KeyCode::Right => self.input.right(),
+            KeyCode::Home => self.input.home(),
+            KeyCode::End => self.input.end(),
+            KeyCode::Up if self.screen == Screen::Chat => self.transcript.scroll_up(1),
+            KeyCode::Down if self.screen == Screen::Chat => self.transcript.scroll_down(1),
+            KeyCode::PageUp if self.screen == Screen::Chat => self.transcript.scroll_up(20),
+            KeyCode::PageDown if self.screen == Screen::Chat => self.transcript.scroll_down(20),
             _ => {}
+        }
+    }
+
+    fn apply_theme(&mut self, name: &str) {
+        self.theme = Theme::named(name);
+        self.transcript.invalidate();
+        self.app_config.tui.theme_color = Some(name.to_string());
+        match crate::config::save_theme_to_config_at(&self.paths.config_path, name) {
+            Ok(()) => self.push(ChatItem::SystemInfo(format!("theme set to {name}"))),
+            Err(e) => self.push(ChatItem::SystemInfo(format!(
+                "theme set to {name} (could not save: {e})"
+            ))),
         }
     }
 
@@ -605,53 +385,13 @@ impl App {
             )),
             "new" => self.start_new_session(),
             "sessions" => {
-                let _ = self.list_sessions_tx.send(());
+                let _ = self.channels.list_sessions.send(());
             }
             "config" => {
-                let ac = &self.agent_config;
-                let mut rows = vec![
-                    ConfigRow::Entry {
-                        key: "Provider".to_string(),
-                        val: ac.provider_name.clone(),
-                    },
-                    ConfigRow::Entry {
-                        key: "Model".to_string(),
-                        val: ac.model.clone(),
-                    },
-                    ConfigRow::Entry {
-                        key: "Max iterations".to_string(),
-                        val: ac.max_iterations.to_string(),
-                    },
-                    ConfigRow::Entry {
-                        key: "Timeout".to_string(),
-                        val: format!("{}s", ac.timeout_secs),
-                    },
-                ];
-                if !self.app_config.providers.is_empty() {
-                    rows.push(ConfigRow::Blank);
-                    rows.push(ConfigRow::Header("Providers".to_string()));
-                    for (pname, p) in &self.app_config.providers {
-                        let label = if pname == &self.app_config.default_provider {
-                            format!("{pname}  (default)")
-                        } else {
-                            pname.clone()
-                        };
-                        rows.push(ConfigRow::Entry {
-                            key: label,
-                            val: p.default_model.clone(),
-                        });
-                    }
-                }
-                if !self.app_config.mcp_servers.is_empty() {
-                    rows.push(ConfigRow::Blank);
-                    rows.push(ConfigRow::Header("MCP Servers".to_string()));
-                    for sname in self.app_config.mcp_servers.keys() {
-                        rows.push(ConfigRow::Item(sname.clone()));
-                    }
-                }
-                self.config_rows = rows;
-                self.config_scroll = 0;
-                self.push_screen(Screen::ConfigViewer);
+                self.overlay = Some(Overlay::ConfigViewer {
+                    rows: self.config_rows(),
+                    scroll: 0,
+                });
             }
             "mcp" => {
                 if self.app_config.mcp_servers.is_empty() {
@@ -661,35 +401,10 @@ impl App {
                             .to_string(),
                     ));
                 } else {
-                    let mut rows = Vec::new();
-                    let mut iter = self.app_config.mcp_servers.iter().peekable();
-                    while let Some((sname, server)) = iter.next() {
-                        rows.push(ConfigRow::Header(sname.clone()));
-                        if let Some(cmd) = &server.command {
-                            let args_str = server.args.join(" ");
-                            let val = if args_str.is_empty() {
-                                cmd.clone()
-                            } else {
-                                format!("{cmd} {args_str}")
-                            };
-                            rows.push(ConfigRow::Entry {
-                                key: "stdio".to_string(),
-                                val,
-                            });
-                        }
-                        if let Some(url) = &server.url {
-                            rows.push(ConfigRow::Entry {
-                                key: "http".to_string(),
-                                val: url.clone(),
-                            });
-                        }
-                        if iter.peek().is_some() {
-                            rows.push(ConfigRow::Blank);
-                        }
-                    }
-                    self.mcp_rows = rows;
-                    self.mcp_scroll = 0;
-                    self.push_screen(Screen::McpViewer);
+                    self.overlay = Some(Overlay::McpViewer {
+                        rows: self.mcp_rows(),
+                        scroll: 0,
+                    });
                 }
             }
             "models" => {
@@ -707,14 +422,13 @@ impl App {
                         .iter()
                         .position(|(_, m)| m == &self.agent_config.model)
                         .unwrap_or(0);
-                    self.picker_items = items;
-                    self.picker_selected = selected;
-                    self.push_screen(Screen::ModelPicker);
+                    self.overlay = Some(Overlay::ModelPicker { items, selected });
                 } else {
                     match self.app_config.resolve(Some(arg)) {
                         Ok(config) => {
                             let _ = self
-                                .switch_model_tx
+                                .channels
+                                .switch_model
                                 .send((config.provider_name, config.model));
                         }
                         Err(e) => {
@@ -732,21 +446,19 @@ impl App {
                                 .to_string(),
                         ));
                     }
-                    Ok(names) => {
-                        self.skills_items = names;
-                        self.skills_scroll = 0;
-                        self.push_screen(Screen::SkillsViewer);
+                    Ok(items) => {
+                        self.overlay = Some(Overlay::SkillsViewer { items, scroll: 0 });
                     }
                     Err(e) => self.push(ChatItem::Err(e.to_string())),
                 }
             }
             "theme" => {
                 if arg.is_empty() {
-                    self.theme_selected = render::THEME_COLORS
+                    let selected = render::THEME_COLORS
                         .iter()
-                        .position(|&n| n == self.theme_color_name)
+                        .position(|&n| n == self.theme.name)
                         .unwrap_or(0);
-                    self.push_screen(Screen::ThemePicker);
+                    self.overlay = Some(Overlay::ThemePicker { selected });
                 } else if render::THEME_COLORS.contains(&arg) {
                     self.apply_theme(arg);
                 } else {
@@ -762,6 +474,83 @@ impl App {
         }
     }
 
+    /// Rows for the `:config` viewer.
+    fn config_rows(&self) -> Vec<ConfigRow> {
+        let ac = &self.agent_config;
+        let mut rows = vec![
+            ConfigRow::Entry {
+                key: "Provider".to_string(),
+                val: ac.provider_name.clone(),
+            },
+            ConfigRow::Entry {
+                key: "Model".to_string(),
+                val: ac.model.clone(),
+            },
+            ConfigRow::Entry {
+                key: "Max iterations".to_string(),
+                val: ac.max_iterations.to_string(),
+            },
+            ConfigRow::Entry {
+                key: "Timeout".to_string(),
+                val: format!("{}s", ac.timeout_secs),
+            },
+        ];
+        if !self.app_config.providers.is_empty() {
+            rows.push(ConfigRow::Blank);
+            rows.push(ConfigRow::Header("Providers".to_string()));
+            for (pname, p) in &self.app_config.providers {
+                let label = if pname == &self.app_config.default_provider {
+                    format!("{pname}  (default)")
+                } else {
+                    pname.clone()
+                };
+                rows.push(ConfigRow::Entry {
+                    key: label,
+                    val: p.default_model.clone(),
+                });
+            }
+        }
+        if !self.app_config.mcp_servers.is_empty() {
+            rows.push(ConfigRow::Blank);
+            rows.push(ConfigRow::Header("MCP Servers".to_string()));
+            for sname in self.app_config.mcp_servers.keys() {
+                rows.push(ConfigRow::Item(sname.clone()));
+            }
+        }
+        rows
+    }
+
+    /// Rows for the `:mcp` viewer.
+    fn mcp_rows(&self) -> Vec<ConfigRow> {
+        let mut rows = Vec::new();
+        let mut iter = self.app_config.mcp_servers.iter().peekable();
+        while let Some((sname, server)) = iter.next() {
+            rows.push(ConfigRow::Header(sname.clone()));
+            if let Some(cmd) = &server.command {
+                let args_str = server.args.join(" ");
+                let val = if args_str.is_empty() {
+                    cmd.clone()
+                } else {
+                    format!("{cmd} {args_str}")
+                };
+                rows.push(ConfigRow::Entry {
+                    key: "stdio".to_string(),
+                    val,
+                });
+            }
+            if let Some(url) = &server.url {
+                rows.push(ConfigRow::Entry {
+                    key: "http".to_string(),
+                    val: url.clone(),
+                });
+            }
+            if iter.peek().is_some() {
+                rows.push(ConfigRow::Blank);
+            }
+        }
+        rows
+    }
+
     /// Asks the agent task to start a brand-new, unsaved session — the same
     /// `SessionBuilder::start` path `run()` uses on startup, just triggered
     /// mid-session instead. Deliberately leaves the current transcript and
@@ -772,7 +561,7 @@ impl App {
     /// session — still live in the agent task — is exactly where it was.
     fn start_new_session(&mut self) {
         self.status = Status::Thinking;
-        if self.new_session_tx.send(()).is_err() {
+        if self.channels.new_session.send(()).is_err() {
             self.status = Status::Idle;
             self.push(ChatItem::Err(
                 "failed to start new session: agent task is gone".to_string(),
@@ -788,10 +577,8 @@ impl App {
     /// the rest of I/O lives — the actual message items arrive later as
     /// `AgentUpdate::History` once the load completes.
     fn open_session(&mut self, meta: &ConversationMeta) {
-        self.items.clear();
+        self.transcript.clear();
         self.status = Status::Idle;
-        self.scroll = 0;
-        self.pinned = true;
 
         let title = meta.title.as_deref().unwrap_or("(untitled)");
         self.push(ChatItem::SystemInfo(format!("─── {title}")));
@@ -812,200 +599,121 @@ impl App {
             .cwd
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
-        let _ = self.switch_session_tx.send((meta.id.to_string(), cwd));
+        let _ = self
+            .channels
+            .switch_session
+            .send((meta.id.to_string(), cwd));
     }
 
     pub(super) fn draw(&mut self, f: &mut Frame) {
-        self.prune_stale_permissions();
+        self.permissions.prune_stale();
 
         let area = f.area();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Fill(1), Constraint::Length(3)])
             .split(area);
-
         let [content_area, input_area] = [chunks[0], chunks[1]];
+        let theme = self.theme.color;
 
-        let bg_screen = if self.screen.is_overlay() {
-            self.pre_picker_screen
-        } else {
-            self.screen
-        };
-
-        if bg_screen == Screen::Welcome {
-            render::render_welcome(
+        match self.screen {
+            Screen::Welcome => render::render_welcome(
                 f,
                 content_area,
                 &self.agent_config.model,
                 &self.agent_config.provider_name,
                 &self.skills,
-                self.theme_color,
-            );
-        } else {
-            self.draw_chat(f, content_area);
+                theme,
+            ),
+            Screen::Chat => self.transcript.draw(f, content_area, theme),
         }
 
         const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let frame = SPINNER[self.spinner_frame % SPINNER.len()];
-        let left_label = match &self.status {
-            Status::Idle => None,
-            Status::Thinking => Some(format!("{frame} thinking…")),
-            Status::Streaming => Some(format!("{frame} streaming…")),
+        let labels = FooterLabels {
+            left: match &self.status {
+                Status::Idle => None,
+                Status::Thinking => Some(format!("{frame} thinking…")),
+                Status::Streaming => Some(format!("{frame} streaming…")),
+            },
+            right: match &self.context_usage {
+                Some(usage) => format!(
+                    "{} · {} · {}",
+                    self.agent_config.provider_name,
+                    self.agent_config.model,
+                    format_token_count(usage.total())
+                ),
+                None => format!(
+                    "{} · {}",
+                    self.agent_config.provider_name, self.agent_config.model
+                ),
+            },
         };
-        let right_label = match &self.context_usage {
-            Some(usage) => format!(
-                "{} · {} · {}",
-                self.agent_config.provider_name,
-                self.agent_config.model,
-                format_token_count(usage.total())
-            ),
-            None => format!(
-                "{} · {}",
-                self.agent_config.provider_name, self.agent_config.model
-            ),
-        };
+        let input_has_focus = self.overlay.is_none() && self.permissions.is_empty();
+        render::render_input_bar(f, input_area, &self.input, &labels, input_has_focus, theme);
 
-        let theme = self.theme_color;
-        render::render_input_bar(
-            f,
-            input_area,
-            &self.input,
-            self.cursor,
-            left_label.as_deref(),
-            &right_label,
-            !self.screen.is_overlay(),
-            theme,
-        );
-
-        match self.screen {
-            Screen::ModelPicker => {
-                render::render_model_picker(
-                    f,
-                    area,
-                    &self.picker_items,
-                    self.picker_selected,
-                    theme,
-                );
+        match &self.overlay {
+            Some(Overlay::ModelPicker { items, selected }) => {
+                render::render_model_picker(f, area, items, *selected, theme)
             }
-            Screen::ConfigViewer => {
-                render::render_config_viewer(f, area, &self.config_rows, self.config_scroll, theme);
+            Some(Overlay::SessionPicker { sessions, selected }) => {
+                render::render_session_picker(f, area, sessions, *selected, theme)
             }
-            Screen::SessionPicker => {
-                render::render_session_picker(f, area, &self.sessions, self.picker_selected, theme);
+            Some(Overlay::ConfigViewer { rows, scroll }) => {
+                render::render_config_viewer(f, area, rows, *scroll, theme)
             }
-            Screen::SkillsViewer => {
-                render::render_skills_viewer(
-                    f,
-                    area,
-                    &self.skills_items,
-                    self.skills_scroll,
-                    theme,
-                );
+            Some(Overlay::McpViewer { rows, scroll }) => {
+                render::render_mcp_viewer(f, area, rows, *scroll, theme)
             }
-            Screen::McpViewer => {
-                render::render_mcp_viewer(f, area, &self.mcp_rows, self.mcp_scroll, theme);
+            Some(Overlay::SkillsViewer { items, scroll }) => {
+                render::render_skills_viewer(f, area, items, *scroll, theme)
             }
-            Screen::ThemePicker => {
-                render::render_theme_picker(
-                    f,
-                    area,
-                    self.theme_selected,
-                    &self.theme_color_name,
-                    theme,
-                );
+            Some(Overlay::ThemePicker { selected }) => {
+                render::render_theme_picker(f, area, *selected, &self.theme.name, theme)
             }
-            Screen::PermissionPrompt => {
-                if let Some(request) = self.pending_permissions.front() {
-                    render::render_permission_prompt(
-                        f,
-                        area,
-                        &request.tool_name,
-                        &request.arguments,
-                        self.permission_selected,
-                        theme,
-                    );
-                }
-            }
-            Screen::Welcome | Screen::Chat => {}
-        }
-    }
-
-    fn draw_chat(&mut self, f: &mut Frame, area: ratatui::layout::Rect) {
-        let chat_w = area.width;
-        if self.cached_width != chat_w {
-            self.cached_lines = render::build_lines(&self.items, chat_w, self.theme_color);
-            self.cached_width = chat_w;
+            None => {}
         }
 
-        let total = self.cached_lines.len();
-        let visible_h = area.height as usize;
-        let max_scroll = total.saturating_sub(visible_h);
-
-        if self.pinned {
-            self.scroll = max_scroll;
-        } else {
-            self.scroll = self.scroll.min(max_scroll);
-            if self.scroll >= max_scroll {
-                self.pinned = true;
-            }
+        if let Some(request) = self.permissions.front() {
+            render::render_permission_prompt(
+                f,
+                area,
+                &request.tool_name,
+                &request.arguments,
+                self.permissions.selected(),
+                theme,
+            );
         }
-
-        let start = self.scroll;
-        let end = (start + visible_h).min(total);
-        let visible: Vec<Line<'static>> = if start < end {
-            self.cached_lines[start..end].to_vec()
-        } else {
-            vec![]
-        };
-
-        let scroll_hint = if !self.pinned && max_scroll > 0 {
-            format!(" {}% ↑ ", (self.scroll * 100) / max_scroll)
-        } else {
-            String::new()
-        };
-
-        let chat_block = Block::default()
-            .borders(Borders::NONE)
-            .title_bottom(Line::from(Span::styled(
-                scroll_hint,
-                Style::default().fg(self.theme_color),
-            )));
-        let chat_inner = chat_block.inner(area);
-        f.render_widget(chat_block, area);
-        f.render_widget(Paragraph::new(visible), chat_inner);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use tokio::sync::oneshot;
+    use tokio::sync::{mpsc, oneshot};
 
     use super::*;
-    use crate::config::AgentConfig;
-
-    fn test_app_config() -> AppConfig {
-        AppConfig::for_tests("mock")
-    }
 
     fn test_app() -> App {
-        let (prompt_tx, _) = mpsc::unbounded_channel();
-        let (switch_model_tx, _) = mpsc::unbounded_channel();
-        let (switch_session_tx, _) = mpsc::unbounded_channel();
-        let (list_sessions_tx, _) = mpsc::unbounded_channel();
-        let (new_session_tx, _) = mpsc::unbounded_channel();
+        let (prompt, _) = mpsc::unbounded_channel();
+        let (switch_model, _) = mpsc::unbounded_channel();
+        let (switch_session, _) = mpsc::unbounded_channel();
+        let (list_sessions, _) = mpsc::unbounded_channel();
+        let (new_session, _) = mpsc::unbounded_channel();
         App::new(
             AgentConfig::default(),
-            test_app_config(),
+            AppConfig::for_tests("mock"),
             RuntimePaths {
                 data_dir: "/nonexistent/openheim".into(),
                 config_path: "/nonexistent/openheim/config.toml".into(),
             },
             vec![],
-            prompt_tx,
-            switch_model_tx,
-            switch_session_tx,
-            list_sessions_tx,
-            new_session_tx,
+            AgentChannels {
+                prompt,
+                switch_model,
+                switch_session,
+                list_sessions,
+                new_session,
+            },
         )
     }
 
@@ -1021,10 +729,13 @@ mod tests {
         )
     }
 
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
     #[test]
     fn prune_drops_requests_whose_receiver_is_gone() {
         let mut app = test_app();
-        app.screen = Screen::Chat;
 
         let (live_request, _live_rx) = permission_request();
         let (dead_request, dead_rx) = permission_request();
@@ -1032,30 +743,66 @@ mod tests {
 
         app.handle_permission_request(dead_request);
         app.handle_permission_request(live_request);
-        assert_eq!(app.screen, Screen::PermissionPrompt);
+        app.permissions.prune_stale();
 
-        app.prune_stale_permissions();
-
-        assert_eq!(app.pending_permissions.len(), 1);
-        assert_eq!(app.pending_permissions[0].tool_name, "read_file");
         // A live request remains, so the prompt stays up.
-        assert_eq!(app.screen, Screen::PermissionPrompt);
+        assert_eq!(app.permissions.len(), 1);
+        assert_eq!(app.permissions.front().unwrap().tool_name, "read_file");
     }
 
     #[test]
-    fn prune_restores_prior_screen_once_queue_empties() {
+    fn keys_go_to_the_input_once_stale_prompts_are_pruned() {
         let mut app = test_app();
-        app.screen = Screen::Chat;
-
         let (dead_request, dead_rx) = permission_request();
         drop(dead_rx);
-
         app.handle_permission_request(dead_request);
-        assert_eq!(app.screen, Screen::PermissionPrompt);
 
-        app.prune_stale_permissions();
+        // The prompt is stale, so the key reaches the input line instead of
+        // answering (and being swallowed by) a prompt nobody is waiting on.
+        app.handle_key(key(KeyCode::Char('y')));
+        assert!(app.permissions.is_empty());
+        assert_eq!(app.input.text(), "y");
+    }
 
-        assert!(app.pending_permissions.is_empty());
+    #[test]
+    fn answering_a_prompt_sends_the_decision_and_shows_the_next() {
+        let mut app = test_app();
+        let (first, first_rx) = permission_request();
+        let (second, _second_rx) = permission_request();
+        app.handle_permission_request(first);
+        app.handle_permission_request(second);
+
+        app.handle_key(key(KeyCode::Char('a')));
+
+        assert_eq!(
+            first_rx.blocking_recv(),
+            Ok(PermissionDecision::AllowAlways)
+        );
+        assert_eq!(app.permissions.len(), 1);
+    }
+
+    // Regression test: a permission prompt arriving while a popup was open
+    // overwrote the "screen to return to" with that popup, so after
+    // answering, Esc "returned" to the popup and could never close it.
+    #[test]
+    fn esc_closes_a_popup_after_a_permission_prompt_over_it() {
+        let mut app = test_app();
+        app.handle_key(key(KeyCode::Char(':')));
+        for c in "theme".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(app.overlay, Some(Overlay::ThemePicker { .. })));
+
+        let (request, _rx) = permission_request();
+        app.handle_permission_request(request);
+        app.handle_key(key(KeyCode::Char('y')));
+        // Back on the theme picker…
+        assert!(matches!(app.overlay, Some(Overlay::ThemePicker { .. })));
+
+        // …and Esc closes it.
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.overlay.is_none());
         assert_eq!(app.screen, Screen::Chat);
     }
 }

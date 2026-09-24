@@ -1,6 +1,7 @@
 mod app;
 mod permission;
 mod render;
+mod state;
 mod types;
 
 use std::io;
@@ -24,6 +25,7 @@ use crate::{client::OpenheimClient, core::permission::PermissionGate};
 
 use app::App;
 use permission::TuiPermissionGate;
+use state::AgentChannels;
 use types::{AgentUpdate, ChatItem};
 
 struct TerminalGuard {
@@ -242,11 +244,13 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
         app_config,
         paths,
         skills,
-        prompt_tx,
-        switch_model_tx,
-        switch_session_tx,
-        list_sessions_tx,
-        new_session_tx,
+        AgentChannels {
+            prompt: prompt_tx,
+            switch_model: switch_model_tx,
+            switch_session: switch_session_tx,
+            list_sessions: list_sessions_tx,
+            new_session: new_session_tx,
+        },
     );
 
     enable_raw_mode()?;
@@ -299,7 +303,7 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         app.handle_key(key);
                     }
-                    Some(Ok(Event::Resize(_, _))) => app.cached_width = 0,
+                    Some(Ok(Event::Resize(_, _))) => app.transcript.invalidate(),
                     Some(Err(_)) | None => break,
                     _ => {}
                 }

@@ -51,32 +51,12 @@ pub(crate) enum Status {
     Streaming,
 }
 
+/// The base screen, under any popup (see `state::Overlay`) or permission
+/// prompt.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Screen {
     Welcome,
     Chat,
-    ModelPicker,
-    ConfigViewer,
-    SessionPicker,
-    SkillsViewer,
-    McpViewer,
-    ThemePicker,
-    PermissionPrompt,
-}
-
-impl Screen {
-    pub(crate) fn is_overlay(self) -> bool {
-        matches!(
-            self,
-            Screen::ModelPicker
-                | Screen::ConfigViewer
-                | Screen::SessionPicker
-                | Screen::SkillsViewer
-                | Screen::McpViewer
-                | Screen::ThemePicker
-                | Screen::PermissionPrompt
-        )
-    }
 }
 
 #[derive(Debug, Clone)]
