@@ -74,7 +74,7 @@ src/
 │
 ├── tools/              Tool abstraction and built-in implementations
 │   ├── mod.rs          ToolHandler / ToolExecutor traits, SystemToolExecutor
-│   ├── args.rs         parse_args / require_str — shared argument decoding
+│   ├── args.rs         parse::<T> / NonEmptyString — shared argument decoding
 │   ├── sandbox.rs      validate_path — work_dir boundary used by every file tool
 │   ├── execute_command.rs
 │   ├── read_file.rs
