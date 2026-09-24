@@ -123,7 +123,7 @@ pub async fn serve(
 
                 let current_model = model
                     .as_deref()
-                    .unwrap_or(&state_session.config.model)
+                    .unwrap_or(&state_session.config().model)
                     .to_string();
                 let model_config =
                     session_model_config_option(&state_session.app_config, &current_model);

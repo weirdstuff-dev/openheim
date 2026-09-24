@@ -43,9 +43,14 @@ use super::{
 type Sessions = Arc<RwLock<HashMap<String, SessionState>>>;
 
 pub struct AgentState {
-    pub llm: Arc<dyn LlmClient>,
+    /// Client for `config`. Private, together with `config`: sessions reuse
+    /// this client only while their config matches `config`
+    /// (`client_for_config`), so the two must never be changed separately.
+    llm: Arc<dyn LlmClient>,
     pub executor: Arc<dyn ToolExecutor>,
-    pub config: AgentConfig,
+    /// The default model/provider new sessions start on (read it via
+    /// [`Self::config`]).
+    config: AgentConfig,
     pub app_config: AppConfig,
     pub memory: MemoryContext,
     /// Long-term memory behind the `remember` / `search_memory` /
@@ -136,6 +141,11 @@ impl AgentState {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             delegate,
         })
+    }
+
+    /// The default model/provider new sessions start on.
+    pub fn config(&self) -> &AgentConfig {
+        &self.config
     }
 
     pub async fn new_session(

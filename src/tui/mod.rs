@@ -47,7 +47,7 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
     // Snapshots for `:config`/`:models` — read once here instead of a second
     // `load_config()` duplicating the one `OpenheimClient::builder().build()`
     // the caller did.
-    let agent_config = client.state().config.clone();
+    let agent_config = client.state().config().clone();
     let app_config = client.state().app_config.clone();
 
     let (permission_tx, mut permission_rx) =
