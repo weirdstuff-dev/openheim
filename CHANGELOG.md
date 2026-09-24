@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-24
+
 ### Added
 
 - **Request ids on the WebSocket `fs` channel.** A request may include an `id`, and its reply (including an error) echoes it, so clients can match replies to requests. Requests without an `id` behave as before. A `rename` with two invalid paths now gets one error reply instead of two.
@@ -39,7 +41,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **An Anthropic or Gemini provider registered under a custom name no longer silently gets the OpenAI-compatible client.** The client used to be picked from the provider's name, so `[providers.claude-work]` sent OpenAI-format requests to Anthropic. The same applied to the thinking default and to rejecting Anthropic as an embeddings provider. All three now follow `kind`. `ProviderConfig::resolve_thinking` now takes a `ProviderKind` instead of the provider name.
 - **Subagents without their own `model` now run on the session's current model.** `delegate_task` was bound to the model the process started with, so after switching a session's model, subagents that set no model kept using the old one. Subagent profiles and inline subagents that set `model`/`provider` are unaffected.
 - **The agent loop no longer re-calls the model after a truncated, refused, or otherwise non-`stop` reply.** Only a normal `stop` used to end the turn. Any other finish on a reply without tool calls resent the history, which then ended in that reply, until `max_iterations` ran out. That made the model repeat itself, and current Anthropic models reject such a request outright. The turn now ends with `MaxTokens`, `Refusal`, or `EndTurn`. Anthropic's `pause_turn` still resumes. The TUI, `openheim run` (on stderr), and `delegate_task` results now say when a turn stopped for one of these reasons.
-
 - **Switching a session's model mid-conversation is now saved.** The model/provider stored with a conversation was only written when the conversation was created, so after a switch (`switch_model`, ACP `session/set_config_option`, the TUI's `:models`) a reloaded session came back on its original model and the session list showed the stale one. Each turn now records the session's current model and provider.
 
 ## [0.12.0] - 2026-09-23
