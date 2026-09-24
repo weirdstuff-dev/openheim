@@ -8,10 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Request ids on the WebSocket `fs` channel.** A request may include an `id`, and its reply (including an error) echoes it, so clients can match replies to requests. Requests without an `id` behave as before. A `rename` with two invalid paths now gets one error reply instead of two.
 - **`kind` on `[providers.<name>]` entries** (`"openai"`, `"anthropic"`, `"gemini"`, `"openai_compatible"`) picks the API client explicitly, so a provider can have any name, e.g. two Anthropic accounts as `claude-work` and `claude-personal`. It's optional and inferred from the name when omitted, so existing configs behave as before. The library exposes it as `ProviderKind`, on `ProviderConfig`, `AgentConfig` and `EmbeddingConfig`.
 
 ### Changed
 
+- **`Debug` output of config types no longer shows secrets.** `AgentConfig`, `ProviderConfig`, `EmbeddingConfig` and `McpServerConfig` (and so `AppConfig`) print API keys as `<redacted>`, MCP `env`/`headers` as their keys only, MCP `args` as a count, and URLs without credentials or query strings, so logging a config with `{:?}` can't leak a key.
+- **Tools are always offered to the model in the same order** (by name), so the request prefix is identical across restarts and resumed sessions and providers' prompt caches keep hitting.
 - **Turns no longer rewrite the whole message log.** Each turn used to save the full conversation twice, before and after, re-reading and rewriting the entire `.jsonl` log each time. Base64 images live in that log, so long sessions paid for it on every prompt. Now the user message and each reply are appended, and only the small meta file is rewritten. The full rewrite, with its guard against another process having written to the log, is kept as the fallback when an append fails. Loading the conversation and skills at the start of a turn also no longer blocks the async runtime. New: `HistoryManager::save_meta` and `ConversationMeta::fill_title_from`.
 - **The resolved data directory and config file path now live in `RuntimePaths`, not `AppConfig`.** `OpenheimBuilder::build` resolves them once (builder `data_dir`, else the config's, else `~/.openheim`), and `AgentState::paths()` returns them. `AppConfig::config_path` is gone. `AppConfig::data_dir` is now only the setting as written, and is no longer rewritten to the resolved directory. `AgentState::new` takes a `RuntimePaths` argument, and `LongTermMemory::from_config` takes the data directory. No behavior change for the CLI.
 - **Built-in tools decode their arguments into typed structs.** A new `tools::args::parse::<T>()` does this, plus `args::NonEmptyString` for text that mustn't be blank. Each tool has a test that its struct and its JSON schema agree on which fields exist and which are required. One visible effect: an argument of the wrong type now fails the call with a message naming the problem. Before, a mistyped *optional* argument was silently ignored; for example `"replace_all": "true"` (a string) behaved as `false`, and `"top_k": "5"` fell back to the default. `parse_args`/`require_str` are still available for custom tools. The ACP layer also now decodes tool-call arguments for display in one place, with one policy: log a warning and show no input.
@@ -22,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A streamed reply could fail with "stream ended prematurely" when the client closed its chunk channel before the reply was done.** The agent loop now waits for the reply itself, not the channel. None of the built-in providers do this, but a custom `LlmClient` may.
 - **TUI: Esc could get stuck on a popup after a permission prompt.** If a tool-approval prompt appeared while a popup (model picker, theme picker, …) was open, answering it left Esc "returning" to that popup, so it could only be closed by picking an entry. Permission prompts now sit on top of everything without replacing what's underneath, and Esc always closes a popup back to the chat.
 - **ACP errors now use the matching JSON-RPC code instead of always `-32603 Internal error`:**
   - `-32002 Resource not found` for a session or conversation that doesn't exist.

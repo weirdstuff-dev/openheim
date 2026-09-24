@@ -1219,6 +1219,15 @@ All filesystem operations are sent over the `fs` channel. The channel is sandbox
 
 No `watch` call is required before file operations — every request is validated against `work_dir` directly.
 
+**Request ids.** Any request may include an `id` (any JSON value) next to `action`. Its reply, success or `error`, carries the same `id`, so a client with several requests in flight can match each reply to its request:
+
+```json
+{ "channel": "fs", "data": { "action": "read", "path": "src/main.rs", "id": 7 } }
+{ "channel": "fs", "data": { "type": "file_content", "path": "src/main.rs", "content": "…", "id": 7 } }
+```
+
+Messages that aren't a reply to a request (the `connected` greeting, `fs_event` from a watch, and the error for an unparseable payload) never carry an `id`. Requests without an `id` get replies without one, as before.
+
 #### 3.3.1 Watch / Unwatch
 
 Start watching a directory for live file change events. The directory must be within `work_dir`. Watching does **not** affect path validation for other operations.
