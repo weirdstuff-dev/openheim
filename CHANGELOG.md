@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **`AgentState::llm` and `AgentState::config` are no longer public fields.** They have to stay in sync, so replacing one without the other broke client reuse. Read the default config through `AgentState::config()`.
 - **"Allow Always"/"Reject Always" answers are now remembered by the runtime, per session, for every permission gate.** ACP and the TUI used to keep separate copies of this logic. Custom `PermissionGate`s now get it too, so an embedder's gate only has to ask; one that already remembers its own answers will simply stop seeing the repeat calls. In the TUI, approvals are now scoped to the session: `:new` or switching sessions starts with none remembered, where before they carried over for the life of the app.
 - **Anthropic's default `max_tokens` is now 16000 (was 4096).** Adaptive thinking is on by default and spends from the same budget, so 4096 regularly cut replies short. An explicit `max_tokens` in `[providers.<name>]` still wins.
 - **`StopReason` gains `MaxTokens` and `Refusal`, and `FinishReason` gains `Refusal` and `Paused`.** Code that matches on either enum exhaustively needs the new arms. `StopReason::notice()` returns a short user-facing explanation for abnormal stops. ACP clients now get the protocol's own `max_tokens`/`refusal` stop reasons.
