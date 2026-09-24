@@ -40,6 +40,28 @@ pub struct ConversationMeta {
 }
 
 impl ConversationMeta {
+    /// Metadata for a brand-new conversation: created and updated now, no
+    /// title, cwd or context usage yet.
+    pub fn new(
+        id: Uuid,
+        model: Option<String>,
+        provider: Option<String>,
+        skills: Vec<String>,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id,
+            created_at: now,
+            updated_at: now,
+            model,
+            provider,
+            title: None,
+            skills,
+            cwd: None,
+            context_usage: None,
+        }
+    }
+
     /// Sets `title` from `message` (its first 80 characters) if there is no
     /// title yet and `message` is a user message with text. The one title
     /// rule every save path applies.
@@ -170,27 +192,27 @@ impl HistoryManager {
 
     /// Creates a new conversation, persists it immediately, and returns it.
     ///
-    /// The conversation starts with no messages and no title. The title is derived
-    /// from the first user message when [`Self::save_conversation`] is later called.
+    /// The conversation starts with no messages and no title. The title is
+    /// derived from the first user message once one is saved or appended.
     pub fn create_conversation(
         &self,
         model: Option<String>,
         provider: Option<String>,
         skills: Vec<String>,
     ) -> Result<Conversation> {
-        let now = Utc::now();
+        self.create_with_id(Uuid::new_v4(), model, provider, skills)
+    }
+
+    /// [`Self::create_conversation`] under a caller-chosen `id`.
+    fn create_with_id(
+        &self,
+        id: Uuid,
+        model: Option<String>,
+        provider: Option<String>,
+        skills: Vec<String>,
+    ) -> Result<Conversation> {
         let conv = Conversation {
-            meta: ConversationMeta {
-                id: Uuid::new_v4(),
-                created_at: now,
-                updated_at: now,
-                model,
-                provider,
-                title: None,
-                skills,
-                cwd: None,
-                context_usage: None,
-            },
+            meta: ConversationMeta::new(id, model, provider, skills),
             messages: Vec::new(),
         };
         self.save_conversation(&conv)?;
@@ -375,23 +397,7 @@ impl HistoryManager {
                 if path.exists() {
                     self.load_conversation(&id)
                 } else {
-                    let now = Utc::now();
-                    let conv = Conversation {
-                        meta: ConversationMeta {
-                            id,
-                            created_at: now,
-                            updated_at: now,
-                            model,
-                            provider,
-                            title: None,
-                            skills,
-                            cwd: None,
-                            context_usage: None,
-                        },
-                        messages: Vec::new(),
-                    };
-                    self.save_conversation(&conv)?;
-                    Ok(conv)
+                    self.create_with_id(id, model, provider, skills)
                 }
             }
             None => self.create_conversation(model, provider, skills),
