@@ -292,17 +292,29 @@ async fn ws_handler(
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 
+/// Starts an ACP server for one WebSocket connection, speaking JSON-RPC as
+/// one line per message over a pair of channels. Returns the sender for
+/// incoming lines (WS → ACP) and the receiver for outgoing ones (ACP → WS);
+/// dropping the sender ends the server. Shared by both socket handlers so the
+/// bridge can't drift between them.
+fn spawn_acp_server(
+    state: Arc<AgentState>,
+) -> (
+    UnboundedSender<std::io::Result<String>>,
+    mpsc::UnboundedReceiver<String>,
+) {
+    let (out_tx, out_rx) = mpsc::unbounded::<String>();
+    let (in_tx, in_rx) = mpsc::unbounded::<std::io::Result<String>>();
+    let sink =
+        out_tx.sink_map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()));
+    tokio::spawn(acp::serve(Lines::new(sink, in_rx), state));
+    (in_tx, out_rx)
+}
+
 async fn handle_socket(socket: WebSocket, state: Arc<AgentState>) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let work_dir = state.work_dir.clone();
-
-    // ACP bridge: futures mpsc channels between the dispatch loop and the ACP server
-    let (acp_out_tx, mut acp_out_rx) = mpsc::unbounded::<String>(); // ACP server → WS
-    let (acp_in_tx, acp_in_rx) = mpsc::unbounded::<std::io::Result<String>>(); // WS → ACP server
-
-    let acp_sink = acp_out_tx
-        .sink_map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()));
-    tokio::spawn(acp::serve(Lines::new(acp_sink, acp_in_rx), state));
+    let (acp_in_tx, mut acp_out_rx) = spawn_acp_server(state);
 
     // FS sidecar: events and responses going back to the WS client
     let (fs_tx, mut fs_rx) = mpsc::unbounded::<WsOutbound>();
@@ -380,13 +392,7 @@ async fn acp_ws_handler(
 /// no `{"channel":...}` envelope and no `fs` sidecar — see module docs.
 async fn handle_acp_socket(socket: WebSocket, state: Arc<AgentState>) {
     let (mut ws_tx, mut ws_rx) = socket.split();
-
-    let (acp_out_tx, mut acp_out_rx) = mpsc::unbounded::<String>();
-    let (acp_in_tx, acp_in_rx) = mpsc::unbounded::<std::io::Result<String>>();
-
-    let acp_sink = acp_out_tx
-        .sink_map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()));
-    tokio::spawn(acp::serve(Lines::new(acp_sink, acp_in_rx), state));
+    let (acp_in_tx, mut acp_out_rx) = spawn_acp_server(state);
 
     let outbound = tokio::spawn(async move {
         while let Some(line) = acp_out_rx.next().await {
@@ -663,6 +669,41 @@ mod tests {
             Some(WsOutbound::Fs(resp)) => resp,
             _ => panic!("expected an fs response"),
         }
+    }
+
+    // Both socket handlers talk to ACP only through `spawn_acp_server`, so a
+    // JSON-RPC round trip over its channels covers the bridge for both.
+    #[tokio::test]
+    async fn acp_server_answers_initialize_over_the_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = crate::OpenheimClient::builder()
+            .provider("openai")
+            .api_key("test-key")
+            .model("gpt-4o")
+            .data_dir(dir.path())
+            .work_dir(dir.path())
+            .build()
+            .await
+            .unwrap();
+        let (in_tx, mut out_rx) = spawn_acp_server(client.state().clone());
+
+        in_tx
+            .unbounded_send(Ok(
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}"#
+                    .to_string(),
+            ))
+            .unwrap();
+        let line = tokio::time::timeout(Duration::from_secs(5), out_rx.next())
+            .await
+            .expect("no response within 5s")
+            .expect("server closed the channel");
+
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["id"], 1, "{response}");
+        assert_eq!(
+            response["result"]["agentInfo"]["name"], "openheim",
+            "{response}"
+        );
     }
 
     #[tokio::test]
