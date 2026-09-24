@@ -342,6 +342,13 @@ impl AgentState {
         )?;
 
         conversation.meta.cwd = Some(cwd);
+        // `prepare` only applies model/provider when it creates the
+        // conversation; an existing one comes back with whatever was saved
+        // before. Overwrite with the session's live values so a mid-session
+        // model switch is persisted by the checkpoint below and survives a
+        // reload instead of reverting to the original model.
+        conversation.meta.model = Some(config.model.clone());
+        conversation.meta.provider = Some(config.provider_name.clone());
         conversation.messages.push(Message {
             role: Role::User,
             content: prompt,
@@ -636,7 +643,7 @@ mod new_session_tests {
             ProviderConfig {
                 api_base: "https://example.com".into(),
                 default_model: "mock-model".into(),
-                models: vec!["mock-model".into()],
+                models: vec!["mock-model".into(), "other-model".into()],
                 env_var: None,
                 api_key: Some("key".into()),
                 timeout_secs: None,
@@ -682,5 +689,71 @@ mod new_session_tests {
             .new_session(Some("nope"), vec![], dir.path().to_path_buf())
             .await;
         assert!(result.is_err(), "{result:?}");
+    }
+
+    /// Always answers with a final text reply, so a turn completes in one
+    /// LLM call without touching the network.
+    struct EndTurnLlm;
+
+    #[async_trait::async_trait]
+    impl LlmClient for EndTurnLlm {
+        async fn send(
+            &self,
+            _messages: &[Message],
+            _tools: &[crate::core::models::Tool],
+        ) -> Result<crate::core::models::Choice> {
+            Ok(crate::core::models::Choice {
+                message: Message::assistant("ok"),
+                finish_reason: Some(crate::core::models::FinishReason::Stop),
+                usage: None,
+            })
+        }
+    }
+
+    // Regression test: a model switched after the conversation's first turn
+    // was never written to its meta file (`resolve_conversation` returns an
+    // existing conversation as saved), so reloading the session brought
+    // back the original model.
+    #[tokio::test]
+    async fn model_switch_is_persisted_to_conversation_meta() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
+        let mut state = sample_state(dir.path()).await;
+        state.llm = Arc::new(EndTurnLlm);
+
+        let session_id = state
+            .new_session(None, vec![], dir.path().to_path_buf())
+            .await
+            .unwrap();
+        async fn run_turn(state: &AgentState, session_id: &str) {
+            state
+                .prompt(
+                    session_id,
+                    vec![ContentBlock::from("hi")],
+                    Arc::new(crate::core::permission::AllowAll),
+                    Arc::new(crate::core::client_io::NoClientIo),
+                    |_| {},
+                )
+                .await
+                .unwrap();
+        }
+
+        // First turn creates the conversation on disk under the default model.
+        run_turn(&state, &session_id).await;
+
+        state
+            .set_session_model(&session_id, "other-model")
+            .await
+            .unwrap();
+        // `client_for_config` reuses `state.llm` only when the session's
+        // config matches `state.config`; line them up so the second turn
+        // stays on the mock instead of building a real HTTP client.
+        state.config = state.app_config.resolve(Some("other-model")).unwrap();
+        run_turn(&state, &session_id).await;
+
+        let uuid = Uuid::parse_str(&session_id).unwrap();
+        let saved = state.memory.history.load_conversation(&uuid).unwrap();
+        assert_eq!(saved.meta.model.as_deref(), Some("other-model"));
+        assert_eq!(saved.meta.provider.as_deref(), Some("mock"));
     }
 }

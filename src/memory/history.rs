@@ -347,6 +347,11 @@ impl HistoryManager {
     /// - `chat_id` is `Some` but the file doesn't exist → creates a new conversation
     ///   with that exact ID (useful for client-assigned IDs).
     /// - `chat_id` is `None` → creates a fresh conversation with a new UUID.
+    ///
+    /// `model`, `provider` and `skills` only seed a conversation created
+    /// here; an existing one is returned as saved. Callers that need to
+    /// record a changed model (`AgentState::prompt`) set it on the returned
+    /// `meta` themselves.
     pub fn resolve_conversation(
         &self,
         chat_id: Option<Uuid>,
