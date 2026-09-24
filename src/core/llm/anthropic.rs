@@ -14,7 +14,8 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Used when the provider sets no `max_tokens`. Adaptive thinking is on by
 /// default and spends from this same budget, so a low cap truncates replies
 /// (or leaves no room for any text at all). ~16k is Anthropic's recommended
-/// default for non-streaming requests, which subagent turns still are.
+/// default for non-streaming requests; the agent loop always streams, but
+/// `send` is still public, so the default stays safe for callers of it.
 const DEFAULT_MAX_TOKENS: u32 = 16_000;
 
 fn is_false(b: &bool) -> bool {

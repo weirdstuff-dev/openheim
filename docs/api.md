@@ -2067,7 +2067,7 @@ All REST endpoints return `200` with JSON body on success. If the server is misc
     "error": {
       "code": -32602,
       "message": "Invalid params",
-      "data": "Parse error: invalid session id format"
+      "data": "Invalid argument: invalid session id format"
     }
   }
 }
@@ -2080,7 +2080,7 @@ All REST endpoints return `200` with JSON body on success. If the server is misc
 | `-32700` | Parse error (invalid JSON) |
 | `-32600` | Invalid request |
 | `-32601` | Method not found (a method openheim doesn't implement) |
-| `-32602` | Invalid params (malformed session id, unknown model, mode, or config option) |
+| `-32602` | Invalid params (malformed session id, unsupported prompt content, unknown model, mode, or config option) |
 | `-32603` | Internal error (anything else, plus the structured `session_busy` / `session_locked` errors) |
 | `-32002` | Resource not found (the session or conversation doesn't exist) |
 
