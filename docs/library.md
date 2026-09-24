@@ -272,7 +272,7 @@ session
 
 ### Send a prompt (raw `StreamEvent`)
 
-`prompt`/`prompt_with_images` map every event onto ACP's `SessionUpdate` vocabulary, which has no room for some of what the agent loop actually produces. `prompt_events`/`prompt_events_with_images` hand you the raw [`StreamEvent`](https://docs.rs/openheim) instead — same turn, no ACP mapping in between — including `Usage` (context size, live per LLM call) and `Finished` (the turn is done) alongside the four `SessionUpdate` has equivalents for. They return the turn's `StopReason` (`EndTurn`/`MaxIterations`/`Cancelled`/`NoContent`) instead of `()`.
+`prompt`/`prompt_with_images` map every event onto ACP's `SessionUpdate` vocabulary, which has no room for some of what the agent loop actually produces. `prompt_events`/`prompt_events_with_images` hand you the raw [`StreamEvent`](https://docs.rs/openheim) instead — same turn, no ACP mapping in between — including `Usage` (context size, live per LLM call) and `Finished` (the turn is done) alongside the four `SessionUpdate` has equivalents for. They return the turn's `StopReason` (`EndTurn`/`MaxIterations`/`MaxTokens`/`Refusal`/`Cancelled`/`NoContent`) instead of `()`; `StopReason::notice()` gives a short user-facing line for the abnormal ones.
 
 ```rust
 use openheim::StreamEvent;

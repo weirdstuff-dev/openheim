@@ -6,7 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **Anthropic's default `max_tokens` is now 16000 (was 4096).** Adaptive thinking is on by default and spends from the same budget, so 4096 regularly cut replies short. An explicit `max_tokens` in `[providers.<name>]` still wins.
+- **`StopReason` gains `MaxTokens` and `Refusal`, and `FinishReason` gains `Refusal` and `Paused`.** Code that matches on either enum exhaustively needs the new arms. `StopReason::notice()` returns a short user-facing explanation for abnormal stops. ACP clients now get the protocol's own `max_tokens`/`refusal` stop reasons.
+
 ### Fixed
+
+- **The agent loop no longer re-calls the model after a truncated, refused, or otherwise non-`stop` reply.** Only a normal `stop` used to end the turn. Any other finish on a reply without tool calls resent the history, which then ended in that reply, until `max_iterations` ran out. That made the model repeat itself, and current Anthropic models reject such a request outright. The turn now ends with `MaxTokens`, `Refusal`, or `EndTurn`. Anthropic's `pause_turn` still resumes. The TUI, `openheim run` (on stderr), and `delegate_task` results now say when a turn stopped for one of these reasons.
 
 - **Switching a session's model mid-conversation is now saved.** The model/provider stored with a conversation was only written when the conversation was created, so after a switch (`switch_model`, ACP `session/set_config_option`, the TUI's `:models`) a reloaded session came back on its original model and the session list showed the stale one. Each turn now records the session's current model and provider.
 

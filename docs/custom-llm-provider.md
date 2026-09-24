@@ -59,6 +59,8 @@ pub enum FinishReason {
     Stop,               // normal completion
     ToolCalls,          // model wants to invoke tools
     MaxTokens,          // truncated at the token limit
+    Refusal,            // model declined, or output was filtered
+    Paused,             // provider paused the turn; resend as-is to resume
     Other(String),      // provider-specific reason with no equivalent above
 }
 
@@ -81,7 +83,7 @@ and constructors for building your own:
 - `Message::user(text)`, `Message::assistant(text)` — single-`Text`-block message
 - `Message::tool_result(tool_call_id, tool_name, content, is_error)` — single-`ToolResult`-block message
 
-The agent loop treats `finish_reason == Some(FinishReason::Stop)` as the signal to end the conversation. Any other finish reason with no tool calls also ends the loop (with a warning). If `message.tool_calls()` is non-empty, the loop executes them and continues.
+If `message.tool_calls()` is non-empty, the loop executes them and continues. Otherwise the finish reason decides how the turn ends: `MaxTokens` → `StopReason::MaxTokens`, `Refusal` → `StopReason::Refusal`, `Paused` → the loop calls the model again with the history unchanged, and anything else (`Stop`, `Other`, or `None`) → `StopReason::EndTurn`. Map your provider's truncation and content-filter values onto `MaxTokens`/`Refusal` so front-ends can tell the user why a reply stopped.
 
 `usage` is optional — set it if your API returns token counts, otherwise leave it `None`. When present, it's surfaced to embedders as the session's current context-size snapshot (`SessionHandle::context_usage()` / `ConversationMeta.context_usage`); leaving it `None` just means that feature has nothing to report for this provider.
 
