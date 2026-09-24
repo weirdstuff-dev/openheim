@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **TUI: Esc could get stuck on a popup after a permission prompt.** If a tool-approval prompt appeared while a popup (model picker, theme picker, …) was open, answering it left Esc "returning" to that popup, so it could only be closed by picking an entry. Permission prompts now sit on top of everything without replacing what's underneath, and Esc always closes a popup back to the chat.
 - **ACP errors now use the matching JSON-RPC code instead of always `-32603 Internal error`:**
   - `-32002 Resource not found` for a session or conversation that doesn't exist.
   - `-32602 Invalid params` for a malformed session id, or an unknown model, mode or config option.
