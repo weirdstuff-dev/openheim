@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **Switching a session's model mid-conversation is now saved.** The model/provider stored with a conversation was only written when the conversation was created, so after a switch (`switch_model`, ACP `session/set_config_option`, the TUI's `:models`) a reloaded session came back on its original model and the session list showed the stale one. Each turn now records the session's current model and provider.
+
 ## [0.12.0] - 2026-09-23
 
 ### Changed
