@@ -41,6 +41,17 @@ async fn call_llm_streaming(
     }
 }
 
+/// Passes one streamed chunk to the caller's callback as the matching event.
+fn forward_chunk<F: FnMut(StreamEvent)>(callback: &mut Option<F>, chunk: LlmChunk) {
+    let Some(cb) = callback.as_mut() else {
+        return;
+    };
+    match chunk {
+        LlmChunk::Text(text) => cb(StreamEvent::LlmResponse { content: text }),
+        LlmChunk::Thinking(thought) => cb(StreamEvent::ThinkingContent { content: thought }),
+    }
+}
+
 /// How a turn ends when the LLM replies without any tool calls, from the
 /// provider's finish reason and whether the reply had text. `None` means
 /// "keep looping": the provider paused the turn and expects the
@@ -127,7 +138,10 @@ where
             let choice_fut = call_llm_streaming(llm, messages, &tools, prompt_builder, chunk_tx);
             tokio::pin!(choice_fut);
 
-            let mut maybe_choice: Option<Result<Choice>> = None;
+            // The reply ends the wait, not the chunk channel: a client may
+            // close its sender before its request finishes, and one that
+            // leaks the sender somewhere must not keep the turn waiting.
+            let mut chunks_open = true;
             loop {
                 tokio::select! {
                     _ = turn.cancel.cancelled() => {
@@ -136,31 +150,20 @@ where
                         stop_reason = StopReason::Cancelled;
                         break 'turn;
                     }
-                    result = &mut choice_fut, if maybe_choice.is_none() => {
-                        maybe_choice = Some(result);
-                    }
-                    maybe_chunk = chunk_rx.recv() => {
-                        match maybe_chunk {
-                            Some(LlmChunk::Text(text)) => {
-                                if let Some(cb) = callback.as_mut() {
-                                    cb(StreamEvent::LlmResponse { content: text });
-                                }
-                            }
-                            Some(LlmChunk::Thinking(thought)) => {
-                                if let Some(cb) = callback.as_mut() {
-                                    cb(StreamEvent::ThinkingContent { content: thought });
-                                }
-                            }
-                            None => break,
+                    result = &mut choice_fut => {
+                        // Chunks sent before the reply completed may still be
+                        // buffered; forward them, in order, before moving on.
+                        while let Ok(chunk) = chunk_rx.try_recv() {
+                            forward_chunk(&mut callback, chunk);
                         }
+                        break result;
                     }
+                    maybe_chunk = chunk_rx.recv(), if chunks_open => match maybe_chunk {
+                        Some(chunk) => forward_chunk(&mut callback, chunk),
+                        None => chunks_open = false,
+                    },
                 }
-            }
-            maybe_choice.unwrap_or_else(|| {
-                Err(crate::error::Error::Other(
-                    "stream ended prematurely".into(),
-                ))
-            })?
+            }?
         } else {
             let result: Result<Choice> = tokio::select! {
                 _ = turn.cancel.cancelled() => {
@@ -1179,6 +1182,69 @@ mod tests {
         assert_eq!(result.stop_reason, StopReason::EndTurn);
         assert_eq!(result.final_response, "done");
         assert_eq!(llm.call_count.load(Ordering::SeqCst), 2);
+    }
+
+    /// Streams one chunk, closes its sender, and only then finishes the
+    /// request — legal for an `LlmClient`, since nothing requires the sender
+    /// to live until the reply is returned.
+    struct EarlyCloseLlm;
+
+    #[async_trait]
+    impl LlmClient for EarlyCloseLlm {
+        async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> Result<Choice> {
+            unreachable!("the streaming path is under test")
+        }
+
+        async fn send_streaming(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            chunk_tx: mpsc::UnboundedSender<LlmChunk>,
+        ) -> Result<Choice> {
+            chunk_tx.send(LlmChunk::Text("hel".into())).unwrap();
+            drop(chunk_tx);
+            // Let the agent loop observe the closed channel before the
+            // reply is ready.
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            Ok(text_choice("hello"))
+        }
+    }
+
+    // Regression test: the loop gave up as soon as the chunk channel
+    // closed, failing the turn with "stream ended prematurely" even though
+    // the reply was still on its way.
+    #[tokio::test]
+    async fn reply_arriving_after_the_chunk_channel_closes_still_completes() {
+        let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));
+        let mut messages = vec![Message::user("hi")];
+        let mut chunks = Vec::new();
+
+        let result = run_agent_streaming_with_history(
+            Arc::new(EarlyCloseLlm),
+            executor,
+            &make_config(10),
+            &mut messages,
+            None,
+            &TurnContext {
+                cancel: &CancellationToken::new(),
+                permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
+            },
+            |event| {
+                if let StreamEvent::LlmResponse { content } = event {
+                    chunks.push(content);
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+        assert_eq!(result.final_response, "hello");
+        assert_eq!(chunks, vec!["hel".to_string()]);
     }
 
     struct HangingPermissionGate;
