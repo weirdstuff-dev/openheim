@@ -675,6 +675,7 @@ fn build_programmatic(
     providers.insert(
         provider.clone(),
         ProviderConfig {
+            kind: None,
             api_base,
             default_model: model.clone(),
             models: vec![model],

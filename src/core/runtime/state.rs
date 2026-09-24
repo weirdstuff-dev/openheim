@@ -658,6 +658,7 @@ mod new_session_tests {
         providers.insert(
             "mock".to_string(),
             ProviderConfig {
+                kind: None,
                 api_base: "https://example.com".into(),
                 default_model: "mock-model".into(),
                 models: vec!["mock-model".into(), "other-model".into()],

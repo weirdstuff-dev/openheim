@@ -82,9 +82,10 @@ pub struct TuiConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
     /// Name of a `[providers.<name>]` entry whose `api_base` / API key serve
-    /// the embeddings endpoint. `"gemini"` speaks Gemini's `embedContent`
-    /// API; anything else is treated as OpenAI-compatible `/embeddings`
-    /// (OpenAI, Ollama, Together, …). Anthropic has no embeddings API.
+    /// the embeddings endpoint. A Gemini-kind provider speaks Gemini's
+    /// `embedContent` API; any other kind is treated as OpenAI-compatible
+    /// `/embeddings` (OpenAI, Ollama, Together, …). Anthropic-kind providers
+    /// are rejected: Anthropic has no embeddings API.
     /// Unset means keyword (FTS5) search only.
     #[serde(default)]
     pub embedding_provider: Option<String>,
@@ -122,6 +123,9 @@ impl Default for MemoryConfig {
 #[derive(Debug, Clone)]
 pub struct EmbeddingConfig {
     pub provider_name: String,
+    /// Wire protocol, i.e. which embeddings client gets built. Never
+    /// [`ProviderKind::Anthropic`] (`resolve_embedding` rejects it).
+    pub kind: ProviderKind,
     pub api_base: String,
     pub api_key: String,
     pub model: String,
@@ -227,9 +231,50 @@ pub enum ThinkingMode {
     Off,
 }
 
+/// Which wire protocol a provider speaks, i.e. which client talks to it.
+/// Set per provider with `kind = "…"`; when omitted it is inferred from the
+/// provider's name (see [`Self::infer_from_name`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ProviderKind {
+    /// OpenAI's Chat Completions API.
+    #[serde(rename = "openai")]
+    OpenAi,
+    /// Anthropic's Messages API.
+    #[serde(rename = "anthropic")]
+    Anthropic,
+    /// Google's Gemini `generateContent` API.
+    #[serde(rename = "gemini")]
+    Gemini,
+    /// Any endpoint speaking OpenAI's Chat Completions format (Ollama,
+    /// OpenRouter, Together, vLLM, …).
+    #[default]
+    #[serde(rename = "openai_compatible")]
+    OpenAiCompatible,
+}
+
+impl ProviderKind {
+    /// The kind a provider gets when its config sets none: the built-in
+    /// names map to their own kind, anything else is OpenAI-compatible.
+    /// Kept so configs written before `kind` existed behave as they did.
+    pub fn infer_from_name(provider_name: &str) -> Self {
+        match provider_name {
+            "openai" => ProviderKind::OpenAi,
+            "anthropic" => ProviderKind::Anthropic,
+            "gemini" => ProviderKind::Gemini,
+            _ => ProviderKind::OpenAiCompatible,
+        }
+    }
+}
+
 /// Per-provider configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
+    /// Wire protocol for this provider. Optional: inferred from the
+    /// provider's name when unset (see [`ProviderKind::infer_from_name`]),
+    /// so it's only needed when the name isn't `openai`/`anthropic`/`gemini`
+    /// but the API is, e.g. `[providers.claude-work] kind = "anthropic"`.
+    #[serde(default)]
+    pub kind: Option<ProviderKind>,
     pub api_base: String,
     pub default_model: String,
     pub models: Vec<String>,
@@ -242,7 +287,7 @@ pub struct ProviderConfig {
     /// Maximum output tokens for LLM responses
     pub max_tokens: Option<u32>,
     /// Extended thinking (`"adaptive"` or `"off"`). Defaults to `adaptive`
-    /// for a provider named `anthropic`, `off` for everything else — see
+    /// for an Anthropic-kind provider, `off` for everything else — see
     /// [`Self::resolve_thinking`]. Set explicitly to `"off"` for an Anthropic
     /// model that doesn't support adaptive thinking (e.g. `claude-haiku-4-5`,
     /// `claude-3-7-sonnet`), since a single `[providers.<name>]` entry has no
@@ -269,15 +314,21 @@ impl ProviderConfig {
         self.api_key.clone().unwrap_or_default()
     }
 
+    /// This provider's [`ProviderKind`]: the configured `kind`, or the one
+    /// inferred from `provider_name` (the key it's registered under).
+    pub fn resolve_kind(&self, provider_name: &str) -> ProviderKind {
+        self.kind
+            .unwrap_or_else(|| ProviderKind::infer_from_name(provider_name))
+    }
+
     /// Whether extended thinking should be requested, given this provider's
-    /// `thinking` setting and `provider_name` (the key it's registered
-    /// under). Unset defaults to `true` only when `provider_name` is
-    /// `"anthropic"` — the only client that reads this.
-    pub fn resolve_thinking(&self, provider_name: &str) -> bool {
+    /// `thinking` setting and its resolved `kind`. Unset defaults to `true`
+    /// only for [`ProviderKind::Anthropic`] — the only client that reads this.
+    pub fn resolve_thinking(&self, kind: ProviderKind) -> bool {
         match self.thinking {
             Some(ThinkingMode::Adaptive) => true,
             Some(ThinkingMode::Off) => false,
-            None => provider_name == "anthropic",
+            None => kind == ProviderKind::Anthropic,
         }
     }
 }
@@ -285,7 +336,13 @@ impl ProviderConfig {
 /// Runtime configuration passed to agent/LLM code
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
+    /// The `[providers.<name>]` key this config was resolved from; used for
+    /// display, persistence, and model-switch lookups — never to pick a
+    /// client (that's `kind`).
     pub provider_name: String,
+    /// Wire protocol, i.e. which client [`crate::config::create_client`] builds.
+    #[serde(default)]
+    pub kind: ProviderKind,
     pub api_base: String,
     pub api_key: String,
     pub model: String,
@@ -308,6 +365,9 @@ pub(crate) fn default_timeout_secs() -> u64 {
 }
 
 impl AgentConfig {
+    /// `kind` is inferred from `provider_name` (see
+    /// [`ProviderKind::infer_from_name`]); set the field afterwards to
+    /// override it.
     pub fn new(
         provider_name: String,
         api_base: String,
@@ -315,8 +375,10 @@ impl AgentConfig {
         model: String,
         max_iterations: usize,
     ) -> Self {
+        let kind = ProviderKind::infer_from_name(&provider_name);
         Self {
-            thinking: provider_name == "anthropic",
+            thinking: kind == ProviderKind::Anthropic,
+            kind,
             provider_name,
             api_base,
             api_key,
@@ -339,6 +401,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             provider_name: String::new(),
+            kind: ProviderKind::default(),
             api_base: String::new(),
             api_key: String::new(),
             model: String::new(),
@@ -356,6 +419,7 @@ mod tests {
 
     fn sample_provider(env_var: Option<&str>, api_key: Option<&str>) -> ProviderConfig {
         ProviderConfig {
+            kind: None,
             api_base: "https://api.example.com".into(),
             default_model: "model-1".into(),
             models: vec!["model-1".into()],
