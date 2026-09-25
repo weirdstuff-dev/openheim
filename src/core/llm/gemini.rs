@@ -78,6 +78,11 @@ struct GeminiPart {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct GeminiFunctionCall {
+    /// Set by Gemini on some calls only. Never sent back: a stored call's id
+    /// may be one openheim made up (see `tool_use_block`), and Gemini matches
+    /// responses to calls by name.
+    #[serde(default, skip_serializing)]
+    id: Option<String>,
     name: String,
     args: Value,
 }
@@ -178,6 +183,7 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<GeminiContent>> {
                             })?;
                             parts.push(GeminiPart {
                                 function_call: Some(GeminiFunctionCall {
+                                    id: None,
                                     name: name.clone(),
                                     args,
                                 }),
@@ -296,6 +302,16 @@ fn map_finish_reason(reason: &str) -> FinishReason {
     }
 }
 
+/// A streamed `functionCall` as a `ToolUse` block, keeping Gemini's id when
+/// it sent one and generating a unique one otherwise.
+fn tool_use_block(call: GeminiFunctionCall) -> Result<ContentBlock> {
+    Ok(ContentBlock::ToolUse {
+        id: call.id.unwrap_or_else(super::new_tool_call_id),
+        arguments: serde_json::to_string(&call.args)?,
+        name: call.name,
+    })
+}
+
 fn gemini_system_instruction(messages: &[Message]) -> Option<GeminiContent> {
     let parts: Vec<String> = messages
         .iter()
@@ -375,7 +391,7 @@ impl LlmClient for GeminiClient {
         .await?;
 
         let mut text_buf = String::new();
-        let mut tool_calls_accum: Vec<(String, String)> = Vec::new();
+        let mut tool_uses: Vec<ContentBlock> = Vec::new();
         let mut finish_reason: Option<FinishReason> = None;
         let mut usage: Option<Usage> = None;
         let mut decoder = SseDecoder::new();
@@ -410,7 +426,7 @@ impl LlmClient for GeminiClient {
                         let _ = chunk_tx.send(LlmChunk::Text(text));
                     }
                     if let Some(fc) = part.function_call {
-                        tool_calls_accum.push((fc.name, serde_json::to_string(&fc.args)?));
+                        tool_uses.push(tool_use_block(fc)?);
                     }
                 }
             }
@@ -420,13 +436,7 @@ impl LlmClient for GeminiClient {
         if !text_buf.is_empty() {
             content.push(ContentBlock::Text { text: text_buf });
         }
-        for (i, (name, arguments)) in tool_calls_accum.into_iter().enumerate() {
-            content.push(ContentBlock::ToolUse {
-                id: format!("call_{i}"),
-                name,
-                arguments,
-            });
-        }
+        content.extend(tool_uses);
 
         Ok(Choice {
             message: Message {
@@ -544,6 +554,53 @@ mod tests {
         assert_eq!(result[0].parts.len(), 2);
     }
 
+    fn streamed_call(json: &str) -> ContentBlock {
+        tool_use_block(serde_json::from_str(json).unwrap()).unwrap()
+    }
+
+    fn id_of(block: &ContentBlock) -> &str {
+        match block {
+            ContentBlock::ToolUse { id, .. } => id,
+            other => panic!("expected a tool use, got {other:?}"),
+        }
+    }
+
+    // Regression test: calls were numbered per reply (`call_0`, `call_1`, …),
+    // so every reply's first call had the same id and ACP clients merged
+    // them into one.
+    #[test]
+    fn calls_without_an_id_get_unique_ones() {
+        let call = r#"{"name":"read_file","args":{"path":"a.txt"}}"#;
+        let (first, second) = (streamed_call(call), streamed_call(call));
+        assert_ne!(id_of(&first), id_of(&second));
+        assert!(id_of(&first).starts_with("call_"));
+        assert_eq!(
+            first,
+            ContentBlock::ToolUse {
+                id: id_of(&first).to_string(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"a.txt"}"#.into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_call_id_from_gemini_is_kept_but_not_sent_back() {
+        let block = streamed_call(r#"{"id":"abc123","name":"read_file","args":{}}"#);
+        assert_eq!(id_of(&block), "abc123");
+
+        let request = convert_messages(&[Message {
+            role: Role::Assistant,
+            content: vec![block],
+        }])
+        .unwrap();
+        let sent = serde_json::to_value(&request[0].parts[0]).unwrap();
+        assert_eq!(
+            sent,
+            json!({ "functionCall": { "name": "read_file", "args": {} } })
+        );
+    }
+
     #[test]
     fn convert_tools_wraps_in_declaration() {
         let tools = vec![Tool::function(
@@ -564,10 +621,9 @@ mod tests {
     }
 
     // `send` builds its response from the streaming loop's chunk-by-chunk
-    // accumulation, not from a single complete `GeminiResponse` — so there's
-    // no standalone response-conversion function to test here beyond
-    // `map_finish_reason`, the one piece of that path's logic worth testing
-    // directly.
+    // accumulation, not from a single complete `GeminiResponse`, so the
+    // pieces of that path are tested directly: `tool_use_block` above and
+    // `map_finish_reason` here.
     #[test]
     fn map_finish_reason_translates_known_values() {
         assert_eq!(map_finish_reason("STOP"), FinishReason::Stop);

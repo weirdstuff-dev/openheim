@@ -242,6 +242,34 @@ struct OpenAiStreamFunctionDelta {
     arguments: Option<String>,
 }
 
+/// One streamed tool call, assembled from its deltas.
+#[derive(Default)]
+struct ToolCallAcc {
+    id: String,
+    name: String,
+    args: String,
+}
+
+impl ToolCallAcc {
+    /// The finished call as a `ToolUse` block, or `None` if no name ever
+    /// arrived. Some OpenAI-compatible backends leave out the id; those
+    /// calls get a generated one.
+    fn into_tool_use(self) -> Option<ContentBlock> {
+        if self.name.is_empty() {
+            return None;
+        }
+        Some(ContentBlock::ToolUse {
+            id: if self.id.is_empty() {
+                super::new_tool_call_id()
+            } else {
+                self.id
+            },
+            name: self.name,
+            arguments: self.args,
+        })
+    }
+}
+
 /// Maps OpenAI's `finish_reason` vocabulary onto the provider-agnostic
 /// [`FinishReason`]; anything without a known equivalent (e.g. the legacy
 /// `function_call`) passes through as [`FinishReason::Other`].
@@ -519,12 +547,6 @@ impl LlmClient for OpenAiClient {
                 Err(e) => return Err(e),
             };
 
-        struct ToolCallAcc {
-            id: String,
-            name: String,
-            args: String,
-        }
-
         let mut text_buf = String::new();
         // Accumulated alongside `text_buf` so the final message persists the
         // reasoning (the live chunks are UI-only); without this, thinking
@@ -584,12 +606,8 @@ impl LlmClient for OpenAiClient {
                 if let Some(tcs) = choice.delta.tool_calls {
                     for tc in tcs {
                         let idx = tc.index;
-                        while tool_acc.len() <= idx {
-                            tool_acc.push(ToolCallAcc {
-                                id: String::new(),
-                                name: String::new(),
-                                args: String::new(),
-                            });
+                        if tool_acc.len() <= idx {
+                            tool_acc.resize_with(idx + 1, ToolCallAcc::default);
                         }
                         if let Some(id) = tc.id {
                             tool_acc[idx].id = id;
@@ -609,17 +627,7 @@ impl LlmClient for OpenAiClient {
 
         let tool_uses = tool_acc
             .into_iter()
-            .enumerate()
-            .filter(|(_, tc)| !tc.name.is_empty())
-            .map(|(i, tc)| ContentBlock::ToolUse {
-                id: if tc.id.is_empty() {
-                    format!("call_{i}")
-                } else {
-                    tc.id
-                },
-                name: tc.name,
-                arguments: tc.args,
-            })
+            .filter_map(ToolCallAcc::into_tool_use)
             .collect();
 
         Ok(Choice {
@@ -636,6 +644,34 @@ impl LlmClient for OpenAiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn acc(id: &str, name: &str) -> ToolCallAcc {
+        ToolCallAcc {
+            id: id.into(),
+            name: name.into(),
+            args: "{}".into(),
+        }
+    }
+
+    // Regression test: a call streamed without an id was numbered by its
+    // position in the reply, so every reply's first call was `call_0`.
+    #[test]
+    fn streamed_calls_without_an_id_get_unique_ones() {
+        let id = |block: Option<ContentBlock>| match block {
+            Some(ContentBlock::ToolUse { id, .. }) => id,
+            other => panic!("expected a tool use, got {other:?}"),
+        };
+        let first = id(acc("", "read_file").into_tool_use());
+        let second = id(acc("", "read_file").into_tool_use());
+        assert_ne!(first, second);
+        assert!(first.starts_with("call_"));
+        assert_eq!(id(acc("call_x", "read_file").into_tool_use()), "call_x");
+    }
+
+    #[test]
+    fn streamed_call_without_a_name_is_dropped() {
+        assert!(acc("call_x", "").into_tool_use().is_none());
+    }
 
     #[test]
     fn map_finish_reason_translates_known_values() {
