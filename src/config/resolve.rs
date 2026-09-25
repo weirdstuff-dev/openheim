@@ -378,9 +378,8 @@ mod tests {
         toml::from_str(&format!("default_provider = \"x\"\n{providers}")).unwrap()
     }
 
-    // Regression test: the client was picked from the provider's *name*, so
-    // an Anthropic endpoint registered under any other name silently got the
-    // OpenAI-compatible client.
+    // The client follows `kind`, not the provider's name, so an Anthropic
+    // endpoint can be registered under any name.
     #[test]
     fn explicit_kind_wins_over_the_provider_name() {
         let config = config_from_toml(

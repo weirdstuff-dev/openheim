@@ -235,9 +235,8 @@ pub(super) enum Overlay {
 
 /// Tool-call approvals waiting on the user, shown one at a time on top of
 /// everything else. A queue rather than a single slot: tool calls are checked
-/// concurrently (see agent.rs's Phase 1b), so several requests can arrive
-/// before the first is answered; later ones wait their turn instead of
-/// overwriting (and orphaning) an earlier one.
+/// concurrently (see `run_agent`), so several requests can arrive before the
+/// first is answered; later ones wait their turn.
 #[derive(Default)]
 pub(super) struct PermissionQueue {
     pending: VecDeque<PendingPermission>,

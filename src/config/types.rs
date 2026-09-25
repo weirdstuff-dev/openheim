@@ -662,8 +662,8 @@ mod tests {
         assert_eq!(memory.top_k, 5);
     }
 
-    // Regression test (PR #61 review): `AgentConfig` data from before `kind`
-    // existed deserialized as OpenAI-compatible whatever the provider.
+    // `AgentConfig` data without a `kind` field infers it from the provider
+    // name rather than defaulting to OpenAI-compatible.
     #[test]
     fn agent_config_without_kind_infers_it_from_the_provider_name() {
         let json = |provider: &str| {

@@ -621,9 +621,8 @@ mod tests {
         }
     }
 
-    // Regression test: calls were numbered per reply (`call_0`, `call_1`, …),
-    // so every reply's first call had the same id and ACP clients merged
-    // them into one.
+    // Calls get ids unique across replies; ids repeated per reply would make
+    // ACP clients merge different calls into one.
     #[test]
     fn calls_without_an_id_get_unique_ones() {
         let call = r#"{"name":"read_file","args":{"path":"a.txt"}}"#;
@@ -660,9 +659,8 @@ mod tests {
         )
     }
 
-    // Regression test: signatures were dropped, so on Gemini 3 every request
-    // after a function call failed with "Function call … is missing a
-    // thought_signature" (400).
+    // Gemini 3 rejects a request whose function call lacks its
+    // `thoughtSignature` ("Function call … is missing a thought_signature").
     #[test]
     fn signatures_and_ids_from_gemini_are_sent_back_as_received() {
         // Parallel calls: only the first carries a signature.
@@ -686,9 +684,8 @@ mod tests {
         assert_eq!(results["parts"][1]["functionResponse"]["id"], "fc_2");
     }
 
-    // Calls Gemini didn't produce (another provider's, or from before
-    // signatures were kept) carry none; the first gets the stand-in so
-    // Gemini 3 doesn't reject the request.
+    // Calls without a signature (e.g. another provider's) get the stand-in
+    // on the first one only, so Gemini 3 doesn't reject the request.
     #[test]
     fn unsigned_calls_get_the_stand_in_signature_on_the_first_only() {
         let (model, results) = sent_turns(vec![
@@ -755,9 +752,8 @@ mod tests {
         assert_eq!(choice.usage.unwrap().output_tokens, 5);
     }
 
-    // Regression test: a connection that closed early looked like a normal
-    // end of body, so a cut-off reply (here: missing its tool call) was
-    // taken as a complete one.
+    // A connection that closes early is an incomplete reply (here: missing
+    // its tool call), not a complete one.
     #[test]
     fn stream_cut_off_before_the_finish_reason_is_an_incomplete_response() {
         let err = parse_stream(&TOOL_REPLY[..1]).unwrap_err();

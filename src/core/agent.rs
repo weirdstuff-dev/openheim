@@ -13,9 +13,8 @@ use crate::tools::ToolExecutor;
 /// finished.
 const CANCELLED_TOOL_RESULT: &str = "Cancelled by user.";
 
-/// The result sent in place of one that never made it into the history: the
-/// process stopped mid-turn, or the history predates cancelled calls being
-/// answered.
+/// The result sent in place of one missing from the history, e.g. because
+/// the process stopped mid-turn.
 const MISSING_TOOL_RESULT: &str =
     "No result: the turn was interrupted before this tool call finished.";
 
@@ -134,21 +133,18 @@ fn stop_for_reply_without_tools(
 /// persisting them is the caller's job. `prompt_builder`, if set, adds the
 /// system prompt and skills to each request.
 ///
-/// `callback` receives a [`StreamEvent`] for each significant step: iteration
-/// start, streamed text and thinking, tool calls, tool results, and the final
-/// completion. It runs on the loop's own task and must not block; pass
-/// `|_| {}` to ignore events. The LLM calls stream either way (see
-/// `call_llm_streaming`).
+/// `callback` receives a [`StreamEvent`] for each step: iteration start,
+/// streamed text and thinking, tool calls, tool results, and completion. It
+/// runs on the loop's own task and must not block; pass `|_| {}` to ignore
+/// events.
 ///
-/// `cancel` is checked between iterations and raced against the in-flight
-/// LLM call, the pending permission-gate approvals, and the running tool
-/// calls, so a caller (e.g. the ACP layer reacting to `session/cancel`) can
-/// abort a slow or hanging request — or a turn stuck waiting on user approval
-/// — rather than waiting for it to finish. Tool calls the LLM asked for are
-/// always answered in `messages`, the cancelled ones with an error result, so
-/// the history stays valid to send. The loop returns `Ok` unless an LLM call fails;
-/// [`AgentResult::stop_reason`] reports why it stopped instead of callers
-/// having to reverse-engineer it.
+/// `turn.cancel` stops the turn at any point: between iterations, during an
+/// LLM call, while waiting for permission, or while tools run. Every tool
+/// call the LLM asked for is still answered in `messages` (cancelled ones
+/// with an error result), so the history stays valid to send.
+///
+/// Returns `Ok` unless an LLM call fails; [`AgentResult::stop_reason`] says
+/// why the turn ended.
 pub async fn run_agent<F>(
     llm: &dyn LlmClient,
     tool_executor: &dyn ToolExecutor,
@@ -230,10 +226,8 @@ where
 
         let tool_calls = choice.message.tool_calls();
         if !tool_calls.is_empty() {
-            // Phase 1a: announce every call up front, before any permission
-            // check runs. Each is reported `Pending` (see the ACP mapping),
-            // which is accurate for all of them the moment the LLM asks —
-            // not just the one whose approval happens to be next in line.
+            // Announce every call before any permission check runs, so a UI
+            // shows all of them as pending, not just the one being asked about.
             for tool_call in &tool_calls {
                 callback(StreamEvent::ToolCall {
                     id: tool_call.id.clone(),
@@ -243,27 +237,22 @@ where
             }
 
             // The assistant message asking for these calls is already in
-            // `messages`, so a cancelled turn must still answer every one of
-            // them (Phase 3): providers reject a history with an unanswered
-            // tool call. Cancellation therefore leaves this block, not the
-            // turn, and whatever has no outcome yet is answered as cancelled.
+            // `messages`, and providers reject a history with an unanswered
+            // tool call. So cancellation leaves this block, not the turn, and
+            // every call without an outcome is answered as cancelled below.
             let mut outcomes: Vec<Option<(String, bool)>> = vec![None; tool_calls.len()];
             'calls: {
                 if turn.cancel.is_cancelled() {
                     break 'calls;
                 }
 
-                // Phase 1b: collect every call's permission decision
-                // concurrently, mirroring Phase 2's execution model — an
-                // interactive gate sees every request up front instead of
-                // one at a time. The ACP gate can answer them independently
-                // and out of order; the TUI gate queues concurrent requests
-                // instead of dropping them (see `App::handle_permission_request`),
-                // so it still only *shows* one prompt at a time.
+                // Ask about every call concurrently, so a gate sees all the
+                // requests at once and may answer them in any order. The TUI
+                // gate queues them and shows one prompt at a time.
                 let decisions = tokio::select! {
                     // Dropping the `join_all` abandons every pending approval
-                    // prompt at once, rather than blocking the turn (and
-                    // holding `prompt_lock`) until the user answers each.
+                    // at once, so the turn (and `prompt_lock`) isn't held
+                    // until the user answers each.
                     _ = turn.cancel.cancelled() => break 'calls,
                     decisions = futures::future::join_all(tool_calls.iter().map(|tool_call| async {
                         let request = PermissionRequest::new(
@@ -275,14 +264,10 @@ where
                     })) => decisions,
                 };
 
-                // Phase 2: run every allowed call concurrently (denied ones
-                // short-circuit without touching the executor). This is what
-                // lets several `delegate_task` sub-agents — or any other
-                // independent tool calls the LLM batched into one turn —
-                // actually run in parallel. `ToolResult` is emitted as soon as
-                // each call finishes (completion order), so fast calls report
-                // back before slow ones; message history in Phase 3 stays in
-                // original tool-call order regardless.
+                // Run every allowed call concurrently (denied ones don't reach
+                // the executor), so e.g. several `delegate_task` subagents run
+                // in parallel. `ToolResult` goes out as each call finishes;
+                // the history below keeps the calls' original order.
                 let mut pending: futures::stream::FuturesUnordered<_> = tool_calls
                     .iter()
                     .zip(&decisions)
@@ -325,11 +310,9 @@ where
                 }
             }
 
-            // Phase 3: record results in original tool-call order, so message
-            // history and the `MessageAppended` stream stay deterministic
-            // regardless of which call finished first. A call with no outcome
-            // was cancelled; it also gets its `ToolResult` here, so a caller
-            // showing it as pending sees it end.
+            // Record results in the calls' original order, whichever finished
+            // first. A call with no outcome was cancelled; it gets its
+            // `ToolResult` here, so a UI showing it as pending sees it end.
             for (tool_call, outcome) in tool_calls.iter().zip(outcomes) {
                 let (result, is_error) = outcome.unwrap_or_else(|| {
                     callback(StreamEvent::ToolResult {
@@ -353,16 +336,14 @@ where
                 messages.push(tool_result_message);
             }
 
-            // Exit immediately rather than relying on next iteration's
-            // top-of-loop check, which would never run if this was the
-            // last allowed iteration and would misreport `MaxIterations`.
+            // Checked here too: on the last iteration the top-of-loop check
+            // never runs, and the turn would be reported as `MaxIterations`.
             if turn.cancel.is_cancelled() {
                 stop_reason = StopReason::Cancelled;
                 break 'turn;
             }
         } else {
-            // LlmResponse chunks already fired per-token from the streaming select
-            // loop above; just record the final text here.
+            // The text was already streamed above; just keep the final reply.
             let text = choice.message.text();
             let has_text = text.is_some();
             if let Some(content) = text {
@@ -853,8 +834,8 @@ mod tests {
         assert_eq!(result.stop_reason, StopReason::Cancelled);
     }
 
-    /// ToolExecutor that never resolves; proves cancellation aborts an
-    /// in-flight tool call (Phase 2) instead of waiting for it to finish.
+    /// ToolExecutor that never resolves; proves cancellation aborts a
+    /// running tool call instead of waiting for it to finish.
     struct SlowToolExecutor;
 
     #[async_trait]
@@ -880,8 +861,7 @@ mod tests {
         let harness = Harness::new();
         let cancel = harness.cancel_handle();
 
-        // Cancel right after the tool call is announced (Phase 1a), i.e.
-        // right before Phase 2 starts executing it.
+        // Cancel as soon as the tool call is announced, just before it runs.
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             harness.run(&llm, &SlowToolExecutor, &mut messages, move |event| {
@@ -911,9 +891,8 @@ mod tests {
         assert!(result.is_error);
     }
 
-    // Regression test: cancelling after one of two calls finished left the
-    // history ending in the assistant's tool calls with no results, which
-    // every provider rejects on the next prompt.
+    // Cancelling after one of two calls finished must leave every call
+    // answered: providers reject a history with an unanswered tool call.
     #[tokio::test(start_paused = true)]
     async fn cancel_keeps_finished_results_and_answers_the_rest() {
         let llm = MockLlm::new(vec![multi_tool_call_choice(&[
@@ -1024,8 +1003,8 @@ mod tests {
         );
     }
 
-    // A turn stored before cancelled calls were answered (or cut short by a
-    // crash) must not break the conversation's next request.
+    // A stored turn with an unanswered call (e.g. cut short by a crash) must
+    // not break the conversation's next request.
     #[tokio::test]
     async fn request_answers_a_stored_unanswered_call() {
         struct RecordingLlm(Mutex<Vec<Vec<Message>>>);
@@ -1117,9 +1096,9 @@ mod tests {
         }
     }
 
-    // Regression test: only `FinishReason::Stop` used to end the turn; any
-    // other finish on a tool-free reply resent the history (ending in that
-    // assistant reply) until `max_iterations` ran out.
+    // Every finish reason on a reply without tool calls ends the turn
+    // (except `Paused`), instead of resending a history that ends in an
+    // assistant reply.
     #[tokio::test]
     async fn reply_without_tools_ends_turn_per_finish_reason() {
         let text = || vec![ContentBlock::from("partial answer")];
@@ -1210,9 +1189,8 @@ mod tests {
         }
     }
 
-    // Regression test: the loop gave up as soon as the chunk channel
-    // closed, failing the turn with "stream ended prematurely" even though
-    // the reply was still on its way.
+    // The loop waits for the reply, not the chunk channel: a client may
+    // close its sender while the reply is still on its way.
     #[tokio::test]
     async fn reply_arriving_after_the_chunk_channel_closes_still_completes() {
         let mut messages = vec![Message::user("hi")];
@@ -1237,11 +1215,10 @@ mod tests {
         assert_eq!(chunks, vec!["hel".to_string()]);
     }
 
-    // Regression test: a run without a callback (what `delegate_task`
-    // subagents use) made non-streaming requests, which send no bytes until
-    // the whole reply is generated and so hit the per-read timeout on long
-    // replies. `EarlyCloseLlm::send` panics, so this only passes if the
-    // request streamed.
+    // A run whose callback ignores events (as `delegate_task` subagents do)
+    // still streams, so long replies don't hit the per-read timeout.
+    // `EarlyCloseLlm::send` panics, so this only passes if the request
+    // streamed.
     #[tokio::test]
     async fn runs_without_a_callback_still_stream() {
         let mut messages = vec![Message::user("hi")];

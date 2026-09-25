@@ -688,8 +688,8 @@ mod tests {
         }
     }
 
-    // Regression test: a call streamed without an id was numbered by its
-    // position in the reply, so every reply's first call was `call_0`.
+    // A call streamed without an id gets a unique one, not one numbered by
+    // its position in the reply.
     #[test]
     fn streamed_calls_without_an_id_get_unique_ones() {
         let id = |block: Option<ContentBlock>| match block {
@@ -744,9 +744,8 @@ mod tests {
         assert_eq!(choice.usage.unwrap().output_tokens, 5);
     }
 
-    // Regression test: a connection that closed early looked like a normal
-    // end of body, so a cut-off reply (here: its tool call's arguments only
-    // half there) was taken as a complete one.
+    // A connection that closes early is an incomplete reply (here: its tool
+    // call's arguments only half there), not a complete one.
     #[test]
     fn stream_cut_off_before_the_finish_reason_is_an_incomplete_response() {
         let err = parse_stream(&TOOL_REPLY[..2]).unwrap_err();
@@ -899,8 +898,7 @@ mod tests {
         assert!(json.get("max_completion_tokens").is_none());
     }
 
-    // Regression test: the limit went out as `max_tokens`, which OpenAI's
-    // reasoning models reject.
+    // OpenAI's reasoning models reject `max_tokens`.
     #[test]
     fn openai_sends_the_limit_as_max_completion_tokens() {
         let json = request_json(&client(Some(1000)));

@@ -766,9 +766,9 @@ mod tests {
         assert_eq!(app.input.text(), "y");
     }
 
-    // Regression test (PR #61 review): pruning a stale request *behind* the
-    // prompt on screen reset its highlight to "Allow Once", so after the user
-    // moved to "Reject Once", Enter allowed the call anyway.
+    // Pruning a stale request *behind* the prompt on screen keeps its
+    // highlight; resetting it to "Allow Once" would let Enter allow a call
+    // the user had moved to "Reject Once".
     #[test]
     fn highlight_survives_a_stale_request_behind_the_prompt() {
         let mut app = test_app();
@@ -804,9 +804,8 @@ mod tests {
         assert_eq!(app.permissions.len(), 1);
     }
 
-    // Regression test: a permission prompt arriving while a popup was open
-    // overwrote the "screen to return to" with that popup, so after
-    // answering, Esc "returned" to the popup and could never close it.
+    // A permission prompt over an open popup doesn't replace what Esc
+    // returns to: after answering it, Esc still closes the popup.
     #[test]
     fn esc_closes_a_popup_after_a_permission_prompt_over_it() {
         let mut app = test_app();

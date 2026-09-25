@@ -83,8 +83,7 @@ pub trait PermissionGate: Send + Sync {
 /// For [`ApprovalScope::ToolName`] (most tools) this is just the tool name —
 /// one approval covers every future call to that tool. For
 /// [`ApprovalScope::ExactArguments`] (e.g. `execute_command`) it's the tool
-/// name plus the full arguments: keying `execute_command` on its program
-/// name alone let an approval for `git status` silently cover
+/// name plus the full arguments, so approving `git status` doesn't cover
 /// `git status && rm -rf ~`. The arguments are normalized first (parsed,
 /// object keys sorted, whitespace dropped), so the same call written
 /// differently still matches; any difference in value re-prompts. Arguments
@@ -383,9 +382,8 @@ mod tests {
         );
     }
 
-    // Regression test: the key read a `command` field, so any other tool
-    // declaring `ExactArguments` fell back to a key of its raw arguments,
-    // which differ with key order and whitespace.
+    // Keys work for any tool declaring `ExactArguments`, not just
+    // `execute_command`, and don't depend on key order or whitespace.
     #[test]
     fn exact_argument_keys_ignore_key_order_and_whitespace() {
         let key = |args: &str| approval_key(ApprovalScope::ExactArguments, "deploy", args);

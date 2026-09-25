@@ -1053,9 +1053,8 @@ mod tests {
         assert_eq!(choice.usage.unwrap().output_tokens, 20);
     }
 
-    // Regression test: a connection that closed early looked like a normal
-    // end of body, so a cut-off reply (here: missing its tool call) was
-    // taken as a complete one that ended the turn.
+    // A connection that closes early is an incomplete reply (here: missing
+    // its tool call), not a complete one that ends the turn.
     #[test]
     fn stream_cut_off_before_message_stop_is_an_incomplete_response() {
         for cut in [3, TOOL_REPLY.len() - 1] {
@@ -1065,10 +1064,9 @@ mod tests {
         }
     }
 
-    // Regression test: all thinking went into one block with every signature
-    // concatenated, redacted thinking was dropped, and blocks were reordered
-    // as thinking → text → tools. Anthropic rejects such a turn when it's
-    // sent back.
+    // Each thinking block keeps its own signature, redacted thinking is
+    // kept, and blocks stay in stored order: Anthropic rejects a turn sent
+    // back any other way.
     #[test]
     fn interleaved_blocks_keep_their_order_and_own_signatures() {
         let choice = parse_stream(&[
