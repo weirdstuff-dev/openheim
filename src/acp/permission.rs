@@ -32,7 +32,7 @@ impl PermissionGate for AcpPermissionGate {
     async fn check(&self, request: &PermissionRequest<'_>) -> PermissionDecision {
         let tool_name = request.tool_name;
         let tool_call = ToolCallUpdate::new(
-            request.tool_call_id.to_string(),
+            client_tool_call_id(request),
             ToolCallUpdateFields::new()
                 .title(permission_title(request))
                 .kind(tool_kind_for(tool_name, self.executor.as_ref()))
@@ -107,6 +107,16 @@ fn permission_title(request: &PermissionRequest<'_>) -> String {
     }
 }
 
+/// The tool call id the client sees. A subagent's ids come from its own
+/// conversation and can repeat one of the parent's, so they're prefixed with
+/// the subagent's name to keep the client from mixing the two calls up.
+fn client_tool_call_id(request: &PermissionRequest<'_>) -> String {
+    match request.subagent {
+        Some(subagent) => format!("subagent:{subagent}:{}", request.tool_call_id),
+        None => request.tool_call_id.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +128,17 @@ mod tests {
         assert_eq!(
             permission_title(&request.from_subagent("reviewer")),
             "execute_command (subagent 'reviewer')"
+        );
+    }
+
+    #[test]
+    fn subagent_tool_call_ids_are_kept_apart_from_the_parents() {
+        let request = PermissionRequest::new("call_1", "execute_command", "{}");
+        assert_eq!(client_tool_call_id(&request), "call_1");
+        let request = PermissionRequest::new("call_1", "execute_command", "{}");
+        assert_eq!(
+            client_tool_call_id(&request.from_subagent("reviewer")),
+            "subagent:reviewer:call_1"
         );
     }
 }

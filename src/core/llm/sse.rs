@@ -33,6 +33,10 @@ pub(crate) trait StreamParser {
     fn finish(self) -> Result<Choice>;
 }
 
+/// Longest SSE line [`read_stream`] buffers. A body that sends more than this
+/// without a newline is rejected rather than held in memory.
+const MAX_LINE_LEN: usize = 1024 * 1024;
+
 /// Reads `response`'s SSE body through `parser` until the parser sees the
 /// end of the stream or the body ends, then returns `parser.finish()`.
 pub(crate) async fn read_stream<P: StreamParser>(
@@ -53,6 +57,12 @@ pub(crate) async fn read_stream<P: StreamParser>(
             if parser.payload(&data, chunk_tx)? {
                 return parser.finish();
             }
+        }
+        // Every complete line is gone, so what's left is one unfinished line.
+        if decoder.buf.len() > MAX_LINE_LEN {
+            return Err(Error::ParseError(format!(
+                "stream line longer than {MAX_LINE_LEN} bytes"
+            )));
         }
         if bytes.is_none() {
             return parser.finish();
@@ -154,8 +164,8 @@ mod tests {
         }
     }
 
-    async fn read(body: &'static str) -> Result<Choice> {
-        let response = reqwest::Response::from(http::Response::new(body));
+    async fn read(body: impl Into<reqwest::Body>) -> Result<Choice> {
+        let response = reqwest::Response::from(http::Response::new(body.into()));
         let (chunk_tx, _chunk_rx) = tokio::sync::mpsc::unbounded_channel();
         read_stream(response, Recorder::default(), &chunk_tx).await
     }
@@ -178,6 +188,13 @@ mod tests {
     async fn read_stream_reports_a_body_that_ends_early() {
         let err = read("data: a\n\n").await.unwrap_err();
         assert!(matches!(err, Error::IncompleteResponse(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn read_stream_rejects_a_line_over_the_limit() {
+        let body = format!("data: a\n\ndata: {}", "x".repeat(MAX_LINE_LEN));
+        let err = read(body).await.unwrap_err();
+        assert!(matches!(err, Error::ParseError(_)), "{err}");
     }
 
     #[test]

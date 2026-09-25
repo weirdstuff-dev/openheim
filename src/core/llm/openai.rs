@@ -281,7 +281,8 @@ struct ToolCallAcc {
 impl ToolCallAcc {
     /// The finished call as a `ToolUse` block, or `None` if no name ever
     /// arrived. Some OpenAI-compatible backends leave out the id; those
-    /// calls get a generated one.
+    /// calls get a generated one. A call that streamed no arguments gets
+    /// `{}`, so it stays valid JSON for the next request.
     fn into_tool_use(self) -> Option<ContentBlock> {
         if self.name.is_empty() {
             return None;
@@ -291,7 +292,12 @@ impl ToolCallAcc {
         } else {
             self.id
         };
-        Some(ContentBlock::tool_use(id, self.name, self.args))
+        let args = if self.args.trim().is_empty() {
+            "{}".to_string()
+        } else {
+            self.args
+        };
+        Some(ContentBlock::tool_use(id, self.name, args))
     }
 }
 
@@ -706,6 +712,18 @@ mod tests {
     #[test]
     fn streamed_call_without_a_name_is_dropped() {
         assert!(acc("call_x", "").into_tool_use().is_none());
+    }
+
+    #[test]
+    fn streamed_call_without_arguments_gets_an_empty_object() {
+        let call = ToolCallAcc {
+            args: String::new(),
+            ..acc("call_x", "list_files")
+        };
+        match call.into_tool_use() {
+            Some(ContentBlock::ToolUse { arguments, .. }) => assert_eq!(arguments, "{}"),
+            other => panic!("expected a tool use, got {other:?}"),
+        }
     }
 
     /// Feeds `payloads` through a fresh `OpenAiStream` as if they were the
