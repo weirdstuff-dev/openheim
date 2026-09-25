@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - **Cancelling a turn while tools were running no longer breaks the session.** The model's tool-call message was already saved, but the cancelled calls never got results, and Anthropic and OpenAI reject a history with an unanswered tool call, so every later prompt in that session failed. Cancelled calls are now recorded as a `Cancelled by user.` error, and calls that had already finished keep their results. Each cancelled call also gets a `ToolResult` event, so UIs stop showing it as pending. Sessions already saved in the broken state, or cut short by a crash mid-turn, work again too: the missing results are filled in on each request, without changing the saved history.
+- **Gemini tool calls now have unique ids.** They were numbered per reply (`call_0`, `call_1`, …), so every reply's first call had the same id as the one before it, and a subagent's calls could share ids with its parent's. ACP clients tell tool calls and permission requests apart by id, so a new call could replace an earlier one on screen. Gemini's own call id is used when it sends one, otherwise a random one. The same applies to OpenAI-compatible backends that stream a tool call without an id.
 
 ## [0.13.0] - 2026-09-24
 
