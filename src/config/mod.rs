@@ -36,7 +36,7 @@ const BUILTIN_PROVIDER_DEFAULTS: &[(&str, &str, &str)] = &[
     (
         "gemini",
         "https://generativelanguage.googleapis.com/v1beta",
-        "gemini-2.0-flash",
+        "gemini-3.8-flash",
     ),
 ];
 
@@ -224,7 +224,7 @@ mod tests {
             builtin_provider_defaults("gemini"),
             (
                 "https://generativelanguage.googleapis.com/v1beta",
-                "gemini-2.0-flash"
+                "gemini-3.8-flash"
             )
         );
     }

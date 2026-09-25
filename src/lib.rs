@@ -34,7 +34,7 @@
 //! |------------|---------------|----------------------|
 //! | OpenAI     | `"openai"`    | `gpt-4o`             |
 //! | Anthropic  | `"anthropic"` | `claude-sonnet-4-6`  |
-//! | Google     | `"gemini"`    | `gemini-2.0-flash`   |
+//! | Google     | `"gemini"`    | `gemini-3.8-flash`   |
 //! | Compatible | any string    | set via `.model()`   |
 //!
 //! ## Configuration file

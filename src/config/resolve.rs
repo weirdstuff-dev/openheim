@@ -420,8 +420,8 @@ mod tests {
 
             [providers.gemini]
             api_base = "https://generativelanguage.googleapis.com/v1beta"
-            default_model = "gemini-2.0-flash"
-            models = ["gemini-2.0-flash"]
+            default_model = "gemini-3.8-flash"
+            models = ["gemini-3.8-flash"]
 
             [providers.ollama]
             api_base = "http://localhost:11434/v1"
