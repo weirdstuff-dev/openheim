@@ -26,6 +26,7 @@ Running `openheim` with no subcommand opens the interactive terminal UI. Type a 
 |---|---|
 | `:help` | Show all commands |
 | `:q` / `:quit` | Exit |
+| `:new` | Start a new session (keeps the current model) |
 | `:sessions` | Browse and restore saved sessions (interactive picker) |
 | `:config` | Show current configuration |
 | `:models` | Open model picker (arrow keys + Enter to switch mid-session) |
