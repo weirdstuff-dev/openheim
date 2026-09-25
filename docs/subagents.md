@@ -91,8 +91,10 @@ file, by calling `delegate_task` with a `system_prompt` instead of an `agent` na
 ```
 
 `tools`, `model`, `provider`, and `max_iterations` are optional and mean exactly
-what the corresponding profile frontmatter fields mean. Exactly one of `agent` or
-`system_prompt` must be provided.
+what the corresponding profile frontmatter fields mean, except that an inline
+`max_iterations` can't exceed the parent's own. Exactly one of `agent` or
+`system_prompt` must be provided. Giving both, neither, or an unknown `agent`
+name fails the tool call with an error explaining the fix.
 
 Inline subagents are **ephemeral by design**: nothing is written to
 `~/.openheim/agents/` and nothing survives the call. They run through the same
