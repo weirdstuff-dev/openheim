@@ -12,7 +12,7 @@ use agent_client_protocol::schema::v1::{
 use crate::{
     config::AppConfig,
     core::{
-        models::{ContentBlock, Message, Role, StopReason as CoreStopReason, StreamEvent},
+        models::{Message, StopReason as CoreStopReason, StreamEvent, TranscriptEntry},
         runtime::AgentMode,
     },
     memory::ConversationMeta,
@@ -99,7 +99,9 @@ pub(super) fn thinking_chunk(content: String) -> TextContent {
 /// session renders identically to one that stayed open — including assistant
 /// thinking blocks, which are tunneled through `agent_message_chunk` with
 /// `content._meta.kind == "thinking"` exactly as the live streaming path
-/// does. An assistant message's blocks are replayed in their stored order.
+/// does. Which blocks are replayed, and in what order, is
+/// [`Message::transcript`]'s call (shared with the TUI); this only picks
+/// the `SessionUpdate`.
 pub(crate) fn replay_history_messages<F>(
     messages: &[Message],
     executor: &dyn ToolExecutor,
@@ -107,82 +109,52 @@ pub(crate) fn replay_history_messages<F>(
 ) where
     F: FnMut(SessionUpdate),
 {
-    for msg in messages {
-        match msg.role {
-            Role::User => {
-                // Iterate every persisted block in order (not just `msg.text()`,
-                // which only concatenates `Text` blocks) so an image attached
-                // to the prompt is restored alongside the text instead of
-                // silently dropped on reload.
-                for block in &msg.content {
-                    match block {
-                        ContentBlock::Text { text } => {
-                            on_update(SessionUpdate::UserMessageChunk(ContentChunk::new(
-                                AcpContentBlock::from(text.clone()),
-                            )));
-                        }
-                        ContentBlock::Image { data, mime_type } => {
-                            on_update(SessionUpdate::UserMessageChunk(ContentChunk::new(
-                                AcpContentBlock::Image(ImageContent::new(
-                                    data.clone(),
-                                    mime_type.clone(),
-                                )),
-                            )));
-                        }
-                        _ => {}
-                    }
-                }
+    for entry in messages.iter().flat_map(Message::transcript) {
+        let update = match entry {
+            TranscriptEntry::UserText(text) => SessionUpdate::UserMessageChunk(ContentChunk::new(
+                AcpContentBlock::from(text.to_string()),
+            )),
+            TranscriptEntry::UserImage { data, mime_type } => {
+                SessionUpdate::UserMessageChunk(ContentChunk::new(AcpContentBlock::Image(
+                    ImageContent::new(data.to_string(), mime_type.to_string()),
+                )))
             }
-            Role::Assistant => {
-                // In stored order, the order a live turn streamed them in:
-                // with interleaved thinking a turn can go thinking → text →
-                // thinking → tool call.
-                for block in &msg.content {
-                    match block {
-                        ContentBlock::Thinking { thinking, .. } if !thinking.is_empty() => {
-                            on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                                AcpContentBlock::Text(thinking_chunk(thinking.clone())),
-                            )));
-                        }
-                        ContentBlock::Text { text } if !text.is_empty() => {
-                            on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                                AcpContentBlock::from(text.clone()),
-                            )));
-                        }
-                        ContentBlock::ToolUse {
-                            id,
-                            name,
-                            arguments,
-                            ..
-                        } => {
-                            on_update(SessionUpdate::ToolCall(
-                                AcpToolCall::new(id.clone(), name)
-                                    .kind(tool_kind_for(name, executor))
-                                    .status(ToolCallStatus::InProgress)
-                                    .raw_input(raw_input(id, name, arguments)),
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
+            TranscriptEntry::Thinking(thinking) => SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(AcpContentBlock::Text(thinking_chunk(thinking.to_string()))),
+            ),
+            TranscriptEntry::AssistantText(text) => SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(AcpContentBlock::from(text.to_string())),
+            ),
+            TranscriptEntry::ToolCall {
+                id,
+                name,
+                arguments,
+            } => SessionUpdate::ToolCall(
+                AcpToolCall::new(id.to_string(), name)
+                    .kind(tool_kind_for(name, executor))
+                    .status(ToolCallStatus::InProgress)
+                    .raw_input(raw_input(id, name, arguments)),
+            ),
+            TranscriptEntry::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+                ..
+            } => {
+                let status = if is_error {
+                    ToolCallStatus::Failed
+                } else {
+                    ToolCallStatus::Completed
+                };
+                SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                    tool_call_id.to_string(),
+                    ToolCallUpdateFields::new()
+                        .status(status)
+                        .raw_output(serde_json::Value::String(content.to_string())),
+                ))
             }
-            Role::Tool => {
-                if let Some(tr) = msg.tool_result_block() {
-                    let status = if tr.is_error {
-                        ToolCallStatus::Failed
-                    } else {
-                        ToolCallStatus::Completed
-                    };
-                    on_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                        tr.tool_call_id,
-                        ToolCallUpdateFields::new()
-                            .status(status)
-                            .raw_output(serde_json::Value::String(tr.content)),
-                    )));
-                }
-            }
-            _ => {}
-        }
+        };
+        on_update(update);
     }
 }
 
@@ -341,6 +313,7 @@ pub(super) fn map_stop_reason(reason: CoreStopReason) -> StopReason {
 #[cfg(test)]
 mod replay_tests {
     use super::*;
+    use crate::core::models::{ContentBlock, Role};
     use crate::tools::SystemToolExecutor;
 
     fn executor() -> SystemToolExecutor {

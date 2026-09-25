@@ -327,66 +327,39 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
     Ok(())
 }
 
-/// Converts one persisted [`Message`](crate::core::models::Message) from a
-/// history replay (`OpenheimClient::resume_session`'s `LoadedSession::messages`) into
-/// the `ChatItem`s a live turn would have produced for the equivalent
-/// content — the same mapping `App::handle_stream_event` applies to a live
-/// turn's `StreamEvent`s, just walking the message's content blocks directly
-/// instead of decoding ACP's `SessionUpdate` vocabulary (there's no live
-/// `StreamEvent` for "here's a message from a past turn"), so this works
-/// without the `acp` feature. An image attachment isn't silently dropped —
-/// it renders as a placeholder line, since the terminal can't inline it.
+/// The `ChatItem`s a live turn would have shown for one persisted
+/// [`Message`](crate::core::models::Message) from a history replay
+/// (`OpenheimClient::resume_session`'s `LoadedSession::messages`). Which
+/// blocks show, and in what order, is [`Message::transcript`]'s call
+/// (shared with ACP's replay); this only picks the `ChatItem`. An image
+/// renders as a placeholder line, since the terminal can't inline it.
+///
+/// [`Message::transcript`]: crate::core::models::Message::transcript
 fn message_to_chat_items(msg: &crate::core::models::Message) -> Vec<ChatItem> {
-    use crate::core::models::{ContentBlock, Role};
+    use crate::core::models::TranscriptEntry;
 
-    let mut items = Vec::new();
-    match msg.role {
-        Role::User => {
-            // Every block, not just `msg.text()` (which only concatenates
-            // `Text` blocks), so an image attached to the prompt is
-            // restored alongside the text instead of silently dropped.
-            for block in &msg.content {
-                match block {
-                    ContentBlock::Text { text } => items.push(ChatItem::UserMessage(text.clone())),
-                    ContentBlock::Image { .. } => {
-                        items.push(ChatItem::SystemInfo("[image attached]".to_string()));
-                    }
-                    _ => {}
-                }
+    msg.transcript()
+        .map(|entry| match entry {
+            TranscriptEntry::UserText(text) => ChatItem::UserMessage(text.to_string()),
+            TranscriptEntry::UserImage { .. } => {
+                ChatItem::SystemInfo("[image attached]".to_string())
             }
-        }
-        Role::Assistant => {
-            // In stored order: with interleaved thinking a turn can go
-            // thinking → text → thinking → tool call.
-            for block in &msg.content {
-                match block {
-                    ContentBlock::Thinking { thinking, .. } if !thinking.is_empty() => {
-                        items.push(ChatItem::Thinking(thinking.clone()));
-                    }
-                    ContentBlock::Text { text } if !text.is_empty() => {
-                        items.push(ChatItem::AssistantMessage(text.clone()));
-                    }
-                    ContentBlock::ToolUse {
-                        name, arguments, ..
-                    } => items.push(ChatItem::ToolCall {
-                        name: name.clone(),
-                        args: arguments.clone(),
-                    }),
-                    _ => {}
-                }
-            }
-        }
-        Role::Tool => {
-            if let Some(tr) = msg.tool_result_block() {
-                items.push(ChatItem::ToolResult {
-                    result: tr.content,
-                    is_error: tr.is_error,
-                });
-            }
-        }
-        Role::System => {}
-    }
-    items
+            TranscriptEntry::Thinking(thinking) => ChatItem::Thinking(thinking.to_string()),
+            TranscriptEntry::AssistantText(text) => ChatItem::AssistantMessage(text.to_string()),
+            TranscriptEntry::ToolCall {
+                name, arguments, ..
+            } => ChatItem::ToolCall {
+                name: name.to_string(),
+                args: arguments.to_string(),
+            },
+            TranscriptEntry::ToolResult {
+                content, is_error, ..
+            } => ChatItem::ToolResult {
+                result: content.to_string(),
+                is_error,
+            },
+        })
+        .collect()
 }
 
 #[cfg(test)]

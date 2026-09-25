@@ -205,6 +205,90 @@ impl Message {
             _ => None,
         })
     }
+
+    /// What a UI shows for this message when replaying saved history, in
+    /// stored order (with interleaved thinking an assistant turn can go
+    /// thinking → text → thinking → tool call). Skips what a live turn
+    /// never showed: system messages, redacted or empty thinking, empty
+    /// assistant text, and blocks in a role that doesn't display them.
+    pub fn transcript(&self) -> impl Iterator<Item = TranscriptEntry<'_>> {
+        self.content
+            .iter()
+            .filter_map(|block| TranscriptEntry::of(&self.role, block))
+    }
+}
+
+/// One displayable piece of a stored [`Message`]; see [`Message::transcript`].
+/// Front ends map these to their own items, so they agree on what a replayed
+/// session shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TranscriptEntry<'a> {
+    UserText(&'a str),
+    UserImage {
+        /// Base64-encoded image data.
+        data: &'a str,
+        mime_type: &'a str,
+    },
+    Thinking(&'a str),
+    AssistantText(&'a str),
+    ToolCall {
+        id: &'a str,
+        name: &'a str,
+        /// JSON string of the arguments object.
+        arguments: &'a str,
+    },
+    ToolResult {
+        tool_call_id: &'a str,
+        tool_name: &'a str,
+        content: &'a str,
+        is_error: bool,
+    },
+}
+
+impl<'a> TranscriptEntry<'a> {
+    fn of(role: &Role, block: &'a ContentBlock) -> Option<Self> {
+        match (role, block) {
+            (Role::User, ContentBlock::Text { text }) => Some(Self::UserText(text)),
+            (Role::User, ContentBlock::Image { data, mime_type }) => {
+                Some(Self::UserImage { data, mime_type })
+            }
+            (Role::Assistant, ContentBlock::Thinking { thinking, .. }) if !thinking.is_empty() => {
+                Some(Self::Thinking(thinking))
+            }
+            (Role::Assistant, ContentBlock::Text { text }) if !text.is_empty() => {
+                Some(Self::AssistantText(text))
+            }
+            (
+                Role::Assistant,
+                ContentBlock::ToolUse {
+                    id,
+                    name,
+                    arguments,
+                    ..
+                },
+            ) => Some(Self::ToolCall {
+                id,
+                name,
+                arguments,
+            }),
+            (
+                Role::Tool,
+                ContentBlock::ToolResult {
+                    tool_call_id,
+                    tool_name,
+                    content,
+                    is_error,
+                },
+            ) => Some(Self::ToolResult {
+                tool_call_id,
+                tool_name,
+                content,
+                is_error: *is_error,
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// A tool available to the agent, serialised in the OpenAI function-calling format.
@@ -435,6 +519,80 @@ mod tests {
         assert_eq!(msg.role, Role::Assistant);
         assert_eq!(msg.text().as_deref(), Some("response"));
         assert!(msg.tool_calls().is_empty());
+    }
+
+    #[test]
+    fn transcript_keeps_assistant_block_order_and_skips_what_isnt_shown() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "first".into(),
+                    signature: Some("sig".into()),
+                },
+                ContentBlock::from("Let me look."),
+                ContentBlock::RedactedThinking { data: "enc".into() },
+                ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                },
+                ContentBlock::from(""),
+                ContentBlock::tool_use("toolu_1", "read_file", "{}"),
+            ],
+        };
+        assert_eq!(
+            msg.transcript().collect::<Vec<_>>(),
+            [
+                TranscriptEntry::Thinking("first"),
+                TranscriptEntry::AssistantText("Let me look."),
+                TranscriptEntry::ToolCall {
+                    id: "toolu_1",
+                    name: "read_file",
+                    arguments: "{}",
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn transcript_of_user_tool_and_system_messages() {
+        let user = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::from("look at this"),
+                ContentBlock::Image {
+                    data: "aGk=".into(),
+                    mime_type: "image/png".into(),
+                },
+            ],
+        };
+        assert_eq!(
+            user.transcript().collect::<Vec<_>>(),
+            [
+                TranscriptEntry::UserText("look at this"),
+                TranscriptEntry::UserImage {
+                    data: "aGk=",
+                    mime_type: "image/png",
+                },
+            ]
+        );
+
+        let tool = Message::tool_result("call_1", "read_file", "boom", true);
+        assert_eq!(
+            tool.transcript().collect::<Vec<_>>(),
+            [TranscriptEntry::ToolResult {
+                tool_call_id: "call_1",
+                tool_name: "read_file",
+                content: "boom",
+                is_error: true,
+            }]
+        );
+
+        let system = Message {
+            role: Role::System,
+            content: vec![ContentBlock::from("you are x")],
+        };
+        assert_eq!(system.transcript().count(), 0);
     }
 
     #[test]
