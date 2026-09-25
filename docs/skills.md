@@ -135,7 +135,7 @@ let session = client
     .await?;
 ```
 
-Skills are persisted in the conversation metadata (`ConversationMeta.skills`), so they are restored when you resume a session with `load_session`.
+Skills are persisted in the conversation metadata (`ConversationMeta.skills`), so they are restored when you resume a session with `resume_session` (or an ACP client's `session/load`).
 
 ---
 

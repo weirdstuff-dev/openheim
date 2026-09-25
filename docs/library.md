@@ -32,19 +32,17 @@ openheim = { version = "0.9", default-features = false }
 ```
 
 Everything else — the client facade, agent loop, providers, tools, MCP, and
-config — is always available. On the facade, `prompt_events`/
-`prompt_events_with_images`, `list_sessions`, `get_session`,
-`delete_session`, `resume_session`, and `SessionHandle::resume` are
-core-typed and always available; `prompt`, `prompt_with_images`, `restore`,
-and `load_session` are thin wrappers around the same calls that additionally
-speak ACP's `SessionUpdate` vocabulary, so they need `features = ["acp"]`.
+config — is always available. The whole facade (`prompt`, `resume_session`,
+`list_sessions`, `get_session`, `delete_session`, …) speaks openheim's own
+types. Only the two ACP adapters, `SessionHandle::acp_updates` and
+`SessionHandle::acp_replay`, need `features = ["acp"]`.
 
 ---
 
 ## Quick start
 
 ```rust
-use openheim::{OpenheimClient, SessionUpdate};
+use openheim::{OpenheimClient, StreamEvent};
 
 #[tokio::main]
 async fn main() -> openheim::Result<()> {
@@ -58,13 +56,9 @@ async fn main() -> openheim::Result<()> {
         .await?;
 
     session
-        .prompt("What files are in the current directory?", |update| {
-            if let SessionUpdate::AgentMessageChunk(chunk) = update {
-                for block in &chunk.content {
-                    if let openheim::ContentBlock::Text(t) = block {
-                        print!("{}", t.text);
-                    }
-                }
+        .prompt("What files are in the current directory?", |event| {
+            if let StreamEvent::LlmResponse { content } = event {
+                print!("{content}");
             }
         })
         .await?;
@@ -221,64 +215,18 @@ let session = client
     .start()
     .await?;
 
-println!("session id: {}", session.id);
+println!("session id: {}", session.id());
 ```
 
 ### Send a prompt (streaming)
 
-`prompt` calls your callback once per ACP `SessionUpdate` event as the agent runs.
-
-```rust
-use openheim::{AcpToolCall, ContentBlock, SessionUpdate};
-
-session
-    .prompt("Refactor the auth module to use JWTs", |update| {
-        match update {
-            SessionUpdate::AgentMessageChunk(chunk) => {
-                for block in &chunk.content {
-                    if let ContentBlock::Text(t) = block {
-                        print!("{}", t.text);
-                    }
-                }
-            }
-            SessionUpdate::ToolCall(tc) => {
-                println!("\n[tool] {} — running…", tc.name);
-            }
-            SessionUpdate::ToolCallUpdate(tcu) => {
-                println!("[tool] {} — done", tcu.id);
-            }
-            _ => {}
-        }
-    })
-    .await?;
-```
-
-### Send a prompt with images
-
-`prompt_with_images` sends a turn that mixes text with one or more images — useful with any vision-capable provider (Anthropic, OpenAI, Gemini). Each image is a `(base64_data, mime_type)` pair; the text block (when non-empty) leads, followed by the images. It streams the same `SessionUpdate` events as `prompt`, which itself delegates to `prompt_with_images` with no images.
-
-```rust
-let png = std::fs::read("screenshot.png")?;
-let data = base64::engine::general_purpose::STANDARD.encode(&png);
-
-session
-    .prompt_with_images(
-        "What's in this screenshot?",
-        vec![(data, "image/png".to_string())],
-        |update| { /* same SessionUpdate events as `prompt` */ },
-    )
-    .await?;
-```
-
-### Send a prompt (raw `StreamEvent`)
-
-`prompt`/`prompt_with_images` map every event onto ACP's `SessionUpdate` vocabulary, which has no room for some of what the agent loop actually produces. `prompt_events`/`prompt_events_with_images` hand you the raw [`StreamEvent`](https://docs.rs/openheim) instead — same turn, no ACP mapping in between — including `Usage` (context size, live per LLM call) and `Finished` (the turn is done) alongside the four `SessionUpdate` has equivalents for. They return the turn's `StopReason` (`EndTurn`/`MaxIterations`/`MaxTokens`/`Refusal`/`Cancelled`/`NoContent`) instead of `()`; `StopReason::notice()` gives a short user-facing line for the abnormal ones.
+`prompt` runs one turn and calls your callback with each [`StreamEvent`](https://docs.rs/openheim) as the agent works: streamed text and thinking, tool calls and results, `Usage` (context size, live per LLM call), and `Finished`. It returns the turn's `StopReason` (`EndTurn`/`MaxIterations`/`MaxTokens`/`Refusal`/`Cancelled`/`NoContent`); `StopReason::notice()` gives a short user-facing line for the abnormal ones.
 
 ```rust
 use openheim::StreamEvent;
 
 let stop_reason = session
-    .prompt_events("Refactor the auth module to use JWTs", |event| {
+    .prompt("Refactor the auth module to use JWTs", |event| {
         match event {
             StreamEvent::LlmResponse { content } => print!("{content}"),
             StreamEvent::ThinkingContent { content } => eprint!("{content}"),
@@ -292,13 +240,54 @@ let stop_reason = session
     .await?;
 ```
 
+### Send a prompt with images
+
+The first argument is anything that converts into a `PromptInput`: plain text as above, or text with images, for any vision-capable provider (Anthropic, OpenAI, Gemini). Each image is its raw base64 data plus a MIME type. The text (when non-empty) comes first, then the images in the order you add them.
+
+```rust
+use openheim::PromptInput;
+
+let png = std::fs::read("screenshot.png")?;
+let data = base64::engine::general_purpose::STANDARD.encode(&png);
+
+session
+    .prompt(
+        PromptInput::text("What's in this screenshot?").image(data, "image/png"),
+        |event| { /* same events as any other prompt */ },
+    )
+    .await?;
+```
+
+### Receive ACP `SessionUpdate`s instead
+
+With `features = ["acp"]`, wrap an ACP-typed callback with `session.acp_updates(…)` to get each event as an ACP `SessionUpdate`. Events ACP has no room for (`IterationStart`, `Usage`, `Finished`, `MessageAppended`) are dropped.
+
+```rust
+use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate};
+
+session
+    .prompt("Refactor the auth module to use JWTs", session.acp_updates(|update| {
+        match update {
+            SessionUpdate::AgentMessageChunk(chunk) => {
+                if let ContentBlock::Text(t) = chunk.content {
+                    print!("{}", t.text);
+                }
+            }
+            SessionUpdate::ToolCall(call) => println!("\n[tool] {} — running…", call.title),
+            SessionUpdate::ToolCallUpdate(update) => println!("[tool] {} — done", update.tool_call_id),
+            _ => {}
+        }
+    }))
+    .await?;
+```
+
 ### Multi-turn conversation
 
 Call `prompt` multiple times on the same handle. The agent accumulates history on disk automatically.
 
 ```rust
 session.prompt("My name is Alice", |_| {}).await?;
-session.prompt("What's my name?", |update| { /* prints "Alice" */ }).await?;
+session.prompt("What's my name?", |event| { /* prints "Alice" */ }).await?;
 ```
 
 ### Context usage
@@ -349,7 +338,7 @@ let session = client
 
 `PermissionGate::check` is called before a tool call executes — including tool calls made by a `delegate_task` subagent, which inherits the parent turn's gate rather than always-allowing. Your gate only has to ask. The runtime remembers `AllowAlways`/`RejectAlways` answers for the rest of the session and returns them for matching calls without calling your gate again. Most tools match by tool name; `execute_command` matches only the exact same command string.
 
-`.client_io(Arc<dyn ClientIo>)` similarly lets `read_file`/`write_file`/`edit_file` be delegated to the embedder's own I/O (e.g. an editor's unsaved buffers) instead of local disk — see [`ClientIo`](../src/core/client_io.rs). `edit_file` uses it for both the read and the write, since an edit is a read followed by a write. Both `.permission_gate()` and `.client_io()` carry over automatically when a handle is reused via `.resume()`/`.restore()`.
+`.client_io(Arc<dyn ClientIo>)` similarly lets `read_file`/`write_file`/`edit_file` be delegated to the embedder's own I/O (e.g. an editor's unsaved buffers) instead of local disk — see [`ClientIo`](../src/core/client_io.rs). `edit_file` uses it for both the read and the write, since an edit is a read followed by a write. A handle from `resume_session` starts from the defaults, so set both again on it.
 
 `session.cancel().await` cancels the turn currently in flight for that session (no-op if none is running) — call it from another task while `prompt()` is awaiting. Tool calls the model had already asked for still get a result in the history: ones that finished keep theirs, and the rest are recorded as a `Cancelled by user.` error (each with a `ToolResult` event), so the conversation can carry on with the next prompt.
 
@@ -417,34 +406,29 @@ if let Some(warning) = &loaded.warning {
 }
 
 // Continue where the conversation left off
-session.prompt_events("Continue from where you left off", |event| { /* … */ }).await?;
+session.prompt("Continue from where you left off", |event| { /* … */ }).await?;
 ```
 
-The returned handle starts from the defaults — `AllowAll` permission gate,
-local-disk I/O; call `.permission_gate(..)`/`.client_io(..)` on it to change
-either. If you already have a handle configured with a gate/I/O,
-`handle.resume(id, cwd)` performs the same load with that handle's gate/I/O
-inherited instead.
+Like a new session, the returned handle starts from the defaults
+(`AllowAll` permission gate, local-disk I/O); call
+`.permission_gate(..)`/`.client_io(..)` on it to change either.
 
-With `features = ["acp"]`, `load_session`/`handle.restore(id, cwd, cb)` are
-thin wrappers around `resume_session`/`handle.resume(..)` that additionally
-replay the history through your callback as ACP `SessionUpdate`s:
+With `features = ["acp"]`, `session.acp_replay(&loaded.messages, cb)` replays
+the history through your callback as the ACP `SessionUpdate`s a live turn
+would have produced, in order and with thinking tagged via `_meta.kind`:
 
 ```rust
-let session = client
-    .load_session(
-        "550e8400-e29b-41d4-a716-446655440000",
-        "/my/workspace".into(),
-        |update| {
-            // replay previous messages into your UI
-            match update {
-                SessionUpdate::UserMessageChunk(chunk) => { /* render user bubble */ }
-                SessionUpdate::AgentMessageChunk(chunk) => { /* render agent bubble */ }
-                _ => {}
-            }
-        },
-    )
+let (session, loaded) = client
+    .resume_session("550e8400-e29b-41d4-a716-446655440000", "/my/workspace".into())
     .await?;
+session.acp_replay(&loaded.messages, |update| {
+    // replay previous messages into your UI
+    match update {
+        SessionUpdate::UserMessageChunk(chunk) => { /* render user bubble */ }
+        SessionUpdate::AgentMessageChunk(chunk) => { /* render agent bubble */ }
+        _ => {}
+    }
+});
 ```
 
 ### Delete a session
@@ -546,7 +530,7 @@ for (provider, info) in &models.providers {
 ## Full example — multi-provider app with MCP and history
 
 ```rust
-use openheim::{ContentBlock, McpServerConfig, OpenheimClient, SessionUpdate};
+use openheim::{McpServerConfig, OpenheimClient, StreamEvent};
 use std::collections::HashMap;
 
 #[tokio::main]
@@ -579,9 +563,10 @@ async fn main() -> openheim::Result<()> {
     let all_sessions = client.list_sessions(Some(std::path::Path::new("/workspace"))).await?;
     let session = if let Some(last) = all_sessions.first() {
         println!("Resuming session: {}", last.id);
-        client
-            .load_session(&last.id.to_string(), "/workspace".into(), |_| {})
-            .await?
+        let (session, _loaded) = client
+            .resume_session(&last.id.to_string(), "/workspace".into())
+            .await?;
+        session
     } else {
         client
             .new_session()
@@ -592,18 +577,14 @@ async fn main() -> openheim::Result<()> {
     };
 
     session
-        .prompt("Summarise the project structure", |update| {
-            if let SessionUpdate::AgentMessageChunk(chunk) = update {
-                for block in &chunk.content {
-                    if let ContentBlock::Text(t) = block {
-                        print!("{}", t.text);
-                    }
-                }
+        .prompt("Summarise the project structure", |event| {
+            if let StreamEvent::LlmResponse { content } = event {
+                print!("{content}");
             }
         })
         .await?;
 
-    println!("\nDone. Session id: {}", session.id);
+    println!("\nDone. Session id: {}", session.id());
     Ok(())
 }
 ```
@@ -612,16 +593,16 @@ async fn main() -> openheim::Result<()> {
 
 ## ACP event reference
 
-All events received by the `prompt` callback are `agent_client_protocol::schema::SessionUpdate` variants, re-exported from `openheim`:
+With `features = ["acp"]`, callbacks wrapped in `session.acp_updates(…)` and the `session.acp_replay(…)` callback receive `agent_client_protocol::schema::v1::SessionUpdate` variants:
 
 | Variant | When |
 |---|---|
-| `AgentMessageChunk(ContentChunk)` | Streaming text from the LLM |
-| `UserMessageChunk(ContentChunk)` | Echoed user message (during `load_session` history replay) |
-| `ToolCall(AcpToolCall)` | Agent is about to invoke a tool |
+| `AgentMessageChunk(ContentChunk)` | Streaming text from the LLM (thinking too, tagged with `_meta.kind == "thinking"`) |
+| `UserMessageChunk(ContentChunk)` | A past user message (`acp_replay` only) |
+| `ToolCall(ToolCall)` | Agent is about to invoke a tool |
 | `ToolCallUpdate(ToolCallUpdate)` | Tool finished; contains status and raw output |
 
-`ContentChunk.content` is a `Vec<ContentBlock>`. Match on `ContentBlock::Text(t)` to get the text string.
+`ContentChunk.content` is a single `ContentBlock`. Match on `ContentBlock::Text(t)` to get the text string.
 
 ---
 

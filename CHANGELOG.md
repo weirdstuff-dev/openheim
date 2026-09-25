@@ -14,6 +14,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **The library facade has one way to prompt and one way to resume a session.** There were four prompt methods and four resume/load methods that did the same things with different argument and callback types. Now `SessionHandle::prompt` takes anything that converts into the new `PromptInput` (a `&str`/`String`, or `PromptInput::text(..).image(data, mime_type)`), always hands your callback `StreamEvent`s, and always returns the turn's `StopReason`. ACP vocabulary is an opt-in adapter (feature `acp`) instead of parallel methods. `SessionHandle::id` is now private; read it with `id()`.
+
+  | Before | Now |
+  |---|---|
+  | `session.prompt_events(text, cb)` | `session.prompt(text, cb)` |
+  | `session.prompt_events_with_images(text, images, cb)` | `session.prompt(PromptInput::text(text).image(data, mime), cb)` |
+  | `session.prompt(text, acp_cb)` (returned `()`) | `session.prompt(text, session.acp_updates(acp_cb))` (returns `StopReason`) |
+  | `session.prompt_with_images(text, images, acp_cb)` | `session.prompt(PromptInput::text(text).image(..), session.acp_updates(acp_cb))` |
+  | `client.load_session(id, cwd, acp_cb)` / `handle.restore(id, cwd, acp_cb)` | `let (session, loaded) = client.resume_session(id, cwd).await?;` then `session.acp_replay(&loaded.messages, acp_cb)` |
+  | `handle.resume(id, cwd)` (kept the handle's gate and client I/O) | `client.resume_session(id, cwd)`, then `.permission_gate(..)` / `.client_io(..)` on the new handle |
+  | `session.id` | `session.id()` |
+
+  `load_session`/`restore` used to pass a fallback warning to the callback as an agent message. It's now only in `LoadedSession::warning`, so show it yourself.
 - **The default Gemini model is now `gemini-3.8-flash`.** The previous default, `gemini-2.0-flash`, has been shut down by Google, so a Gemini provider left on the built-in default no longer worked. Configs that name a model explicitly are unaffected.
 
 ### Fixed

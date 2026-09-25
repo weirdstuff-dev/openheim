@@ -234,9 +234,9 @@ When `[memory]` names an `embedding_provider` and `embedding_model`, the same st
 The `OpenheimClient` facade (`src/client.rs`) wraps the same `core::runtime::AgentState` the transports use, behind a simple Rust API. Internally it:
 
 1. Builds an `AgentState` (LLM client, tool executor, memory context, long-term memory).
-2. Calls its request handlers (`prompt`, `load_session`, `cancel_session`, …) directly — no wire protocol, no background task. Streaming updates reach your callback through the same `SessionUpdate` events a transport would forward.
+2. Calls its request handlers (`prompt`, `load_session`, `cancel_session`, …) directly — no wire protocol, no background task. Your callback gets the agent loop's own `StreamEvent`s; `SessionHandle::acp_updates` (feature `acp`) maps them onto the same `SessionUpdate`s a transport would forward.
 
-The duplex-pipe + ACP-client wiring does exist — in `src/transport/run.rs`, where the headless `openheim run` mode drives `acp::serve` over `tokio::io::duplex`. Either way there is no separate "library mode" agent logic: the facade and every transport share the exact same session and agent-loop code path.
+The headless `openheim run` mode (`src/transport/run.rs`) is itself just a facade caller. There is no separate "library mode" agent logic: the facade and every transport share the exact same session and agent-loop code path.
 
 Every transport (`stdio`, `ws`, `run`) builds its `AgentState` the same way: `OpenheimClient::builder().build().await?` followed by `OpenheimClient::state()` (`pub(crate)`, so only reachable from inside this crate) to get the `Arc<AgentState>` `acp::serve` wants. That's the same load-config → resolve → `MemoryContext::new` → `AgentState::new` sequence the builder already does for library users, so there's exactly one place that canonicalizes `work_dir`, merges builder-registered MCP servers, and registers custom tools — a hand-rolled sequence in a transport would silently skip all of that.
 
