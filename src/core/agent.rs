@@ -489,11 +489,7 @@ mod tests {
         Choice {
             message: Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "call_1".into(),
-                    name: tool_name.into(),
-                    arguments: args.into(),
-                }],
+                content: vec![ContentBlock::tool_use("call_1", tool_name, args)],
             },
             finish_reason: Some(FinishReason::ToolCalls),
             usage: None,
@@ -507,10 +503,8 @@ mod tests {
                 content: calls
                     .iter()
                     .enumerate()
-                    .map(|(i, (name, args))| ContentBlock::ToolUse {
-                        id: format!("call_{i}"),
-                        name: (*name).into(),
-                        arguments: (*args).into(),
+                    .map(|(i, (name, args))| {
+                        ContentBlock::tool_use(format!("call_{i}"), *name, *args)
                     })
                     .collect(),
             },
@@ -1125,18 +1119,13 @@ mod tests {
         assert_eq!(appended, 3);
     }
 
-    fn call(id: &str) -> ContentBlock {
-        ContentBlock::ToolUse {
-            id: id.into(),
-            name: "read_file".into(),
-            arguments: "{}".into(),
-        }
-    }
-
     fn calls(ids: &[&str]) -> Message {
         Message {
             role: Role::Assistant,
-            content: ids.iter().map(|id| call(id)).collect(),
+            content: ids
+                .iter()
+                .map(|id| ContentBlock::tool_use(*id, "read_file", "{}"))
+                .collect(),
         }
     }
 

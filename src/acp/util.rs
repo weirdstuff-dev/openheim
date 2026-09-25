@@ -398,11 +398,11 @@ mod replay_tests {
             Message::user("hello"),
             Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "call_1".into(),
-                    name: "read_file".into(),
-                    arguments: r#"{"path":"a.txt"}"#.into(),
-                }],
+                content: vec![ContentBlock::tool_use(
+                    "call_1",
+                    "read_file",
+                    r#"{"path":"a.txt"}"#,
+                )],
             },
             Message::tool_result("call_1", "read_file", "file content", false),
         ];

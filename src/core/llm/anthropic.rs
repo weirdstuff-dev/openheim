@@ -285,11 +285,11 @@ impl StreamParser for AnthropicStream {
                 if let (Some(id), Some(name)) =
                     (self.current_tool_id.take(), self.current_tool_name.take())
                 {
-                    self.tool_calls.push(ContentBlock::ToolUse {
+                    self.tool_calls.push(ContentBlock::tool_use(
                         id,
                         name,
-                        arguments: std::mem::take(&mut self.current_tool_json),
-                    });
+                        std::mem::take(&mut self.current_tool_json),
+                    ));
                 }
                 self.current_tool_json.clear();
             }
@@ -403,6 +403,7 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
                             id,
                             name,
                             arguments,
+                            ..
                         } => {
                             let input: Value = serde_json::from_str(arguments).map_err(|e| {
                                 Error::ParseError(format!(
@@ -642,11 +643,7 @@ mod tests {
                 ContentBlock::Text {
                     text: "thinking".into(),
                 },
-                ContentBlock::ToolUse {
-                    id: "call_1".into(),
-                    name: "read_file".into(),
-                    arguments: r#"{"path":"a.txt"}"#.into(),
-                },
+                ContentBlock::tool_use("call_1", "read_file", r#"{"path":"a.txt"}"#),
             ],
         }];
         let result = convert_messages(&messages).unwrap();
@@ -667,11 +664,7 @@ mod tests {
                 ContentBlock::Text {
                     text: "here's my answer".into(),
                 },
-                ContentBlock::ToolUse {
-                    id: "call_1".into(),
-                    name: "read_file".into(),
-                    arguments: r#"{"path":"a.txt"}"#.into(),
-                },
+                ContentBlock::tool_use("call_1", "read_file", r#"{"path":"a.txt"}"#),
             ],
         }];
         let result = convert_messages(&messages).unwrap();
@@ -688,11 +681,11 @@ mod tests {
     fn convert_messages_invalid_tool_arguments_returns_error() {
         let messages = vec![Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "call_1".into(),
-                name: "read_file".into(),
-                arguments: "not valid json".into(),
-            }],
+            content: vec![ContentBlock::tool_use(
+                "call_1",
+                "read_file",
+                "not valid json",
+            )],
         }];
         assert!(convert_messages(&messages).is_err());
     }
@@ -945,11 +938,7 @@ mod tests {
             choice.message.content,
             [
                 ContentBlock::from("Reading."),
-                ContentBlock::ToolUse {
-                    id: "toolu_1".into(),
-                    name: "read_file".into(),
-                    arguments: r#"{"path":"a.txt"}"#.into(),
-                },
+                ContentBlock::tool_use("toolu_1", "read_file", r#"{"path":"a.txt"}"#),
             ]
         );
         assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));

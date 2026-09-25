@@ -45,6 +45,11 @@ pub enum ContentBlock {
         name: String,
         /// JSON string of the arguments object.
         arguments: String,
+        /// Opaque provider token that has to be sent back with this call on
+        /// the next request (Gemini's `thoughtSignature`). Other providers
+        /// ignore it. Build calls without one via [`ContentBlock::tool_use`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
     },
     ToolResult {
         tool_call_id: String,
@@ -53,6 +58,22 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "is_false")]
         is_error: bool,
     },
+}
+
+impl ContentBlock {
+    /// A `ToolUse` block without a provider signature.
+    pub fn tool_use(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
+        ContentBlock::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            arguments: arguments.into(),
+            signature: None,
+        }
+    }
 }
 
 impl<T: Into<String>> From<T> for ContentBlock {
@@ -149,6 +170,7 @@ impl Message {
                     id,
                     name,
                     arguments,
+                    ..
                 } => Some(ToolUseBlock {
                     id: id.clone(),
                     name: name.clone(),
@@ -428,11 +450,7 @@ mod tests {
                 ContentBlock::Text {
                     text: "hello ".into(),
                 },
-                ContentBlock::ToolUse {
-                    id: "call_1".into(),
-                    name: "read_file".into(),
-                    arguments: "{}".into(),
-                },
+                ContentBlock::tool_use("call_1", "read_file", "{}"),
                 ContentBlock::Text {
                     text: "world".into(),
                 },
@@ -446,14 +464,18 @@ mod tests {
 
     #[test]
     fn content_block_serializes_with_type_tag() {
-        let block = ContentBlock::ToolUse {
-            id: "call_1".into(),
-            name: "read_file".into(),
-            arguments: "{}".into(),
-        };
+        let block = ContentBlock::tool_use("call_1", "read_file", "{}");
         let json: Value = serde_json::to_value(&block).unwrap();
         assert_eq!(json["type"], "tool_use");
         assert_eq!(json["name"], "read_file");
+        // No signature: the field is left out, so history written before it
+        // existed and history written now read the same.
+        assert!(json.get("signature").is_none());
+        let old: ContentBlock = serde_json::from_value(serde_json::json!({
+            "type": "tool_use", "id": "call_1", "name": "read_file", "arguments": "{}"
+        }))
+        .unwrap();
+        assert_eq!(old, block);
 
         let block = ContentBlock::Thinking {
             thinking: "hmm".into(),

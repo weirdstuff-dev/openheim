@@ -969,11 +969,11 @@ mod new_session_tests {
         let delegate_call = Choice {
             message: Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "call_1".into(),
-                    name: crate::tools::DELEGATE_TOOL_NAME.into(),
-                    arguments: r#"{"system_prompt":"You are a helper.","task":"say hi"}"#.into(),
-                }],
+                content: vec![ContentBlock::tool_use(
+                    "call_1",
+                    crate::tools::DELEGATE_TOOL_NAME,
+                    r#"{"system_prompt":"You are a helper.","task":"say hi"}"#,
+                )],
             },
             finish_reason: Some(FinishReason::ToolCalls),
             usage: None,

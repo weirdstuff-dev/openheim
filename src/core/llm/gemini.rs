@@ -76,14 +76,25 @@ struct GeminiPart {
     function_response: Option<GeminiFunctionResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     inline_data: Option<GeminiInlineData>,
+    /// Gemini's encrypted reasoning for this part. On a `functionCall` part
+    /// it has to be sent back unchanged: Gemini 3 rejects a request whose
+    /// current-turn function calls lack it (400). With parallel calls only
+    /// the first one carries it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thought_signature: Option<String>,
 }
+
+/// The documented stand-in `thoughtSignature` for a function call Gemini
+/// didn't produce (history from another provider or model). Gemini 3 skips
+/// signature validation for it instead of rejecting the request.
+const SKIP_SIGNATURE_VALIDATION: &str = "skip_thought_signature_validator";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct GeminiFunctionCall {
-    /// Set by Gemini on some calls only. Never sent back: a stored call's id
-    /// may be one openheim made up (see `tool_use_block`), and Gemini matches
-    /// responses to calls by name.
-    #[serde(default, skip_serializing)]
+    /// Gemini 3.x ids every call and expects the matching
+    /// `functionResponse.id` back; calls without one get a generated id (see
+    /// `tool_use_block`), which is sent on both sides too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     id: Option<String>,
     name: String,
     args: Value,
@@ -91,6 +102,10 @@ struct GeminiFunctionCall {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct GeminiFunctionResponse {
+    /// The `functionCall.id` this answers. Gemini 3.x requires it; without
+    /// it `generateContent` replies with an empty `STOP`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
     name: String,
     response: Value,
 }
@@ -179,7 +194,10 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<GeminiContent>> {
                             });
                         }
                         ContentBlock::ToolUse {
-                            name, arguments, ..
+                            id,
+                            name,
+                            arguments,
+                            signature,
                         } => {
                             let args: Value = serde_json::from_str(arguments).map_err(|e| {
                                 Error::ParseError(format!(
@@ -188,16 +206,18 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<GeminiContent>> {
                             })?;
                             parts.push(GeminiPart {
                                 function_call: Some(GeminiFunctionCall {
-                                    id: None,
+                                    id: Some(id.clone()),
                                     name: name.clone(),
                                     args,
                                 }),
+                                thought_signature: signature.clone(),
                                 ..Default::default()
                             });
                         }
                         _ => {}
                     }
                 }
+                sign_foreign_function_calls(&mut parts);
                 if !parts.is_empty() {
                     result.push(GeminiContent {
                         role: "model".to_string(),
@@ -207,12 +227,12 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<GeminiContent>> {
             }
             Role::Tool => {
                 // Tool results become functionResponse parts in a user turn.
-                // Gemini matches by function name, not by call id.
                 let Some(tr) = msg.tool_result_block() else {
                     continue;
                 };
                 let part = GeminiPart {
                     function_response: Some(GeminiFunctionResponse {
+                        id: Some(tr.tool_call_id),
                         name: tr.tool_name,
                         response: serde_json::json!({ "result": tr.content }),
                     }),
@@ -307,13 +327,29 @@ fn map_finish_reason(reason: &str) -> FinishReason {
     }
 }
 
-/// A streamed `functionCall` as a `ToolUse` block, keeping Gemini's id when
-/// it sent one and generating a unique one otherwise.
-fn tool_use_block(call: GeminiFunctionCall) -> Result<ContentBlock> {
+/// Gives the first function call of a model turn the stand-in signature when
+/// none of the turn's calls has one, i.e. when Gemini didn't produce them.
+/// Calls Gemini did produce are left exactly as received: with parallel calls
+/// only the first carries a signature, and the rest must stay without.
+fn sign_foreign_function_calls(parts: &mut [GeminiPart]) {
+    let mut calls = parts.iter_mut().filter(|p| p.function_call.is_some());
+    let Some(first) = calls.next() else {
+        return;
+    };
+    if first.thought_signature.is_none() && calls.all(|p| p.thought_signature.is_none()) {
+        first.thought_signature = Some(SKIP_SIGNATURE_VALIDATION.to_string());
+    }
+}
+
+/// A streamed `functionCall` part as a `ToolUse` block, keeping Gemini's id
+/// when it sent one (generating a unique one otherwise) and the part's
+/// `thoughtSignature`.
+fn tool_use_block(call: GeminiFunctionCall, signature: Option<String>) -> Result<ContentBlock> {
     Ok(ContentBlock::ToolUse {
         id: call.id.unwrap_or_else(super::new_tool_call_id),
         arguments: serde_json::to_string(&call.args)?,
         name: call.name,
+        signature,
     })
 }
 
@@ -438,7 +474,8 @@ impl StreamParser for GeminiStream {
                 let _ = chunk_tx.send(LlmChunk::Text(text));
             }
             if let Some(fc) = part.function_call {
-                self.tool_uses.push(tool_use_block(fc)?);
+                self.tool_uses
+                    .push(tool_use_block(fc, part.thought_signature.clone())?);
             }
         }
         Ok(false)
@@ -517,11 +554,11 @@ mod tests {
     fn convert_messages_assistant_with_tool_calls() {
         let messages = vec![Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "call_1".into(),
-                name: "read_file".into(),
-                arguments: r#"{"path":"a.txt"}"#.into(),
-            }],
+            content: vec![ContentBlock::tool_use(
+                "call_1",
+                "read_file",
+                r#"{"path":"a.txt"}"#,
+            )],
         }];
         let result = convert_messages(&messages).unwrap();
         assert_eq!(result.len(), 1);
@@ -537,11 +574,11 @@ mod tests {
     fn convert_messages_invalid_tool_arguments_returns_error() {
         let messages = vec![Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "call_1".into(),
-                name: "read_file".into(),
-                arguments: "not valid json".into(),
-            }],
+            content: vec![ContentBlock::tool_use(
+                "call_1",
+                "read_file",
+                "not valid json",
+            )],
         }];
         assert!(convert_messages(&messages).is_err());
     }
@@ -574,7 +611,7 @@ mod tests {
     }
 
     fn streamed_call(json: &str) -> ContentBlock {
-        tool_use_block(serde_json::from_str(json).unwrap()).unwrap()
+        tool_use_block(serde_json::from_str(json).unwrap(), None).unwrap()
     }
 
     fn id_of(block: &ContentBlock) -> &str {
@@ -595,29 +632,76 @@ mod tests {
         assert!(id_of(&first).starts_with("call_"));
         assert_eq!(
             first,
-            ContentBlock::ToolUse {
-                id: id_of(&first).to_string(),
-                name: "read_file".into(),
-                arguments: r#"{"path":"a.txt"}"#.into(),
-            }
+            ContentBlock::tool_use(id_of(&first), "read_file", r#"{"path":"a.txt"}"#)
         );
     }
 
-    #[test]
-    fn a_call_id_from_gemini_is_kept_but_not_sent_back() {
-        let block = streamed_call(r#"{"id":"abc123","name":"read_file","args":{}}"#);
-        assert_eq!(id_of(&block), "abc123");
-
-        let request = convert_messages(&[Message {
+    /// The model turn and tool-result turn `convert_messages` sends for
+    /// `calls` and one result per call, as JSON.
+    fn sent_turns(calls: Vec<ContentBlock>) -> (Value, Value) {
+        let results: Vec<Message> = calls
+            .iter()
+            .map(|call| match call {
+                ContentBlock::ToolUse { id, name, .. } => {
+                    Message::tool_result(id.as_str(), name.as_str(), "ok", false)
+                }
+                other => panic!("expected a tool use, got {other:?}"),
+            })
+            .collect();
+        let mut messages = vec![Message {
             role: Role::Assistant,
-            content: vec![block],
-        }])
-        .unwrap();
-        let sent = serde_json::to_value(&request[0].parts[0]).unwrap();
+            content: calls,
+        }];
+        messages.extend(results);
+        let request = convert_messages(&messages).unwrap();
+        (
+            serde_json::to_value(&request[0]).unwrap(),
+            serde_json::to_value(&request[1]).unwrap(),
+        )
+    }
+
+    // Regression test: signatures were dropped, so on Gemini 3 every request
+    // after a function call failed with "Function call … is missing a
+    // thought_signature" (400).
+    #[test]
+    fn signatures_and_ids_from_gemini_are_sent_back_as_received() {
+        // Parallel calls: only the first carries a signature.
+        let reply = r#"{"candidates":[{"content":{"role":"model","parts":[
+            {"functionCall":{"id":"fc_1","name":"read_file","args":{"path":"a"}},"thoughtSignature":"sig_1"},
+            {"functionCall":{"id":"fc_2","name":"read_file","args":{"path":"b"}}}
+        ]},"finishReason":"STOP"}]}"#
+            .replace('\n', "");
+        let calls = parse_stream(&[&reply]).unwrap().message.content;
+
+        let (model, results) = sent_turns(calls);
         assert_eq!(
-            sent,
-            json!({ "functionCall": { "name": "read_file", "args": {} } })
+            model["parts"],
+            json!([
+                {"functionCall": {"id": "fc_1", "name": "read_file", "args": {"path": "a"}}, "thoughtSignature": "sig_1"},
+                {"functionCall": {"id": "fc_2", "name": "read_file", "args": {"path": "b"}}},
+            ])
         );
+        // Gemini 3.x matches each response to its call by id.
+        assert_eq!(results["parts"][0]["functionResponse"]["id"], "fc_1");
+        assert_eq!(results["parts"][1]["functionResponse"]["id"], "fc_2");
+    }
+
+    // Calls Gemini didn't produce (another provider's, or from before
+    // signatures were kept) carry none; the first gets the stand-in so
+    // Gemini 3 doesn't reject the request.
+    #[test]
+    fn unsigned_calls_get_the_stand_in_signature_on_the_first_only() {
+        let (model, results) = sent_turns(vec![
+            ContentBlock::tool_use("toolu_1", "read_file", "{}"),
+            ContentBlock::tool_use("toolu_2", "read_file", "{}"),
+        ]);
+        assert_eq!(
+            model["parts"][0]["thoughtSignature"],
+            SKIP_SIGNATURE_VALIDATION
+        );
+        assert!(model["parts"][1].get("thoughtSignature").is_none());
+        assert_eq!(model["parts"][0]["functionCall"]["id"], "toolu_1");
+        assert_eq!(results["parts"][0]["functionResponse"]["id"], "toolu_1");
     }
 
     #[test]
@@ -664,11 +748,7 @@ mod tests {
             choice.message.content,
             [
                 ContentBlock::from("Reading."),
-                ContentBlock::ToolUse {
-                    id: "fc_1".into(),
-                    name: "read_file".into(),
-                    arguments: r#"{"path":"a.txt"}"#.into(),
-                },
+                ContentBlock::tool_use("fc_1", "read_file", r#"{"path":"a.txt"}"#),
             ]
         );
         assert_eq!(choice.finish_reason, Some(FinishReason::Stop));

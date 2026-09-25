@@ -395,11 +395,7 @@ mod tests {
         Choice {
             message: Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "call_1".into(),
-                    name: "nonexistent".into(),
-                    arguments: "{}".into(),
-                }],
+                content: vec![ContentBlock::tool_use("call_1", "nonexistent", "{}")],
             },
             finish_reason: Some(FinishReason::ToolCalls),
             usage: None,

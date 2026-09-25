@@ -258,15 +258,12 @@ impl ToolCallAcc {
         if self.name.is_empty() {
             return None;
         }
-        Some(ContentBlock::ToolUse {
-            id: if self.id.is_empty() {
-                super::new_tool_call_id()
-            } else {
-                self.id
-            },
-            name: self.name,
-            arguments: self.args,
-        })
+        let id = if self.id.is_empty() {
+            super::new_tool_call_id()
+        } else {
+            self.id
+        };
+        Some(ContentBlock::tool_use(id, self.name, self.args))
     }
 }
 
@@ -481,11 +478,7 @@ impl LlmClient for OpenAiClient {
             .tool_calls
             .unwrap_or_default()
             .into_iter()
-            .map(|tc| ContentBlock::ToolUse {
-                id: tc.id,
-                name: tc.function.name,
-                arguments: tc.function.arguments,
-            })
+            .map(|tc| ContentBlock::tool_use(tc.id, tc.function.name, tc.function.arguments))
             .collect();
         let content = assemble_content(
             choice.message.reasoning_content,
@@ -711,11 +704,7 @@ mod tests {
             choice.message.content,
             [
                 ContentBlock::from("Reading."),
-                ContentBlock::ToolUse {
-                    id: "call_1".into(),
-                    name: "read_file".into(),
-                    arguments: r#"{"path":"a.txt"}"#.into(),
-                },
+                ContentBlock::tool_use("call_1", "read_file", r#"{"path":"a.txt"}"#),
             ]
         );
         assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
@@ -792,11 +781,11 @@ mod tests {
     fn convert_messages_assistant_with_tool_calls() {
         let messages = vec![Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "call_1".into(),
-                name: "read_file".into(),
-                arguments: r#"{"path":"a.txt"}"#.into(),
-            }],
+            content: vec![ContentBlock::tool_use(
+                "call_1",
+                "read_file",
+                r#"{"path":"a.txt"}"#,
+            )],
         }];
         let result = convert_messages(&messages);
         assert_eq!(result.len(), 1);
@@ -826,11 +815,7 @@ mod tests {
                     thinking: "let me check the file".into(),
                     signature: None,
                 },
-                ContentBlock::ToolUse {
-                    id: "call_1".into(),
-                    name: "read_file".into(),
-                    arguments: r#"{"path":"a.txt"}"#.into(),
-                },
+                ContentBlock::tool_use("call_1", "read_file", r#"{"path":"a.txt"}"#),
             ],
         }];
         let result = convert_messages(&messages);
@@ -873,11 +858,7 @@ mod tests {
 
     #[test]
     fn assemble_content_puts_thinking_before_text_and_tool_uses() {
-        let tool = ContentBlock::ToolUse {
-            id: "call_0".into(),
-            name: "read_file".into(),
-            arguments: "{}".into(),
-        };
+        let tool = ContentBlock::tool_use("call_0", "read_file", "{}");
         let content = assemble_content(
             Some("let me think".into()),
             Some("here's the answer".into()),
