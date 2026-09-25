@@ -21,7 +21,10 @@ use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
-use crate::{client::OpenheimClient, core::permission::PermissionGate};
+use crate::{
+    client::OpenheimClient,
+    core::{models::StopReason, permission::PermissionGate},
+};
 
 use app::App;
 use permission::TuiPermissionGate;
@@ -71,6 +74,7 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
         mpsc::unbounded_channel::<(String, std::path::PathBuf)>();
     let (list_sessions_tx, mut list_sessions_rx) = mpsc::unbounded_channel::<()>();
     let (new_session_tx, mut new_session_rx) = mpsc::unbounded_channel::<()>();
+    let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel::<()>();
 
     let agent_handle = {
         let update_tx = update_tx.clone();
@@ -94,18 +98,35 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
                     maybe_prompt = prompt_rx.recv() => {
                         match maybe_prompt {
                             Some(prompt) => {
+                                // A cancel sent while no turn was running
+                                // (e.g. during `:new`, or just as the last
+                                // turn ended) isn't meant for this one.
+                                while cancel_rx.try_recv().is_ok() {}
                                 let tx_cb = update_tx.clone();
                                 // `StreamEvent::Finished`/`Usage` arrive as part of
                                 // this stream and drive the status/footer directly
                                 // (see `App::handle_stream_event`) — no separate
                                 // "done" signal or post-turn context-usage re-read
                                 // needed here.
-                                let result = session
-                                    .prompt(prompt, move |event| {
-                                        let _ = tx_cb.send(AgentUpdate::Stream(event));
-                                    })
-                                    .await;
+                                let turn = session.prompt(prompt, move |event| {
+                                    let _ = tx_cb.send(AgentUpdate::Stream(event));
+                                });
+                                tokio::pin!(turn);
+                                // The turn is polled first, so it queues for the
+                                // session lock (where it resets its cancel
+                                // token) ahead of a cancel arriving with it.
+                                let result = loop {
+                                    tokio::select! {
+                                        biased;
+                                        result = &mut turn => break result,
+                                        Some(()) = cancel_rx.recv() => session.cancel().await,
+                                    }
+                                };
                                 match result {
+                                    Ok(StopReason::Cancelled) => {
+                                        let _ = update_tx
+                                            .send(AgentUpdate::Notice("turn cancelled".to_string()));
+                                    }
                                     Ok(stop_reason) => {
                                         if let Some(notice) = stop_reason.notice() {
                                             let _ = update_tx
@@ -252,6 +273,7 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
             switch_session: switch_session_tx,
             list_sessions: list_sessions_tx,
             new_session: new_session_tx,
+            cancel: cancel_tx,
         },
     );
 

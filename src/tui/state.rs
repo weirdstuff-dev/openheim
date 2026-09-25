@@ -337,4 +337,6 @@ pub(super) struct AgentChannels {
     pub(super) switch_session: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
     pub(super) list_sessions: mpsc::UnboundedSender<()>,
     pub(super) new_session: mpsc::UnboundedSender<()>,
+    /// Cancels the running turn, if any.
+    pub(super) cancel: mpsc::UnboundedSender<()>,
 }
