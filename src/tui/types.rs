@@ -21,7 +21,7 @@ pub(crate) enum AgentUpdate {
     /// loaded off the UI task by the agent task.
     SessionList(Vec<crate::memory::ConversationMeta>),
     /// A batch of chat items replayed from a restored session's history,
-    /// appended once the agent task's `SessionHandle::restore` finishes
+    /// appended once the agent task's `OpenheimClient::resume_session` finishes
     /// loading it (see `App::open_session`).
     History(Vec<ChatItem>),
     /// Confirms a `:new` request actually replaced the session — the agent

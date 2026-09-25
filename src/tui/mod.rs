@@ -101,7 +101,7 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
                                 // "done" signal or post-turn context-usage re-read
                                 // needed here.
                                 let result = session
-                                    .prompt_events(&prompt, move |event| {
+                                    .prompt(prompt, move |event| {
                                         let _ = tx_cb.send(AgentUpdate::Stream(event));
                                     })
                                     .await;
@@ -144,8 +144,10 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
                                 // history replay isn't "live" the way a turn is,
                                 // and batching means the app only clears/repaints
                                 // once instead of on every historical message.
-                                match session.resume(&session_id, cwd).await {
+                                match client.resume_session(&session_id, cwd).await {
                                     Ok((restored, loaded)) => {
+                                        let restored =
+                                            restored.permission_gate(permission_gate.clone());
                                         let mut history = Vec::new();
                                         if let Some(warning) = loaded.warning {
                                             history.push(ChatItem::AssistantMessage(warning));
@@ -326,7 +328,7 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
 }
 
 /// Converts one persisted [`Message`](crate::core::models::Message) from a
-/// history replay (`SessionHandle::resume`'s `LoadedSession::messages`) into
+/// history replay (`OpenheimClient::resume_session`'s `LoadedSession::messages`) into
 /// the `ChatItem`s a live turn would have produced for the equivalent
 /// content — the same mapping `App::handle_stream_event` applies to a live
 /// turn's `StreamEvent`s, just walking the message's content blocks directly

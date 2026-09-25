@@ -22,8 +22,7 @@ mod serve;
 
 pub use serve::serve;
 
-// ACP's own wire vocabulary, for library users who want the ACP-typed
-// `SessionHandle`/`OpenheimClient` methods (`prompt`, `prompt_with_images`,
-// `restore`, `load_session`) without a direct `agent-client-protocol`
-// dependency.
+// ACP's own wire vocabulary, for library users of the ACP adapters
+// (`SessionHandle::acp_updates`, `SessionHandle::acp_replay`) without a
+// direct `agent-client-protocol` dependency.
 pub use agent_client_protocol::schema::v1 as schema;

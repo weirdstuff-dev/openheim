@@ -570,7 +570,7 @@ impl App {
     }
 
     /// Clears the transcript and requests the agent task load `meta`'s full
-    /// history via `SessionHandle::resume`, converted straight to `ChatItem`s
+    /// history via `OpenheimClient::resume_session`, converted straight to `ChatItem`s
     /// (see `message_to_chat_items`), so thinking blocks and image
     /// attachments show up instead of being silently dropped. That also
     /// keeps the history read off the UI task and on the agent task, where
