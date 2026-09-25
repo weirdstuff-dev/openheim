@@ -386,11 +386,11 @@ fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
     result
 }
 
-/// Assembles an assistant message's content blocks in canonical order:
-/// `Thinking` (when the provider returned reasoning) first, then `Text`,
-/// then tool uses — the same ordering the Anthropic client produces, which
-/// the history persistence and ACP replay layers rely on. Empty strings
-/// produce no block, so an all-empty response yields empty content.
+/// Assembles an assistant message's content blocks: `Thinking` (when the
+/// provider returned reasoning) first, then `Text`, then tool uses. The
+/// OpenAI stream doesn't say how reasoning, text and calls interleave, so
+/// this fixed order is the best available. Empty strings produce no block,
+/// so an all-empty response yields empty content.
 fn assemble_content(
     reasoning: Option<String>,
     text: Option<String>,

@@ -33,7 +33,7 @@ pub(crate) enum AgentUpdate {
     NewSession(Vec<ChatItem>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ChatItem {
     UserMessage(String),
     AssistantMessage(String),

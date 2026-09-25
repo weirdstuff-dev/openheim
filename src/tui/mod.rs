@@ -354,19 +354,24 @@ fn message_to_chat_items(msg: &crate::core::models::Message) -> Vec<ChatItem> {
             }
         }
         Role::Assistant => {
+            // In stored order: with interleaved thinking a turn can go
+            // thinking → text → thinking → tool call.
             for block in &msg.content {
-                if let ContentBlock::Thinking { thinking, .. } = block {
-                    items.push(ChatItem::Thinking(thinking.clone()));
+                match block {
+                    ContentBlock::Thinking { thinking, .. } if !thinking.is_empty() => {
+                        items.push(ChatItem::Thinking(thinking.clone()));
+                    }
+                    ContentBlock::Text { text } if !text.is_empty() => {
+                        items.push(ChatItem::AssistantMessage(text.clone()));
+                    }
+                    ContentBlock::ToolUse {
+                        name, arguments, ..
+                    } => items.push(ChatItem::ToolCall {
+                        name: name.clone(),
+                        args: arguments.clone(),
+                    }),
+                    _ => {}
                 }
-            }
-            if let Some(text) = msg.text() {
-                items.push(ChatItem::AssistantMessage(text));
-            }
-            for tc in msg.tool_calls() {
-                items.push(ChatItem::ToolCall {
-                    name: tc.name,
-                    args: tc.arguments,
-                });
             }
         }
         Role::Tool => {
@@ -380,4 +385,42 @@ fn message_to_chat_items(msg: &crate::core::models::Message) -> Vec<ChatItem> {
         Role::System => {}
     }
     items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::models::{ContentBlock, Message, Role};
+
+    // Interleaved thinking stores several thinking blocks between text and
+    // tool calls; a restored session shows them in that order.
+    #[test]
+    fn restored_assistant_turn_keeps_its_block_order() {
+        let thinking = |t: &str| ContentBlock::Thinking {
+            thinking: t.into(),
+            signature: Some("sig".into()),
+        };
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                thinking("first"),
+                ContentBlock::from("Let me look."),
+                ContentBlock::RedactedThinking { data: "enc".into() },
+                thinking("second"),
+                ContentBlock::tool_use("toolu_1", "read_file", "{}"),
+            ],
+        };
+        assert_eq!(
+            message_to_chat_items(&msg),
+            [
+                ChatItem::Thinking("first".into()),
+                ChatItem::AssistantMessage("Let me look.".into()),
+                ChatItem::Thinking("second".into()),
+                ChatItem::ToolCall {
+                    name: "read_file".into(),
+                    args: "{}".into(),
+                },
+            ]
+        );
+    }
 }

@@ -97,11 +97,9 @@ pub(super) fn thinking_chunk(content: String) -> TextContent {
 /// Replays persisted history to a (re)attaching connection as the same
 /// stream of session updates a live turn would have produced, so a reloaded
 /// session renders identically to one that stayed open — including assistant
-/// thinking blocks, which lead the persisted content (`[Thinking?, Text?,
-/// ToolUse*]`) and are tunneled through `agent_message_chunk` with
+/// thinking blocks, which are tunneled through `agent_message_chunk` with
 /// `content._meta.kind == "thinking"` exactly as the live streaming path
-/// does. Without this, thinking shown during a turn vanished on reload even
-/// though it was persisted.
+/// does. An assistant message's blocks are replayed in their stored order.
 pub(crate) fn replay_history_messages<F>(
     messages: &[Message],
     executor: &dyn ToolExecutor,
@@ -136,25 +134,36 @@ pub(crate) fn replay_history_messages<F>(
                 }
             }
             Role::Assistant => {
+                // In stored order, the order a live turn streamed them in:
+                // with interleaved thinking a turn can go thinking → text →
+                // thinking → tool call.
                 for block in &msg.content {
-                    if let ContentBlock::Thinking { thinking, .. } = block {
-                        on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                            AcpContentBlock::Text(thinking_chunk(thinking.clone())),
-                        )));
+                    match block {
+                        ContentBlock::Thinking { thinking, .. } if !thinking.is_empty() => {
+                            on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                AcpContentBlock::Text(thinking_chunk(thinking.clone())),
+                            )));
+                        }
+                        ContentBlock::Text { text } if !text.is_empty() => {
+                            on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                AcpContentBlock::from(text.clone()),
+                            )));
+                        }
+                        ContentBlock::ToolUse {
+                            id,
+                            name,
+                            arguments,
+                            ..
+                        } => {
+                            on_update(SessionUpdate::ToolCall(
+                                AcpToolCall::new(id.clone(), name)
+                                    .kind(tool_kind_for(name, executor))
+                                    .status(ToolCallStatus::InProgress)
+                                    .raw_input(raw_input(id, name, arguments)),
+                            ));
+                        }
+                        _ => {}
                     }
-                }
-                if let Some(text) = msg.text() {
-                    on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                        AcpContentBlock::from(text),
-                    )));
-                }
-                for tc in msg.tool_calls() {
-                    on_update(SessionUpdate::ToolCall(
-                        AcpToolCall::new(tc.id.clone(), &tc.name)
-                            .kind(tool_kind_for(&tc.name, executor))
-                            .status(ToolCallStatus::InProgress)
-                            .raw_input(raw_input(&tc.id, &tc.name, &tc.arguments)),
-                    ));
                 }
             }
             Role::Tool => {
@@ -390,6 +399,51 @@ mod replay_tests {
             }
             other => panic!("expected a text block, got {other:?}"),
         }
+    }
+
+    // Interleaved thinking stores several thinking blocks between text and
+    // tool calls; replay follows the stored order instead of grouping them.
+    #[test]
+    fn replay_keeps_interleaved_blocks_in_order() {
+        let thinking = |t: &str| ContentBlock::Thinking {
+            thinking: t.into(),
+            signature: Some("sig".into()),
+        };
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                thinking("first"),
+                ContentBlock::from("Let me look."),
+                ContentBlock::RedactedThinking { data: "enc".into() },
+                thinking("second"),
+                ContentBlock::tool_use("toolu_1", "read_file", "{}"),
+            ],
+        }];
+        let mut updates = Vec::new();
+        replay_history_messages(&messages, &executor(), &mut |u| updates.push(u));
+
+        let replayed: Vec<String> = updates
+            .iter()
+            .map(|u| match u {
+                SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
+                    AcpContentBlock::Text(t) if t.meta.is_some() => format!("thinking:{}", t.text),
+                    AcpContentBlock::Text(t) => format!("text:{}", t.text),
+                    other => panic!("unexpected chunk {other:?}"),
+                },
+                SessionUpdate::ToolCall(call) => format!("tool:{}", call.title),
+                other => panic!("unexpected update {other:?}"),
+            })
+            .collect();
+        // Redacted thinking has nothing to show.
+        assert_eq!(
+            replayed,
+            [
+                "thinking:first",
+                "text:Let me look.",
+                "thinking:second",
+                "tool:read_file"
+            ]
+        );
     }
 
     #[test]

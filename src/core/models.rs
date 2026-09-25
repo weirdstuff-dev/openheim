@@ -28,12 +28,19 @@ pub enum ContentBlock {
         text: String,
     },
     /// Extended-thinking text for an assistant turn. Must be replayed
-    /// verbatim (with `signature`) as the first block of the turn when it also
-    /// contains `ToolUse` blocks, or Anthropic rejects the next request.
+    /// verbatim (with `signature`) in its original position in the turn —
+    /// with interleaved thinking a turn can hold several, between text and
+    /// tool calls — or Anthropic rejects the next request.
     Thinking {
         thinking: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
+    },
+    /// Thinking the provider returned encrypted (Anthropic's
+    /// `redacted_thinking`). Nothing to show, but it has to be replayed
+    /// verbatim in its place in the turn, like `Thinking`.
+    RedactedThinking {
+        data: String,
     },
     Image {
         /// Base64-encoded image data.
