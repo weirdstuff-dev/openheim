@@ -35,7 +35,7 @@ Running `openheim` with no subcommand opens the interactive terminal UI. Type a 
 | `:theme` | Open theme color picker |
 | `:theme <name>` | Apply a theme color directly and save it to `config.toml` |
 
-**Keyboard shortcuts:** `↑`/`↓` scroll · `PgUp`/`PgDn` page · `Ctrl+C` quit · `Esc` close any overlay
+**Keyboard shortcuts:** `↑`/`↓` scroll · `PgUp`/`PgDn` page · `Ctrl+C` cancel the running turn · `Ctrl+C` twice (within two seconds) quit · `Esc` close any overlay
 
 **Theme colors:** `white`, `gray`, `blue`, `cyan`, `magenta`, `green`, `yellow`, `red`, `pink`
 
