@@ -310,15 +310,22 @@ It's also persisted on the conversation, so it's readable via `client.get_sessio
 By default a `SessionHandle` allows every tool call unconditionally (`AllowAll`) — the embedder is trusted to have already consented to the run. For an interactive embedder, supply your own [`PermissionGate`](../src/core/permission.rs) so the agent asks before running a tool call:
 
 ```rust
-use openheim::core::permission::{PermissionDecision, PermissionGate};
+use openheim::core::permission::{PermissionDecision, PermissionGate, PermissionRequest};
 use std::sync::Arc;
 
 struct CliConfirmGate;
 
 #[async_trait::async_trait]
 impl PermissionGate for CliConfirmGate {
-    async fn check(&self, _id: &str, tool_name: &str, arguments: &str) -> PermissionDecision {
-        eprintln!("allow {tool_name}({arguments})? [y/N]");
+    async fn check(&self, request: &PermissionRequest<'_>) -> PermissionDecision {
+        let who = match request.subagent {
+            Some(name) => format!("subagent '{name}'"),
+            None => "the agent".to_string(),
+        };
+        eprintln!(
+            "allow {who} to run {}({})? [y/N]",
+            request.tool_name, request.arguments
+        );
         let mut line = String::new();
         std::io::stdin().read_line(&mut line).ok();
         if line.trim().eq_ignore_ascii_case("y") {
@@ -336,7 +343,7 @@ let session = client
     .permission_gate(Arc::new(CliConfirmGate));
 ```
 
-`PermissionGate::check` is called before a tool call executes — including tool calls made by a `delegate_task` subagent, which inherits the parent turn's gate rather than always-allowing. Your gate only has to ask. The runtime remembers `AllowAlways`/`RejectAlways` answers for the rest of the session and returns them for matching calls without calling your gate again. Most tools match by tool name; `execute_command` matches only the exact same command string.
+`PermissionGate::check` is called before a tool call executes — including tool calls made by a `delegate_task` subagent, which asks the parent turn's gate rather than always-allowing. A subagent's calls never appear in the session's events, so for those `request.subagent` holds the subagent's name (`"inline"` for an inline one); show it when asking. Your gate only has to ask. The runtime remembers `AllowAlways`/`RejectAlways` answers for the rest of the session and returns them for matching calls without calling your gate again. Most tools match by tool name; `execute_command` matches only the exact same command string.
 
 `.client_io(Arc<dyn ClientIo>)` similarly lets `read_file`/`write_file`/`edit_file` be delegated to the embedder's own I/O (e.g. an editor's unsaved buffers) instead of local disk — see [`ClientIo`](../src/core/client_io.rs). `edit_file` uses it for both the read and the write, since an edit is a read followed by a write. A handle from `resume_session` starts from the defaults, so set both again on it.
 

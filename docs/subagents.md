@@ -123,6 +123,10 @@ name or an inline `system_prompt`, openheim:
    client still sees `session/request_permission` for a subagent's shell
    command), and a `session/cancel` on the parent turn stops an in-flight
    subagent too. There is no separate, more-trusting policy for subagents.
+   Since the subagent's own tool calls aren't shown, the prompt names the
+   subagent asking: the TUI adds a `from subagent '<name>'` line, and ACP
+   titles the request `<tool> (subagent '<name>')`. An "Allow Always" answer
+   covers the whole session, parent and subagents alike.
 4. Runs that agent loop to completion and returns only its final answer to the
    orchestrator. Intermediate tool calls and reasoning are not visible to the
    parent — the subagent genuinely runs "in the background", much like Claude
