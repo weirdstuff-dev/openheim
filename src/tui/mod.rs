@@ -6,6 +6,7 @@ mod types;
 
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossterm::{
@@ -31,18 +32,74 @@ use permission::TuiPermissionGate;
 use state::AgentChannels;
 use types::{AgentUpdate, ChatItem};
 
-struct TerminalGuard {
+type PanicHook = dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync;
+
+/// Puts the terminal back the way `run` found it. Called from both
+/// `TerminalGuard::drop` and the panic hook; only the first call does
+/// anything, so the keyboard flags pushed at startup are popped exactly once.
+struct TerminalRestore {
     kbd_enhanced: bool,
+    done: AtomicBool,
 }
 
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
+impl TerminalRestore {
+    fn restore(&self) {
+        if self.done.swap(true, Ordering::SeqCst) {
+            return;
+        }
         if self.kbd_enhanced {
             let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
         }
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), Show);
+    }
+
+    fn is_restored(&self) -> bool {
+        self.done.load(Ordering::SeqCst)
+    }
+}
+
+/// Restores the terminal when `run` returns, and on a panic in any thread
+/// before that, so the panic message is printed to the normal screen with
+/// raw mode off instead of vanishing with the alternate screen. The panic
+/// hook in place before `run` is put back when the guard drops.
+struct TerminalGuard {
+    terminal: Arc<TerminalRestore>,
+    previous_hook: Arc<PanicHook>,
+}
+
+impl TerminalGuard {
+    fn install(kbd_enhanced: bool) -> Self {
+        let terminal = Arc::new(TerminalRestore {
+            kbd_enhanced,
+            done: AtomicBool::new(false),
+        });
+        let previous_hook: Arc<PanicHook> = Arc::from(std::panic::take_hook());
+        {
+            let terminal = terminal.clone();
+            let previous_hook = previous_hook.clone();
+            std::panic::set_hook(Box::new(move |info| {
+                terminal.restore();
+                previous_hook(info);
+            }));
+        }
+        Self {
+            terminal,
+            previous_hook,
+        }
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        self.terminal.restore();
+        // `set_hook` panics on a panicking thread; the process is going down
+        // with our hook in place anyway.
+        if !std::thread::panicking() {
+            let previous_hook = self.previous_hook.clone();
+            std::panic::set_hook(Box::new(move |info| previous_hook(info)));
+        }
     }
 }
 
@@ -282,8 +339,8 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
     execute!(stdout, EnterAlternateScreen)?;
 
     // Enable keyboard enhancement on supporting terminals so that arrow-key
-    // escape sequences (\x1b[B etc.) are never ambiguously split into a
-    // spurious Esc + characters, which caused `[B` to appear in the input.
+    // escape sequences (\x1b[B etc.) are never split into a spurious Esc
+    // plus characters that land in the input.
     let kbd_enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
     if kbd_enhanced {
         execute!(
@@ -296,20 +353,20 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
         .ok();
     }
 
+    let guard = TerminalGuard::install(kbd_enhanced);
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    let _guard = TerminalGuard { kbd_enhanced };
-
-    let original_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        original_hook(info);
-    }));
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(80));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
+        // A panic (e.g. in the agent task) has already restored the
+        // terminal; drawing again would paint over its message.
+        if guard.terminal.is_restored() {
+            break;
+        }
         terminal.draw(|f| app.draw(f))?;
 
         if app.should_quit {
@@ -344,9 +401,12 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
     // Drop app first so all channel senders close, signaling the agent task to exit.
     drop(app);
     agent_handle.abort();
-    let _ = agent_handle.await;
-
-    Ok(())
+    match agent_handle.await {
+        Err(e) if e.is_panic() => Err(crate::error::Error::Other(
+            "the TUI's agent task panicked".to_string(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// The `ChatItem`s a live turn would have shown for one persisted
