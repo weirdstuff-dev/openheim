@@ -25,9 +25,10 @@ use crate::core::permission::PermissionGate;
 /// [`crate::tools::DelegateTool`] for subagents) pass the same context
 /// straight through rather than manufacturing their own: the subagent shares
 /// the parent turn's cancellation token, so a `session/cancel` on the outer
-/// turn stops the subagent too, and inherits the parent's permission gate, so
+/// turn stops the subagent too, and asks the parent's permission gate, so
 /// subagent tool calls go through the same approval flow as the
-/// orchestrator's own — there is no separate "subagent trust policy".
+/// orchestrator's own — there is no separate "subagent trust policy". The
+/// gate is wrapped so each request's `subagent` names who is asking.
 pub struct TurnContext<'a> {
     /// Fires when the turn is cancelled; long-running tools should race
     /// their work against it.

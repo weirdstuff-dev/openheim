@@ -11,7 +11,7 @@ use agent_client_protocol::{
 };
 
 use crate::{
-    core::permission::{PermissionDecision, PermissionGate},
+    core::permission::{PermissionDecision, PermissionGate, PermissionRequest},
     tools::ToolExecutor,
 };
 
@@ -29,19 +29,19 @@ pub(super) struct AcpPermissionGate {
 
 #[async_trait::async_trait]
 impl PermissionGate for AcpPermissionGate {
-    async fn check(
-        &self,
-        tool_call_id: &str,
-        tool_name: &str,
-        arguments: &str,
-    ) -> PermissionDecision {
+    async fn check(&self, request: &PermissionRequest<'_>) -> PermissionDecision {
+        let tool_name = request.tool_name;
         let tool_call = ToolCallUpdate::new(
-            tool_call_id.to_string(),
+            request.tool_call_id.to_string(),
             ToolCallUpdateFields::new()
-                .title(tool_name)
+                .title(permission_title(request))
                 .kind(tool_kind_for(tool_name, self.executor.as_ref()))
                 .status(ToolCallStatus::Pending)
-                .raw_input(raw_input(tool_call_id, tool_name, arguments)),
+                .raw_input(raw_input(
+                    request.tool_call_id,
+                    tool_name,
+                    request.arguments,
+                )),
         );
         let options = vec![
             PermissionOption::new("allow_once", "Allow Once", PermissionOptionKind::AllowOnce),
@@ -94,5 +94,30 @@ impl PermissionGate for AcpPermissionGate {
                 PermissionDecision::RejectOnce
             }
         }
+    }
+}
+
+/// The prompt's title: the tool name, plus the subagent that wants it run.
+/// A subagent's tool calls are never sent as `session/update`s, so the title
+/// is the only place the client learns where the call came from.
+fn permission_title(request: &PermissionRequest<'_>) -> String {
+    match request.subagent {
+        Some(subagent) => format!("{} (subagent '{subagent}')", request.tool_name),
+        None => request.tool_name.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn title_names_the_subagent_that_asked() {
+        let request = PermissionRequest::new("call_1", "execute_command", "{}");
+        assert_eq!(permission_title(&request), "execute_command");
+        assert_eq!(
+            permission_title(&request.from_subagent("reviewer")),
+            "execute_command (subagent 'reviewer')"
+        );
     }
 }

@@ -22,6 +22,7 @@ use crate::config::{AgentConfig, AppConfig, client_for_config};
 use crate::core::agent::run_agent;
 use crate::core::llm::LlmClient;
 use crate::core::models::{Message, StopReason, Tool};
+use crate::core::permission::{PermissionDecision, PermissionGate, PermissionRequest};
 use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 use crate::memory::PromptBuilder;
@@ -237,12 +238,13 @@ impl ToolHandler for DelegateTool {
         )
     }
 
-    /// Runs the delegated subagent turn under the *same* [`TurnContext`] as
-    /// the orchestrating turn rather than manufacturing a fresh one: a
-    /// `session/cancel` on the orchestrator must stop the subagent too, there
-    /// is no separate trust policy for subagent tool calls (they go through
-    /// the same approval flow, e.g. `session/request_permission`), and the
-    /// subagent is confined to the same work directory and client I/O.
+    /// Runs the delegated subagent turn under the orchestrating turn's
+    /// [`TurnContext`] rather than a fresh one: a `session/cancel` on the
+    /// orchestrator must stop the subagent too, there is no separate trust
+    /// policy for subagent tool calls (they go through the same gate, e.g.
+    /// `session/request_permission`), and the subagent is confined to the
+    /// same work directory and client I/O. The one change is that the gate is
+    /// wrapped in a `SubagentGate`, so each request names the subagent.
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
         let args: DelegateArgs = parse(args)?;
 
@@ -291,13 +293,22 @@ impl ToolHandler for DelegateTool {
         // Fresh, isolated history — the subagent only ever sees its own task.
         let mut messages = vec![Message::user(args.task.clone())];
 
+        let permission_gate: Arc<dyn PermissionGate> = Arc::new(SubagentGate {
+            parent: turn.permission_gate.clone(),
+            subagent: profile.name.clone(),
+        });
+        let subagent_turn = TurnContext {
+            permission_gate: &permission_gate,
+            ..*turn
+        };
+
         let result = run_agent(
             &*llm,
             &*executor,
             &config,
             &mut messages,
             Some(&prompt_builder),
-            turn,
+            &subagent_turn,
             |_| {},
         )
         .await?;
@@ -325,6 +336,23 @@ impl ToolHandler for DelegateTool {
         // Architect mode. Kind stays the `Other` default — there's no ACP
         // `ToolKind` for "ran a subagent".
         ToolCapabilities::default()
+    }
+}
+
+/// The parent turn's gate, with every request attributed to `subagent`: the
+/// subagent's tool calls never appear in the parent's transcript, so without
+/// this the user would be asked about calls they've never seen.
+struct SubagentGate {
+    parent: Arc<dyn PermissionGate>,
+    subagent: String,
+}
+
+#[async_trait]
+impl PermissionGate for SubagentGate {
+    async fn check(&self, request: &PermissionRequest<'_>) -> PermissionDecision {
+        self.parent
+            .check(&request.from_subagent(&self.subagent))
+            .await
     }
 }
 
@@ -359,7 +387,7 @@ mod tests {
     use super::*;
     use crate::core::client_io::NoClientIo;
     use crate::core::models::{Choice, ContentBlock, FinishReason, Role};
-    use crate::core::permission::{AllowAll, PermissionDecision, PermissionGate};
+    use crate::core::permission::AllowAll;
     use crate::tools::SystemToolExecutor;
     use crate::tools::test_support::TurnHarness;
     use std::path::Path;
@@ -569,25 +597,29 @@ mod tests {
         assert_eq!(result, "");
     }
 
-    struct RejectPermissionGate;
+    /// Rejects everything, recording which subagent (if any) each request
+    /// named.
+    #[derive(Default)]
+    struct RejectPermissionGate {
+        asked_by: Mutex<Vec<Option<String>>>,
+    }
 
     #[async_trait]
     impl PermissionGate for RejectPermissionGate {
-        async fn check(
-            &self,
-            _tool_call_id: &str,
-            _tool_name: &str,
-            _arguments: &str,
-        ) -> PermissionDecision {
+        async fn check(&self, request: &PermissionRequest<'_>) -> PermissionDecision {
+            self.asked_by
+                .lock()
+                .unwrap()
+                .push(request.subagent.map(str::to_string));
             PermissionDecision::RejectOnce
         }
     }
 
     #[tokio::test]
-    async fn subagent_tool_calls_go_through_parent_permission_gate() {
+    async fn subagent_tool_calls_go_through_parent_permission_gate_named() {
         // Subagent tool calls must be checked by the same gate as the
         // orchestrator's own — there is no separate, more-trusting policy for
-        // subagents.
+        // subagents — and the request must say which subagent is asking.
         let llm = Arc::new(MockLlm::new(vec![
             tool_call_choice(),
             text_choice("denied"),
@@ -595,7 +627,8 @@ mod tests {
         let tool = make_tool(vec![sample_profile("reviewer", "desc")], llm);
 
         let cancel = CancellationToken::new();
-        let permission_gate: Arc<dyn PermissionGate> = Arc::new(RejectPermissionGate);
+        let gate = Arc::new(RejectPermissionGate::default());
+        let permission_gate: Arc<dyn PermissionGate> = gate.clone();
         let turn = TurnContext {
             cancel: &cancel,
             permission_gate: &permission_gate,
@@ -612,6 +645,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(result, "denied");
+        assert_eq!(
+            *gate.asked_by.lock().unwrap(),
+            vec![Some("reviewer".to_string())]
+        );
     }
 
     /// Subagents are built from a snapshot of the registry taken before

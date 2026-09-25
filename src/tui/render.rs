@@ -848,6 +848,7 @@ pub(crate) fn render_permission_prompt(
     f: &mut Frame,
     area: Rect,
     tool_name: &str,
+    subagent: Option<&str>,
     arguments: &str,
     selected: usize,
     theme: Color,
@@ -867,6 +868,7 @@ pub(crate) fn render_permission_prompt(
     }
 
     let body_h = 1 /* tool name */
+        + subagent.is_some() as u16
         + 1 /* blank */
         + arg_lines.len() as u16
         + 1 /* blank */
@@ -905,6 +907,16 @@ pub(crate) fn render_permission_prompt(
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
+    // A subagent's calls aren't in the transcript; say whose call this is.
+    if let Some(subagent) = subagent {
+        lines.push(Line::from(vec![
+            Span::styled("from  ", Style::default().fg(theme)),
+            Span::styled(
+                format!("subagent '{subagent}'"),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+    }
     lines.push(Line::raw(""));
     for arg_line in arg_lines {
         lines.push(Line::styled(arg_line, Style::default().fg(Color::DarkGray)));

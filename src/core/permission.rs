@@ -31,6 +31,41 @@ impl PermissionDecision {
     }
 }
 
+/// The tool call a [`PermissionGate`] is asked about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PermissionRequest<'a> {
+    pub tool_call_id: &'a str,
+    pub tool_name: &'a str,
+    /// The call's arguments as the model sent them (normally a JSON object).
+    pub arguments: &'a str,
+    /// Name of the `delegate_task` subagent that made the call (`"inline"`
+    /// for an inline one), or `None` for the session's own agent. A
+    /// subagent's calls never appear in the session's transcript, so show
+    /// this when asking the user.
+    pub subagent: Option<&'a str>,
+}
+
+impl<'a> PermissionRequest<'a> {
+    /// A request for a call the session's own agent made.
+    pub fn new(tool_call_id: &'a str, tool_name: &'a str, arguments: &'a str) -> Self {
+        Self {
+            tool_call_id,
+            tool_name,
+            arguments,
+            subagent: None,
+        }
+    }
+
+    /// This request, attributed to the subagent `name`.
+    pub fn from_subagent(self, name: &'a str) -> Self {
+        Self {
+            subagent: Some(name),
+            ..self
+        }
+    }
+}
+
 /// Asked before every tool call the agent loop is about to execute.
 ///
 /// Implementations only need to *ask*: the runtime wraps whatever gate a
@@ -39,12 +74,7 @@ impl PermissionDecision {
 /// matching calls never reach the gate again.
 #[async_trait]
 pub trait PermissionGate: Send + Sync {
-    async fn check(
-        &self,
-        tool_call_id: &str,
-        tool_name: &str,
-        arguments: &str,
-    ) -> PermissionDecision;
+    async fn check(&self, request: &PermissionRequest<'_>) -> PermissionDecision;
 }
 
 /// Key used to remember an `AllowAlways`/`RejectAlways` decision across tool
@@ -153,18 +183,13 @@ impl RememberingGate {
 
 #[async_trait]
 impl PermissionGate for RememberingGate {
-    async fn check(
-        &self,
-        tool_call_id: &str,
-        tool_name: &str,
-        arguments: &str,
-    ) -> PermissionDecision {
-        let scope = self.executor.capabilities(tool_name).approval_scope;
-        let key = approval_key(scope, tool_name, arguments);
+    async fn check(&self, request: &PermissionRequest<'_>) -> PermissionDecision {
+        let scope = self.executor.capabilities(request.tool_name).approval_scope;
+        let key = approval_key(scope, request.tool_name, request.arguments);
         if let Some(remembered) = self.approvals.get(&key) {
             return remembered;
         }
-        let decision = self.inner.check(tool_call_id, tool_name, arguments).await;
+        let decision = self.inner.check(request).await;
         self.approvals.remember(key, decision);
         decision
     }
@@ -176,12 +201,7 @@ pub struct AllowAll;
 
 #[async_trait]
 impl PermissionGate for AllowAll {
-    async fn check(
-        &self,
-        _tool_call_id: &str,
-        _tool_name: &str,
-        _arguments: &str,
-    ) -> PermissionDecision {
+    async fn check(&self, _request: &PermissionRequest<'_>) -> PermissionDecision {
         PermissionDecision::AllowOnce
     }
 }
@@ -212,13 +232,11 @@ mod tests {
 
     #[async_trait]
     impl PermissionGate for ScriptedGate {
-        async fn check(
-            &self,
-            tool_call_id: &str,
-            _tool_name: &str,
-            _arguments: &str,
-        ) -> PermissionDecision {
-            self.asked.lock().unwrap().push(tool_call_id.to_string());
+        async fn check(&self, request: &PermissionRequest<'_>) -> PermissionDecision {
+            self.asked
+                .lock()
+                .unwrap()
+                .push(request.tool_call_id.to_string());
             self.answers.lock().unwrap().remove(0)
         }
     }
@@ -229,17 +247,21 @@ mod tests {
         RememberingGate::new(inner, approvals, Arc::new(executor))
     }
 
+    fn request<'a>(id: &'a str, tool: &'a str, arguments: &'a str) -> PermissionRequest<'a> {
+        PermissionRequest::new(id, tool, arguments)
+    }
+
     #[tokio::test]
     async fn allow_always_is_remembered_for_later_calls_to_the_same_tool() {
         let inner = ScriptedGate::new(vec![PermissionDecision::AllowAlways]);
         let gate = remembering(inner.clone(), Approvals::default());
 
         assert_eq!(
-            gate.check("call_1", "read_file", "{}").await,
+            gate.check(&request("call_1", "read_file", "{}")).await,
             PermissionDecision::AllowAlways
         );
         assert_eq!(
-            gate.check("call_2", "read_file", "{}").await,
+            gate.check(&request("call_2", "read_file", "{}")).await,
             PermissionDecision::AllowAlways
         );
         assert_eq!(inner.asked(), vec!["call_1"], "second call must not re-ask");
@@ -250,9 +272,9 @@ mod tests {
         let inner = ScriptedGate::new(vec![PermissionDecision::RejectAlways]);
         let gate = remembering(inner.clone(), Approvals::default());
 
-        gate.check("call_1", "write_file", "{}").await;
+        gate.check(&request("call_1", "write_file", "{}")).await;
         assert_eq!(
-            gate.check("call_2", "write_file", "{}").await,
+            gate.check(&request("call_2", "write_file", "{}")).await,
             PermissionDecision::RejectAlways
         );
         assert_eq!(inner.asked(), vec!["call_1"]);
@@ -266,8 +288,8 @@ mod tests {
         ]);
         let gate = remembering(inner.clone(), Approvals::default());
 
-        gate.check("call_1", "read_file", "{}").await;
-        gate.check("call_2", "read_file", "{}").await;
+        gate.check(&request("call_1", "read_file", "{}")).await;
+        gate.check(&request("call_2", "read_file", "{}")).await;
         assert_eq!(inner.asked(), vec!["call_1", "call_2"]);
     }
 
@@ -279,15 +301,19 @@ mod tests {
         ]);
         let gate = remembering(inner.clone(), Approvals::default());
 
-        gate.check("call_1", "execute_command", r#"{"command": "git status"}"#)
-            .await;
+        gate.check(&request(
+            "call_1",
+            "execute_command",
+            r#"{"command": "git status"}"#,
+        ))
+        .await;
         // Shares the first word, but must be asked about on its own.
         let second = gate
-            .check(
+            .check(&request(
                 "call_2",
                 "execute_command",
                 r#"{"command": "git status && rm -rf ~"}"#,
-            )
+            ))
             .await;
         assert_eq!(second, PermissionDecision::RejectOnce);
         assert_eq!(inner.asked(), vec!["call_1", "call_2"]);
@@ -300,20 +326,36 @@ mod tests {
         let approvals = Approvals::default();
         let first_turn = ScriptedGate::new(vec![PermissionDecision::AllowAlways]);
         remembering(first_turn, approvals.clone())
-            .check("call_1", "read_file", "{}")
+            .check(&request("call_1", "read_file", "{}"))
             .await;
 
         let second_turn = ScriptedGate::new(vec![]);
         let decision = remembering(second_turn.clone(), approvals)
-            .check("call_2", "read_file", "{}")
+            .check(&request("call_2", "read_file", "{}"))
             .await;
         assert_eq!(decision, PermissionDecision::AllowAlways);
         assert!(second_turn.asked().is_empty());
     }
 
     #[tokio::test]
+    async fn a_subagents_allow_always_covers_the_parents_calls_too() {
+        // One session, one set of approvals: who made the call doesn't
+        // change what an earlier "Allow Always" covers.
+        let inner = ScriptedGate::new(vec![PermissionDecision::AllowAlways]);
+        let gate = remembering(inner.clone(), Approvals::default());
+
+        gate.check(&request("call_1", "read_file", "{}").from_subagent("reviewer"))
+            .await;
+        let decision = gate.check(&request("call_2", "read_file", "{}")).await;
+        assert_eq!(decision, PermissionDecision::AllowAlways);
+        assert_eq!(inner.asked(), vec!["call_1"]);
+    }
+
+    #[tokio::test]
     async fn allow_all_always_allows() {
-        let decision = AllowAll.check("call_1", "execute_command", "{}").await;
+        let decision = AllowAll
+            .check(&request("call_1", "execute_command", "{}"))
+            .await;
         assert!(decision.is_allowed());
     }
 

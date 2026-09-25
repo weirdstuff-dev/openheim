@@ -10,7 +10,7 @@ use crate::{
     memory::{ConversationMeta, SkillsManager},
 };
 
-use super::permission::PermissionRequest;
+use super::permission::PendingPermission;
 use super::render::{self, FooterLabels};
 use super::state::{AgentChannels, InputLine, Overlay, PermissionQueue, Theme, Transcript};
 use super::types::{AgentUpdate, ChatItem, ConfigRow, Screen, Status};
@@ -198,21 +198,21 @@ impl App {
         }
     }
 
-    pub(super) fn handle_permission_request(&mut self, request: PermissionRequest) {
+    pub(super) fn handle_permission_request(&mut self, request: PendingPermission) {
         self.permissions.push(request);
     }
 
     /// Answers the permission prompt on screen and notes the decision in the
     /// transcript.
     fn resolve_permission(&mut self, decision: PermissionDecision) {
-        if let Some(tool_name) = self.permissions.resolve(decision) {
+        if let Some(call) = self.permissions.resolve(decision) {
             let label = match decision {
                 PermissionDecision::AllowOnce => "allowed",
                 PermissionDecision::AllowAlways => "always allowed",
                 PermissionDecision::RejectOnce => "rejected",
                 PermissionDecision::RejectAlways => "always rejected",
             };
-            self.push(ChatItem::SystemInfo(format!("{label} '{tool_name}'")));
+            self.push(ChatItem::SystemInfo(format!("{label} {call}")));
         }
     }
 
@@ -679,6 +679,7 @@ impl App {
                 f,
                 area,
                 &request.tool_name,
+                request.subagent.as_deref(),
                 &request.arguments,
                 self.permissions.selected(),
                 theme,
@@ -717,12 +718,13 @@ mod tests {
         )
     }
 
-    fn permission_request() -> (PermissionRequest, oneshot::Receiver<PermissionDecision>) {
+    fn permission_request() -> (PendingPermission, oneshot::Receiver<PermissionDecision>) {
         let (respond_to, rx) = oneshot::channel();
         (
-            PermissionRequest {
+            PendingPermission {
                 tool_name: "read_file".into(),
                 arguments: "{}".into(),
+                subagent: None,
                 respond_to,
             },
             rx,

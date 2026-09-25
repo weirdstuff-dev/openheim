@@ -3,6 +3,7 @@ use tokio::sync::mpsc;
 use crate::config::AgentConfig;
 use crate::core::llm::{LlmChunk, LlmClient};
 use crate::core::models::*;
+use crate::core::permission::PermissionRequest;
 use crate::core::turn::TurnContext;
 use crate::error::Result;
 use crate::memory::PromptBuilder;
@@ -264,8 +265,13 @@ where
                     // prompt at once, rather than blocking the turn (and
                     // holding `prompt_lock`) until the user answers each.
                     _ = turn.cancel.cancelled() => break 'calls,
-                    decisions = futures::future::join_all(tool_calls.iter().map(|tool_call| {
-                        turn.permission_gate.check(&tool_call.id, &tool_call.name, &tool_call.arguments)
+                    decisions = futures::future::join_all(tool_calls.iter().map(|tool_call| async {
+                        let request = PermissionRequest::new(
+                            &tool_call.id,
+                            &tool_call.name,
+                            &tool_call.arguments,
+                        );
+                        turn.permission_gate.check(&request).await
                     })) => decisions,
                 };
 
@@ -1257,12 +1263,7 @@ mod tests {
 
     #[async_trait]
     impl PermissionGate for HangingPermissionGate {
-        async fn check(
-            &self,
-            _tool_call_id: &str,
-            _tool_name: &str,
-            _arguments: &str,
-        ) -> PermissionDecision {
+        async fn check(&self, _request: &PermissionRequest<'_>) -> PermissionDecision {
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             unreachable!("cancellation should abort this wait before the sleep elapses");
         }
@@ -1300,12 +1301,7 @@ mod tests {
 
     #[async_trait]
     impl PermissionGate for RejectPermissionGate {
-        async fn check(
-            &self,
-            _tool_call_id: &str,
-            _tool_name: &str,
-            _arguments: &str,
-        ) -> PermissionDecision {
+        async fn check(&self, _request: &PermissionRequest<'_>) -> PermissionDecision {
             PermissionDecision::RejectOnce
         }
     }

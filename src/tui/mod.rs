@@ -54,7 +54,7 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
     let paths = client.state().paths().clone();
 
     let (permission_tx, mut permission_rx) =
-        mpsc::unbounded_channel::<permission::PermissionRequest>();
+        mpsc::unbounded_channel::<permission::PendingPermission>();
     let permission_gate: Arc<dyn PermissionGate> = Arc::new(TuiPermissionGate::new(permission_tx));
 
     let session = client
