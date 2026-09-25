@@ -1437,7 +1437,7 @@ Creates the directory and all parent directories (equivalent to `mkdir -p`).
 
 #### 3.3.6 Delete
 
-Deletes a file or directory (recursively if directory).
+Deletes a file or directory (recursively if directory). The work directory itself can't be deleted: a path that resolves to it (`""`, `.`, its absolute path, a symlink to it) gets an `error` reply. The same applies to both `from` and `to` of a rename.
 
 **Request:**
 
