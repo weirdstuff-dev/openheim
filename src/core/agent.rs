@@ -10,6 +10,64 @@ use crate::error::Result;
 use crate::memory::PromptBuilder;
 use crate::tools::ToolExecutor;
 
+/// The result recorded for a tool call whose turn was cancelled before it
+/// finished.
+const CANCELLED_TOOL_RESULT: &str = "Cancelled by user.";
+
+/// The result sent in place of one that never made it into the history: the
+/// process stopped mid-turn, or the history predates cancelled calls being
+/// answered.
+const MISSING_TOOL_RESULT: &str =
+    "No result: the turn was interrupted before this tool call finished.";
+
+/// `messages` with an error result added for every tool call that has none,
+/// right after the results that did arrive, or `None` if every call is
+/// answered. Providers reject a history with an unanswered tool call, so
+/// without this one interrupted turn would break every later request in the
+/// conversation. Applied to each request only; the stored history is left as
+/// it is.
+fn answer_missing_tool_results(messages: &[Message]) -> Option<Vec<Message>> {
+    // (index to insert before, results to insert), in ascending index order.
+    let mut insertions: Vec<(usize, Vec<Message>)> = Vec::new();
+    let mut i = 0;
+    while i < messages.len() {
+        let calls = match messages[i].role {
+            Role::Assistant => messages[i].tool_calls(),
+            _ => Vec::new(),
+        };
+        i += 1;
+        if calls.is_empty() {
+            continue;
+        }
+        let mut answered = std::collections::HashSet::new();
+        while let Some(result) = messages.get(i).and_then(Message::tool_result_block) {
+            answered.insert(result.tool_call_id);
+            i += 1;
+        }
+        let missing: Vec<Message> = calls
+            .into_iter()
+            .filter(|call| !answered.contains(&call.id))
+            .map(|call| Message::tool_result(call.id, call.name, MISSING_TOOL_RESULT, true))
+            .collect();
+        if !missing.is_empty() {
+            insertions.push((i, missing));
+        }
+    }
+    if insertions.is_empty() {
+        return None;
+    }
+
+    let mut repaired = Vec::with_capacity(messages.len() + insertions.len());
+    let mut copied = 0;
+    for (at, missing) in insertions {
+        repaired.extend_from_slice(&messages[copied..at]);
+        repaired.extend(missing);
+        copied = at;
+    }
+    repaired.extend_from_slice(&messages[copied..]);
+    Some(repaired)
+}
+
 /// Every LLM call streams, even when nobody watches the chunks: the HTTP
 /// client's timeout is per read, not per request (see `build_http_client`),
 /// so a non-streaming reply that takes longer than `timeout_secs` to
@@ -23,6 +81,8 @@ async fn call_llm_streaming(
     prompt_builder: Option<&PromptBuilder>,
     chunk_tx: mpsc::UnboundedSender<LlmChunk>,
 ) -> Result<Choice> {
+    let repaired = answer_missing_tool_results(messages);
+    let messages = repaired.as_deref().unwrap_or(messages);
     match prompt_builder {
         Some(builder) => {
             let built = builder.build(messages);
@@ -78,11 +138,13 @@ fn stop_for_reply_without_tools(
 /// start, streamed text and thinking, tool calls, tool results, and the final
 /// completion.
 ///
-/// `cancel` is checked between iterations and before each tool call, and is
-/// also raced against the in-flight LLM call and the pending permission-gate
-/// approval so a caller (e.g. the ACP layer reacting to `session/cancel`) can
+/// `cancel` is checked between iterations and raced against the in-flight
+/// LLM call, the pending permission-gate approvals, and the running tool
+/// calls, so a caller (e.g. the ACP layer reacting to `session/cancel`) can
 /// abort a slow or hanging request — or a turn stuck waiting on user approval
-/// — rather than waiting for it to finish. The loop returns `Ok` unless an LLM call fails;
+/// — rather than waiting for it to finish. Tool calls the LLM asked for are
+/// always answered in `messages`, the cancelled ones with an error result, so
+/// the history stays valid to send. The loop returns `Ok` unless an LLM call fails;
 /// [`AgentResult::stop_reason`] reports why it stopped instead of callers
 /// having to reverse-engineer it.
 async fn run_agent_loop<F>(
@@ -171,11 +233,6 @@ where
             // which is accurate for all of them the moment the LLM asks —
             // not just the one whose approval happens to be next in line.
             for tool_call in &tool_calls {
-                if turn.cancel.is_cancelled() {
-                    stop_reason = StopReason::Cancelled;
-                    break 'turn;
-                }
-
                 callback(StreamEvent::ToolCall {
                     id: tool_call.id.clone(),
                     tool_name: tool_call.name.clone(),
@@ -183,88 +240,99 @@ where
                 });
             }
 
-            // Phase 1b: collect every call's permission decision
-            // concurrently, mirroring Phase 2's execution model — an
-            // interactive gate sees every request up front instead of
-            // one at a time. The ACP gate can answer them independently and
-            // out of order; the TUI gate queues concurrent requests instead
-            // of dropping them (see `App::handle_permission_request`), so
-            // it still only *shows* one prompt at a time.
-            let decisions = tokio::select! {
-                _ = turn.cancel.cancelled() => {
-                    // Dropping the `join_all` here abandons every pending
-                    // approval prompt at once, rather than blocking the turn
-                    // (and holding `prompt_lock`) until the user responds to
-                    // each in turn.
-                    stop_reason = StopReason::Cancelled;
-                    break 'turn;
-                }
-                decisions = futures::future::join_all(tool_calls.iter().map(|tool_call| {
-                    turn.permission_gate.check(&tool_call.id, &tool_call.name, &tool_call.arguments)
-                })) => decisions,
-            };
-
-            // Phase 2: run every allowed call concurrently (denied ones
-            // short-circuit without touching the executor). This is what lets
-            // several `delegate_task` sub-agents — or any other independent
-            // tool calls the LLM batched into one turn — actually run in
-            // parallel instead of one after another. `ToolResult` is emitted
-            // as soon as each call finishes (completion order), so a caller
-            // watching the stream sees fast calls report back before slow
-            // ones instead of everything landing at once; message history in
-            // Phase 3 stays in original tool-call order regardless.
-            let mut pending: futures::stream::FuturesUnordered<_> = tool_calls
-                .iter()
-                .zip(&decisions)
-                .enumerate()
-                .map(|(index, (tool_call, decision))| async move {
-                    if decision.is_allowed() {
-                        match tool_executor
-                            .execute(&tool_call.name, &tool_call.arguments, turn)
-                            .await
-                        {
-                            Ok(r) => (index, r, false),
-                            Err(e) => (index, format!("Error: {e}"), true),
-                        }
-                    } else {
-                        (index, "Permission denied by user.".to_string(), true)
-                    }
-                })
-                .collect();
-
+            // The assistant message asking for these calls is already in
+            // `messages`, so a cancelled turn must still answer every one of
+            // them (Phase 3): providers reject a history with an unanswered
+            // tool call. Cancellation therefore leaves this block, not the
+            // turn, and whatever has no outcome yet is answered as cancelled.
             let mut outcomes: Vec<Option<(String, bool)>> = vec![None; tool_calls.len()];
-            loop {
-                tokio::select! {
-                    _ = turn.cancel.cancelled() => {
-                        // Dropping `pending` here abandons every in-flight
-                        // tool call at once, rather than blocking the turn
-                        // until all of them finish.
-                        stop_reason = StopReason::Cancelled;
-                        break 'turn;
-                    }
-                    next = futures::StreamExt::next(&mut pending) => {
-                        let Some((index, result, is_error)) = next else {
-                            break;
-                        };
-                        let tool_call = &tool_calls[index];
-                        callback(StreamEvent::ToolResult {
-                            id: tool_call.id.clone(),
-                            tool_name: tool_call.name.clone(),
-                            result: result.clone(),
-                            is_error,
-                        });
-                        outcomes[index] = Some((result, is_error));
+            'calls: {
+                if turn.cancel.is_cancelled() {
+                    break 'calls;
+                }
+
+                // Phase 1b: collect every call's permission decision
+                // concurrently, mirroring Phase 2's execution model — an
+                // interactive gate sees every request up front instead of
+                // one at a time. The ACP gate can answer them independently
+                // and out of order; the TUI gate queues concurrent requests
+                // instead of dropping them (see `App::handle_permission_request`),
+                // so it still only *shows* one prompt at a time.
+                let decisions = tokio::select! {
+                    // Dropping the `join_all` abandons every pending approval
+                    // prompt at once, rather than blocking the turn (and
+                    // holding `prompt_lock`) until the user answers each.
+                    _ = turn.cancel.cancelled() => break 'calls,
+                    decisions = futures::future::join_all(tool_calls.iter().map(|tool_call| {
+                        turn.permission_gate.check(&tool_call.id, &tool_call.name, &tool_call.arguments)
+                    })) => decisions,
+                };
+
+                // Phase 2: run every allowed call concurrently (denied ones
+                // short-circuit without touching the executor). This is what
+                // lets several `delegate_task` sub-agents — or any other
+                // independent tool calls the LLM batched into one turn —
+                // actually run in parallel. `ToolResult` is emitted as soon as
+                // each call finishes (completion order), so fast calls report
+                // back before slow ones; message history in Phase 3 stays in
+                // original tool-call order regardless.
+                let mut pending: futures::stream::FuturesUnordered<_> = tool_calls
+                    .iter()
+                    .zip(&decisions)
+                    .enumerate()
+                    .map(|(index, (tool_call, decision))| async move {
+                        if decision.is_allowed() {
+                            match tool_executor
+                                .execute(&tool_call.name, &tool_call.arguments, turn)
+                                .await
+                            {
+                                Ok(r) => (index, r, false),
+                                Err(e) => (index, format!("Error: {e}"), true),
+                            }
+                        } else {
+                            (index, "Permission denied by user.".to_string(), true)
+                        }
+                    })
+                    .collect();
+
+                loop {
+                    tokio::select! {
+                        // Dropping `pending` abandons every in-flight tool
+                        // call at once; calls that already finished keep
+                        // their results.
+                        _ = turn.cancel.cancelled() => break 'calls,
+                        next = futures::StreamExt::next(&mut pending) => {
+                            let Some((index, result, is_error)) = next else {
+                                break 'calls;
+                            };
+                            let tool_call = &tool_calls[index];
+                            callback(StreamEvent::ToolResult {
+                                id: tool_call.id.clone(),
+                                tool_name: tool_call.name.clone(),
+                                result: result.clone(),
+                                is_error,
+                            });
+                            outcomes[index] = Some((result, is_error));
+                        }
                     }
                 }
             }
 
-            // Phase 3: replay results in original tool-call order (every
-            // entry is `Some` here — the loop above only exits early via
-            // `break 'turn` on cancellation), so message history and the
-            // callback's `MessageAppended` stream stay deterministic
-            // regardless of which call actually finished first.
+            // Phase 3: record results in original tool-call order, so message
+            // history and the `MessageAppended` stream stay deterministic
+            // regardless of which call finished first. A call with no outcome
+            // was cancelled; it also gets its `ToolResult` here, so a caller
+            // showing it as pending sees it end.
             for (tool_call, outcome) in tool_calls.iter().zip(outcomes) {
-                let (result, is_error) = outcome.expect("every outcome is filled before Phase 3");
+                let (result, is_error) = outcome.unwrap_or_else(|| {
+                    callback(StreamEvent::ToolResult {
+                        id: tool_call.id.clone(),
+                        tool_name: tool_call.name.clone(),
+                        result: CANCELLED_TOOL_RESULT.to_string(),
+                        is_error: true,
+                    });
+                    (CANCELLED_TOOL_RESULT.to_string(), true)
+                });
 
                 let tool_result_message = Message::tool_result(
                     tool_call.id.clone(),
@@ -968,6 +1036,193 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.stop_reason, StopReason::Cancelled);
+        assert_every_call_answered_as_cancelled(&messages);
+    }
+
+    /// The history ends with the assistant's tool call followed by a
+    /// cancelled error result for it, so the next request is still valid.
+    fn assert_every_call_answered_as_cancelled(messages: &[Message]) {
+        let [.., call, result] = messages else {
+            panic!("expected a tool call and its result, got {messages:?}");
+        };
+        assert_eq!(call.tool_calls().len(), 1);
+        let result = result.tool_result_block().expect("a tool result");
+        assert_eq!(result.tool_call_id, call.tool_calls()[0].id);
+        assert_eq!(result.content, CANCELLED_TOOL_RESULT);
+        assert!(result.is_error);
+    }
+
+    // Regression test: cancelling after one of two calls finished left the
+    // history ending in the assistant's tool calls with no results, which
+    // every provider rejects on the next prompt.
+    #[tokio::test(start_paused = true)]
+    async fn cancel_keeps_finished_results_and_answers_the_rest() {
+        let llm = Arc::new(MockLlm::new(vec![multi_tool_call_choice(&[
+            ("slow", "{}"),
+            ("fast", "{}"),
+        ])]));
+        let delays = std::collections::HashMap::from([
+            ("slow".to_string(), std::time::Duration::from_secs(3600)),
+            ("fast".to_string(), std::time::Duration::from_millis(1)),
+        ]);
+        let executor = Arc::new(DelayedToolExecutor { delays });
+        let mut messages = vec![Message::user("go")];
+        let cancel = CancellationToken::new();
+        let cancel_signal = cancel.clone();
+        let mut results = Vec::new();
+        let mut appended = 0;
+
+        let result = run_agent_streaming_with_history(
+            llm,
+            executor,
+            &make_config(10),
+            &mut messages,
+            None,
+            &TurnContext {
+                cancel: &cancel,
+                permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
+            },
+            |event| match event {
+                StreamEvent::ToolResult {
+                    tool_name, result, ..
+                } => {
+                    if tool_name == "fast" {
+                        cancel_signal.cancel();
+                    }
+                    results.push((tool_name, result));
+                }
+                StreamEvent::MessageAppended { .. } => appended += 1,
+                _ => {}
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.stop_reason, StopReason::Cancelled);
+        // Every call's `ToolResult` fires, the cancelled one included.
+        assert_eq!(
+            results,
+            [
+                ("fast".to_string(), "fast-done".to_string()),
+                ("slow".to_string(), CANCELLED_TOOL_RESULT.to_string()),
+            ]
+        );
+        let recorded: Vec<_> = messages
+            .iter()
+            .filter_map(Message::tool_result_block)
+            .map(|r| (r.tool_name, r.content, r.is_error))
+            .collect();
+        assert_eq!(
+            recorded,
+            [
+                ("slow".to_string(), CANCELLED_TOOL_RESULT.to_string(), true),
+                ("fast".to_string(), "fast-done".to_string(), false),
+            ]
+        );
+        // The assistant message plus both results reach the history log.
+        assert_eq!(appended, 3);
+    }
+
+    fn call(id: &str) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: id.into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        }
+    }
+
+    fn calls(ids: &[&str]) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: ids.iter().map(|id| call(id)).collect(),
+        }
+    }
+
+    fn answer(id: &str) -> Message {
+        Message::tool_result(id, "read_file", "ok", false)
+    }
+
+    #[test]
+    fn complete_history_is_sent_unchanged() {
+        let messages = vec![
+            Message::user("hi"),
+            calls(&["a", "b"]),
+            answer("a"),
+            answer("b"),
+            Message::assistant("done"),
+        ];
+        assert!(answer_missing_tool_results(&messages).is_none());
+    }
+
+    #[test]
+    fn missing_results_are_answered_after_the_ones_that_arrived() {
+        let messages = vec![
+            Message::user("hi"),
+            calls(&["a", "b"]),
+            answer("a"),
+            Message::user("still there?"),
+            calls(&["c"]),
+        ];
+        let repaired = answer_missing_tool_results(&messages).unwrap();
+
+        let missing = |id: &str| Message::tool_result(id, "read_file", MISSING_TOOL_RESULT, true);
+        assert_eq!(
+            repaired,
+            [
+                Message::user("hi"),
+                calls(&["a", "b"]),
+                answer("a"),
+                missing("b"),
+                Message::user("still there?"),
+                calls(&["c"]),
+                missing("c"),
+            ]
+        );
+    }
+
+    // A turn stored before cancelled calls were answered (or cut short by a
+    // crash) must not break the conversation's next request.
+    #[tokio::test]
+    async fn request_answers_a_stored_unanswered_call() {
+        struct RecordingLlm(Mutex<Vec<Vec<Message>>>);
+
+        #[async_trait]
+        impl LlmClient for RecordingLlm {
+            async fn send(&self, messages: &[Message], _tools: &[Tool]) -> Result<Choice> {
+                self.0.lock().unwrap().push(messages.to_vec());
+                Ok(text_choice("ok"))
+            }
+        }
+
+        let llm = Arc::new(RecordingLlm(Mutex::new(Vec::new())));
+        let executor: Arc<dyn ToolExecutor> = Arc::new(MockToolExecutor::new(""));
+        let mut messages = vec![Message::user("hi"), calls(&["a"]), Message::user("again")];
+
+        run_agent_with_history(
+            llm.clone(),
+            executor,
+            &make_config(10),
+            &mut messages,
+            None,
+            &TurnContext {
+                cancel: &CancellationToken::new(),
+                permission_gate: &allow_all(),
+                work_dir: std::path::Path::new("."),
+                client_io: &NoClientIo,
+            },
+        )
+        .await
+        .unwrap();
+
+        let sent = &llm.0.lock().unwrap()[0];
+        assert_eq!(
+            sent[2],
+            Message::tool_result("a", "read_file", MISSING_TOOL_RESULT, true)
+        );
+        // The stored history itself isn't rewritten.
+        assert_eq!(messages[2], Message::user("again"));
     }
 
     #[tokio::test]
@@ -1297,6 +1552,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.stop_reason, StopReason::Cancelled);
+        assert_every_call_answered_as_cancelled(&messages);
     }
 
     struct RejectPermissionGate;
