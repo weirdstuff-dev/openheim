@@ -13,7 +13,7 @@ Openheim can be used in two ways:
 | **Library** | `OpenheimClient` in `src/client.rs` | Embedded in a Rust application |
 | **Server** | `src/main.rs` subcommands | Standalone process driven by a client over a transport |
 
-Both modes share the same agent logic. Transports speak the ACP wire protocol to `acp::serve`; the library facade calls the same `core::runtime::AgentState` request handlers directly, and the headless `run` mode connects an ACP client to `acp::serve` over an in-memory duplex pipe.
+Both modes share the same agent logic. Transports speak the ACP wire protocol to `acp::serve`; the library facade calls the same `core::runtime::AgentState` request handlers directly, and the headless `run` mode is itself a facade caller.
 
 ---
 

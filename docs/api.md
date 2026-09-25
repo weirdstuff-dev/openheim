@@ -1675,8 +1675,9 @@ interface Message {
 type ContentBlock =
   | { type: "text"; text: string }
   | { type: "thinking"; thinking: string; signature?: string | null }
+  | { type: "redacted_thinking"; data: string }
   | { type: "image"; data: string; mime_type: string } // data is base64-encoded
-  | { type: "tool_use"; id: string; name: string; arguments: string } // arguments is a JSON string
+  | { type: "tool_use"; id: string; name: string; arguments: string; signature?: string } // arguments is a JSON string
   | {
       type: "tool_result";
       tool_call_id: string;
