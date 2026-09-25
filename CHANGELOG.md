@@ -6,7 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **`Error::IncompleteResponse`**, returned when a provider's streamed reply ends before the provider says it's finished. It's retryable. Code that matches on `Error` exhaustively needs the new arm.
+
 ### Fixed
+
+- **A reply cut off mid-stream is no longer taken as complete.** When the connection dropped partway through a reply, the body just ended, and the built-in providers returned whatever had arrived as the finished answer. The turn then ended there, with half a reply saved and any tool call still in flight lost. Now a stream that ends without the provider's end marker (Anthropic's `message_stop`, OpenAI's `[DONE]` or finish reason, Gemini's `finishReason`) fails with `Error::IncompleteResponse`. It's retried like a network error while nothing has been streamed to the caller yet. Stream payloads that fail to parse are now logged as warnings rather than skipped silently.
+- **A Gemini reply blocked for safety now ends the turn as a refusal.** Its final chunk has a finish reason but no content, and that chunk failed to parse and was ignored.
 
 - **Cancelling a turn while tools were running no longer breaks the session.** The model's tool-call message was already saved, but the cancelled calls never got results, and Anthropic and OpenAI reject a history with an unanswered tool call, so every later prompt in that session failed. Cancelled calls are now recorded as a `Cancelled by user.` error, and calls that had already finished keep their results. Each cancelled call also gets a `ToolResult` event, so UIs stop showing it as pending. Sessions already saved in the broken state, or cut short by a crash mid-turn, work again too: the missing results are filled in on each request, without changing the saved history.
 - **Gemini tool calls now have unique ids.** They were numbered per reply (`call_0`, `call_1`, …), so every reply's first call had the same id as the one before it, and a subagent's calls could share ids with its parent's. ACP clients tell tool calls and permission requests apart by id, so a new call could replace an earlier one on screen. Gemini's own call id is used when it sends one, otherwise a random one. The same applies to OpenAI-compatible backends that stream a tool call without an id.
