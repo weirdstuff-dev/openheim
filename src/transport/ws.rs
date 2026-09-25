@@ -21,8 +21,9 @@
 //! The fs sidecar is rooted at the agent's resolved `work_dir` — the same
 //! sandbox boundary the agent's own tools are held to. Every request path is
 //! validated against it (relative paths resolve within it) and `watch` may
-//! only select directories inside it. `delete` and `rename` also refuse the
-//! root itself, so a client can't remove or move the whole workspace.
+//! only select directories inside it. `delete` and `rename` act on a symlink
+//! itself rather than its target, and refuse the root itself, so a client
+//! can't remove or move the whole workspace.
 //!
 //! `/acp` carries the same ACP protocol frames as `/ws`'s `agent` channel, but
 //! unwrapped: each WebSocket text message is exactly one JSON-RPC object, with
@@ -58,8 +59,11 @@ use walkdir::WalkDir;
 use agent_client_protocol::Lines;
 
 use crate::{
-    acp, client::OpenheimClient, core::runtime::AgentState, error::Error as AppError,
-    tools::sandbox::validate_path,
+    acp,
+    client::OpenheimClient,
+    core::runtime::AgentState,
+    error::Error as AppError,
+    tools::sandbox::{validate_entry, validate_path},
 };
 
 #[derive(Deserialize)]
@@ -476,23 +480,11 @@ impl FsState {
         validate_path(path, &self.work_dir).map_err(|e| fs_error(e.to_string()))
     }
 
-    /// Like [`Self::validate`], but also refuses the work directory itself:
-    /// `delete`/`rename` on something *inside* the sandbox is fine, on the
-    /// sandbox root would remove or move the whole workspace. `path` may
-    /// name the root in many ways (`""`, `.`, `a/..`, its absolute path, a
-    /// symlink to it); all of them resolve to the canonical root.
+    /// Validates `path` for `delete`/`rename` via the shared
+    /// [`validate_entry`]: a symlink names the link itself, not its target,
+    /// and the work directory itself is refused.
     fn validate_entry(&self, path: &str) -> Result<PathBuf, FsResponse> {
-        let validated = self.validate(path)?;
-        if self
-            .work_dir
-            .canonicalize()
-            .is_ok_and(|root| root == validated)
-        {
-            return Err(fs_error(format!(
-                "'{path}' is the work directory itself; it can't be deleted or renamed"
-            )));
-        }
-        Ok(validated)
+        validate_entry(path, &self.work_dir).map_err(|e| fs_error(e.to_string()))
     }
 
     /// Carries out one request and returns its reply. `events` is where a
@@ -549,7 +541,12 @@ impl FsState {
             }
             FsRequest::Delete { path } => {
                 let validated = self.validate_entry(&path)?;
-                if validated.is_dir() {
+                // The entry's own type: a symlink to a directory is removed
+                // as a link, leaving the directory it points to alone.
+                let metadata = fs::symlink_metadata(&validated)
+                    .await
+                    .map_err(|e| fs_error(format!("Failed to delete: {e}")))?;
+                if metadata.is_dir() {
                     fs::remove_dir_all(&validated)
                         .await
                         .map_err(|e| fs_error(format!("Failed to delete dir: {e}")))?;
@@ -772,17 +769,12 @@ mod tests {
         std::fs::write(work.path().join("keep.txt"), "data").unwrap();
         let mut state = make_fs_state(work.path());
 
-        let mut names_for_root = vec![
+        let names_for_root = [
             String::new(),
             ".".to_string(),
             "sub/..".to_string(),
             work.path().to_str().unwrap().to_string(),
         ];
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(work.path(), work.path().join("root_link")).unwrap();
-            names_for_root.push("root_link".to_string());
-        }
 
         for path in names_for_root {
             let resp = run_request(&mut state, FsRequest::Delete { path: path.clone() }).await;
@@ -825,6 +817,45 @@ mod tests {
         .await;
         assert!(matches!(resp, FsResponse::DeleteSuccess { .. }), "{resp:?}");
         assert!(!work.path().join("keep.txt").exists());
+    }
+
+    /// Deleting or renaming a symlink acts on the link: a link to `src/`
+    /// must not take `src/`'s contents with it, and a link to the root is
+    /// just an entry, not the root.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_delete_and_rename_act_on_a_symlink_not_its_target() {
+        let work = tempfile::tempdir().unwrap();
+        let src = work.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("main.rs"), "fn main() {}").unwrap();
+        std::os::unix::fs::symlink(&src, work.path().join("src_link")).unwrap();
+        std::os::unix::fs::symlink(work.path(), work.path().join("root_link")).unwrap();
+        let mut state = make_fs_state(work.path());
+
+        for path in ["src_link", "root_link"] {
+            let resp = run_request(&mut state, FsRequest::Delete { path: path.into() }).await;
+            assert!(
+                matches!(resp, FsResponse::DeleteSuccess { .. }),
+                "{path}: {resp:?}"
+            );
+            assert!(work.path().join(path).symlink_metadata().is_err(), "{path}");
+        }
+        assert!(src.join("main.rs").exists());
+
+        std::os::unix::fs::symlink(&src, work.path().join("src_link")).unwrap();
+        let resp = run_request(
+            &mut state,
+            FsRequest::Rename {
+                from: "src_link".into(),
+                to: "renamed_link".into(),
+            },
+        )
+        .await;
+        assert!(matches!(resp, FsResponse::RenameSuccess { .. }), "{resp:?}");
+        let renamed = work.path().join("renamed_link");
+        assert!(renamed.symlink_metadata().unwrap().is_symlink());
+        assert!(src.join("main.rs").exists());
     }
 
     #[tokio::test]
