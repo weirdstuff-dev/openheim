@@ -52,27 +52,46 @@ pub trait PermissionGate: Send + Sync {
 /// [`ToolCapabilities::approval_scope`](crate::tools::ToolCapabilities::approval_scope).
 /// For [`ApprovalScope::ToolName`] (most tools) this is just the tool name —
 /// one approval covers every future call to that tool. For
-/// [`ApprovalScope::ExactArguments`] (`execute_command`) this is scoped to
-/// the exact command string: keying on the program name alone let an
-/// approval for `git status` silently cover `git status && rm -rf ~`. The
-/// tradeoff is that "Allow Always" only sticks for byte-identical commands,
-/// so argument variations re-prompt — annoying, but the alternative re-opens
-/// the bypass. Falls back to a key containing the raw arguments if a
-/// `command` field can't be extracted: such calls fail at execution time
-/// anyway, and distinct raw arguments get distinct keys so one malformed
-/// approval can't cover another.
+/// [`ApprovalScope::ExactArguments`] (e.g. `execute_command`) it's the tool
+/// name plus the full arguments: keying `execute_command` on its program
+/// name alone let an approval for `git status` silently cover
+/// `git status && rm -rf ~`. The arguments are normalized first (parsed,
+/// object keys sorted, whitespace dropped), so the same call written
+/// differently still matches; any difference in value re-prompts. Arguments
+/// that aren't JSON are keyed as the raw string: such calls fail at
+/// execution anyway, and distinct raw arguments still get distinct keys.
 pub fn approval_key(scope: ApprovalScope, tool_name: &str, arguments: &str) -> String {
     match scope {
         ApprovalScope::ToolName => tool_name.to_string(),
         ApprovalScope::ExactArguments => {
-            let command = serde_json::from_str::<serde_json::Value>(arguments)
-                .ok()
-                .and_then(|v| v.get("command")?.as_str().map(str::to_string));
-            match command {
-                Some(cmd) => format!("{tool_name}:{cmd}"),
-                None => format!("{tool_name}:unparsed:{arguments}"),
+            match serde_json::from_str::<serde_json::Value>(arguments) {
+                Ok(value) => format!("{tool_name}:{}", sorted_keys(value)),
+                Err(_) => format!("{tool_name}:unparsed:{arguments}"),
             }
         }
+    }
+}
+
+/// `value` with every object's keys in sorted order, so two spellings of the
+/// same arguments serialize identically. Needed because serde_json may be
+/// built with `preserve_order` (another dependency enables it), in which case
+/// objects keep the model's key order.
+fn sorted_keys(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<_> = map.into_iter().collect();
+            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            serde_json::Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, sorted_keys(value)))
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(sorted_keys).collect())
+        }
+        other => other,
     }
 }
 
@@ -311,15 +330,28 @@ mod tests {
     }
 
     #[test]
-    fn shell_commands_are_scoped_by_their_full_command_string() {
+    fn exact_argument_keys_hold_the_full_normalized_arguments() {
         assert_eq!(
             approval_key(
                 ApprovalScope::ExactArguments,
                 "execute_command",
                 r#"{"command": "git status"}"#
             ),
-            "execute_command:git status"
+            r#"execute_command:{"command":"git status"}"#
         );
+    }
+
+    // Regression test: the key read a `command` field, so any other tool
+    // declaring `ExactArguments` fell back to a key of its raw arguments,
+    // which differ with key order and whitespace.
+    #[test]
+    fn exact_argument_keys_ignore_key_order_and_whitespace() {
+        let key = |args: &str| approval_key(ApprovalScope::ExactArguments, "deploy", args);
+        assert_eq!(
+            key(r#"{"env": "prod", "opts": {"b": 2, "a": 1}}"#),
+            key(r#"{"opts":{"a":1,"b":2},"env":"prod"}"#)
+        );
+        assert_ne!(key(r#"{"env": "prod"}"#), key(r#"{"env": "staging"}"#));
     }
 
     #[test]
@@ -383,12 +415,12 @@ mod tests {
     }
 
     #[test]
-    fn unparseable_shell_arguments_fall_back_to_a_raw_arguments_key() {
+    fn unparseable_arguments_fall_back_to_a_raw_arguments_key() {
         assert_eq!(
             approval_key(ApprovalScope::ExactArguments, "execute_command", "not json"),
             "execute_command:unparsed:not json"
         );
-        // Distinct malformed arguments must not share a fallback key either.
+        // Distinct malformed arguments must not share a key either.
         assert_ne!(
             approval_key(ApprovalScope::ExactArguments, "execute_command", "not json"),
             approval_key(
