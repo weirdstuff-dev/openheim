@@ -23,7 +23,7 @@ use crate::core::agent::run_agent;
 use crate::core::llm::LlmClient;
 use crate::core::models::{Message, StopReason, Tool};
 use crate::core::turn::TurnContext;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::memory::PromptBuilder;
 use crate::subagents::AgentProfile;
 
@@ -33,7 +33,7 @@ use super::scoped_executor::ScopedExecutor;
 use super::{ToolExecutor, ToolHandler};
 
 /// `delegate_task`'s arguments; exactly one of `agent`/`system_prompt` must
-/// be set (checked in `execute`, which answers the LLM with how to fix it).
+/// be set (checked in `execute`, whose error tells the LLM how to fix it).
 #[derive(Deserialize)]
 struct DelegateArgs {
     task: String,
@@ -248,11 +248,11 @@ impl ToolHandler for DelegateTool {
 
         let profile = match (args.agent.as_deref(), args.system_prompt.as_deref()) {
             (Some(_), Some(_)) => {
-                return Ok(
+                return Err(Error::ToolExecutionError(
                     "Provide either 'agent' (a pre-configured subagent) or 'system_prompt' \
                      (an inline one), not both."
                         .to_string(),
-                );
+                ));
             }
             (Some(agent_name), None) => match self.find_profile(agent_name) {
                 Some(profile) => profile.clone(),
@@ -263,19 +263,21 @@ impl ToolHandler for DelegateTool {
                         .map(|p| p.name.as_str())
                         .collect::<Vec<_>>()
                         .join(", ");
-                    return Ok(format!(
+                    return Err(Error::ToolExecutionError(format!(
                         "Unknown subagent '{agent_name}'. Available subagents: {available}. \
                          Alternatively, define an inline subagent via 'system_prompt'."
-                    ));
+                    )));
                 }
             },
-            (None, Some(system_prompt)) => inline_profile(system_prompt, &args),
+            (None, Some(system_prompt)) => {
+                inline_profile(system_prompt, &args, self.base_config.max_iterations)
+            }
             (None, None) => {
-                return Ok(
+                return Err(Error::ToolExecutionError(
                     "Missing subagent: provide 'agent' (a pre-configured subagent) or \
                      'system_prompt' (an inline one)."
                         .to_string(),
-                );
+                ));
             }
         };
         let profile = &profile;
@@ -333,14 +335,21 @@ impl ToolHandler for DelegateTool {
 /// same [`DelegateTool::resolve_runtime`]/[`DelegateTool::build_executor`] path
 /// as named profiles, inline subagents get the identical sandbox, permission
 /// gate, and no-recursion guarantees.
-fn inline_profile(system_prompt: &str, args: &DelegateArgs) -> AgentProfile {
+///
+/// The LLM-supplied `max_iterations` is capped at `session_max_iterations`
+/// so an orchestrator can't grant its subagent a longer run than its own.
+fn inline_profile(
+    system_prompt: &str,
+    args: &DelegateArgs,
+    session_max_iterations: usize,
+) -> AgentProfile {
     AgentProfile {
         name: "inline".to_string(),
         description: String::new(),
         model: args.model.clone(),
         provider: args.provider.clone(),
         tools: args.tools.clone(),
-        max_iterations: args.max_iterations,
+        max_iterations: args.max_iterations.map(|n| n.min(session_max_iterations)),
         system_prompt: system_prompt.to_string(),
     }
 }
@@ -351,7 +360,6 @@ mod tests {
     use crate::core::client_io::NoClientIo;
     use crate::core::models::{Choice, ContentBlock, FinishReason, Role};
     use crate::core::permission::{AllowAll, PermissionDecision, PermissionGate};
-    use crate::error::Error;
     use crate::tools::SystemToolExecutor;
     use crate::tools::test_support::TurnHarness;
     use std::path::Path;
@@ -477,21 +485,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_returns_message_for_unknown_agent() {
+    async fn execute_errors_for_unknown_agent() {
         let llm = Arc::new(MockLlm::new(vec![]));
         let tool = make_tool(vec![sample_profile("reviewer", "desc")], llm);
         let harness = TurnHarness::new();
 
-        let result = tool
+        let err = tool
             .execute(
                 r#"{"agent": "ghost", "task": "do something"}"#,
                 &harness.turn(),
             )
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert!(result.contains("Unknown subagent 'ghost'"));
-        assert!(result.contains("reviewer"));
+        assert!(matches!(err, Error::ToolExecutionError(_)), "{err}");
+        assert!(err.to_string().contains("Unknown subagent 'ghost'"));
+        assert!(err.to_string().contains("reviewer"));
     }
 
     #[tokio::test]
@@ -689,15 +698,16 @@ mod tests {
         let tool = make_tool(vec![sample_profile("reviewer", "desc")], llm);
         let harness = TurnHarness::new();
 
-        let result = tool
+        let err = tool
             .execute(
                 r#"{"agent": "reviewer", "system_prompt": "You are X.", "task": "go"}"#,
                 &harness.turn(),
             )
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert!(result.contains("not both"));
+        assert!(matches!(err, Error::ToolExecutionError(_)), "{err}");
+        assert!(err.to_string().contains("not both"));
     }
 
     #[tokio::test]
@@ -706,12 +716,34 @@ mod tests {
         let tool = make_tool(vec![], llm);
         let harness = TurnHarness::new();
 
-        let result = tool
+        let err = tool
             .execute(r#"{"task": "go"}"#, &harness.turn())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::ToolExecutionError(_)), "{err}");
+        assert!(err.to_string().contains("Missing subagent"));
+    }
+
+    #[tokio::test]
+    async fn inline_max_iterations_is_capped_at_the_sessions() {
+        // The session allows 5 iterations; asking for 100 must not lift that.
+        let llm = Arc::new(MockLlm::new((0..10).map(|_| tool_call_choice()).collect()));
+        let tool = make_tool(vec![], llm);
+        let harness = TurnHarness::new();
+
+        let result = tool
+            .execute(
+                r#"{"system_prompt": "Loop.", "max_iterations": 100, "task": "go"}"#,
+                &harness.turn(),
+            )
             .await
             .unwrap();
 
-        assert!(result.contains("Missing subagent"));
+        assert!(
+            result.contains("reached its iteration limit (5)"),
+            "{result}"
+        );
     }
 
     #[tokio::test]
@@ -747,7 +779,7 @@ mod tests {
         )
         .unwrap();
 
-        let profile = inline_profile("You are X.", &args);
+        let profile = inline_profile("You are X.", &args, 10);
         assert_eq!(profile.name, "inline");
         assert_eq!(profile.system_prompt, "You are X.");
         assert_eq!(profile.tools, Some(vec!["read_file".to_string()]));
