@@ -32,6 +32,7 @@ pub struct Message {
 pub enum ContentBlock {
     Text { text: String },
     Thinking { thinking: String, signature: Option<String> }, // extended-thinking output; signature must round-trip unmodified
+    RedactedThinking { data: String },                        // encrypted thinking (Anthropic); round-trip unmodified
     Image { data: String, mime_type: String },                // data is base64-encoded
     ToolUse { id: String, name: String, arguments: String, signature: Option<String> }, // arguments is a JSON string; signature is an opaque provider token (Gemini's thoughtSignature) to round-trip unmodified
     ToolResult { tool_call_id: String, tool_name: String, content: String, is_error: bool },
@@ -72,7 +73,7 @@ pub struct Usage {
 }
 ```
 
-`content` is an ordered list of blocks rather than a single string — an assistant turn is commonly `[Thinking?, Text?, ToolUse*]`; a `Role::Tool` message holds exactly one `ToolResult` block; a `Role::User` message holds `Text`/`Image` blocks. `Message` has convenience accessors so you rarely need to pattern-match the enum directly:
+`content` is an ordered list of blocks rather than a single string — an assistant turn is commonly `[Thinking?, Text?, ToolUse*]`, though with interleaved thinking further `Thinking`/`RedactedThinking` blocks can sit between the others, and their order must be kept; a `Role::Tool` message holds exactly one `ToolResult` block; a `Role::User` message holds `Text`/`Image` blocks. `Message` has convenience accessors so you rarely need to pattern-match the enum directly:
 
 - `message.text() -> Option<String>` — concatenation of all `Text` blocks
 - `message.tool_calls() -> Vec<ToolUseBlock>` — all `ToolUse` blocks, each `{ id, name, arguments }`

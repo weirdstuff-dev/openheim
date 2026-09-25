@@ -391,7 +391,7 @@ for msg in &conv.messages {
 }
 ```
 
-`msg.content` is a `Vec<core::models::ContentBlock>` (`Text`/`Thinking`/`Image`/`ToolUse`/`ToolResult`) rather than a plain string — `msg.text()` concatenates the `Text` blocks. Use `msg.tool_calls()` / `msg.tool_result_block()` for the other block types; see `docs/custom-llm-provider.md` for the full `ContentBlock` shape.
+`msg.content` is a `Vec<core::models::ContentBlock>` (`Text`/`Thinking`/`RedactedThinking`/`Image`/`ToolUse`/`ToolResult`) rather than a plain string — `msg.text()` concatenates the `Text` blocks. Use `msg.tool_calls()` / `msg.tool_result_block()` for the other block types; see `docs/custom-llm-provider.md` for the full `ContentBlock` shape.
 
 `conv.meta.context_usage` is an `Option<core::models::Usage>` — see [Context usage](#context-usage) above.
 
