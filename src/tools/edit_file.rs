@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::core::models::Tool;
@@ -11,7 +12,7 @@ use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
 use super::ToolHandler;
-use super::args::{parse_args, require_str};
+use super::args::parse;
 use super::capabilities::{ToolCapabilities, ToolKindHint};
 use super::read_file::read_text;
 use super::sandbox::validate_path;
@@ -82,6 +83,17 @@ fn success_message(path: &Path, count: usize) -> String {
 /// work directory.
 pub struct EditFileTool;
 
+#[derive(Deserialize)]
+struct EditFileArgs {
+    path: String,
+    old_string: String,
+    new_string: String,
+    /// `Option` rather than a defaulted `bool` so an explicit `null` (which
+    /// models do send for optional flags) means "unset", not a parse error.
+    #[serde(default)]
+    replace_all: Option<bool>,
+}
+
 #[async_trait]
 impl ToolHandler for EditFileTool {
     fn definition(&self) -> Tool {
@@ -114,15 +126,16 @@ impl ToolHandler for EditFileTool {
     }
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
-        let args = parse_args(args)?;
-        let path = require_str(&args, "path")?;
-        let old_string = require_str(&args, "old_string")?;
-        let new_string = require_str(&args, "new_string")?;
-        let replace_all = args["replace_all"].as_bool().unwrap_or(false);
-        let validated = validate_path(path, turn.work_dir)?;
+        let args: EditFileArgs = parse(args)?;
+        let validated = validate_path(&args.path, turn.work_dir)?;
 
         let content = read_text(&validated, turn).await?;
-        let (edited, count) = apply_edit(&content, old_string, new_string, replace_all)?;
+        let (edited, count) = apply_edit(
+            &content,
+            &args.old_string,
+            &args.new_string,
+            args.replace_all.unwrap_or(false),
+        )?;
         write_text(&validated, &edited, turn).await?;
         Ok(success_message(&validated, count))
     }
@@ -299,5 +312,18 @@ mod tests {
             "unexpected error: {err}"
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
+    }
+
+    #[test]
+    fn args_struct_matches_schema() {
+        crate::tools::args::assert_args_match_schema::<EditFileArgs>(
+            &EditFileTool,
+            serde_json::json!({
+                "path": "a.txt",
+                "old_string": "a",
+                "new_string": "b",
+                "replace_all": true
+            }),
+        );
     }
 }

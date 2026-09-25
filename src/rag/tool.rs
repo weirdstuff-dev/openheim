@@ -6,13 +6,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::core::models::Tool;
 use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 use crate::tools::ToolHandler;
-use crate::tools::args::parse_args;
+use crate::tools::args::{NonEmptyString, parse};
 use crate::tools::capabilities::{ToolCapabilities, ToolKindHint};
 
 use super::LongTermMemory;
@@ -30,6 +31,39 @@ const MAX_TOP_K: usize = 20;
 /// Longest note accepted, in characters. Memory is for facts and
 /// preferences, not documents.
 const MAX_NOTE_CHARS: usize = 4000;
+
+/// Rejects a note over [`MAX_NOTE_CHARS`]; shared by `remember` and `edit_memory`.
+fn check_note_len(content: &str) -> Result<()> {
+    if content.chars().count() > MAX_NOTE_CHARS {
+        return Err(Error::ToolExecutionError(format!(
+            "note is longer than {MAX_NOTE_CHARS} characters; split it into smaller notes"
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RememberArgs {
+    content: NonEmptyString,
+}
+
+#[derive(Deserialize)]
+struct SearchMemoryArgs {
+    query: NonEmptyString,
+    #[serde(default)]
+    top_k: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct EditMemoryArgs {
+    id: i64,
+    content: NonEmptyString,
+}
+
+#[derive(Deserialize)]
+struct ForgetArgs {
+    id: i64,
+}
 
 /// Stores a note in long-term memory.
 pub struct RememberTool {
@@ -66,18 +100,9 @@ impl ToolHandler for RememberTool {
     }
 
     async fn execute(&self, args: &str, _turn: &TurnContext<'_>) -> Result<String> {
-        let args = parse_args(args)?;
-        let content = args["content"]
-            .as_str()
-            .map(str::trim)
-            .filter(|c| !c.is_empty())
-            .ok_or_else(|| Error::ParseError("Missing 'content' argument".to_string()))?;
-        if content.chars().count() > MAX_NOTE_CHARS {
-            return Err(Error::ToolExecutionError(format!(
-                "note is longer than {MAX_NOTE_CHARS} characters; split it into smaller notes"
-            )));
-        }
-        let record = self.memory.remember(content).await?;
+        let args: RememberArgs = parse(args)?;
+        check_note_len(&args.content)?;
+        let record = self.memory.remember(&args.content).await?;
         Ok(format!("Remembered as memory #{}.", record.id))
     }
 
@@ -136,17 +161,10 @@ impl ToolHandler for SearchMemoryTool {
     }
 
     async fn execute(&self, args: &str, _turn: &TurnContext<'_>) -> Result<String> {
-        let args = parse_args(args)?;
-        let query = args["query"]
-            .as_str()
-            .map(str::trim)
-            .filter(|q| !q.is_empty())
-            .ok_or_else(|| Error::ParseError("Missing 'query' argument".to_string()))?;
-        let top_k = args["top_k"]
-            .as_u64()
-            .map(|k| (k as usize).clamp(1, MAX_TOP_K));
+        let args: SearchMemoryArgs = parse(args)?;
+        let top_k = args.top_k.map(|k| k.clamp(1, MAX_TOP_K));
 
-        let hits = self.memory.search(query, top_k).await?;
+        let hits = self.memory.search(&args.query, top_k).await?;
         if hits.is_empty() {
             let stats = self.memory.stats().await?;
             if stats.memories == 0 {
@@ -219,21 +237,9 @@ impl ToolHandler for EditMemoryTool {
     }
 
     async fn execute(&self, args: &str, _turn: &TurnContext<'_>) -> Result<String> {
-        let args = parse_args(args)?;
-        let id = args["id"]
-            .as_i64()
-            .ok_or_else(|| Error::ParseError("Missing or non-integer 'id' argument".to_string()))?;
-        let content = args["content"]
-            .as_str()
-            .map(str::trim)
-            .filter(|c| !c.is_empty())
-            .ok_or_else(|| Error::ParseError("Missing 'content' argument".to_string()))?;
-        if content.chars().count() > MAX_NOTE_CHARS {
-            return Err(Error::ToolExecutionError(format!(
-                "note is longer than {MAX_NOTE_CHARS} characters; split it into smaller notes"
-            )));
-        }
-        match self.memory.edit(id, content).await? {
+        let EditMemoryArgs { id, content } = parse(args)?;
+        check_note_len(&content)?;
+        match self.memory.edit(id, &content).await? {
             Some(_) => Ok(format!("Updated memory #{id}.")),
             None => Ok(format!("No memory #{id} exists; nothing to edit.")),
         }
@@ -281,10 +287,7 @@ impl ToolHandler for ForgetTool {
     }
 
     async fn execute(&self, args: &str, _turn: &TurnContext<'_>) -> Result<String> {
-        let args = parse_args(args)?;
-        let id = args["id"]
-            .as_i64()
-            .ok_or_else(|| Error::ParseError("Missing or non-integer 'id' argument".to_string()))?;
+        let ForgetArgs { id } = parse(args)?;
         if self.memory.forget(id).await? {
             Ok(format!("Forgot memory #{id}."))
         } else {
@@ -505,5 +508,24 @@ mod tests {
         assert!(edit.execute(r#"{"content":"x"}"#, &turn).await.is_err());
         let huge = json!({ "id": 1, "content": "x".repeat(MAX_NOTE_CHARS + 1) }).to_string();
         assert!(edit.execute(&huge, &turn).await.is_err());
+    }
+
+    #[test]
+    fn args_structs_match_schemas() {
+        use crate::tools::args::assert_args_match_schema;
+        let memory = keyword();
+        assert_args_match_schema::<RememberArgs>(
+            &RememberTool::new(memory.clone()),
+            json!({"content": "note"}),
+        );
+        assert_args_match_schema::<SearchMemoryArgs>(
+            &SearchMemoryTool::new(memory.clone()),
+            json!({"query": "note", "top_k": 3}),
+        );
+        assert_args_match_schema::<EditMemoryArgs>(
+            &EditMemoryTool::new(memory.clone()),
+            json!({"id": 1, "content": "note"}),
+        );
+        assert_args_match_schema::<ForgetArgs>(&ForgetTool::new(memory), json!({"id": 1}));
     }
 }

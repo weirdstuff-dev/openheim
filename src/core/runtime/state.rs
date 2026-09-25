@@ -5,7 +5,10 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Instant,
 };
 
@@ -14,19 +17,22 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    config::{AgentConfig, AppConfig, build_http_client, create_client},
+    config::{AgentConfig, AppConfig, RuntimePaths, build_http_client, create_client},
     core::{
         agent::run_agent_streaming_with_history,
         client_io::ClientIo,
         models::{ContentBlock, Message, Role, StopReason as CoreStopReason, StreamEvent},
-        permission::PermissionGate,
+        permission::{Approvals, PermissionGate, RememberingGate},
         turn::TurnContext,
     },
     error::{Error, Result},
     llm::LlmClient,
-    memory::{Conversation, ConversationMeta, MemoryContext},
+    memory::{ConversationMeta, HistoryManager, MemoryContext},
     subagents::SubagentLoader,
-    tools::{DelegateTool, ScopedExecutor, SystemToolExecutor, ToolExecutor, ToolHandler},
+    tools::{
+        DelegateTool, OverlayExecutor, ScopedExecutor, SystemToolExecutor, ToolExecutor,
+        ToolHandler,
+    },
 };
 
 use super::{
@@ -40,9 +46,14 @@ use super::{
 type Sessions = Arc<RwLock<HashMap<String, SessionState>>>;
 
 pub struct AgentState {
-    pub llm: Arc<dyn LlmClient>,
+    /// Client for `config`. Private, together with `config`: sessions reuse
+    /// this client only while their config matches `config`
+    /// (`client_for_config`), so the two must never be changed separately.
+    llm: Arc<dyn LlmClient>,
     pub executor: Arc<dyn ToolExecutor>,
-    pub config: AgentConfig,
+    /// The default model/provider new sessions start on (read it via
+    /// [`Self::config`]).
+    config: AgentConfig,
     pub app_config: AppConfig,
     pub memory: MemoryContext,
     /// Long-term memory behind the `remember` / `search_memory` /
@@ -53,9 +64,13 @@ pub struct AgentState {
     pub mcp_statuses: Vec<crate::mcp::McpServerStatus>,
     /// Resolved work directory used as the sandbox boundary for every session.
     pub work_dir: PathBuf,
-    /// `pub(crate)` (not private) so `acp::AcpPermissionGate` — which lives
-    /// outside this module — can read remembered approvals directly.
-    pub(crate) sessions: Sessions,
+    /// Resolved data directory and config file (read via [`Self::paths`]).
+    paths: RuntimePaths,
+    sessions: Sessions,
+    /// The `delegate_task` registered in `executor`, bound to the startup
+    /// model. `prompt` rebinds a copy to the session's live model each turn
+    /// (see [`DelegateTool::for_session`]).
+    delegate: DelegateTool,
 }
 
 impl AgentState {
@@ -63,9 +78,12 @@ impl AgentState {
     /// `read_file`, `write_file`, …) and any MCP-sourced tools. Every handler
     /// receives the turn's [`TurnContext`] — `work_dir`, cancel token, client
     /// I/O — so custom tools can enforce the same boundary the built-ins do.
+    /// `paths` says where subagent profiles and (by default) the memory
+    /// database live; `memory` should already be rooted at `paths.data_dir`.
     pub async fn new(
         config: AgentConfig,
         app_config: AppConfig,
+        paths: RuntimePaths,
         memory: MemoryContext,
         custom_tools: Vec<Box<dyn ToolHandler>>,
     ) -> Result<Self> {
@@ -86,7 +104,10 @@ impl AgentState {
             sys_executor.register(tool);
         }
         #[cfg(feature = "rag")]
-        let long_term_memory = Arc::new(crate::rag::LongTermMemory::from_config(&app_config)?);
+        let long_term_memory = Arc::new(crate::rag::LongTermMemory::from_config(
+            &app_config,
+            &paths.data_dir,
+        )?);
         #[cfg(feature = "rag")]
         {
             let m = &long_term_memory;
@@ -101,20 +122,16 @@ impl AgentState {
         // It's built from a snapshot of the registry taken *before* it
         // registers itself, so subagents structurally never see
         // `delegate_task` and can't delegate recursively.
-        let agents_dir = app_config
-            .data_dir
-            .as_deref()
-            .expect("data_dir is resolved by OpenheimBuilder::build before AgentState::new")
-            .join("agents");
-        let profiles = SubagentLoader::with_dir(agents_dir).load()?;
+        let profiles = SubagentLoader::with_dir(paths.data_dir.join("agents")).load()?;
         let base: Arc<dyn ToolExecutor> = Arc::new(sys_executor.clone());
-        sys_executor.register(Box::new(DelegateTool::new(
+        let delegate = DelegateTool::new(
             base,
             profiles,
             llm.clone(),
             app_config.clone(),
             config.clone(),
-        )));
+        );
+        sys_executor.register(Box::new(delegate.clone()));
         let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
 
         Ok(Self {
@@ -127,8 +144,20 @@ impl AgentState {
             long_term_memory,
             mcp_statuses,
             work_dir,
+            paths,
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            delegate,
         })
+    }
+
+    /// The default model/provider new sessions start on.
+    pub fn config(&self) -> &AgentConfig {
+        &self.config
+    }
+
+    /// The data directory and config file this client resolved at build time.
+    pub fn paths(&self) -> &RuntimePaths {
+        &self.paths
     }
 
     pub async fn new_session(
@@ -156,7 +185,7 @@ impl AgentState {
                     cwd,
                     skills,
                     cancel: CancellationToken::new(),
-                    approved_tools: HashMap::new(),
+                    approved_tools: Approvals::default(),
                     mode: AgentMode::Code,
                     prompt_lock: Arc::new(Mutex::new(())),
                     last_active: Instant::now(),
@@ -233,19 +262,25 @@ impl AgentState {
         Ok(())
     }
 
-    /// Persists `conv`'s full current state off the async runtime thread,
-    /// logging (not propagating) any failure — history durability is
-    /// best-effort and must never fail a turn that otherwise succeeded.
-    /// `context` is folded into the warning log line to identify which of
-    /// this method's call sites failed.
-    async fn persist_conversation(&self, conv: &Conversation, context: &str) {
+    /// Runs the history write `write` off the async runtime thread, logging
+    /// (not propagating) any failure — history durability is best-effort and
+    /// must never fail a turn that otherwise succeeded. Returns whether it
+    /// succeeded. `context` names the write in the warning log line.
+    async fn persist(
+        &self,
+        context: &str,
+        write: impl FnOnce(&HistoryManager) -> Result<()> + Send + 'static,
+    ) -> bool {
         let history = self.memory.history.clone();
-        let conv = conv.clone();
-        if let Err(e) = tokio::task::spawn_blocking(move || history.save_conversation(&conv))
+        match tokio::task::spawn_blocking(move || write(&history))
             .await
             .unwrap_or_else(|e| Err(Error::from(e)))
         {
-            tracing::warn!("failed to {context}: {e}");
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("failed to {context}: {e}");
+                false
+            }
         }
     }
 
@@ -271,9 +306,9 @@ impl AgentState {
         F: FnMut(StreamEvent) + Send,
     {
         let uuid = Uuid::parse_str(session_id)
-            .map_err(|_| Error::ParseError("invalid session id format".to_string()))?;
+            .map_err(|_| Error::InvalidArgument("invalid session id format".to_string()))?;
 
-        let (llm, executor, config, chat_id, skills, cwd, cancel, _prompt_guard) = {
+        let (llm, executor, config, chat_id, skills, cwd, cancel, approvals, _prompt_guard) = {
             // Write lock: each new prompt turn gets a fresh cancellation token,
             // since a token can only ever transition uncancelled -> cancelled
             // and must not leak a previous turn's cancellation into this one.
@@ -309,7 +344,15 @@ impl AgentState {
                     .collect();
                 Arc::new(ScopedExecutor::new(self.executor.clone(), read_only))
             } else {
-                self.executor.clone()
+                // Subagents without a model of their own fall back to this
+                // session's model, not the one `delegate_task` was built
+                // with at startup. (Architect mode needs no override:
+                // `delegate_task` isn't read-only, so it's filtered out.)
+                let delegate = self.delegate.for_session(llm.clone(), s.config.clone());
+                Arc::new(OverlayExecutor::new(
+                    self.executor.clone(),
+                    Arc::new(delegate),
+                ))
             };
             (
                 llm,
@@ -319,9 +362,17 @@ impl AgentState {
                 s.skills.clone(),
                 s.cwd.clone(),
                 s.cancel.clone(),
+                s.approved_tools.clone(),
                 prompt_guard,
             )
         };
+        // The caller's gate only asks; remembering `*Always` answers for the
+        // rest of the session happens here, the same for every front-end.
+        let permission_gate: Arc<dyn PermissionGate> = Arc::new(RememberingGate::new(
+            permission_gate,
+            approvals,
+            executor.clone(),
+        ));
 
         // Cross-process write lease for this turn only (see `memory::lease`).
         // Held until this function returns — success, error, or cancellation
@@ -334,27 +385,49 @@ impl AgentState {
         // does, in any process.
         let _lease = self.memory.history.acquire_lease(&uuid)?;
 
-        let (mut conversation, prompt_builder) = self.memory.prepare(
-            Some(chat_id),
-            &skills,
-            Some(config.model.clone()),
-            Some(config.provider_name.clone()),
-        )?;
+        // Loads the conversation, `system.md` and skills from disk, so it runs
+        // off the async runtime like every other history read.
+        let memory = self.memory.clone();
+        let (model, provider) = (config.model.clone(), config.provider_name.clone());
+        let (mut conversation, prompt_builder) = tokio::task::spawn_blocking(move || {
+            memory.prepare(Some(chat_id), &skills, Some(model), Some(provider))
+        })
+        .await
+        .map_err(Error::from)??;
 
         conversation.meta.cwd = Some(cwd);
-        conversation.messages.push(Message {
+        // `prepare` only applies model/provider when it creates the
+        // conversation; an existing one comes back with whatever was saved
+        // before. Overwrite with the session's live values so a mid-session
+        // model switch is persisted below and survives a reload instead of
+        // reverting to the original model.
+        conversation.meta.model = Some(config.model.clone());
+        conversation.meta.provider = Some(config.provider_name.clone());
+        let user_message = Message {
             role: Role::User,
             content: prompt,
-        });
+        };
+        conversation.meta.fill_title_from(&user_message);
+        conversation.messages.push(user_message.clone());
 
-        // Full checkpoint before the turn starts: durably records this
-        // turn's new user message even if the turn crashes before producing
-        // anything else, so the `append_message` calls below have a `.jsonl`
-        // log that already reflects everything up to this point to append
-        // onto.
-        self.persist_conversation(&conversation, "persist conversation before turn start")
+        // Record the turn's metadata and user message before the turn starts,
+        // so both survive a crash mid-turn. Everything earlier is already in
+        // the log, so this appends rather than rewriting it.
+        let meta = conversation.meta.clone();
+        let started_ok = self
+            .persist("record turn start", move |history| {
+                history.save_meta(&meta)?;
+                history.append_message(&chat_id, &user_message)
+            })
             .await;
 
+        // Set once any write fails; from then on nothing more is appended and
+        // the end of the turn rewrites the whole log instead. Appending past
+        // a failure would leave a gap in the log (or bury a half-written line
+        // mid-file), and `save_conversation` then refuses the rewrite, or
+        // can't read the log at all, so the history could never recover.
+        let write_failed = AtomicBool::new(!started_ok);
+        let write_failed_flag = &write_failed;
         let history_for_append = self.memory.history.clone();
         // The work-directory boundary and client I/O hook reach every tool
         // through this context; there is no per-session executor wrapper.
@@ -380,9 +453,11 @@ impl AgentState {
                 // spawning it would only risk two concurrent appends landing
                 // out of order.
                 if let StreamEvent::MessageAppended { message } = &event
+                    && !write_failed_flag.load(Ordering::Relaxed)
                     && let Err(e) = history_for_append.append_message(&chat_id, message)
                 {
                     tracing::warn!("failed to append message to history: {e}");
+                    write_failed_flag.store(true, Ordering::Relaxed);
                 }
                 on_update(event);
             },
@@ -400,12 +475,24 @@ impl AgentState {
             conversation.meta.context_usage = r.context_usage;
         }
 
-        // Final full checkpoint: reconciles whatever `append_message` calls
-        // landed above into one consistent, complete log, and is the only
-        // save at all for a turn that produced no messages (cancelled or
-        // errored before the first LLM response).
-        self.persist_conversation(&conversation, "save conversation")
+        // Every message is normally in the log by now, so only the metadata
+        // (context usage, `updated_at`) needs writing. If any write above
+        // failed, rewrite the whole log from memory instead, which
+        // `save_conversation` refuses to do if another process has written
+        // to it meanwhile.
+        if !write_failed.load(Ordering::Relaxed) {
+            let meta = conversation.meta.clone();
+            self.persist("save conversation metadata", move |history| {
+                history.save_meta(&meta)
+            })
             .await;
+        } else {
+            self.persist(
+                "rewrite conversation after a failed write",
+                move |history| history.save_conversation(&conversation),
+            )
+            .await;
+        }
 
         run_result.map(|r| r.stop_reason)
     }
@@ -430,7 +517,7 @@ impl AgentState {
     /// resolves.
     pub async fn load_session(&self, session_id: &str, cwd: PathBuf) -> Result<LoadedSession> {
         let uuid = Uuid::parse_str(session_id)
-            .map_err(|_| Error::ParseError("invalid session id format".to_string()))?;
+            .map_err(|_| Error::InvalidArgument("invalid session id format".to_string()))?;
 
         let history = self.memory.history.clone();
         let conversation = tokio::task::spawn_blocking(move || history.load_conversation(&uuid))
@@ -486,7 +573,7 @@ impl AgentState {
                     cwd,
                     skills: conversation.meta.skills.clone(),
                     cancel: CancellationToken::new(),
-                    approved_tools: HashMap::new(),
+                    approved_tools: Approvals::default(),
                     mode: AgentMode::Code,
                     prompt_lock: Arc::new(Mutex::new(())),
                     last_active: Instant::now(),
@@ -548,8 +635,6 @@ pub struct LoadedSession {
 
 #[cfg(test)]
 mod prompt_lease_ordering_tests {
-    use std::collections::HashMap;
-
     use tempfile::tempdir;
 
     use crate::memory::history::HistoryManager;
@@ -569,7 +654,7 @@ mod prompt_lease_ordering_tests {
             cwd: PathBuf::from("/tmp"),
             skills: vec![],
             cancel: CancellationToken::new(),
-            approved_tools: HashMap::new(),
+            approved_tools: Approvals::default(),
             mode: AgentMode::Code,
             prompt_lock: Arc::new(Mutex::new(())),
             last_active: Instant::now(),
@@ -619,43 +704,25 @@ mod prompt_lease_ordering_tests {
 
 #[cfg(test)]
 mod new_session_tests {
-    use std::collections::BTreeMap;
-
     use tempfile::tempdir;
 
-    use crate::config::{ProviderConfig, TuiConfig};
+    use crate::config::ProviderConfig;
 
     use super::*;
 
     /// A minimal, network-free `AgentState`: one provider/model, empty MCP
     /// servers, everything rooted at a temp `data_dir`.
     async fn sample_state(dir: &std::path::Path) -> AgentState {
-        let mut providers = BTreeMap::new();
-        providers.insert(
+        let mut app_config = AppConfig::for_tests("mock");
+        app_config.max_iterations = 5;
+        app_config.work_dir = Some(dir.to_path_buf());
+        app_config.providers.insert(
             "mock".to_string(),
-            ProviderConfig {
-                api_base: "https://example.com".into(),
-                default_model: "mock-model".into(),
-                models: vec!["mock-model".into()],
-                env_var: None,
-                api_key: Some("key".into()),
-                timeout_secs: None,
-                max_tokens: None,
-                thinking: None,
-            },
+            ProviderConfig::for_tests("https://example.com", &["mock-model", "other-model"]),
         );
-        let app_config = AppConfig {
-            default_provider: "mock".into(),
-            max_iterations: 5,
-            tui: TuiConfig::default(),
-            providers,
-            mcp_servers: BTreeMap::new(),
-            default_skills: vec![],
-            work_dir: Some(dir.to_path_buf()),
-            allow_shell: false,
-            memory: None,
-            data_dir: Some(dir.to_path_buf()),
-            config_path: PathBuf::new(),
+        let paths = RuntimePaths {
+            data_dir: dir.to_path_buf(),
+            config_path: dir.join("config.toml"),
         };
         let agent_config = AgentConfig::new(
             "mock".into(),
@@ -665,7 +732,7 @@ mod new_session_tests {
             5,
         );
         let memory = MemoryContext::new(vec![], dir).unwrap();
-        AgentState::new(agent_config, app_config, memory, vec![])
+        AgentState::new(agent_config, app_config, paths, memory, vec![])
             .await
             .unwrap()
     }
@@ -682,5 +749,272 @@ mod new_session_tests {
             .new_session(Some("nope"), vec![], dir.path().to_path_buf())
             .await;
         assert!(result.is_err(), "{result:?}");
+    }
+
+    /// Always answers with a final text reply, so a turn completes in one
+    /// LLM call without touching the network.
+    struct EndTurnLlm;
+
+    #[async_trait::async_trait]
+    impl LlmClient for EndTurnLlm {
+        async fn send(
+            &self,
+            _messages: &[Message],
+            _tools: &[crate::core::models::Tool],
+        ) -> Result<crate::core::models::Choice> {
+            Ok(crate::core::models::Choice {
+                message: Message::assistant("ok"),
+                finish_reason: Some(crate::core::models::FinishReason::Stop),
+                usage: None,
+            })
+        }
+    }
+
+    /// Runs one "hi" turn on `session_id`, allowing every tool call.
+    async fn run_turn(state: &AgentState, session_id: &str) {
+        state
+            .prompt(
+                session_id,
+                vec![ContentBlock::from("hi")],
+                Arc::new(crate::core::permission::AllowAll),
+                Arc::new(crate::core::client_io::NoClientIo),
+                |_| {},
+            )
+            .await
+            .unwrap();
+    }
+
+    /// A state answering every turn with `EndTurnLlm`, plus a fresh session.
+    async fn state_with_session(dir: &std::path::Path) -> (AgentState, String) {
+        std::fs::write(dir.join("system.md"), "You are a test agent.").unwrap();
+        let mut state = sample_state(dir).await;
+        state.llm = Arc::new(EndTurnLlm);
+        let session_id = state
+            .new_session(None, vec![], dir.to_path_buf())
+            .await
+            .unwrap();
+        (state, session_id)
+    }
+
+    // A turn appends to the message log instead of rewriting it: a rewrite
+    // replaces the file (temp file + rename), which gives it a new inode.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn turn_appends_to_the_log_instead_of_rewriting_it() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempdir().unwrap();
+        let (state, session_id) = state_with_session(dir.path()).await;
+        let log = dir
+            .path()
+            .join("history")
+            .join(format!("{session_id}.jsonl"));
+
+        run_turn(&state, &session_id).await;
+        let inode = std::fs::metadata(&log).unwrap().ino();
+        run_turn(&state, &session_id).await;
+        assert_eq!(
+            std::fs::metadata(&log).unwrap().ino(),
+            inode,
+            "the second turn must append, not rewrite the log"
+        );
+
+        let uuid = Uuid::parse_str(&session_id).unwrap();
+        let saved = state.memory.history.load_conversation(&uuid).unwrap();
+        let texts: Vec<_> = saved.messages.iter().filter_map(Message::text).collect();
+        assert_eq!(texts, ["hi", "ok", "hi", "ok"]);
+        assert_eq!(saved.meta.title.as_deref(), Some("hi"));
+        assert_eq!(saved.meta.model.as_deref(), Some("mock-model"));
+    }
+
+    // If an append fails, the end of the turn rewrites the whole log from
+    // memory, so the history still ends up complete.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_append_falls_back_to_a_full_rewrite() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let (state, session_id) = state_with_session(dir.path()).await;
+        let log = dir
+            .path()
+            .join("history")
+            .join(format!("{session_id}.jsonl"));
+
+        run_turn(&state, &session_id).await;
+        // Appends open the log for writing, so they now fail; the rewrite
+        // replaces the file through its (still writable) directory.
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o444)).unwrap();
+        run_turn(&state, &session_id).await;
+
+        let uuid = Uuid::parse_str(&session_id).unwrap();
+        let saved = state.memory.history.load_conversation(&uuid).unwrap();
+        let texts: Vec<_> = saved.messages.iter().filter_map(Message::text).collect();
+        assert_eq!(texts, ["hi", "ok", "hi", "ok"]);
+    }
+
+    /// Makes the message log writable again, then replies "ok": a write
+    /// failure that clears up partway through a turn.
+    #[cfg(unix)]
+    struct RestoreLogPermissionsLlm(std::path::PathBuf);
+
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl LlmClient for RestoreLogPermissionsLlm {
+        async fn send(
+            &self,
+            messages: &[Message],
+            tools: &[crate::core::models::Tool],
+        ) -> Result<crate::core::models::Choice> {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o644)).unwrap();
+            EndTurnLlm.send(messages, tools).await
+        }
+    }
+
+    // Regression test (PR #61 review): after one failed write, later appends
+    // kept going. Here the user message's append fails but the reply's would
+    // succeed, which left a gap in the log that the end-of-turn rewrite then
+    // refused to overwrite, losing the user message for good.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_transient_write_failure_still_ends_with_a_complete_log() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let (mut state, session_id) = state_with_session(dir.path()).await;
+        let log = dir
+            .path()
+            .join("history")
+            .join(format!("{session_id}.jsonl"));
+
+        run_turn(&state, &session_id).await;
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o444)).unwrap();
+        state.llm = Arc::new(RestoreLogPermissionsLlm(log.clone()));
+        run_turn(&state, &session_id).await;
+
+        let uuid = Uuid::parse_str(&session_id).unwrap();
+        let saved = state.memory.history.load_conversation(&uuid).unwrap();
+        let texts: Vec<_> = saved.messages.iter().filter_map(Message::text).collect();
+        assert_eq!(texts, ["hi", "ok", "hi", "ok"]);
+    }
+
+    // Regression test: a model switched after the conversation's first turn
+    // was never written to its meta file (`resolve_conversation` returns an
+    // existing conversation as saved), so reloading the session brought
+    // back the original model.
+    #[tokio::test]
+    async fn model_switch_is_persisted_to_conversation_meta() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
+        let mut state = sample_state(dir.path()).await;
+        state.llm = Arc::new(EndTurnLlm);
+
+        let session_id = state
+            .new_session(None, vec![], dir.path().to_path_buf())
+            .await
+            .unwrap();
+
+        // First turn creates the conversation on disk under the default model.
+        run_turn(&state, &session_id).await;
+
+        state
+            .set_session_model(&session_id, "other-model")
+            .await
+            .unwrap();
+        // `client_for_config` reuses `state.llm` only when the session's
+        // config matches `state.config`; line them up so the second turn
+        // stays on the mock instead of building a real HTTP client.
+        state.config = state.app_config.resolve(Some("other-model")).unwrap();
+        run_turn(&state, &session_id).await;
+
+        let uuid = Uuid::parse_str(&session_id).unwrap();
+        let saved = state.memory.history.load_conversation(&uuid).unwrap();
+        assert_eq!(saved.meta.model.as_deref(), Some("other-model"));
+        assert_eq!(saved.meta.provider.as_deref(), Some("mock"));
+    }
+
+    /// Answers each call with the next scripted choice, whoever makes it —
+    /// the orchestrator and any subagent share it when they share a client.
+    struct ScriptedLlm(std::sync::Mutex<std::collections::VecDeque<crate::core::models::Choice>>);
+
+    #[async_trait::async_trait]
+    impl LlmClient for ScriptedLlm {
+        async fn send(
+            &self,
+            _messages: &[Message],
+            _tools: &[crate::core::models::Tool],
+        ) -> Result<crate::core::models::Choice> {
+            self.0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| Error::Other("script exhausted".into()))
+        }
+    }
+
+    // Regression test: `delegate_task` captured the startup model/client, so
+    // a subagent with no model of its own ignored the session's model switch.
+    // Here the startup client is a real HTTP client (never reachable from
+    // the test) and the session's client is the script, so the subagent's
+    // answer only comes back if it ran on the session's client.
+    #[tokio::test]
+    async fn subagent_without_model_override_runs_on_the_sessions_model() {
+        use crate::core::models::{Choice, FinishReason};
+
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
+        let mut state = sample_state(dir.path()).await;
+
+        let delegate_call = Choice {
+            message: Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: crate::tools::DELEGATE_TOOL_NAME.into(),
+                    arguments: r#"{"system_prompt":"You are a helper.","task":"say hi"}"#.into(),
+                }],
+            },
+            finish_reason: Some(FinishReason::ToolCalls),
+            usage: None,
+        };
+        let text = |t: &str| Choice {
+            message: Message::assistant(t),
+            finish_reason: Some(FinishReason::Stop),
+            usage: None,
+        };
+        state.llm = Arc::new(ScriptedLlm(std::sync::Mutex::new(
+            [delegate_call, text("hi from the subagent"), text("done")].into(),
+        )));
+
+        let session_id = state
+            .new_session(None, vec![], dir.path().to_path_buf())
+            .await
+            .unwrap();
+        state
+            .set_session_model(&session_id, "other-model")
+            .await
+            .unwrap();
+        // Same alignment as the test above: keeps the session's turn on
+        // `state.llm` (the script) instead of building a real client.
+        state.config = state.app_config.resolve(Some("other-model")).unwrap();
+
+        let mut tool_results = Vec::new();
+        state
+            .prompt(
+                &session_id,
+                vec![ContentBlock::from("delegate something")],
+                Arc::new(crate::core::permission::AllowAll),
+                Arc::new(crate::core::client_io::NoClientIo),
+                |event| {
+                    if let StreamEvent::ToolResult { result, .. } = event {
+                        tool_results.push(result);
+                    }
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(tool_results, vec!["hi from the subagent".to_string()]);
     }
 }

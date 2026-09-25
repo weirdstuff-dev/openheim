@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::json;
 use tokio::fs;
 
@@ -11,7 +12,7 @@ use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
 use super::ToolHandler;
-use super::args::{parse_args, require_str};
+use super::args::parse;
 use super::capabilities::{ToolCapabilities, ToolKindHint};
 use super::sandbox::validate_path;
 
@@ -49,6 +50,12 @@ async fn write_local(path: &Path, content: &str) -> Result<()> {
 /// must be inside the work directory.
 pub struct WriteFileTool;
 
+#[derive(Deserialize)]
+struct WriteFileArgs {
+    path: String,
+    content: String,
+}
+
 #[async_trait]
 impl ToolHandler for WriteFileTool {
     fn definition(&self) -> Tool {
@@ -73,11 +80,9 @@ impl ToolHandler for WriteFileTool {
     }
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
-        let args = parse_args(args)?;
-        let path = require_str(&args, "path")?;
-        let content = require_str(&args, "content")?;
-        let validated = validate_path(path, turn.work_dir)?;
-        write_text(&validated, content, turn).await?;
+        let args: WriteFileArgs = parse(args)?;
+        let validated = validate_path(&args.path, turn.work_dir)?;
+        write_text(&validated, &args.content, turn).await?;
         Ok(format!("Successfully wrote to {}", validated.display()))
     }
 
@@ -210,5 +215,13 @@ mod tests {
             "unexpected error: {err}"
         );
         assert!(!escape_target.exists());
+    }
+
+    #[test]
+    fn args_struct_matches_schema() {
+        crate::tools::args::assert_args_match_schema::<WriteFileArgs>(
+            &WriteFileTool,
+            serde_json::json!({"path": "a.txt", "content": "hi"}),
+        );
     }
 }

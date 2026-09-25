@@ -1,4 +1,4 @@
-use super::types::{AgentConfig, AppConfig, EmbeddingConfig, ProviderConfig};
+use super::types::{AgentConfig, AppConfig, EmbeddingConfig, ProviderConfig, ProviderKind};
 use crate::error::{Error, Result};
 
 fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<()> {
@@ -43,15 +43,17 @@ impl AppConfig {
         provider: &ProviderConfig,
         model: String,
     ) -> AgentConfig {
+        let kind = provider.resolve_kind(provider_name);
         AgentConfig {
             provider_name: provider_name.to_string(),
+            kind,
             api_base: provider.api_base.clone(),
             api_key: provider.resolve_api_key(),
             model,
             max_iterations: self.max_iterations,
             timeout_secs: provider.resolve_timeout_secs(),
             max_tokens: provider.max_tokens,
-            thinking: provider.resolve_thinking(provider_name),
+            thinking: provider.resolve_thinking(kind),
         }
     }
 
@@ -129,15 +131,17 @@ impl AppConfig {
             .ok_or_else(|| {
                 Error::config("[memory] embedding_model is required when embedding_provider is set")
             })?;
-        if provider_name == "anthropic" {
-            return Err(Error::config(
-                "[memory] embedding_provider 'anthropic' has no embeddings API; use an OpenAI-compatible provider or 'gemini'",
-            ));
-        }
         let provider = self.get_provider(provider_name)?;
+        let kind = provider.resolve_kind(provider_name);
+        if kind == ProviderKind::Anthropic {
+            return Err(Error::config(format!(
+                "[memory] embedding_provider '{provider_name}' is an Anthropic provider, which has no embeddings API; use an OpenAI-compatible or Gemini provider"
+            )));
+        }
         validate_provider(provider_name, provider)?;
         Ok(Some(EmbeddingConfig {
             provider_name: provider_name.to_string(),
+            kind,
             api_base: provider.api_base.clone(),
             api_key: provider.resolve_api_key(),
             model: model.to_string(),
@@ -158,49 +162,30 @@ impl AppConfig {
 mod tests {
     use super::*;
     use crate::config::ProviderConfig;
-    use std::collections::BTreeMap;
 
     fn sample_config() -> AppConfig {
-        let mut providers = BTreeMap::new();
-        providers.insert(
+        let mut config = AppConfig::for_tests("openai");
+        config.max_iterations = 5;
+        config.providers.insert(
             "openai".into(),
             ProviderConfig {
-                api_base: "https://api.openai.com/v1".into(),
-                default_model: "gpt-4".into(),
-                models: vec!["gpt-4".into(), "gpt-3.5-turbo".into()],
-                env_var: None,
                 api_key: Some("test-key".into()),
                 timeout_secs: Some(60),
                 max_tokens: Some(4096),
-                thinking: None,
+                ..ProviderConfig::for_tests(
+                    "https://api.openai.com/v1",
+                    &["gpt-4", "gpt-3.5-turbo"],
+                )
             },
         );
-        providers.insert(
+        config.providers.insert(
             "anthropic".into(),
             ProviderConfig {
-                api_base: "https://api.anthropic.com/v1".into(),
-                default_model: "claude-3".into(),
-                models: vec!["claude-3".into()],
-                env_var: None,
                 api_key: Some("anthropic-key".into()),
-                timeout_secs: None,
-                max_tokens: None,
-                thinking: None,
+                ..ProviderConfig::for_tests("https://api.anthropic.com/v1", &["claude-3"])
             },
         );
-        AppConfig {
-            default_provider: "openai".into(),
-            max_iterations: 5,
-            tui: crate::config::TuiConfig::default(),
-            providers,
-            mcp_servers: BTreeMap::new(),
-            default_skills: vec![],
-            work_dir: None,
-            allow_shell: true,
-            memory: None,
-            data_dir: None,
-            config_path: std::path::PathBuf::new(),
-        }
+        config
     }
 
     #[test]
@@ -234,34 +219,13 @@ mod tests {
 
     #[test]
     fn resolve_default_errors_when_provider_missing() {
-        let config = AppConfig {
-            default_provider: "nonexistent".into(),
-            max_iterations: 10,
-            tui: crate::config::TuiConfig::default(),
-            providers: BTreeMap::new(),
-            mcp_servers: BTreeMap::new(),
-            default_skills: vec![],
-            work_dir: None,
-            allow_shell: true,
-            memory: None,
-            data_dir: None,
-            config_path: std::path::PathBuf::new(),
-        };
+        let config = AppConfig::for_tests("nonexistent");
         let err = config.resolve(None).unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
     }
 
     fn provider_with_base(api_base: &str) -> ProviderConfig {
-        ProviderConfig {
-            api_base: api_base.into(),
-            default_model: "gpt-4".into(),
-            models: vec!["gpt-4".into()],
-            env_var: None,
-            api_key: Some("key".into()),
-            timeout_secs: None,
-            max_tokens: None,
-            thinking: None,
-        }
+        ProviderConfig::for_tests(api_base, &["gpt-4"])
     }
 
     #[test]
@@ -408,5 +372,103 @@ mod tests {
             .resolve_with_provider("openai", "any-future-model")
             .unwrap();
         assert_eq!(agent.model, "any-future-model");
+    }
+
+    fn config_from_toml(providers: &str) -> AppConfig {
+        toml::from_str(&format!("default_provider = \"x\"\n{providers}")).unwrap()
+    }
+
+    // Regression test: the client was picked from the provider's *name*, so
+    // an Anthropic endpoint registered under any other name silently got the
+    // OpenAI-compatible client.
+    #[test]
+    fn explicit_kind_wins_over_the_provider_name() {
+        let config = config_from_toml(
+            r#"
+            [providers.claude-work]
+            kind = "anthropic"
+            api_base = "https://api.anthropic.com/v1"
+            default_model = "claude-sonnet-4-6"
+            models = ["claude-sonnet-4-6"]
+
+            [providers.work-openai]
+            kind = "openai"
+            api_base = "https://api.openai.com/v1"
+            default_model = "gpt-4o"
+            models = ["gpt-4o"]
+            "#,
+        );
+
+        let claude = config.resolve_provider_default("claude-work").unwrap();
+        assert_eq!(claude.kind, ProviderKind::Anthropic);
+        assert_eq!(claude.provider_name, "claude-work");
+        // Thinking follows the kind, not the name.
+        assert!(claude.thinking);
+
+        let openai = config.resolve_provider_default("work-openai").unwrap();
+        assert_eq!(openai.kind, ProviderKind::OpenAi);
+    }
+
+    #[test]
+    fn kind_is_inferred_from_the_name_when_unset() {
+        let config = config_from_toml(
+            r#"
+            [providers.anthropic]
+            api_base = "https://api.anthropic.com/v1"
+            default_model = "claude-sonnet-4-6"
+            models = ["claude-sonnet-4-6"]
+
+            [providers.gemini]
+            api_base = "https://generativelanguage.googleapis.com/v1beta"
+            default_model = "gemini-2.0-flash"
+            models = ["gemini-2.0-flash"]
+
+            [providers.ollama]
+            api_base = "http://localhost:11434/v1"
+            default_model = "llama3"
+            models = ["llama3"]
+            "#,
+        );
+
+        let kind = |name: &str| config.resolve_provider_default(name).unwrap().kind;
+        assert_eq!(kind("anthropic"), ProviderKind::Anthropic);
+        assert_eq!(kind("gemini"), ProviderKind::Gemini);
+        assert_eq!(kind("ollama"), ProviderKind::OpenAiCompatible);
+    }
+
+    #[test]
+    fn unknown_kind_is_a_parse_error() {
+        let result: std::result::Result<AppConfig, _> = toml::from_str(
+            r#"
+            default_provider = "x"
+            [providers.x]
+            kind = "claude"
+            api_base = "https://example.com"
+            default_model = "m"
+            models = ["m"]
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn embeddings_reject_anthropic_by_kind_not_name() {
+        let mut config = config_from_toml(
+            r#"
+            [providers.claude-work]
+            kind = "anthropic"
+            api_base = "https://api.anthropic.com/v1"
+            default_model = "claude-sonnet-4-6"
+            models = ["claude-sonnet-4-6"]
+            api_key = "k"
+            "#,
+        );
+        config.memory = Some(crate::config::MemoryConfig {
+            embedding_provider: Some("claude-work".into()),
+            embedding_model: Some("m".into()),
+            ..Default::default()
+        });
+        let err = config.resolve_embedding().unwrap_err().to_string();
+        assert!(err.contains("embeddings API"), "{err}");
     }
 }

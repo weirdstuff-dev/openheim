@@ -5,9 +5,12 @@
 //! a protocol-agnostic trait defined here, with the ACP-specific implementation
 //! (backed by `session/request_permission`) living in `crate::acp` (needs the `acp` feature).
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use async_trait::async_trait;
 
-use crate::tools::ApprovalScope;
+use crate::tools::{ApprovalScope, ToolExecutor};
 
 /// The user's (or embedder's) decision on a single tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +32,11 @@ impl PermissionDecision {
 }
 
 /// Asked before every tool call the agent loop is about to execute.
+///
+/// Implementations only need to *ask*: the runtime wraps whatever gate a
+/// session is given in a `RememberingGate`, so an `AllowAlways` /
+/// `RejectAlways` answer is remembered for the rest of that session and
+/// matching calls never reach the gate again.
 #[async_trait]
 pub trait PermissionGate: Send + Sync {
     async fn check(
@@ -68,9 +76,83 @@ pub fn approval_key(scope: ApprovalScope, tool_name: &str, arguments: &str) -> S
     }
 }
 
-/// Default gate for contexts with no human in the loop to ask: the TUI (already
-/// fully interactive/local), the library facade, `openheim run`, and subagents.
-/// Always allows.
+/// A session's remembered `AllowAlways`/`RejectAlways` decisions, keyed by
+/// [`approval_key`]. Cheap to clone: clones share the same map, so the copy a
+/// turn's `RememberingGate` holds writes straight into the session's.
+#[derive(Debug, Clone, Default)]
+pub struct Approvals(Arc<Mutex<HashMap<String, PermissionDecision>>>);
+
+impl Approvals {
+    /// The remembered decision for `key`, if any.
+    pub fn get(&self, key: &str) -> Option<PermissionDecision> {
+        self.lock().get(key).copied()
+    }
+
+    /// Records `decision` under `key` if it's a sticky one
+    /// (`AllowAlways`/`RejectAlways`); `*Once` decisions are not remembered.
+    pub fn remember(&self, key: String, decision: PermissionDecision) {
+        if matches!(
+            decision,
+            PermissionDecision::AllowAlways | PermissionDecision::RejectAlways
+        ) {
+            self.lock().insert(key, decision);
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, PermissionDecision>> {
+        // Poisoning can only come from a panic mid-insert of a plain map;
+        // the data is still consistent, so keep using it.
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Wraps the gate a session was given (ACP's `session/request_permission`,
+/// the TUI prompt, an embedder's own) with the session's [`Approvals`]: a
+/// remembered decision is returned without asking, and a new sticky decision
+/// is recorded. This is the only place approvals are remembered, so every
+/// front-end gets the same behaviour and only has to implement the asking.
+pub(crate) struct RememberingGate {
+    inner: Arc<dyn PermissionGate>,
+    approvals: Approvals,
+    /// Supplies each tool's [`ApprovalScope`] (how its approvals are keyed).
+    executor: Arc<dyn ToolExecutor>,
+}
+
+impl RememberingGate {
+    pub(crate) fn new(
+        inner: Arc<dyn PermissionGate>,
+        approvals: Approvals,
+        executor: Arc<dyn ToolExecutor>,
+    ) -> Self {
+        Self {
+            inner,
+            approvals,
+            executor,
+        }
+    }
+}
+
+#[async_trait]
+impl PermissionGate for RememberingGate {
+    async fn check(
+        &self,
+        tool_call_id: &str,
+        tool_name: &str,
+        arguments: &str,
+    ) -> PermissionDecision {
+        let scope = self.executor.capabilities(tool_name).approval_scope;
+        let key = approval_key(scope, tool_name, arguments);
+        if let Some(remembered) = self.approvals.get(&key) {
+            return remembered;
+        }
+        let decision = self.inner.check(tool_call_id, tool_name, arguments).await;
+        self.approvals.remember(key, decision);
+        decision
+    }
+}
+
+/// Default gate for contexts with no human in the loop to ask: the library
+/// facade and `openheim run`. Always allows.
 pub struct AllowAll;
 
 #[async_trait]
@@ -88,6 +170,127 @@ impl PermissionGate for AllowAll {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Answers each `check` with the next scripted decision and records
+    /// which tool calls actually reached it.
+    struct ScriptedGate {
+        answers: Mutex<Vec<PermissionDecision>>,
+        asked: Mutex<Vec<String>>,
+    }
+
+    impl ScriptedGate {
+        fn new(answers: Vec<PermissionDecision>) -> Arc<Self> {
+            Arc::new(Self {
+                answers: Mutex::new(answers),
+                asked: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl PermissionGate for ScriptedGate {
+        async fn check(
+            &self,
+            tool_call_id: &str,
+            _tool_name: &str,
+            _arguments: &str,
+        ) -> PermissionDecision {
+            self.asked.lock().unwrap().push(tool_call_id.to_string());
+            self.answers.lock().unwrap().remove(0)
+        }
+    }
+
+    fn remembering(inner: Arc<ScriptedGate>, approvals: Approvals) -> RememberingGate {
+        let mut executor = crate::tools::SystemToolExecutor::new();
+        executor.register_builtins(true);
+        RememberingGate::new(inner, approvals, Arc::new(executor))
+    }
+
+    #[tokio::test]
+    async fn allow_always_is_remembered_for_later_calls_to_the_same_tool() {
+        let inner = ScriptedGate::new(vec![PermissionDecision::AllowAlways]);
+        let gate = remembering(inner.clone(), Approvals::default());
+
+        assert_eq!(
+            gate.check("call_1", "read_file", "{}").await,
+            PermissionDecision::AllowAlways
+        );
+        assert_eq!(
+            gate.check("call_2", "read_file", "{}").await,
+            PermissionDecision::AllowAlways
+        );
+        assert_eq!(inner.asked(), vec!["call_1"], "second call must not re-ask");
+    }
+
+    #[tokio::test]
+    async fn reject_always_is_remembered_too() {
+        let inner = ScriptedGate::new(vec![PermissionDecision::RejectAlways]);
+        let gate = remembering(inner.clone(), Approvals::default());
+
+        gate.check("call_1", "write_file", "{}").await;
+        assert_eq!(
+            gate.check("call_2", "write_file", "{}").await,
+            PermissionDecision::RejectAlways
+        );
+        assert_eq!(inner.asked(), vec!["call_1"]);
+    }
+
+    #[tokio::test]
+    async fn once_decisions_are_not_remembered() {
+        let inner = ScriptedGate::new(vec![
+            PermissionDecision::AllowOnce,
+            PermissionDecision::RejectOnce,
+        ]);
+        let gate = remembering(inner.clone(), Approvals::default());
+
+        gate.check("call_1", "read_file", "{}").await;
+        gate.check("call_2", "read_file", "{}").await;
+        assert_eq!(inner.asked(), vec!["call_1", "call_2"]);
+    }
+
+    #[tokio::test]
+    async fn allow_always_on_one_command_does_not_cover_a_different_command() {
+        let inner = ScriptedGate::new(vec![
+            PermissionDecision::AllowAlways,
+            PermissionDecision::RejectOnce,
+        ]);
+        let gate = remembering(inner.clone(), Approvals::default());
+
+        gate.check("call_1", "execute_command", r#"{"command": "git status"}"#)
+            .await;
+        // Shares the first word, but must be asked about on its own.
+        let second = gate
+            .check(
+                "call_2",
+                "execute_command",
+                r#"{"command": "git status && rm -rf ~"}"#,
+            )
+            .await;
+        assert_eq!(second, PermissionDecision::RejectOnce);
+        assert_eq!(inner.asked(), vec!["call_1", "call_2"]);
+    }
+
+    #[tokio::test]
+    async fn approvals_outlive_the_gate_that_recorded_them() {
+        // Each turn builds a fresh `RememberingGate` over the session's
+        // shared `Approvals`; a decision from one turn must hold in the next.
+        let approvals = Approvals::default();
+        let first_turn = ScriptedGate::new(vec![PermissionDecision::AllowAlways]);
+        remembering(first_turn, approvals.clone())
+            .check("call_1", "read_file", "{}")
+            .await;
+
+        let second_turn = ScriptedGate::new(vec![]);
+        let decision = remembering(second_turn.clone(), approvals)
+            .check("call_2", "read_file", "{}")
+            .await;
+        assert_eq!(decision, PermissionDecision::AllowAlways);
+        assert!(second_turn.asked().is_empty());
+    }
 
     #[tokio::test]
     async fn allow_all_always_allows() {

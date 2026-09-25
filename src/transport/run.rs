@@ -18,7 +18,7 @@ use crate::core::models::StreamEvent;
 /// user already consented to this run by invoking it.
 pub async fn run_headless(client: OpenheimClient, prompt: String) -> crate::error::Result<()> {
     let session = client.new_session().start().await?;
-    session
+    let stop_reason = session
         .prompt_events(&prompt, |event| {
             if let StreamEvent::LlmResponse { content } = event {
                 print!("{content}");
@@ -27,5 +27,9 @@ pub async fn run_headless(client: OpenheimClient, prompt: String) -> crate::erro
         })
         .await?;
     println!();
+    // On stderr, so piping the answer somewhere doesn't capture the notice.
+    if let Some(notice) = stop_reason.notice() {
+        eprintln!("[openheim: {notice}]");
+    }
     Ok(())
 }

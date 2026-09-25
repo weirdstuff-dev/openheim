@@ -6,6 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::redirect::Policy;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::core::models::Tool;
@@ -13,7 +14,7 @@ use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
 use super::ToolHandler;
-use super::args::{parse_args, require_str};
+use super::args::parse;
 use super::capabilities::{ToolCapabilities, ToolKindHint};
 
 /// Wall-clock limit for the whole request (connect + headers + body).
@@ -343,6 +344,11 @@ fn collapse_blank_lines(text: &str) -> String {
 /// the full list of guards applied.
 pub struct WebFetchTool;
 
+#[derive(Deserialize)]
+struct WebFetchArgs {
+    url: String,
+}
+
 #[async_trait]
 impl ToolHandler for WebFetchTool {
     fn definition(&self) -> Tool {
@@ -363,8 +369,7 @@ impl ToolHandler for WebFetchTool {
     }
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
-        let args = parse_args(args)?;
-        let url = require_str(&args, "url")?;
+        let args: WebFetchArgs = parse(args)?;
         // The request already has its own timeout; racing it against the
         // turn's cancel token additionally lets `session/cancel` drop a
         // fetch that's still in flight.
@@ -372,7 +377,7 @@ impl ToolHandler for WebFetchTool {
             _ = turn.cancel.cancelled() => Err(Error::ToolExecutionError(
                 "web_fetch cancelled".to_string(),
             )),
-            result = fetch_url(url) => result,
+            result = fetch_url(&args.url) => result,
         }
     }
 
@@ -515,5 +520,13 @@ mod tests {
         // A publicly routable address embedded either way stays allowed.
         assert!(!is_disallowed_ip("::ffff:8.8.8.8".parse().unwrap()));
         assert!(!is_disallowed_ip("::8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn args_struct_matches_schema() {
+        crate::tools::args::assert_args_match_schema::<WebFetchArgs>(
+            &WebFetchTool,
+            serde_json::json!({"url": "https://example.com"}),
+        );
     }
 }

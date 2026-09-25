@@ -50,7 +50,7 @@ fn capabilities(&self) -> ToolCapabilities {
 
 Ignore the fields you don't need — a tool that calls an HTTP API only cares about `turn.cancel`, if that.
 
-`openheim::tools::args` provides `parse_args(args)` and `require_str(&value, "key")`, which produce the same "failed to parse arguments" / "missing 'key' argument" errors the built-ins use, so the LLM sees consistent feedback.
+`openheim::tools::args::parse::<T>(args)` decodes the arguments into your own `#[derive(Deserialize)]` struct, which is what the built-ins do. Required schema fields are plain fields, optional ones `Option<_>` or `#[serde(default)]`, and `args::NonEmptyString` rejects blank text. On failure it returns the same "failed to parse arguments: …" error the built-ins use (serde names the missing or mistyped field), so the LLM sees consistent feedback. If you'd rather work with a raw `serde_json::Value`, use `parse_args(args)` (same "failed to parse arguments: …" error for malformed JSON) and `require_str(&value, "key")` (returns "missing 'key' argument"); the example below uses them.
 
 ---
 

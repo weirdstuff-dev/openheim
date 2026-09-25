@@ -11,7 +11,12 @@ use super::sse::SseDecoder;
 use super::{LlmChunk, LlmClient};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-const DEFAULT_MAX_TOKENS: u32 = 4096;
+/// Used when the provider sets no `max_tokens`. Adaptive thinking is on by
+/// default and spends from this same budget, so a low cap truncates replies
+/// (or leaves no room for any text at all). ~16k is Anthropic's recommended
+/// default for non-streaming requests; the agent loop always streams, but
+/// `send` is still public, so the default stays safe for callers of it.
+const DEFAULT_MAX_TOKENS: u32 = 16_000;
 
 fn is_false(b: &bool) -> bool {
     !b
@@ -347,7 +352,9 @@ fn map_stop_reason(reason: Option<&str>) -> Option<FinishReason> {
     match reason {
         Some("tool_use") => Some(FinishReason::ToolCalls),
         Some("end_turn") => Some(FinishReason::Stop),
-        Some("max_tokens") => Some(FinishReason::MaxTokens),
+        Some("max_tokens" | "model_context_window_exceeded") => Some(FinishReason::MaxTokens),
+        Some("refusal") => Some(FinishReason::Refusal),
+        Some("pause_turn") => Some(FinishReason::Paused),
         other => other.map(|s| FinishReason::Other(s.to_string())),
     }
 }
@@ -724,13 +731,25 @@ mod tests {
             map_stop_reason(Some("max_tokens")),
             Some(FinishReason::MaxTokens)
         );
+        assert_eq!(
+            map_stop_reason(Some("model_context_window_exceeded")),
+            Some(FinishReason::MaxTokens)
+        );
+        assert_eq!(
+            map_stop_reason(Some("refusal")),
+            Some(FinishReason::Refusal)
+        );
+        assert_eq!(
+            map_stop_reason(Some("pause_turn")),
+            Some(FinishReason::Paused)
+        );
     }
 
     #[test]
     fn map_stop_reason_passes_through_unknown_values() {
         assert_eq!(
-            map_stop_reason(Some("refusal")),
-            Some(FinishReason::Other("refusal".to_string()))
+            map_stop_reason(Some("stop_sequence")),
+            Some(FinishReason::Other("stop_sequence".to_string()))
         );
     }
 

@@ -1,12 +1,16 @@
 mod client;
+mod public;
 mod resolve;
 mod types;
 
 pub use client::{build_http_client, client_for_config, create_client};
+pub use public::{
+    PublicConfig, PublicMcpServerConfig, PublicMemoryConfig, PublicProviderConfig, PublicTuiConfig,
+};
 pub(crate) use types::default_timeout_secs;
 pub use types::{
     AgentConfig, AppConfig, EmbeddingConfig, McpServerConfig, MemoryConfig, ModelsInfo,
-    ProviderConfig, ProviderModels, TuiConfig,
+    ProviderConfig, ProviderKind, ProviderModels, RuntimePaths, TuiConfig,
 };
 
 use std::path::PathBuf;

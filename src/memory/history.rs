@@ -39,6 +39,42 @@ pub struct ConversationMeta {
     pub context_usage: Option<Usage>,
 }
 
+impl ConversationMeta {
+    /// Metadata for a brand-new conversation: created and updated now, no
+    /// title, cwd or context usage yet.
+    pub fn new(
+        id: Uuid,
+        model: Option<String>,
+        provider: Option<String>,
+        skills: Vec<String>,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id,
+            created_at: now,
+            updated_at: now,
+            model,
+            provider,
+            title: None,
+            skills,
+            cwd: None,
+            context_usage: None,
+        }
+    }
+
+    /// Sets `title` from `message` (its first 80 characters) if there is no
+    /// title yet and `message` is a user message with text. The one title
+    /// rule every save path applies.
+    pub fn fill_title_from(&mut self, message: &Message) {
+        if self.title.is_none()
+            && message.role == Role::User
+            && let Some(text) = message.text()
+        {
+            self.title = Some(text.chars().take(80).collect());
+        }
+    }
+}
+
 /// A complete conversation: metadata plus the full ordered message list.
 ///
 /// Not itself the on-disk format — see [`HistoryManager`]'s doc comment.
@@ -156,27 +192,27 @@ impl HistoryManager {
 
     /// Creates a new conversation, persists it immediately, and returns it.
     ///
-    /// The conversation starts with no messages and no title. The title is derived
-    /// from the first user message when [`Self::save_conversation`] is later called.
+    /// The conversation starts with no messages and no title. The title is
+    /// derived from the first user message once one is saved or appended.
     pub fn create_conversation(
         &self,
         model: Option<String>,
         provider: Option<String>,
         skills: Vec<String>,
     ) -> Result<Conversation> {
-        let now = Utc::now();
+        self.create_with_id(Uuid::new_v4(), model, provider, skills)
+    }
+
+    /// [`Self::create_conversation`] under a caller-chosen `id`.
+    fn create_with_id(
+        &self,
+        id: Uuid,
+        model: Option<String>,
+        provider: Option<String>,
+        skills: Vec<String>,
+    ) -> Result<Conversation> {
         let conv = Conversation {
-            meta: ConversationMeta {
-                id: Uuid::new_v4(),
-                created_at: now,
-                updated_at: now,
-                model,
-                provider,
-                title: None,
-                skills,
-                cwd: None,
-                context_usage: None,
-            },
+            meta: ConversationMeta::new(id, model, provider, skills),
             messages: Vec::new(),
         };
         self.save_conversation(&conv)?;
@@ -211,11 +247,11 @@ impl HistoryManager {
     /// If the conversation has no title yet and contains at least one user message,
     /// the title is set to the first 80 characters of that message.
     ///
-    /// Rewrites the *entire* message log (see `write_message_log`);
-    /// this is the right call for creating a conversation or for an
-    /// end-of-turn consistency checkpoint, but a turn that wants to persist
-    /// messages as they're produced should call [`Self::append_message`]
-    /// instead of calling this once per message.
+    /// Rewrites the *entire* message log (see `write_message_log`). Use it
+    /// to create a conversation, or to recover when an append failed and the
+    /// log may be missing messages (what `AgentState::prompt` does). For
+    /// routine writes, [`Self::append_message`] adds messages and
+    /// [`Self::save_meta`] records metadata without rewriting the log.
     ///
     /// Refuses (returning [`Error::HistoryDiverged`]) instead of rewriting if
     /// the on-disk log isn't exactly a prefix of `conv.messages` — either
@@ -241,20 +277,25 @@ impl HistoryManager {
         }
 
         let mut meta = conv.meta.clone();
-        meta.updated_at = Utc::now();
-
-        if meta.title.is_none()
-            && let Some(msg) = conv.messages.iter().find(|m| m.role == Role::User)
-            && let Some(content) = msg.text()
-        {
-            let title: String = content.chars().take(80).collect();
-            meta.title = Some(title);
+        if let Some(first_user) = conv.messages.iter().find(|m| m.role == Role::User) {
+            meta.fill_title_from(first_user);
         }
 
         self.write_message_log(&conv.meta.id, &conv.messages)?;
+        self.save_meta(&meta)
+    }
+
+    /// Writes only a conversation's meta file, bumping `updated_at`; the
+    /// message log is left alone. For recording metadata changes (model
+    /// switch, cwd, context usage) when the messages are already on disk via
+    /// [`Self::append_message`], without paying [`Self::save_conversation`]'s
+    /// full log rewrite.
+    pub fn save_meta(&self, meta: &ConversationMeta) -> Result<()> {
+        let mut meta = meta.clone();
+        meta.updated_at = Utc::now();
         let envelope = ConversationEnvelope { meta };
         Self::write_atomic(
-            &self.meta_path(&conv.meta.id),
+            &self.meta_path(&envelope.meta.id),
             &serde_json::to_string_pretty(&envelope)?,
         )
     }
@@ -282,17 +323,8 @@ impl HistoryManager {
         if let Ok(data) = std::fs::read_to_string(self.meta_path(id))
             && let Ok(mut envelope) = serde_json::from_str::<ConversationEnvelope>(&data)
         {
-            envelope.meta.updated_at = Utc::now();
-            if envelope.meta.title.is_none()
-                && message.role == Role::User
-                && let Some(text) = message.text()
-            {
-                envelope.meta.title = Some(text.chars().take(80).collect());
-            }
-            Self::write_atomic(
-                &self.meta_path(id),
-                &serde_json::to_string_pretty(&envelope)?,
-            )?;
+            envelope.meta.fill_title_from(message);
+            self.save_meta(&envelope.meta)?;
         }
         Ok(())
     }
@@ -347,6 +379,11 @@ impl HistoryManager {
     /// - `chat_id` is `Some` but the file doesn't exist → creates a new conversation
     ///   with that exact ID (useful for client-assigned IDs).
     /// - `chat_id` is `None` → creates a fresh conversation with a new UUID.
+    ///
+    /// `model`, `provider` and `skills` only seed a conversation created
+    /// here; an existing one is returned as saved. Callers that need to
+    /// record a changed model (`AgentState::prompt`) set it on the returned
+    /// `meta` themselves.
     pub fn resolve_conversation(
         &self,
         chat_id: Option<Uuid>,
@@ -360,23 +397,7 @@ impl HistoryManager {
                 if path.exists() {
                     self.load_conversation(&id)
                 } else {
-                    let now = Utc::now();
-                    let conv = Conversation {
-                        meta: ConversationMeta {
-                            id,
-                            created_at: now,
-                            updated_at: now,
-                            model,
-                            provider,
-                            title: None,
-                            skills,
-                            cwd: None,
-                            context_usage: None,
-                        },
-                        messages: Vec::new(),
-                    };
-                    self.save_conversation(&conv)?;
-                    Ok(conv)
+                    self.create_with_id(id, model, provider, skills)
                 }
             }
             None => self.create_conversation(model, provider, skills),

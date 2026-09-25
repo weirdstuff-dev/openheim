@@ -47,7 +47,7 @@ impl AgentMode {
         match mode_id {
             "code" => Ok(AgentMode::Code),
             "architect" => Ok(AgentMode::Architect),
-            other => Err(crate::error::Error::ParseError(format!(
+            other => Err(crate::error::Error::InvalidArgument(format!(
                 "unknown session mode: {other}"
             ))),
         }

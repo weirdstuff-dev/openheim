@@ -39,17 +39,19 @@ pub(crate) fn convert_prompt_blocks(blocks: &[AcpContentBlock]) -> Result<Vec<Co
                 });
             }
             AcpContentBlock::Audio(_) => {
-                return Err(Error::Other(
+                return Err(Error::InvalidArgument(
                     "audio prompt content is not supported".to_string(),
                 ));
             }
             AcpContentBlock::Resource(_) => {
-                return Err(Error::Other(
+                return Err(Error::InvalidArgument(
                     "embedded resource prompt content is not supported".to_string(),
                 ));
             }
             _ => {
-                return Err(Error::Other("unsupported prompt content type".to_string()));
+                return Err(Error::InvalidArgument(
+                    "unsupported prompt content type".to_string(),
+                ));
             }
         }
     }

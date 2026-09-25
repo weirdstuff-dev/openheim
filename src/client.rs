@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::acp::util::{replay_history_messages, stream_event_to_session_update};
 use crate::{
     config::{
-        AgentConfig, AppConfig, McpServerConfig, ProviderConfig, TuiConfig, config_dir,
-        config_path, load_config, load_config_from,
+        AgentConfig, AppConfig, McpServerConfig, ProviderConfig, RuntimePaths, TuiConfig,
+        config_dir, config_path, load_config, load_config_from,
     },
     core::{
         client_io::{ClientIo, NoClientIo},
@@ -127,7 +127,7 @@ impl OpenheimClient {
     /// Fetch the full `Conversation` (messages + metadata) for a session id.
     pub async fn get_session(&self, session_id: &str) -> Result<Conversation> {
         let uuid = Uuid::parse_str(session_id)
-            .map_err(|_| crate::error::Error::ParseError("invalid session id".to_string()))?;
+            .map_err(|_| crate::error::Error::InvalidArgument("invalid session id".to_string()))?;
         let history = self.state.memory.history.clone();
         tokio::task::spawn_blocking(move || history.load_conversation(&uuid)).await?
     }
@@ -135,7 +135,7 @@ impl OpenheimClient {
     /// Permanently delete a persisted session.
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
         let uuid = Uuid::parse_str(session_id)
-            .map_err(|_| crate::error::Error::ParseError("invalid session id".to_string()))?;
+            .map_err(|_| crate::error::Error::InvalidArgument("invalid session id".to_string()))?;
         let history = self.state.memory.history.clone();
         tokio::task::spawn_blocking(move || history.delete_conversation(&uuid)).await?
     }
@@ -339,7 +339,7 @@ impl SessionHandle {
     /// first turn completes.
     async fn conversation_meta(&self) -> Result<Option<crate::memory::ConversationMeta>> {
         let uuid = Uuid::parse_str(&self.id)
-            .map_err(|_| crate::error::Error::ParseError("invalid session id".to_string()))?;
+            .map_err(|_| crate::error::Error::InvalidArgument("invalid session id".to_string()))?;
         let history = self.state.memory.history.clone();
         match tokio::task::spawn_blocking(move || history.load_conversation(&uuid)).await? {
             Ok(conversation) => Ok(Some(conversation.meta)),
@@ -572,16 +572,7 @@ impl OpenheimBuilder {
     pub async fn build(self) -> Result<OpenheimClient> {
         let (agent_config, mut app_config) =
             if self.provider.is_some() || self.api_key.is_some() || self.api_base.is_some() {
-                build_programmatic(
-                    self.provider,
-                    self.api_key,
-                    self.model,
-                    self.api_base,
-                    self.max_iterations,
-                    self.timeout_secs,
-                    self.max_tokens,
-                    self.default_skills.clone(),
-                )?
+                self.programmatic_config()?
             } else {
                 let app_config = match self.config_path {
                     Some(ref path) => load_config_from(path)?,
@@ -633,92 +624,94 @@ impl OpenheimBuilder {
         if let Some(shell) = self.allow_shell {
             app_config.allow_shell = shell;
         }
-        if let Some(dir) = self.data_dir {
-            app_config.data_dir = Some(dir);
-        }
-        app_config.data_dir.get_or_insert(config_dir()?);
-        app_config.config_path = match self.config_path {
-            Some(path) => path,
-            None => config_path()?,
+        // Resolved once here; everything downstream reads `RuntimePaths`.
+        let paths = RuntimePaths {
+            data_dir: match self.data_dir.or_else(|| app_config.data_dir.clone()) {
+                Some(dir) => dir,
+                None => config_dir()?,
+            },
+            config_path: match self.config_path {
+                Some(path) => path,
+                None => config_path()?,
+            },
         };
 
-        let data_dir = app_config
-            .data_dir
-            .clone()
-            .expect("data_dir was just defaulted above");
-        let memory = MemoryContext::new(app_config.default_skills.clone(), &data_dir)?;
-        let state = Arc::new(AgentState::new(agent_config, app_config, memory, self.tools).await?);
+        let memory = MemoryContext::new(app_config.default_skills.clone(), &paths.data_dir)?;
+        let state =
+            Arc::new(AgentState::new(agent_config, app_config, paths, memory, self.tools).await?);
         Ok(OpenheimClient { state })
     }
-}
 
-#[allow(clippy::too_many_arguments)]
-fn build_programmatic(
-    provider: Option<String>,
-    api_key: Option<String>,
-    model: Option<String>,
-    api_base: Option<String>,
-    max_iterations: Option<usize>,
-    timeout_secs: Option<u64>,
-    max_tokens: Option<u32>,
-    default_skills: Vec<String>,
-) -> Result<(AgentConfig, AppConfig)> {
-    let provider = provider.unwrap_or_else(|| "openai".to_string());
-    let (default_api_base, default_model) = crate::config::builtin_provider_defaults(&provider);
-    let api_base = api_base.unwrap_or_else(|| default_api_base.to_string());
-    let model = model.unwrap_or_else(|| default_model.to_string());
-    let api_key = api_key.unwrap_or_default();
-    let max_iter = max_iterations.unwrap_or(10);
-    let timeout = timeout_secs.unwrap_or_else(crate::config::default_timeout_secs);
+    /// The config for programmatic mode (no config file): a single provider
+    /// built from this builder's `provider`/`api_key`/`model`/`api_base`,
+    /// with built-in defaults for whatever is unset.
+    fn programmatic_config(&self) -> Result<(AgentConfig, AppConfig)> {
+        let provider = self
+            .provider
+            .clone()
+            .unwrap_or_else(|| "openai".to_string());
+        let (default_api_base, default_model) = crate::config::builtin_provider_defaults(&provider);
+        let api_base = self
+            .api_base
+            .clone()
+            .unwrap_or_else(|| default_api_base.to_string());
+        let model = self
+            .model
+            .clone()
+            .unwrap_or_else(|| default_model.to_string());
+        let api_key = self.api_key.clone().unwrap_or_default();
+        let max_iter = self.max_iterations.unwrap_or(10);
+        let timeout = self
+            .timeout_secs
+            .unwrap_or_else(crate::config::default_timeout_secs);
 
-    let mut providers = BTreeMap::new();
-    providers.insert(
-        provider.clone(),
-        ProviderConfig {
-            api_base,
-            default_model: model.clone(),
-            models: vec![model],
-            env_var: None,
-            api_key: Some(api_key),
-            timeout_secs: Some(timeout),
-            max_tokens,
-            thinking: None,
-        },
-    );
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            provider.clone(),
+            ProviderConfig {
+                kind: None,
+                api_base,
+                default_model: model.clone(),
+                models: vec![model],
+                env_var: None,
+                api_key: Some(api_key),
+                timeout_secs: Some(timeout),
+                max_tokens: self.max_tokens,
+                thinking: None,
+            },
+        );
 
-    let app_config = AppConfig {
-        default_provider: provider.clone(),
-        max_iterations: max_iter,
-        tui: TuiConfig::default(),
-        providers,
-        mcp_servers: BTreeMap::new(),
-        default_skills,
-        work_dir: None,
-        allow_shell: false,
-        memory: None,
-        data_dir: None,
-        config_path: std::path::PathBuf::new(),
-    };
+        let app_config = AppConfig {
+            default_provider: provider.clone(),
+            max_iterations: max_iter,
+            tui: TuiConfig::default(),
+            providers,
+            mcp_servers: BTreeMap::new(),
+            default_skills: self.default_skills.clone(),
+            work_dir: None,
+            allow_shell: false,
+            memory: None,
+            data_dir: None,
+        };
 
-    // Funnels through the same `AppConfig::agent_config` assembly every
-    // file-based `resolve()` path uses, instead of hand-building a second
-    // `AgentConfig` with the same field set alongside it.
-    let agent_config = app_config.resolve_provider_default(&provider)?;
-    Ok((agent_config, app_config))
+        // Funnels through the same `AppConfig::agent_config` assembly every
+        // file-based `resolve()` path uses, instead of hand-building a second
+        // `AgentConfig` with the same field set alongside it.
+        let agent_config = app_config.resolve_provider_default(&provider)?;
+        Ok((agent_config, app_config))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Regression guard for the `data_dir`/`config_path` resolution `build()`
-    /// does once: every downstream reader (`MemoryContext`, `AgentState`,
-    /// `LongTermMemory::from_config`, the TUI's `:skills`/`:theme`) assumes
-    /// both are always populated after `build()` succeeds, never `None`/empty.
-    /// Uses the programmatic path (`provider`/`api_key`/`model` set) so this
-    /// stays mock-free — no config file, no MCP servers, no network.
+    /// `build()` resolves `RuntimePaths` once: the builder's `data_dir` wins,
+    /// and `config_path` falls back to the default location. Uses the
+    /// programmatic path (`provider`/`api_key`/`model` set) so this stays
+    /// mock-free — no config file, no MCP servers, no network.
     #[tokio::test]
-    async fn build_resolves_data_dir_and_config_path() {
+    async fn build_resolves_runtime_paths() {
         let dir = tempfile::tempdir().unwrap();
         let client = OpenheimClient::builder()
             .provider("openai")
@@ -728,11 +721,11 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert_eq!(
-            client.state.app_config.data_dir,
-            Some(dir.path().to_path_buf())
-        );
-        assert!(!client.state.app_config.config_path.as_os_str().is_empty());
+        let paths = client.state.paths();
+        assert_eq!(paths.data_dir, dir.path());
+        assert_eq!(paths.config_path, config_path().unwrap());
+        // The data dir is actually used, not just recorded.
+        assert!(dir.path().join("history").is_dir());
     }
 
     /// `resume_session` (and by extension `SessionHandle::resume`) works

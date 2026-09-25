@@ -272,7 +272,7 @@ session
 
 ### Send a prompt (raw `StreamEvent`)
 
-`prompt`/`prompt_with_images` map every event onto ACP's `SessionUpdate` vocabulary, which has no room for some of what the agent loop actually produces. `prompt_events`/`prompt_events_with_images` hand you the raw [`StreamEvent`](https://docs.rs/openheim) instead — same turn, no ACP mapping in between — including `Usage` (context size, live per LLM call) and `Finished` (the turn is done) alongside the four `SessionUpdate` has equivalents for. They return the turn's `StopReason` (`EndTurn`/`MaxIterations`/`Cancelled`/`NoContent`) instead of `()`.
+`prompt`/`prompt_with_images` map every event onto ACP's `SessionUpdate` vocabulary, which has no room for some of what the agent loop actually produces. `prompt_events`/`prompt_events_with_images` hand you the raw [`StreamEvent`](https://docs.rs/openheim) instead — same turn, no ACP mapping in between — including `Usage` (context size, live per LLM call) and `Finished` (the turn is done) alongside the four `SessionUpdate` has equivalents for. They return the turn's `StopReason` (`EndTurn`/`MaxIterations`/`MaxTokens`/`Refusal`/`Cancelled`/`NoContent`) instead of `()`; `StopReason::notice()` gives a short user-facing line for the abnormal ones.
 
 ```rust
 use openheim::StreamEvent;
@@ -347,7 +347,7 @@ let session = client
     .permission_gate(Arc::new(CliConfirmGate));
 ```
 
-`PermissionGate::check` is called once per tool call, before it executes — including tool calls made by a `delegate_task` subagent, which inherits the parent turn's gate rather than always-allowing.
+`PermissionGate::check` is called before a tool call executes — including tool calls made by a `delegate_task` subagent, which inherits the parent turn's gate rather than always-allowing. Your gate only has to ask. The runtime remembers `AllowAlways`/`RejectAlways` answers for the rest of the session and returns them for matching calls without calling your gate again. Most tools match by tool name; `execute_command` matches only the exact same command string.
 
 `.client_io(Arc<dyn ClientIo>)` similarly lets `read_file`/`write_file`/`edit_file` be delegated to the embedder's own I/O (e.g. an editor's unsaved buffers) instead of local disk — see [`ClientIo`](../src/core/client_io.rs). `edit_file` uses it for both the read and the write, since an edit is a read followed by a write. Both `.permission_gate()` and `.client_io()` carry over automatically when a handle is reused via `.resume()`/`.restore()`.
 

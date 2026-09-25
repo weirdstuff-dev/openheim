@@ -4,6 +4,10 @@ pub(crate) enum AgentUpdate {
     /// `App::handle_stream_event` for which variants the UI reacts to.
     Stream(crate::core::models::StreamEvent),
     Error(String),
+    /// A turn ended abnormally but without an error (truncated, refused,
+    /// iteration limit, …); shown as a system line under the reply. See
+    /// `StopReason::notice`.
+    Notice(String),
     ModelChanged {
         provider: String,
         model: String,
@@ -47,32 +51,12 @@ pub(crate) enum Status {
     Streaming,
 }
 
+/// The base screen, under any popup (see `state::Overlay`) or permission
+/// prompt.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Screen {
     Welcome,
     Chat,
-    ModelPicker,
-    ConfigViewer,
-    SessionPicker,
-    SkillsViewer,
-    McpViewer,
-    ThemePicker,
-    PermissionPrompt,
-}
-
-impl Screen {
-    pub(crate) fn is_overlay(self) -> bool {
-        matches!(
-            self,
-            Screen::ModelPicker
-                | Screen::ConfigViewer
-                | Screen::SessionPicker
-                | Screen::SkillsViewer
-                | Screen::McpViewer
-                | Screen::ThemePicker
-                | Screen::PermissionPrompt
-        )
-    }
 }
 
 #[derive(Debug, Clone)]

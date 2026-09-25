@@ -63,7 +63,7 @@ All `/ws` messages are JSON envelopes tagged with a `channel` field so the clien
 
 ### 2.1 `GET /api/config`
 
-Returns the public server configuration. API keys and sensitive env vars are stripped/redacted.
+Returns the public server configuration: an explicit allow-list of fields, so anything not shown below (API keys, local paths, fields added to the config later) is never included.
 
 **Response `200`:**
 
@@ -71,8 +71,12 @@ Returns the public server configuration. API keys and sensitive env vars are str
 {
   "default_provider": "openai",
   "max_iterations": 10,
+  "work_dir": "/home/user/project",
+  "allow_shell": false,
+  "tui": { "theme_color": "green" },
   "providers": {
     "openai": {
+      "kind": "openai",
       "api_base": "https://api.openai.com/v1",
       "default_model": "gpt-4",
       "models": ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"],
@@ -81,17 +85,29 @@ Returns the public server configuration. API keys and sensitive env vars are str
       "max_tokens": 4096
     },
     "anthropic": {
+      "kind": "anthropic",
       "api_base": "https://api.anthropic.com/v1",
       "default_model": "claude-3-5-sonnet-20241022",
       "models": ["claude-3-5-sonnet-20241022", "claude-3-opus-20240229"],
       "env_var": "ANTHROPIC_API_KEY"
     }
   },
-  "mcp_servers": {}
+  "mcp_servers": {
+    "github": {
+      "command": "npx",
+      "env": { "GITHUB_TOKEN": "<redacted>" },
+      "headers": {}
+    }
+  },
+  "memory": {
+    "embedding_provider": "openai",
+    "embedding_model": "text-embedding-3-small",
+    "top_k": 5
+  }
 }
 ```
 
-> **Note:** `api_key` fields are never included. `env` and `headers` values inside `mcp_servers` are replaced with `"<redacted>"`.
+> **Note:** `api_key` is never included. `mcp_servers` entries omit `args` entirely (command lines often carry tokens) and show only the keys of `env` and `headers`, each with the value `"<redacted>"`. Provider `api_base` and MCP `url` values are shown without any `user:password@` part, query string, or fragment. `memory` has no `db_path`, and `data_dir` is never included. `kind` is always present (resolved from the provider name when the config doesn't set it). Unset optional fields are omitted.
 
 ---
 
@@ -659,8 +675,8 @@ The agent channel uses the **Agent Client Protocol (ACP)**, which is JSON-RPC 2.
   "jsonrpc": "2.0",
   "id": 1,
   "error": {
-    "code": -32603,
-    "message": "Internal error",
+    "code": -32002,
+    "message": "Resource not found",
     "data": "session not found: abc123"
   }
 }
@@ -962,8 +978,8 @@ The flow is:
     "jsonrpc": "2.0",
     "id": 4,
     "error": {
-      "code": -32603,
-      "message": "Internal error",
+      "code": -32002,
+      "message": "Resource not found",
       "data": "Conversation 550e8400-... not found at ..."
     }
   }
@@ -1027,7 +1043,7 @@ Send a user message to the agent within a session. The agent will stream back re
 
 **Errors specific to `session/prompt` and `session/load`:**
 
-Both requests can fail with one of two structured errors, in addition to the generic `{"code": -32603, "message": "Internal error", "data": "<string>"}` shape used elsewhere (e.g. session not found). Both carry a machine-readable `data.kind` so a client can offer a "busy, retry" UX instead of surfacing a generic failure.
+Both requests can fail with one of two structured errors, in addition to the plain-string errors listed under [Common JSON-RPC error codes](#6-error-handling) (e.g. `-32002` for a session that doesn't exist). Both carry a machine-readable `data.kind` so a client can offer a "busy, retry" UX instead of surfacing a generic failure.
 
 **`session_busy`** — another turn is already in flight for this session, in this process (only one `session/prompt` runs per session at a time). Retry once it completes; unlike `session_locked` below, this is expected under normal concurrent use and not a hard failure.
 
@@ -1202,6 +1218,15 @@ pending → in_progress → completed
 All filesystem operations are sent over the `fs` channel. The channel is sandboxed to the agent's configured `work_dir` (see [configuration.md](./configuration.md)) — the same boundary the agent's own `read_file`/`write_file`/`edit_file`/`list_dir`/`search` tools are held to. Relative paths resolve against `work_dir`; absolute paths must be within it. Symlinks are followed and canonicalized so they cannot escape the boundary.
 
 No `watch` call is required before file operations — every request is validated against `work_dir` directly.
+
+**Request ids.** Any request may include an `id` (any JSON value) next to `action`. Its reply, success or `error`, carries the same `id`, so a client with several requests in flight can match each reply to its request:
+
+```json
+{ "channel": "fs", "data": { "action": "read", "path": "src/main.rs", "id": 7 } }
+{ "channel": "fs", "data": { "type": "file_content", "path": "src/main.rs", "content": "…", "id": 7 } }
+```
+
+Messages that aren't a reply to a request (the `connected` greeting, `fs_event` from a watch, and the error for an unparseable payload) never carry an `id`. Requests without an `id` get replies without one, as before.
 
 #### 3.3.1 Watch / Unwatch
 
@@ -1547,7 +1572,8 @@ There is no filesystem sidecar on this endpoint — use `/ws` if you need it. Ev
 // ─── REST API ───────────────────────────────────────────────
 
 interface ProviderConfig {
-  api_base: string;
+  kind: "openai" | "anthropic" | "gemini" | "openai_compatible";
+  api_base: string; // credentials, query string and fragment removed
   default_model: string;
   models: string[];
   env_var?: string;
@@ -1559,16 +1585,20 @@ interface ProviderConfig {
 interface AppConfig {
   default_provider: string;
   max_iterations: number;
+  work_dir: string;
+  allow_shell: boolean;
+  tui: { theme_color?: string };
   providers: Record<string, ProviderConfig>;
   mcp_servers: Record<string, McpServerConfig>;
+  memory?: { embedding_provider?: string; embedding_model?: string; top_k: number };
 }
 
 interface McpServerConfig {
   command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  url?: string;
-  headers?: Record<string, string>; // e.g. { Authorization: "Bearer <token>" } (HTTP only)
+  url?: string; // credentials, query string and fragment removed
+  env: Record<string, "<redacted>">;     // keys only
+  headers: Record<string, "<redacted>">; // keys only
+  // args is NEVER included in responses
 }
 
 interface ProviderModels {
@@ -2035,9 +2065,9 @@ All REST endpoints return `200` with JSON body on success. If the server is misc
     "jsonrpc": "2.0",
     "id": 3,
     "error": {
-      "code": -32603,
-      "message": "Internal error",
-      "data": "session not found: invalid-session-id"
+      "code": -32602,
+      "message": "Invalid params",
+      "data": "Invalid argument: invalid session id format"
     }
   }
 }
@@ -2049,9 +2079,12 @@ All REST endpoints return `200` with JSON body on success. If the server is misc
 |---|---|
 | `-32700` | Parse error (invalid JSON) |
 | `-32600` | Invalid request |
-| `-32601` | Method not found |
-| `-32602` | Invalid params |
-| `-32603` | Internal error |
+| `-32601` | Method not found (a method openheim doesn't implement) |
+| `-32602` | Invalid params (malformed session id, unsupported prompt content, unknown model, mode, or config option) |
+| `-32603` | Internal error (anything else, plus the structured `session_busy` / `session_locked` errors) |
+| `-32002` | Resource not found (the session or conversation doesn't exist) |
+
+Except for `session_busy` / `session_locked`, `data` is a human-readable string describing the problem.
 
 ### Connection Lifecycle
 

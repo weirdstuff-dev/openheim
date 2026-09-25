@@ -14,7 +14,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use reqwest::Client as ReqwestClient;
 
-use crate::config::EmbeddingConfig;
+use crate::config::{EmbeddingConfig, ProviderKind};
 use crate::error::{Error, Result};
 
 pub use gemini::GeminiEmbeddingClient;
@@ -60,14 +60,15 @@ pub(crate) async fn embed_batched(
     Ok(out)
 }
 
-/// Picks the wire format for `config.provider_name`: `"gemini"` speaks
-/// Gemini's API, everything else is OpenAI-compatible.
+/// Picks the wire format for `config.kind`: Gemini speaks Gemini's API,
+/// everything else is OpenAI-compatible (`resolve_embedding` already
+/// rejected Anthropic, which has no embeddings API).
 pub fn create_embedding_client(
     config: &EmbeddingConfig,
     http_client: &ReqwestClient,
 ) -> Arc<dyn EmbeddingClient> {
-    match config.provider_name.as_str() {
-        "gemini" => Arc::new(GeminiEmbeddingClient::new(
+    match config.kind {
+        ProviderKind::Gemini => Arc::new(GeminiEmbeddingClient::new(
             http_client.clone(),
             config.api_base.clone(),
             config.api_key.clone(),
@@ -198,17 +199,18 @@ mod tests {
     }
 
     #[test]
-    fn create_embedding_client_picks_by_provider_name() {
+    fn create_embedding_client_picks_by_kind() {
         let http = reqwest::Client::new();
         let mut cfg = EmbeddingConfig {
             provider_name: "gemini".into(),
+            kind: ProviderKind::Gemini,
             api_base: "https://example".into(),
             api_key: "k".into(),
             model: "m".into(),
             timeout_secs: 10,
         };
         assert_eq!(create_embedding_client(&cfg, &http).model(), "m");
-        cfg.provider_name = "ollama".into();
+        cfg.kind = ProviderKind::OpenAiCompatible;
         assert_eq!(create_embedding_client(&cfg, &http).model(), "m");
     }
 }

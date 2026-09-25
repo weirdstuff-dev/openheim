@@ -2,7 +2,7 @@ use reqwest::{Client as ReqwestClient, redirect::Policy};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::types::AgentConfig;
+use super::types::{AgentConfig, ProviderKind};
 use crate::core::llm::{
     AnthropicClient, GeminiClient, LlmClient, OpenAiClient, OpenAiCompatibleClient, RetryClient,
 };
@@ -35,17 +35,17 @@ pub fn build_http_client(timeout_secs: u64) -> Result<ReqwestClient> {
         .map_err(|e| crate::error::Error::Other(format!("failed to build HTTP client: {}", e)))
 }
 
-/// Create the appropriate LLM client based on the provider name, wrapped with retry logic.
+/// Create the LLM client for `config.kind`, wrapped with retry logic.
 pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<dyn LlmClient> {
-    let inner: Arc<dyn LlmClient> = match config.provider_name.as_str() {
-        "openai" => Arc::new(OpenAiClient::new(
+    let inner: Arc<dyn LlmClient> = match config.kind {
+        ProviderKind::OpenAi => Arc::new(OpenAiClient::new(
             http_client.clone(),
             config.api_base.clone(),
             config.api_key.clone(),
             config.model.clone(),
             config.max_tokens,
         )),
-        "anthropic" => Arc::new(AnthropicClient::new(
+        ProviderKind::Anthropic => Arc::new(AnthropicClient::new(
             http_client.clone(),
             config.api_base.clone(),
             config.api_key.clone(),
@@ -53,14 +53,14 @@ pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<d
             config.max_tokens,
             config.thinking,
         )),
-        "gemini" => Arc::new(GeminiClient::new(
+        ProviderKind::Gemini => Arc::new(GeminiClient::new(
             http_client.clone(),
             config.api_base.clone(),
             config.api_key.clone(),
             config.model.clone(),
             config.max_tokens,
         )),
-        _ => Arc::new(OpenAiCompatibleClient::new(
+        ProviderKind::OpenAiCompatible => Arc::new(OpenAiCompatibleClient::new(
             http_client.clone(),
             config.api_base.clone(),
             config.api_key.clone(),
