@@ -17,6 +17,17 @@ pub struct OpenAiClient {
     api_key: String,
     model: String,
     max_tokens: Option<u32>,
+    /// Which request field carries `max_tokens`; see [`TokenLimitField`].
+    token_limit_field: TokenLimitField,
+}
+
+/// OpenAI replaced `max_tokens` with `max_completion_tokens`, and its
+/// reasoning models reject the old name. OpenAI-compatible backends mostly
+/// still only know `max_tokens`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum TokenLimitField {
+    MaxCompletionTokens,
+    MaxTokens,
 }
 
 impl OpenAiClient {
@@ -33,7 +44,21 @@ impl OpenAiClient {
             api_key,
             model,
             max_tokens,
+            token_limit_field: TokenLimitField::MaxCompletionTokens,
         }
+    }
+
+    /// This client sending its output limit as `field` instead.
+    pub(super) fn with_token_limit_field(self, field: TokenLimitField) -> Self {
+        Self {
+            token_limit_field: field,
+            ..self
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn token_limit_field(&self) -> TokenLimitField {
+        self.token_limit_field
     }
 }
 
@@ -45,6 +70,9 @@ struct OpenAiRequest {
     messages: Vec<OpenAiMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<OpenAiTool>,
+    /// At most one of these two is set; see [`TokenLimitField`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
 }
@@ -432,11 +460,16 @@ fn convert_tools(tools: &[Tool]) -> Vec<OpenAiTool> {
 
 impl OpenAiClient {
     fn request(&self, messages: &[Message], tools: &[Tool]) -> OpenAiRequest {
+        let (max_completion_tokens, max_tokens) = match self.token_limit_field {
+            TokenLimitField::MaxCompletionTokens => (self.max_tokens, None),
+            TokenLimitField::MaxTokens => (None, self.max_tokens),
+        };
         OpenAiRequest {
             model: self.model.clone(),
             messages: convert_messages(messages),
             tools: convert_tools(tools),
-            max_tokens: self.max_tokens,
+            max_completion_tokens,
+            max_tokens,
         }
     }
 
@@ -843,17 +876,44 @@ mod tests {
         assert!(matches!(&result[0].content, Some(OpenAiContent::Text(t)) if t == "file content"));
     }
 
+    fn client(max_tokens: Option<u32>) -> OpenAiClient {
+        OpenAiClient::new(
+            ReqwestClient::new(),
+            "https://api.openai.com/v1".into(),
+            "key".into(),
+            "gpt-5".into(),
+            max_tokens,
+        )
+    }
+
+    /// The request body `client` sends for one user message, as JSON.
+    fn request_json(client: &OpenAiClient) -> Value {
+        serde_json::to_value(client.request(&[Message::user("hi")], &[])).unwrap()
+    }
+
     #[test]
-    fn openai_request_skips_empty_tools_and_max_tokens() {
-        let req = OpenAiRequest {
-            model: "gpt-4".into(),
-            messages: vec![],
-            tools: vec![],
-            max_tokens: None,
-        };
-        let json: Value = serde_json::to_value(&req).unwrap();
+    fn openai_request_skips_empty_tools_and_unset_limit() {
+        let json = request_json(&client(None));
         assert!(json.get("tools").is_none());
         assert!(json.get("max_tokens").is_none());
+        assert!(json.get("max_completion_tokens").is_none());
+    }
+
+    // Regression test: the limit went out as `max_tokens`, which OpenAI's
+    // reasoning models reject.
+    #[test]
+    fn openai_sends_the_limit_as_max_completion_tokens() {
+        let json = request_json(&client(Some(1000)));
+        assert_eq!(json["max_completion_tokens"], 1000);
+        assert!(json.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn a_legacy_limit_field_sends_max_tokens() {
+        let legacy = client(Some(1000)).with_token_limit_field(TokenLimitField::MaxTokens);
+        let json = request_json(&legacy);
+        assert_eq!(json["max_tokens"], 1000);
+        assert!(json.get("max_completion_tokens").is_none());
     }
 
     #[test]
