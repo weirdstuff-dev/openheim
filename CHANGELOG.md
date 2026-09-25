@@ -27,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   | `session.id` | `session.id()` |
 
   `load_session`/`restore` used to pass a fallback warning to the callback as an agent message. It's now only in `LoadedSession::warning`, so show it yourself.
+- **The agent loop has one entry point, `core::agent::run_agent`.** It replaces `run_agent_with_history` (pass `|_| {}` as the new last argument) and `run_agent_streaming_with_history` (same arguments). It takes the LLM client and tool executor as `&dyn LlmClient` / `&dyn ToolExecutor` instead of `Arc`s by value; with an `Arc`, pass `&*llm`.
 - **The default Gemini model is now `gemini-3.8-flash`.** The previous default, `gemini-2.0-flash`, has been shut down by Google, so a Gemini provider left on the built-in default no longer worked. Configs that name a model explicitly are unaffected.
 
 ### Fixed

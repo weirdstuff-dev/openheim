@@ -178,7 +178,7 @@ If you're driving the agent loop yourself, use `SystemToolExecutor::register` an
 
 ```rust
 use openheim::tools::SystemToolExecutor;
-use openheim::core::agent::run_agent_with_history;
+use openheim::core::agent::run_agent;
 use openheim::core::client_io::NoClientIo;
 use openheim::core::models::Message;
 use openheim::core::permission::{AllowAll, PermissionGate};
@@ -196,7 +196,6 @@ async fn main() -> openheim::Result<()> {
     let mut executor = SystemToolExecutor::new();
     executor.register_builtins(app_config.allow_shell);   // built-ins
     executor.register(Box::new(FetchUrlTool::new()));    // your tool
-    let executor = Arc::new(executor);
 
     // Build the LLM client from config
     let http = openheim::config::build_http_client(agent_config.timeout_secs)?;
@@ -212,13 +211,14 @@ async fn main() -> openheim::Result<()> {
         client_io: &NoClientIo, // no editor to delegate file I/O to
     };
 
-    let result = run_agent_with_history(
-        llm,
-        executor,
+    let result = run_agent(
+        &*llm,
+        &executor,
         &agent_config,
         &mut messages,
-        None, // prompt_builder
+        None,   // prompt_builder
         &turn,
+        |_| {}, // or handle each StreamEvent as it happens
     )
     .await?;
 

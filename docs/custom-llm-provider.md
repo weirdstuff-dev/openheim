@@ -16,7 +16,7 @@ pub trait LlmClient: Send + Sync {
 
 `messages` is the full conversation history (user, assistant, tool-result turns). `tools` is the list of currently registered tools in JSON-schema format. Return the model's next `Choice` — either a text response or a set of tool calls.
 
-`send_streaming` is a second trait method with a default implementation that calls `send` and forwards the whole response as one `LlmChunk::Text`. The agent loop always calls `send_streaming`, including `run_agent_with_history` and `delegate_task` subagents, because openheim's HTTP timeout is per read: a streamed reply keeps bytes arriving, while a non-streamed one sends nothing until it's done and can time out on long generations. Override it if your provider supports token-by-token streaming; otherwise the default is fine. Your `send_streaming` may drop its `chunk_tx` before returning; the loop waits for the returned reply, not the channel.
+`send_streaming` is a second trait method with a default implementation that calls `send` and forwards the whole response as one `LlmChunk::Text`. The agent loop always calls `send_streaming`, even when the caller ignores events (as `delegate_task` subagents do), because openheim's HTTP timeout is per read: a streamed reply keeps bytes arriving, while a non-streamed one sends nothing until it's done and can time out on long generations. Override it if your provider supports token-by-token streaming; otherwise the default is fine. Your `send_streaming` may drop its `chunk_tx` before returning; the loop waits for the returned reply, not the channel.
 
 ---
 
@@ -276,10 +276,10 @@ let llm: Arc<dyn LlmClient> = Arc::new(RetryClient::new(Arc::new(base_provider))
 
 ### 5. Use with the agent loop
 
-Pass the custom client directly to `run_agent_with_history`. It also needs a `TurnContext` (cancellation token + permission gate) — use `permission::AllowAll` and a fresh `CancellationToken` for a one-shot, non-interactive run:
+Pass the custom client directly to `run_agent`. It also needs a `TurnContext` (cancellation token + permission gate) — use `permission::AllowAll` and a fresh `CancellationToken` for a one-shot, non-interactive run. The last argument receives each `StreamEvent` of the turn; pass `|_| {}` to ignore them:
 
 ```rust
-use openheim::core::agent::run_agent_with_history;
+use openheim::core::agent::run_agent;
 use openheim::core::models::Message;
 use openheim::core::permission::{AllowAll, PermissionGate};
 use openheim::core::turn::TurnContext;
@@ -290,20 +290,17 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> openheim::Result<()> {
-    let llm: Arc<dyn openheim::llm::LlmClient> = Arc::new(
-        RetryClient::new(Arc::new(MyCustomProvider::new(
-            "https://api.myprovider.com",
-            std::env::var("MY_PROVIDER_KEY").unwrap(),
-            "my-model-v1",
-        )))
-    );
+    let llm = RetryClient::new(Arc::new(MyCustomProvider::new(
+        "https://api.myprovider.com",
+        std::env::var("MY_PROVIDER_KEY").unwrap(),
+        "my-model-v1",
+    )));
 
     let app_config = load_config()?;
     let agent_config = app_config.resolve(None)?;
 
     let mut executor = SystemToolExecutor::new();
     executor.register_builtins(app_config.allow_shell);
-    let executor = Arc::new(executor);
 
     let mut messages = vec![Message::user("Hello!")];
 
@@ -315,13 +312,14 @@ async fn main() -> openheim::Result<()> {
         client_io: &openheim::core::client_io::NoClientIo,
     };
 
-    let result = run_agent_with_history(
-        llm,
-        executor,
+    let result = run_agent(
+        &llm,
+        &executor,
         &agent_config,
         &mut messages,
         None, // prompt_builder — Some(&builder) to prepend a system.md/skills identity
         &turn,
+        |_| {}, // or handle each StreamEvent as it happens
     )
     .await?;
 
