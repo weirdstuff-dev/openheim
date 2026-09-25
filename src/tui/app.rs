@@ -17,6 +17,22 @@ use super::render::{self, FooterLabels};
 use super::state::{AgentChannels, InputLine, Overlay, PermissionQueue, Theme, Transcript};
 use super::types::{AgentUpdate, ChatItem, ConfigRow, Screen, Status};
 
+/// What `:help` shows. The welcome screen lists the same commands
+/// (`render::WELCOME_COMMANDS`).
+const HELP_TEXT: &str = ":help              show this\n\
+                         :q / :quit         exit\n\
+                         :new               start a new session\n\
+                         :sessions          browse and restore saved sessions\n\
+                         :config            current config\n\
+                         :models            list available models\n\
+                         :models <name>     switch to model mid-session\n\
+                         :mcp               MCP servers\n\
+                         :skills            available skills\n\
+                         :theme             change accent color\n\
+                         :theme <name>      apply color directly\n\n\
+                         ↑/↓  scroll · PgUp/PgDn  page\n\
+                         Ctrl+C  cancel the running turn · Ctrl+C twice  quit";
+
 /// How long after a Ctrl-C a second one quits.
 const QUIT_CONFIRM_WINDOW: Duration = Duration::from_secs(2);
 
@@ -396,22 +412,7 @@ impl App {
         let arg = parts.next().unwrap_or("").trim();
         match name {
             "q" | "quit" => self.should_quit = true,
-            "help" => self.push(ChatItem::SystemInfo(
-                ":help              show this\n\
-                 :q / :quit         exit\n\
-                 :new               start a new session\n\
-                 :sessions          browse and restore saved sessions\n\
-                 :config            current config\n\
-                 :models            list available models\n\
-                 :models <name>     switch to model mid-session\n\
-                 :mcp               MCP servers\n\
-                 :skills            available skills\n\
-                 :theme             change accent color\n\
-                 :theme <name>      apply color directly\n\n\
-                 ↑/↓  scroll · PgUp/PgDn  page\n\
-                 Ctrl+C  cancel the running turn · Ctrl+C twice  quit"
-                    .to_string(),
-            )),
+            "help" => self.push(ChatItem::SystemInfo(HELP_TEXT.to_string())),
             "new" => self.start_new_session(),
             "sessions" => {
                 let _ = self.channels.list_sessions.send(());
@@ -754,6 +755,21 @@ mod tests {
             },
         );
         (app, cancel_rx)
+    }
+
+    #[test]
+    fn help_and_welcome_screen_list_the_same_commands() {
+        let mut in_help: Vec<&str> = HELP_TEXT
+            .lines()
+            .filter(|line| line.starts_with(':'))
+            .map(|line| line.split("  ").next().unwrap().trim())
+            .collect();
+        let mut on_welcome: Vec<&str> = render::WELCOME_COMMANDS.iter().map(|(c, _)| *c).collect();
+        in_help.sort_unstable();
+        on_welcome.sort_unstable();
+
+        assert!(in_help.contains(&":new"), "{in_help:?}");
+        assert_eq!(in_help, on_welcome);
     }
 
     fn ctrl_c() -> KeyEvent {
