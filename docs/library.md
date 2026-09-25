@@ -351,7 +351,7 @@ let session = client
 
 `.client_io(Arc<dyn ClientIo>)` similarly lets `read_file`/`write_file`/`edit_file` be delegated to the embedder's own I/O (e.g. an editor's unsaved buffers) instead of local disk — see [`ClientIo`](../src/core/client_io.rs). `edit_file` uses it for both the read and the write, since an edit is a read followed by a write. Both `.permission_gate()` and `.client_io()` carry over automatically when a handle is reused via `.resume()`/`.restore()`.
 
-`session.cancel().await` cancels the turn currently in flight for that session (no-op if none is running) — call it from another task while `prompt()` is awaiting.
+`session.cancel().await` cancels the turn currently in flight for that session (no-op if none is running) — call it from another task while `prompt()` is awaiting. Tool calls the model had already asked for still get a result in the history: ones that finished keep theirs, and the rest are recorded as a `Cancelled by user.` error (each with a `ToolResult` event), so the conversation can carry on with the next prompt.
 
 ---
 

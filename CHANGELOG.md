@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cancelling a turn while tools were running no longer breaks the session.** The model's tool-call message was already saved, but the cancelled calls never got results, and Anthropic and OpenAI reject a history with an unanswered tool call, so every later prompt in that session failed. Cancelled calls are now recorded as a `Cancelled by user.` error, and calls that had already finished keep their results. Each cancelled call also gets a `ToolResult` event, so UIs stop showing it as pending. Sessions already saved in the broken state, or cut short by a crash mid-turn, work again too: the missing results are filled in on each request, without changing the saved history.
+
 ## [0.13.0] - 2026-09-24
 
 ### Added
