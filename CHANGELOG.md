@@ -9,10 +9,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - **`Error::IncompleteResponse`**, returned when a provider's streamed reply ends before the provider says it's finished. It's retryable. Code that matches on `Error` exhaustively needs the new arm.
+- **`ContentBlock::ToolUse` has a `signature` field** for an opaque token the provider needs back with the call (Gemini's `thoughtSignature`). It's optional and left out of saved history when unset, so existing history loads as before. Code that builds `ToolUse` with a struct literal needs `signature: None`, or can use the new `ContentBlock::tool_use(id, name, arguments)`. Patterns that destructure it need `..`.
+
+### Changed
+
+- **The default Gemini model is now `gemini-3.8-flash`.** The previous default, `gemini-2.0-flash`, has been shut down by Google, so a Gemini provider left on the built-in default no longer worked. Configs that name a model explicitly are unaffected.
 
 ### Fixed
 
 - **A reply cut off mid-stream is no longer taken as complete.** When the connection dropped partway through a reply, the body just ended, and the built-in providers returned whatever had arrived as the finished answer. The turn then ended there, with half a reply saved and any tool call still in flight lost. Now a stream that ends without the provider's end marker (Anthropic's `message_stop`, OpenAI's `[DONE]` or finish reason, Gemini's `finishReason`) fails with `Error::IncompleteResponse`. It's retried like a network error while nothing has been streamed to the caller yet. Stream payloads that fail to parse are now logged as warnings rather than skipped silently.
+- **Function calling works on Gemini 3.** Gemini 3 needs two things back with each function call, and openheim sent neither. First, the call's `thoughtSignature`: without it, every request after a tool call failed with a 400 ("missing a `thought_signature`"). Second, the call's id on its `functionResponse`: without it, Gemini 3.x silently replies with nothing. Both are now kept from the reply and sent back as received. Calls Gemini didn't make itself (from before this change, or from another provider after a model switch) get the stand-in signature Google documents for this case, so those sessions keep working on Gemini 3 too. Gemini 2.5 accepts the new fields as well.
 - **A Gemini reply blocked for safety now ends the turn as a refusal.** Its final chunk has a finish reason but no content, and that chunk failed to parse and was ignored.
 
 - **Cancelling a turn while tools were running no longer breaks the session.** The model's tool-call message was already saved, but the cancelled calls never got results, and Anthropic and OpenAI reject a history with an unanswered tool call, so every later prompt in that session failed. Cancelled calls are now recorded as a `Cancelled by user.` error, and calls that had already finished keep their results. Each cancelled call also gets a `ToolResult` event, so UIs stop showing it as pending. Sessions already saved in the broken state, or cut short by a crash mid-turn, work again too: the missing results are filled in on each request, without changing the saved history.

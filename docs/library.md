@@ -118,7 +118,7 @@ Supported `provider` values: `"openai"`, `"anthropic"`, `"gemini"`, or any strin
 
 Default models when `.model()` is omitted:
 - `"anthropic"` → `claude-sonnet-4-6`
-- `"gemini"` → `gemini-2.0-flash`
+- `"gemini"` → `gemini-3.8-flash`
 - everything else → `gpt-4o`
 
 ### Security controls

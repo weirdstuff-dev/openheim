@@ -33,7 +33,7 @@ pub enum ContentBlock {
     Text { text: String },
     Thinking { thinking: String, signature: Option<String> }, // extended-thinking output; signature must round-trip unmodified
     Image { data: String, mime_type: String },                // data is base64-encoded
-    ToolUse { id: String, name: String, arguments: String },  // arguments is a JSON string
+    ToolUse { id: String, name: String, arguments: String, signature: Option<String> }, // arguments is a JSON string; signature is an opaque provider token (Gemini's thoughtSignature) to round-trip unmodified
     ToolResult { tool_call_id: String, tool_name: String, content: String, is_error: bool },
 }
 
@@ -364,7 +364,7 @@ impl LlmClient for MockLlm {
 }
 ```
 
-Build a tool-call response for a mock with `Message { role: Role::Assistant, content: vec![ContentBlock::ToolUse { id: "call_1".into(), name: "read_file".into(), arguments: "{}".into() }] }` — see `core::models::ContentBlock` for the other block types.
+Build a tool-call response for a mock with `Message { role: Role::Assistant, content: vec![ContentBlock::tool_use("call_1", "read_file", "{}")] }` — see `core::models::ContentBlock` for the other block types.
 
 ---
 
