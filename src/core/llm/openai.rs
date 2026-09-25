@@ -2,12 +2,12 @@ use async_trait::async_trait;
 use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool, Usage};
 use crate::error::{Error, Result};
 
-use super::sse::SseDecoder;
+use super::sse::{StreamParser, parse_payload, read_stream};
 use super::{LlmChunk, LlmClient};
 
 #[derive(Clone)]
@@ -17,6 +17,17 @@ pub struct OpenAiClient {
     api_key: String,
     model: String,
     max_tokens: Option<u32>,
+    /// Which request field carries `max_tokens`; see [`TokenLimitField`].
+    token_limit_field: TokenLimitField,
+}
+
+/// OpenAI replaced `max_tokens` with `max_completion_tokens`, and its
+/// reasoning models reject the old name. OpenAI-compatible backends mostly
+/// still only know `max_tokens`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum TokenLimitField {
+    MaxCompletionTokens,
+    MaxTokens,
 }
 
 impl OpenAiClient {
@@ -33,7 +44,21 @@ impl OpenAiClient {
             api_key,
             model,
             max_tokens,
+            token_limit_field: TokenLimitField::MaxCompletionTokens,
         }
+    }
+
+    /// This client sending its output limit as `field` instead.
+    pub(super) fn with_token_limit_field(self, field: TokenLimitField) -> Self {
+        Self {
+            token_limit_field: field,
+            ..self
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn token_limit_field(&self) -> TokenLimitField {
+        self.token_limit_field
     }
 }
 
@@ -45,6 +70,9 @@ struct OpenAiRequest {
     messages: Vec<OpenAiMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<OpenAiTool>,
+    /// At most one of these two is set; see [`TokenLimitField`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
 }
@@ -242,6 +270,37 @@ struct OpenAiStreamFunctionDelta {
     arguments: Option<String>,
 }
 
+/// One streamed tool call, assembled from its deltas.
+#[derive(Default)]
+struct ToolCallAcc {
+    id: String,
+    name: String,
+    args: String,
+}
+
+impl ToolCallAcc {
+    /// The finished call as a `ToolUse` block, or `None` if no name ever
+    /// arrived. Some OpenAI-compatible backends leave out the id; those
+    /// calls get a generated one. A call that streamed no arguments gets
+    /// `{}`, so it stays valid JSON for the next request.
+    fn into_tool_use(self) -> Option<ContentBlock> {
+        if self.name.is_empty() {
+            return None;
+        }
+        let id = if self.id.is_empty() {
+            super::new_tool_call_id()
+        } else {
+            self.id
+        };
+        let args = if self.args.trim().is_empty() {
+            "{}".to_string()
+        } else {
+            self.args
+        };
+        Some(ContentBlock::tool_use(id, self.name, args))
+    }
+}
+
 /// Maps OpenAI's `finish_reason` vocabulary onto the provider-agnostic
 /// [`FinishReason`]; anything without a known equivalent (e.g. the legacy
 /// `function_call`) passes through as [`FinishReason::Other`].
@@ -361,11 +420,11 @@ fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
     result
 }
 
-/// Assembles an assistant message's content blocks in canonical order:
-/// `Thinking` (when the provider returned reasoning) first, then `Text`,
-/// then tool uses — the same ordering the Anthropic client produces, which
-/// the history persistence and ACP replay layers rely on. Empty strings
-/// produce no block, so an all-empty response yields empty content.
+/// Assembles an assistant message's content blocks: `Thinking` (when the
+/// provider returned reasoning) first, then `Text`, then tool uses. The
+/// OpenAI stream doesn't say how reasoning, text and calls interleave, so
+/// this fixed order is the best available. Empty strings produce no block,
+/// so an all-empty response yields empty content.
 fn assemble_content(
     reasoning: Option<String>,
     text: Option<String>,
@@ -407,11 +466,16 @@ fn convert_tools(tools: &[Tool]) -> Vec<OpenAiTool> {
 
 impl OpenAiClient {
     fn request(&self, messages: &[Message], tools: &[Tool]) -> OpenAiRequest {
+        let (max_completion_tokens, max_tokens) = match self.token_limit_field {
+            TokenLimitField::MaxCompletionTokens => (self.max_tokens, None),
+            TokenLimitField::MaxTokens => (None, self.max_tokens),
+        };
         OpenAiRequest {
             model: self.model.clone(),
             messages: convert_messages(messages),
             tools: convert_tools(tools),
-            max_tokens: self.max_tokens,
+            max_completion_tokens,
+            max_tokens,
         }
     }
 
@@ -453,11 +517,7 @@ impl LlmClient for OpenAiClient {
             .tool_calls
             .unwrap_or_default()
             .into_iter()
-            .map(|tc| ContentBlock::ToolUse {
-                id: tc.id,
-                name: tc.function.name,
-                arguments: tc.function.arguments,
-            })
+            .map(|tc| ContentBlock::tool_use(tc.id, tc.function.name, tc.function.arguments))
             .collect();
         let content = assemble_content(
             choice.message.reasoning_content,
@@ -499,136 +559,125 @@ impl LlmClient for OpenAiClient {
         let auth = self.auth_header();
         let headers = [("Authorization", auth.as_str())];
 
-        let mut response =
-            match super::http::post_json(&self.client, &endpoint, &headers, &body).await {
-                Ok(response) => response,
-                // Only a 400 that actually complains about `stream_options` is
-                // retried without it — any other 400 (bad request, context too
-                // long, …) would otherwise be retried for nothing, doubling its
-                // cost, and return unchanged.
-                Err(Error::HttpError {
-                    status,
-                    body: err_body,
-                }) if should_retry_without_stream_options(status, &err_body) => {
-                    let mut retry_body = body.clone();
-                    if let Some(obj) = retry_body.as_object_mut() {
-                        obj.remove("stream_options");
-                    }
-                    super::http::post_json(&self.client, &endpoint, &headers, &retry_body).await?
+        let response = match super::http::post_json(&self.client, &endpoint, &headers, &body).await
+        {
+            Ok(response) => response,
+            // Only a 400 that actually complains about `stream_options` is
+            // retried without it — any other 400 (bad request, context too
+            // long, …) would otherwise be retried for nothing, doubling its
+            // cost, and return unchanged.
+            Err(Error::HttpError {
+                status,
+                body: err_body,
+            }) if should_retry_without_stream_options(status, &err_body) => {
+                let mut retry_body = body.clone();
+                if let Some(obj) = retry_body.as_object_mut() {
+                    obj.remove("stream_options");
                 }
-                Err(e) => return Err(e),
-            };
+                super::http::post_json(&self.client, &endpoint, &headers, &retry_body).await?
+            }
+            Err(e) => return Err(e),
+        };
 
-        struct ToolCallAcc {
-            id: String,
-            name: String,
-            args: String,
+        read_stream(response, OpenAiStream::default(), &chunk_tx).await
+    }
+}
+
+/// One streamed reply, assembled chunk by chunk.
+#[derive(Default)]
+struct OpenAiStream {
+    text: String,
+    /// Kept alongside `text` so the final message persists the reasoning
+    /// (the live chunks are UI-only).
+    reasoning: String,
+    tool_calls: Vec<ToolCallAcc>,
+    finish_reason: Option<FinishReason>,
+    usage: Option<Usage>,
+    /// Set by `[DONE]`.
+    done: bool,
+}
+
+impl StreamParser for OpenAiStream {
+    fn payload(&mut self, data: &str, chunk_tx: &UnboundedSender<LlmChunk>) -> Result<bool> {
+        if data == "[DONE]" {
+            self.done = true;
+            return Ok(true);
+        }
+        let Some(event) = parse_payload::<OpenAiStreamChunk>("openai", data) else {
+            return Ok(false);
+        };
+
+        // The `include_usage` final chunk carries `usage` alongside an empty
+        // `choices` array, so this is read independently of the choice.
+        if let Some(u) = event.usage {
+            self.usage = Some(Usage::from(u));
         }
 
-        let mut text_buf = String::new();
-        // Accumulated alongside `text_buf` so the final message persists the
-        // reasoning (the live chunks are UI-only); without this, thinking
-        // displayed during a turn vanished on reload.
-        let mut reasoning_buf = String::new();
-        let mut tool_acc: Vec<ToolCallAcc> = Vec::new();
-        let mut finish_reason: Option<FinishReason> = None;
-        let mut usage: Option<Usage> = None;
-        let mut decoder = SseDecoder::new();
-        let mut done = false;
+        let Some(choice) = event.choices.into_iter().next() else {
+            return Ok(false);
+        };
 
-        while !done {
-            let Some(bytes) = response.chunk().await.map_err(Error::ReqwestError)? else {
-                break;
-            };
-            decoder.feed(&bytes);
+        if let Some(fr) = choice.finish_reason {
+            self.finish_reason = Some(map_finish_reason(&fr));
+        }
 
-            while let Some(data) = decoder.next_payload() {
-                if data == "[DONE]" {
-                    done = true;
-                    break;
+        if let Some(reasoning) = choice.delta.reasoning_content
+            && !reasoning.is_empty()
+        {
+            self.reasoning.push_str(&reasoning);
+            let _ = chunk_tx.send(LlmChunk::Thinking(reasoning));
+        }
+
+        if let Some(content) = choice.delta.content
+            && !content.is_empty()
+        {
+            self.text.push_str(&content);
+            let _ = chunk_tx.send(LlmChunk::Text(content));
+        }
+
+        for tc in choice.delta.tool_calls.unwrap_or_default() {
+            let idx = tc.index;
+            if self.tool_calls.len() <= idx {
+                self.tool_calls.resize_with(idx + 1, ToolCallAcc::default);
+            }
+            let acc = &mut self.tool_calls[idx];
+            if let Some(id) = tc.id {
+                acc.id = id;
+            }
+            if let Some(function) = tc.function {
+                if let Some(name) = function.name {
+                    acc.name.push_str(&name);
                 }
-
-                let Ok(event) = serde_json::from_str::<OpenAiStreamChunk>(&data) else {
-                    continue;
-                };
-
-                // The `include_usage` final chunk carries `usage` alongside an
-                // empty `choices` array, so this is checked independently of the
-                // choice fields below rather than folded into that branch.
-                if let Some(u) = event.usage {
-                    usage = Some(Usage::from(u));
-                }
-
-                let Some(choice) = event.choices.into_iter().next() else {
-                    continue;
-                };
-
-                if let Some(fr) = choice.finish_reason {
-                    finish_reason = Some(map_finish_reason(&fr));
-                }
-
-                if let Some(reasoning) = choice.delta.reasoning_content
-                    && !reasoning.is_empty()
-                {
-                    reasoning_buf.push_str(&reasoning);
-                    let _ = chunk_tx.send(LlmChunk::Thinking(reasoning));
-                }
-
-                if let Some(content) = choice.delta.content
-                    && !content.is_empty()
-                {
-                    text_buf.push_str(&content);
-                    let _ = chunk_tx.send(LlmChunk::Text(content));
-                }
-
-                if let Some(tcs) = choice.delta.tool_calls {
-                    for tc in tcs {
-                        let idx = tc.index;
-                        while tool_acc.len() <= idx {
-                            tool_acc.push(ToolCallAcc {
-                                id: String::new(),
-                                name: String::new(),
-                                args: String::new(),
-                            });
-                        }
-                        if let Some(id) = tc.id {
-                            tool_acc[idx].id = id;
-                        }
-                        if let Some(function) = tc.function {
-                            if let Some(name) = function.name {
-                                tool_acc[idx].name.push_str(&name);
-                            }
-                            if let Some(args) = function.arguments {
-                                tool_acc[idx].args.push_str(&args);
-                            }
-                        }
-                    }
+                if let Some(args) = function.arguments {
+                    acc.args.push_str(&args);
                 }
             }
         }
+        Ok(false)
+    }
 
-        let tool_uses = tool_acc
+    /// Complete once `[DONE]` or a `finish_reason` arrived: some
+    /// OpenAI-compatible backends end the stream without `[DONE]`, but every
+    /// one sends the finish reason on the last choice chunk.
+    fn finish(self) -> Result<Choice> {
+        if !self.done && self.finish_reason.is_none() {
+            return Err(Error::IncompleteResponse(
+                "OpenAI stream ended before a finish_reason or [DONE]".to_string(),
+            ));
+        }
+
+        let tool_uses = self
+            .tool_calls
             .into_iter()
-            .enumerate()
-            .filter(|(_, tc)| !tc.name.is_empty())
-            .map(|(i, tc)| ContentBlock::ToolUse {
-                id: if tc.id.is_empty() {
-                    format!("call_{i}")
-                } else {
-                    tc.id
-                },
-                name: tc.name,
-                arguments: tc.args,
-            })
+            .filter_map(ToolCallAcc::into_tool_use)
             .collect();
-
         Ok(Choice {
             message: Message {
                 role: Role::Assistant,
-                content: assemble_content(Some(reasoning_buf), Some(text_buf), tool_uses),
+                content: assemble_content(Some(self.reasoning), Some(self.text), tool_uses),
             },
-            finish_reason,
-            usage,
+            finish_reason: self.finish_reason,
+            usage: self.usage,
         })
     }
 }
@@ -636,6 +685,98 @@ impl LlmClient for OpenAiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn acc(id: &str, name: &str) -> ToolCallAcc {
+        ToolCallAcc {
+            id: id.into(),
+            name: name.into(),
+            args: "{}".into(),
+        }
+    }
+
+    // A call streamed without an id gets a unique one, not one numbered by
+    // its position in the reply.
+    #[test]
+    fn streamed_calls_without_an_id_get_unique_ones() {
+        let id = |block: Option<ContentBlock>| match block {
+            Some(ContentBlock::ToolUse { id, .. }) => id,
+            other => panic!("expected a tool use, got {other:?}"),
+        };
+        let first = id(acc("", "read_file").into_tool_use());
+        let second = id(acc("", "read_file").into_tool_use());
+        assert_ne!(first, second);
+        assert!(first.starts_with("call_"));
+        assert_eq!(id(acc("call_x", "read_file").into_tool_use()), "call_x");
+    }
+
+    #[test]
+    fn streamed_call_without_a_name_is_dropped() {
+        assert!(acc("call_x", "").into_tool_use().is_none());
+    }
+
+    #[test]
+    fn streamed_call_without_arguments_gets_an_empty_object() {
+        let call = ToolCallAcc {
+            args: String::new(),
+            ..acc("call_x", "list_files")
+        };
+        match call.into_tool_use() {
+            Some(ContentBlock::ToolUse { arguments, .. }) => assert_eq!(arguments, "{}"),
+            other => panic!("expected a tool use, got {other:?}"),
+        }
+    }
+
+    /// Feeds `payloads` through a fresh `OpenAiStream` as if they were the
+    /// whole response body.
+    fn parse_stream(payloads: &[&str]) -> Result<Choice> {
+        let (chunk_tx, _chunk_rx) = mpsc::unbounded_channel();
+        let mut stream = OpenAiStream::default();
+        for payload in payloads {
+            if stream.payload(payload, &chunk_tx)? {
+                break;
+            }
+        }
+        stream.finish()
+    }
+
+    const TOOL_REPLY: &[&str] = &[
+        r#"{"choices":[{"delta":{"content":"Reading."}}]}"#,
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\""}}]}}]}"#,
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"a.txt\"}"}}]}}]}"#,
+        r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+        "[DONE]",
+    ];
+
+    #[test]
+    fn complete_stream_becomes_a_choice() {
+        let choice = parse_stream(TOOL_REPLY).unwrap();
+        assert_eq!(
+            choice.message.content,
+            [
+                ContentBlock::from("Reading."),
+                ContentBlock::tool_use("call_1", "read_file", r#"{"path":"a.txt"}"#),
+            ]
+        );
+        assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
+        assert_eq!(choice.usage.unwrap().output_tokens, 5);
+    }
+
+    // A connection that closes early is an incomplete reply (here: its tool
+    // call's arguments only half there), not a complete one.
+    #[test]
+    fn stream_cut_off_before_the_finish_reason_is_an_incomplete_response() {
+        let err = parse_stream(&TOOL_REPLY[..2]).unwrap_err();
+        assert!(matches!(err, Error::IncompleteResponse(_)), "{err}");
+    }
+
+    // Some OpenAI-compatible backends never send `[DONE]`; the finish reason
+    // alone marks the reply complete.
+    #[test]
+    fn stream_with_a_finish_reason_but_no_done_is_complete() {
+        let choice = parse_stream(&TOOL_REPLY[..4]).unwrap();
+        assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
+    }
 
     #[test]
     fn map_finish_reason_translates_known_values() {
@@ -690,11 +831,11 @@ mod tests {
     fn convert_messages_assistant_with_tool_calls() {
         let messages = vec![Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "call_1".into(),
-                name: "read_file".into(),
-                arguments: r#"{"path":"a.txt"}"#.into(),
-            }],
+            content: vec![ContentBlock::tool_use(
+                "call_1",
+                "read_file",
+                r#"{"path":"a.txt"}"#,
+            )],
         }];
         let result = convert_messages(&messages);
         assert_eq!(result.len(), 1);
@@ -724,11 +865,7 @@ mod tests {
                     thinking: "let me check the file".into(),
                     signature: None,
                 },
-                ContentBlock::ToolUse {
-                    id: "call_1".into(),
-                    name: "read_file".into(),
-                    arguments: r#"{"path":"a.txt"}"#.into(),
-                },
+                ContentBlock::tool_use("call_1", "read_file", r#"{"path":"a.txt"}"#),
             ],
         }];
         let result = convert_messages(&messages);
@@ -756,26 +893,48 @@ mod tests {
         assert!(matches!(&result[0].content, Some(OpenAiContent::Text(t)) if t == "file content"));
     }
 
+    fn client(max_tokens: Option<u32>) -> OpenAiClient {
+        OpenAiClient::new(
+            ReqwestClient::new(),
+            "https://api.openai.com/v1".into(),
+            "key".into(),
+            "gpt-5".into(),
+            max_tokens,
+        )
+    }
+
+    /// The request body `client` sends for one user message, as JSON.
+    fn request_json(client: &OpenAiClient) -> Value {
+        serde_json::to_value(client.request(&[Message::user("hi")], &[])).unwrap()
+    }
+
     #[test]
-    fn openai_request_skips_empty_tools_and_max_tokens() {
-        let req = OpenAiRequest {
-            model: "gpt-4".into(),
-            messages: vec![],
-            tools: vec![],
-            max_tokens: None,
-        };
-        let json: Value = serde_json::to_value(&req).unwrap();
+    fn openai_request_skips_empty_tools_and_unset_limit() {
+        let json = request_json(&client(None));
         assert!(json.get("tools").is_none());
+        assert!(json.get("max_tokens").is_none());
+        assert!(json.get("max_completion_tokens").is_none());
+    }
+
+    // OpenAI's reasoning models reject `max_tokens`.
+    #[test]
+    fn openai_sends_the_limit_as_max_completion_tokens() {
+        let json = request_json(&client(Some(1000)));
+        assert_eq!(json["max_completion_tokens"], 1000);
         assert!(json.get("max_tokens").is_none());
     }
 
     #[test]
+    fn a_legacy_limit_field_sends_max_tokens() {
+        let legacy = client(Some(1000)).with_token_limit_field(TokenLimitField::MaxTokens);
+        let json = request_json(&legacy);
+        assert_eq!(json["max_tokens"], 1000);
+        assert!(json.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
     fn assemble_content_puts_thinking_before_text_and_tool_uses() {
-        let tool = ContentBlock::ToolUse {
-            id: "call_0".into(),
-            name: "read_file".into(),
-            arguments: "{}".into(),
-        };
+        let tool = ContentBlock::tool_use("call_0", "read_file", "{}");
         let content = assemble_content(
             Some("let me think".into()),
             Some("here's the answer".into()),

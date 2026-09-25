@@ -1,7 +1,7 @@
 //! [`ToolCapabilities`]: the single declaration each [`super::ToolHandler`]
 //! makes about itself, consumed wherever a tool's coarse behavior matters —
-//! Architect mode's allowlist, `approval_key`'s `execute_command` special
-//! case, ACP's tool-kind-for-UI mapping, and `SystemToolExecutor::build`'s
+//! Architect mode's allowlist, how `approval_key` scopes remembered
+//! approvals, ACP's tool-kind-for-UI mapping, and `SystemToolExecutor::build`'s
 //! shell-tool gate.
 
 /// Coarse hint of what kind of action a tool performs. Mirrors
@@ -29,9 +29,10 @@ pub enum ApprovalScope {
     /// One approval covers every call to this tool, keyed by tool name.
     #[default]
     ToolName,
-    /// Approval only covers calls with the exact same arguments — e.g.
-    /// `execute_command`, where approving `git status` must not silently
-    /// cover `git status && rm -rf ~`.
+    /// Approval only covers calls with the same arguments (compared as JSON,
+    /// so key order and whitespace don't matter) — e.g. `execute_command`,
+    /// where approving `git status` must not silently cover
+    /// `git status && rm -rf ~`. Works for any tool, whatever its arguments.
     ExactArguments,
 }
 

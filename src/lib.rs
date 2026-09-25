@@ -21,7 +21,7 @@
 //!
 //!     let session = client.new_session().start().await?;
 //!     session
-//!         .prompt_events("List the files in the current directory.", |_event| {})
+//!         .prompt("List the files in the current directory.", |_event| {})
 //!         .await?;
 //!
 //!     Ok(())
@@ -34,7 +34,7 @@
 //! |------------|---------------|----------------------|
 //! | OpenAI     | `"openai"`    | `gpt-4o`             |
 //! | Anthropic  | `"anthropic"` | `claude-sonnet-4-6`  |
-//! | Google     | `"gemini"`    | `gemini-2.0-flash`   |
+//! | Google     | `"gemini"`    | `gemini-3.8-flash`   |
 //! | Compatible | any string    | set via `.model()`   |
 //!
 //! ## Configuration file
@@ -71,7 +71,7 @@
 //! ## Key types
 //!
 //! - [`OpenheimClient`] / [`OpenheimBuilder`] — main entry point
-//! - [`SessionHandle`] — send prompts and receive streaming events (`StreamEvent`, or ACP's `SessionUpdate` with feature `acp`)
+//! - [`SessionHandle`] — send prompts ([`PromptInput`]: text, optionally with images) and receive streaming `StreamEvent`s (or ACP's `SessionUpdate`s via `acp_updates`, feature `acp`)
 //! - [`LlmClient`] — implement to add a custom provider
 //! - [`MemoryContext`] — conversation history, skills, and system identity
 //! - `rag::LongTermMemory` — tool-driven long-term memory: FTS5 keyword search, optionally sqlite-vec semantic search (feature `rag`)
@@ -108,7 +108,7 @@ pub use models::{
 pub use rag::LongTermMemory;
 
 // Library facade
-pub use client::{OpenheimBuilder, OpenheimClient, SessionBuilder, SessionHandle};
+pub use client::{OpenheimBuilder, OpenheimClient, PromptInput, SessionBuilder, SessionHandle};
 
 // ACP's own vocabulary (`SessionUpdate`, `ContentBlock`, …) is reached via
 // `openheim::acp::schema` (feature `acp`), not re-exported at the crate

@@ -16,7 +16,7 @@ pub trait LlmClient: Send + Sync {
 
 `messages` is the full conversation history (user, assistant, tool-result turns). `tools` is the list of currently registered tools in JSON-schema format. Return the model's next `Choice` — either a text response or a set of tool calls.
 
-`send_streaming` is a second trait method with a default implementation that calls `send` and forwards the whole response as one `LlmChunk::Text`. The agent loop always calls `send_streaming`, including `run_agent_with_history` and `delegate_task` subagents, because openheim's HTTP timeout is per read: a streamed reply keeps bytes arriving, while a non-streamed one sends nothing until it's done and can time out on long generations. Override it if your provider supports token-by-token streaming; otherwise the default is fine. Your `send_streaming` may drop its `chunk_tx` before returning; the loop waits for the returned reply, not the channel.
+`send_streaming` is a second trait method with a default implementation that calls `send` and forwards the whole response as one `LlmChunk::Text`. The agent loop always calls `send_streaming`, even when the caller ignores events (as `delegate_task` subagents do), because openheim's HTTP timeout is per read: a streamed reply keeps bytes arriving, while a non-streamed one sends nothing until it's done and can time out on long generations. Override it if your provider supports token-by-token streaming; otherwise the default is fine. Your `send_streaming` may drop its `chunk_tx` before returning; the loop waits for the returned reply, not the channel.
 
 ---
 
@@ -32,8 +32,9 @@ pub struct Message {
 pub enum ContentBlock {
     Text { text: String },
     Thinking { thinking: String, signature: Option<String> }, // extended-thinking output; signature must round-trip unmodified
+    RedactedThinking { data: String },                        // encrypted thinking (Anthropic); round-trip unmodified
     Image { data: String, mime_type: String },                // data is base64-encoded
-    ToolUse { id: String, name: String, arguments: String },  // arguments is a JSON string
+    ToolUse { id: String, name: String, arguments: String, signature: Option<String> }, // arguments is a JSON string; signature is an opaque provider token (Gemini's thoughtSignature) to round-trip unmodified
     ToolResult { tool_call_id: String, tool_name: String, content: String, is_error: bool },
 }
 
@@ -72,7 +73,7 @@ pub struct Usage {
 }
 ```
 
-`content` is an ordered list of blocks rather than a single string — an assistant turn is commonly `[Thinking?, Text?, ToolUse*]`; a `Role::Tool` message holds exactly one `ToolResult` block; a `Role::User` message holds `Text`/`Image` blocks. `Message` has convenience accessors so you rarely need to pattern-match the enum directly:
+`content` is an ordered list of blocks rather than a single string — an assistant turn is commonly `[Thinking?, Text?, ToolUse*]`, though with interleaved thinking further `Thinking`/`RedactedThinking` blocks can sit between the others, and their order must be kept; a `Role::Tool` message holds exactly one `ToolResult` block; a `Role::User` message holds `Text`/`Image` blocks. `Message` has convenience accessors so you rarely need to pattern-match the enum directly:
 
 - `message.text() -> Option<String>` — concatenation of all `Text` blocks
 - `message.tool_calls() -> Vec<ToolUseBlock>` — all `ToolUse` blocks, each `{ id, name, arguments }`
@@ -256,7 +257,9 @@ impl LlmClient for MyCustomProvider {
 
 ### 4. Wrap with `RetryClient` (optional but recommended)
 
-`RetryClient` wraps any `LlmClient` and retries on transient errors (rate limits, 5xx, network timeouts) with exponential backoff. Non-streaming `send` calls are retried up to three times; streaming `send_streaming` calls are retried only while it is still safe — i.e. before your provider has emitted the first chunk to the caller. Once the first token has been forwarded, a mid-stream failure is returned as-is rather than replayed (which would duplicate output):
+If you override `send_streaming`, check that the stream actually finished: a connection that drops mid-reply ends the body just like a normal close does. If the stream ends without your API's end-of-reply marker (a `[DONE]`, a `message_stop` event, a finish reason), return `Error::IncompleteResponse` instead of the partial reply. Otherwise the cut-off text is saved as a finished answer, and a tool call that never arrived is silently lost. `IncompleteResponse` counts as transient.
+
+`RetryClient` wraps any `LlmClient` and retries on transient errors (rate limits, 5xx, network timeouts, `IncompleteResponse`) with exponential backoff. Non-streaming `send` calls are retried up to three times; streaming `send_streaming` calls are retried only while it is still safe — i.e. before your provider has emitted the first chunk to the caller. Once the first token has been forwarded, a mid-stream failure is returned as-is rather than replayed (which would duplicate output):
 
 ```rust
 use openheim::llm::RetryClient;
@@ -273,34 +276,32 @@ let llm: Arc<dyn LlmClient> = Arc::new(RetryClient::new(Arc::new(base_provider))
 
 ### 5. Use with the agent loop
 
-Pass the custom client directly to `run_agent_with_history`. It also needs a `TurnContext` (cancellation token + permission gate) — use `permission::AllowAll` and a fresh `CancellationToken` for a one-shot, non-interactive run:
+Pass the custom client directly to `run_agent`. It also needs a `TurnContext` (cancellation token + permission gate) — use `permission::AllowAll` and a fresh `CancellationToken` for a one-shot, non-interactive run. The last argument receives each `StreamEvent` of the turn; pass `|_| {}` to ignore them:
 
 ```rust
-use openheim::core::agent::run_agent_with_history;
+use openheim::core::agent::run_agent;
 use openheim::core::models::Message;
 use openheim::core::permission::{AllowAll, PermissionGate};
 use openheim::core::turn::TurnContext;
 use openheim::config::load_config;
+use openheim::llm::RetryClient;
 use openheim::tools::SystemToolExecutor;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> openheim::Result<()> {
-    let llm: Arc<dyn openheim::llm::LlmClient> = Arc::new(
-        RetryClient::new(Arc::new(MyCustomProvider::new(
-            "https://api.myprovider.com",
-            std::env::var("MY_PROVIDER_KEY").unwrap(),
-            "my-model-v1",
-        )))
-    );
+    let llm = RetryClient::new(Arc::new(MyCustomProvider::new(
+        "https://api.myprovider.com",
+        std::env::var("MY_PROVIDER_KEY").unwrap(),
+        "my-model-v1",
+    )));
 
     let app_config = load_config()?;
     let agent_config = app_config.resolve(None)?;
 
     let mut executor = SystemToolExecutor::new();
     executor.register_builtins(app_config.allow_shell);
-    let executor = Arc::new(executor);
 
     let mut messages = vec![Message::user("Hello!")];
 
@@ -312,13 +313,14 @@ async fn main() -> openheim::Result<()> {
         client_io: &openheim::core::client_io::NoClientIo,
     };
 
-    let result = run_agent_with_history(
-        llm,
-        executor,
+    let result = run_agent(
+        &llm,
+        &executor,
         &agent_config,
         &mut messages,
         None, // prompt_builder — Some(&builder) to prepend a system.md/skills identity
         &turn,
+        |_| {}, // or handle each StreamEvent as it happens
     )
     .await?;
 
@@ -362,7 +364,7 @@ impl LlmClient for MockLlm {
 }
 ```
 
-Build a tool-call response for a mock with `Message { role: Role::Assistant, content: vec![ContentBlock::ToolUse { id: "call_1".into(), name: "read_file".into(), arguments: "{}".into() }] }` — see `core::models::ContentBlock` for the other block types.
+Build a tool-call response for a mock with `Message { role: Role::Assistant, content: vec![ContentBlock::tool_use("call_1", "read_file", "{}")] }` — see `core::models::ContentBlock` for the other block types.
 
 ---
 

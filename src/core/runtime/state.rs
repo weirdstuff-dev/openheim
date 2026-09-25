@@ -19,7 +19,7 @@ use uuid::Uuid;
 use crate::{
     config::{AgentConfig, AppConfig, RuntimePaths, build_http_client, create_client},
     core::{
-        agent::run_agent_streaming_with_history,
+        agent::run_agent,
         client_io::ClientIo,
         models::{ContentBlock, Message, Role, StopReason as CoreStopReason, StreamEvent},
         permission::{Approvals, PermissionGate, RememberingGate},
@@ -284,16 +284,11 @@ impl AgentState {
         }
     }
 
-    /// Runs one prompt turn to completion and returns why it stopped, so the
-    /// caller can map it to an ACP `agent_client_protocol::schema::StopReason`
-    /// directly instead of having to reverse-engineer it (e.g. by polling
-    /// session state for cancellation after the fact).
+    /// Runs one prompt turn to completion and returns why it stopped.
     ///
-    /// `on_update` sees every [`StreamEvent`] the turn produces, including
-    /// ones with no ACP wire equivalent (`IterationStart`, `Usage`,
-    /// `Finished`, `MessageAppended`) — mapping onto ACP's `SessionUpdate` is
-    /// the caller's concern (see `acp::util::stream_event_to_session_update`),
-    /// not this runtime's.
+    /// `on_update` sees every [`StreamEvent`] the turn produces; mapping them
+    /// to a transport's own messages is the caller's job (see
+    /// `acp::util::stream_event_to_session_update`).
     pub async fn prompt<F>(
         &self,
         session_id: &str,
@@ -309,32 +304,24 @@ impl AgentState {
             .map_err(|_| Error::InvalidArgument("invalid session id format".to_string()))?;
 
         let (llm, executor, config, chat_id, skills, cwd, cancel, approvals, _prompt_guard) = {
-            // Write lock: each new prompt turn gets a fresh cancellation token,
-            // since a token can only ever transition uncancelled -> cancelled
-            // and must not leak a previous turn's cancellation into this one.
+            // Write lock: each turn gets a fresh cancellation token, since a
+            // cancelled token stays cancelled.
             let mut sessions = self.sessions.write().await;
             let s = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| Error::NotFound(format!("session not found: {session_id}")))?;
-            // Held until this function returns (success, error, or cancellation);
-            // a second overlapping `session/prompt` on the same session would
-            // otherwise race this one to reset `cancel` and to save history.
-            // Must be acquired — and must fail fast on an overlapping call —
-            // before the cross-process lease below: `SessionLease`'s Drop
-            // can't tell "this guard's turn was legitimately accepted, then
-            // later dropped" apart from "this guard was for a redundant,
-            // rejected overlapping call", so if a rejected call had already
-            // created its own lease guard, returning its error here would
-            // drop *that* guard and delete the still-running accepted turn's
-            // lockfile out from under it.
+            // Held for the whole turn, so an overlapping prompt on this
+            // session fails instead of racing it. Taken before the
+            // cross-process lease below: a rejected call that already held a
+            // lease guard would delete the running turn's lockfile when the
+            // guard dropped.
             let prompt_guard = s.try_acquire_prompt_lock(session_id)?;
             s.cancel = CancellationToken::new();
             s.last_active = Instant::now();
             let llm = crate::config::client_for_config(&s.config, &self.config, &self.llm)?;
             let executor: Arc<dyn ToolExecutor> = if s.mode == AgentMode::Architect {
-                // Every read-only tool is available in Architect mode — built-in
-                // or custom — derived from each `ToolHandler`'s own declared
-                // `capabilities()` instead of a hand-maintained name list.
+                // Architect mode gets every tool that declares itself
+                // read-only, built-in or custom.
                 let read_only: Vec<String> = self
                     .executor
                     .list_tools()
@@ -344,10 +331,9 @@ impl AgentState {
                     .collect();
                 Arc::new(ScopedExecutor::new(self.executor.clone(), read_only))
             } else {
-                // Subagents without a model of their own fall back to this
-                // session's model, not the one `delegate_task` was built
-                // with at startup. (Architect mode needs no override:
-                // `delegate_task` isn't read-only, so it's filtered out.)
+                // Subagents without a model of their own run on this
+                // session's model. (Architect mode has no `delegate_task`:
+                // it isn't read-only.)
                 let delegate = self.delegate.for_session(llm.clone(), s.config.clone());
                 Arc::new(OverlayExecutor::new(
                     self.executor.clone(),
@@ -374,15 +360,9 @@ impl AgentState {
             executor.clone(),
         ));
 
-        // Cross-process write lease for this turn only (see `memory::lease`).
-        // Held until this function returns — success, error, or cancellation
-        // — via `_lease` staying in scope for the whole body, so an
-        // overlapping `session/prompt` on this session from *another*
-        // process is rejected immediately instead of racing history writes
-        // or generating against a context that's about to go stale. Merely
-        // loading/holding a session open never takes this lease — see
-        // `SessionState::prompt_lock`'s doc comment — only an in-flight turn
-        // does, in any process.
+        // Cross-process write lease (see `memory::lease`), held for the whole
+        // turn, so a prompt on this session from another process fails
+        // instead of racing its history writes. Only a running turn takes it.
         let _lease = self.memory.history.acquire_lease(&uuid)?;
 
         // Loads the conversation, `system.md` and skills from disk, so it runs
@@ -396,11 +376,8 @@ impl AgentState {
         .map_err(Error::from)??;
 
         conversation.meta.cwd = Some(cwd);
-        // `prepare` only applies model/provider when it creates the
-        // conversation; an existing one comes back with whatever was saved
-        // before. Overwrite with the session's live values so a mid-session
-        // model switch is persisted below and survives a reload instead of
-        // reverting to the original model.
+        // `prepare` only sets model/provider on a new conversation. Set the
+        // session's live values so a mid-session model switch is saved.
         conversation.meta.model = Some(config.model.clone());
         conversation.meta.provider = Some(config.provider_name.clone());
         let user_message = Message {
@@ -423,9 +400,8 @@ impl AgentState {
 
         // Set once any write fails; from then on nothing more is appended and
         // the end of the turn rewrites the whole log instead. Appending past
-        // a failure would leave a gap in the log (or bury a half-written line
-        // mid-file), and `save_conversation` then refuses the rewrite, or
-        // can't read the log at all, so the history could never recover.
+        // a failure could leave a gap or a half-written line mid-file, which
+        // the log can't recover from.
         let write_failed = AtomicBool::new(!started_ok);
         let write_failed_flag = &write_failed;
         let history_for_append = self.memory.history.clone();
@@ -437,21 +413,17 @@ impl AgentState {
             work_dir: &self.work_dir,
             client_io: &*client_io,
         };
-        let run_result = run_agent_streaming_with_history(
-            llm,
-            executor,
+        let run_result = run_agent(
+            &*llm,
+            &*executor,
             &config,
             &mut conversation.messages,
             Some(&prompt_builder),
             &turn,
             move |event| {
-                // Blocking I/O called synchronously (not via `spawn_blocking`)
-                // deliberately: appends must land in the log in the same
-                // order messages are produced, and this closure already runs
-                // strictly sequentially with the rest of the turn, so a
-                // small, fast local-disk append here doesn't race anything —
-                // spawning it would only risk two concurrent appends landing
-                // out of order.
+                // Blocking on purpose (not `spawn_blocking`): appends must
+                // land in the order messages are produced, and this closure
+                // runs in that order. Each append is a small local write.
                 if let StreamEvent::MessageAppended { message } = &event
                     && !write_failed_flag.load(Ordering::Relaxed)
                     && let Err(e) = history_for_append.append_message(&chat_id, message)
@@ -464,11 +436,8 @@ impl AgentState {
         )
         .await;
 
-        // Folded into the conversation's context-size snapshot before the
-        // final checkpoint below, so it's persisted even for a turn that
-        // only partially completed (cancelled mid-turn still made LLM calls
-        // worth accounting for). A turn with no successful calls leaves the
-        // previous snapshot in place rather than clearing it.
+        // Saved even for a cancelled turn, which still made LLM calls. A turn
+        // with no successful call keeps the previous snapshot.
         if let Ok(r) = &run_result
             && r.context_usage.is_some()
         {
@@ -550,22 +519,11 @@ impl AgentState {
 
         let (mode, model) = {
             let mut sessions = self.sessions.write().await;
-            // A second connection attaching to an already-live session
-            // must not replace its control state — a fresh `cancel` token
-            // would orphan an in-flight turn, wiping `approved_tools` loses
-            // remembered AllowAlways decisions, and a fresh `prompt_lock`
-            // would let two turns overlap on one chat. The live entry (if
-            // any) is also newer than the disk snapshot above. Note the
-            // history replay below is a one-shot dump of what's on disk, not
-            // a live subscription — it never sees chunks from a turn that's
-            // still streaming, and this connection gets no further updates
-            // for that turn (only the connection that called `session/prompt`
-            // does). The in-flight check below rejects the load outright in
-            // that case rather than silently handing back a stale picture.
-            // No write lease is taken here — loading/attaching to a session
-            // doesn't touch history by itself, so it never contends with
-            // another process merely viewing (or even holding open) the same
-            // session; only an in-flight `session/prompt` turn does.
+            // Attaching to an already-live session keeps its control state:
+            // a fresh `cancel` token would orphan a running turn, fresh
+            // `approved_tools` would forget "Always" answers, and a fresh
+            // `prompt_lock` would let two turns overlap. Loading takes no
+            // write lease; only a running turn does.
             if !insert_or_keep_live(&mut sessions, session_id, || {
                 Ok(SessionState {
                     chat_id: uuid,
@@ -592,19 +550,16 @@ impl AgentState {
             let live = sessions
                 .get(session_id)
                 .ok_or_else(|| Error::NotFound(format!("session not found: {session_id}")))?;
-            // A turn in flight on this session streams its updates only to
-            // the connection that called `session/prompt` (see comment
-            // above); reject the load instead of handing this connection a
-            // history snapshot that's already stale and will never catch up.
+            // A running turn streams only to the connection that started it,
+            // so the history loaded above is already stale and would never
+            // catch up.
             if prompt_in_flight(live) {
                 return Err(Error::SessionBusy {
                     session_id: session_id.to_string(),
                 });
             }
-            // Read back the mode and model so the response reflects whatever
-            // is actually live for this session (e.g. a prior
-            // `session/set_config_option`), not the fresh-session default or
-            // the just-loaded disk snapshot.
+            // The live session's mode and model, which may differ from the
+            // saved ones (e.g. after `session/set_config_option`).
             (live.mode, live.config.model.clone())
         };
 
@@ -661,13 +616,10 @@ mod prompt_lease_ordering_tests {
         }
     }
 
-    // The ordering `Self::prompt` relies on: the in-process `prompt_lock`
-    // must be acquired (and fail fast on an overlapping call) *before* the
-    // cross-process `SessionLease` is acquired. Getting this backwards lets
-    // an overlapping, rejected `session/prompt` call create its own lease
-    // guard and then drop it (`SessionLease::drop` can't tell that apart
-    // from a legitimately superseded one) — deleting the still-running
-    // accepted turn's lockfile out from under it.
+    // `Self::prompt` takes the in-process `prompt_lock` before the
+    // cross-process `SessionLease`, so an overlapping call is rejected
+    // before it holds a lease guard whose drop would delete the running
+    // turn's lockfile.
     #[test]
     fn overlapping_prompt_in_same_process_never_touches_the_accepted_turns_lease() {
         let dir = tempdir().unwrap();
@@ -737,10 +689,8 @@ mod new_session_tests {
             .unwrap()
     }
 
-    // Regression test for `new_session` swallowing a bad `model` override:
-    // it used to fall back to the session default silently
-    // (`resolve(model).ok().unwrap_or_else(default)`) instead of surfacing
-    // the `ConfigError` `resolve` returns for an unknown model.
+    // `new_session` with an unknown `model` fails with the config error
+    // instead of starting on the default model.
     #[tokio::test]
     async fn bad_model_override_is_an_error() {
         let dir = tempdir().unwrap();
@@ -872,10 +822,9 @@ mod new_session_tests {
         }
     }
 
-    // Regression test (PR #61 review): after one failed write, later appends
-    // kept going. Here the user message's append fails but the reply's would
-    // succeed, which left a gap in the log that the end-of-turn rewrite then
-    // refused to overwrite, losing the user message for good.
+    // After one failed write nothing more is appended. Here the user
+    // message's append fails but the reply's would succeed; appending it
+    // would leave a gap the end-of-turn rewrite can't repair.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_transient_write_failure_still_ends_with_a_complete_log() {
@@ -899,10 +848,8 @@ mod new_session_tests {
         assert_eq!(texts, ["hi", "ok", "hi", "ok"]);
     }
 
-    // Regression test: a model switched after the conversation's first turn
-    // was never written to its meta file (`resolve_conversation` returns an
-    // existing conversation as saved), so reloading the session brought
-    // back the original model.
+    // A model switched after the conversation's first turn is saved to its
+    // meta file, so reloading the session keeps it.
     #[tokio::test]
     async fn model_switch_is_persisted_to_conversation_meta() {
         let dir = tempdir().unwrap();
@@ -953,11 +900,10 @@ mod new_session_tests {
         }
     }
 
-    // Regression test: `delegate_task` captured the startup model/client, so
-    // a subagent with no model of its own ignored the session's model switch.
-    // Here the startup client is a real HTTP client (never reachable from
-    // the test) and the session's client is the script, so the subagent's
-    // answer only comes back if it ran on the session's client.
+    // A subagent with no model of its own runs on the session's current
+    // model. Here the startup client is a real HTTP client (never reachable
+    // from the test) and the session's client is the script, so the
+    // subagent's answer only comes back if it ran on the session's client.
     #[tokio::test]
     async fn subagent_without_model_override_runs_on_the_sessions_model() {
         use crate::core::models::{Choice, FinishReason};
@@ -969,11 +915,11 @@ mod new_session_tests {
         let delegate_call = Choice {
             message: Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "call_1".into(),
-                    name: crate::tools::DELEGATE_TOOL_NAME.into(),
-                    arguments: r#"{"system_prompt":"You are a helper.","task":"say hi"}"#.into(),
-                }],
+                content: vec![ContentBlock::tool_use(
+                    "call_1",
+                    crate::tools::DELEGATE_TOOL_NAME,
+                    r#"{"system_prompt":"You are a helper.","task":"say hi"}"#,
+                )],
             },
             finish_reason: Some(FinishReason::ToolCalls),
             usage: None,

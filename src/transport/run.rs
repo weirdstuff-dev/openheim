@@ -19,7 +19,7 @@ use crate::core::models::StreamEvent;
 pub async fn run_headless(client: OpenheimClient, prompt: String) -> crate::error::Result<()> {
     let session = client.new_session().start().await?;
     let stop_reason = session
-        .prompt_events(&prompt, |event| {
+        .prompt(prompt, |event| {
             if let StreamEvent::LlmResponse { content } = event {
                 print!("{content}");
                 let _ = std::io::stdout().flush();

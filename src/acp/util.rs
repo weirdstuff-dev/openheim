@@ -12,7 +12,7 @@ use agent_client_protocol::schema::v1::{
 use crate::{
     config::AppConfig,
     core::{
-        models::{ContentBlock, Message, Role, StopReason as CoreStopReason, StreamEvent},
+        models::{Message, StopReason as CoreStopReason, StreamEvent, TranscriptEntry},
         runtime::AgentMode,
     },
     memory::ConversationMeta,
@@ -97,11 +97,11 @@ pub(super) fn thinking_chunk(content: String) -> TextContent {
 /// Replays persisted history to a (re)attaching connection as the same
 /// stream of session updates a live turn would have produced, so a reloaded
 /// session renders identically to one that stayed open — including assistant
-/// thinking blocks, which lead the persisted content (`[Thinking?, Text?,
-/// ToolUse*]`) and are tunneled through `agent_message_chunk` with
+/// thinking blocks, which are tunneled through `agent_message_chunk` with
 /// `content._meta.kind == "thinking"` exactly as the live streaming path
-/// does. Without this, thinking shown during a turn vanished on reload even
-/// though it was persisted.
+/// does. Which blocks are replayed, and in what order, is
+/// [`Message::transcript`]'s call (shared with the TUI); this only picks
+/// the `SessionUpdate`.
 pub(crate) fn replay_history_messages<F>(
     messages: &[Message],
     executor: &dyn ToolExecutor,
@@ -109,71 +109,52 @@ pub(crate) fn replay_history_messages<F>(
 ) where
     F: FnMut(SessionUpdate),
 {
-    for msg in messages {
-        match msg.role {
-            Role::User => {
-                // Iterate every persisted block in order (not just `msg.text()`,
-                // which only concatenates `Text` blocks) so an image attached
-                // to the prompt is restored alongside the text instead of
-                // silently dropped on reload.
-                for block in &msg.content {
-                    match block {
-                        ContentBlock::Text { text } => {
-                            on_update(SessionUpdate::UserMessageChunk(ContentChunk::new(
-                                AcpContentBlock::from(text.clone()),
-                            )));
-                        }
-                        ContentBlock::Image { data, mime_type } => {
-                            on_update(SessionUpdate::UserMessageChunk(ContentChunk::new(
-                                AcpContentBlock::Image(ImageContent::new(
-                                    data.clone(),
-                                    mime_type.clone(),
-                                )),
-                            )));
-                        }
-                        _ => {}
-                    }
-                }
+    for entry in messages.iter().flat_map(Message::transcript) {
+        let update = match entry {
+            TranscriptEntry::UserText(text) => SessionUpdate::UserMessageChunk(ContentChunk::new(
+                AcpContentBlock::from(text.to_string()),
+            )),
+            TranscriptEntry::UserImage { data, mime_type } => {
+                SessionUpdate::UserMessageChunk(ContentChunk::new(AcpContentBlock::Image(
+                    ImageContent::new(data.to_string(), mime_type.to_string()),
+                )))
             }
-            Role::Assistant => {
-                for block in &msg.content {
-                    if let ContentBlock::Thinking { thinking, .. } = block {
-                        on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                            AcpContentBlock::Text(thinking_chunk(thinking.clone())),
-                        )));
-                    }
-                }
-                if let Some(text) = msg.text() {
-                    on_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                        AcpContentBlock::from(text),
-                    )));
-                }
-                for tc in msg.tool_calls() {
-                    on_update(SessionUpdate::ToolCall(
-                        AcpToolCall::new(tc.id.clone(), &tc.name)
-                            .kind(tool_kind_for(&tc.name, executor))
-                            .status(ToolCallStatus::InProgress)
-                            .raw_input(raw_input(&tc.id, &tc.name, &tc.arguments)),
-                    ));
-                }
+            TranscriptEntry::Thinking(thinking) => SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(AcpContentBlock::Text(thinking_chunk(thinking.to_string()))),
+            ),
+            TranscriptEntry::AssistantText(text) => SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(AcpContentBlock::from(text.to_string())),
+            ),
+            TranscriptEntry::ToolCall {
+                id,
+                name,
+                arguments,
+            } => SessionUpdate::ToolCall(
+                AcpToolCall::new(id.to_string(), name)
+                    .kind(tool_kind_for(name, executor))
+                    .status(ToolCallStatus::InProgress)
+                    .raw_input(raw_input(id, name, arguments)),
+            ),
+            TranscriptEntry::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+                ..
+            } => {
+                let status = if is_error {
+                    ToolCallStatus::Failed
+                } else {
+                    ToolCallStatus::Completed
+                };
+                SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                    tool_call_id.to_string(),
+                    ToolCallUpdateFields::new()
+                        .status(status)
+                        .raw_output(serde_json::Value::String(content.to_string())),
+                ))
             }
-            Role::Tool => {
-                if let Some(tr) = msg.tool_result_block() {
-                    let status = if tr.is_error {
-                        ToolCallStatus::Failed
-                    } else {
-                        ToolCallStatus::Completed
-                    };
-                    on_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                        tr.tool_call_id,
-                        ToolCallUpdateFields::new()
-                            .status(status)
-                            .raw_output(serde_json::Value::String(tr.content)),
-                    )));
-                }
-            }
-            _ => {}
-        }
+        };
+        on_update(update);
     }
 }
 
@@ -332,6 +313,7 @@ pub(super) fn map_stop_reason(reason: CoreStopReason) -> StopReason {
 #[cfg(test)]
 mod replay_tests {
     use super::*;
+    use crate::core::models::{ContentBlock, Role};
     use crate::tools::SystemToolExecutor;
 
     fn executor() -> SystemToolExecutor {
@@ -392,17 +374,62 @@ mod replay_tests {
         }
     }
 
+    // Interleaved thinking stores several thinking blocks between text and
+    // tool calls; replay follows the stored order instead of grouping them.
+    #[test]
+    fn replay_keeps_interleaved_blocks_in_order() {
+        let thinking = |t: &str| ContentBlock::Thinking {
+            thinking: t.into(),
+            signature: Some("sig".into()),
+        };
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                thinking("first"),
+                ContentBlock::from("Let me look."),
+                ContentBlock::RedactedThinking { data: "enc".into() },
+                thinking("second"),
+                ContentBlock::tool_use("toolu_1", "read_file", "{}"),
+            ],
+        }];
+        let mut updates = Vec::new();
+        replay_history_messages(&messages, &executor(), &mut |u| updates.push(u));
+
+        let replayed: Vec<String> = updates
+            .iter()
+            .map(|u| match u {
+                SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
+                    AcpContentBlock::Text(t) if t.meta.is_some() => format!("thinking:{}", t.text),
+                    AcpContentBlock::Text(t) => format!("text:{}", t.text),
+                    other => panic!("unexpected chunk {other:?}"),
+                },
+                SessionUpdate::ToolCall(call) => format!("tool:{}", call.title),
+                other => panic!("unexpected update {other:?}"),
+            })
+            .collect();
+        // Redacted thinking has nothing to show.
+        assert_eq!(
+            replayed,
+            [
+                "thinking:first",
+                "text:Let me look.",
+                "thinking:second",
+                "tool:read_file"
+            ]
+        );
+    }
+
     #[test]
     fn replay_still_emits_user_text_and_tool_calls() {
         let messages = vec![
             Message::user("hello"),
             Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "call_1".into(),
-                    name: "read_file".into(),
-                    arguments: r#"{"path":"a.txt"}"#.into(),
-                }],
+                content: vec![ContentBlock::tool_use(
+                    "call_1",
+                    "read_file",
+                    r#"{"path":"a.txt"}"#,
+                )],
             },
             Message::tool_result("call_1", "read_file", "file content", false),
         ];

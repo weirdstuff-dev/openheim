@@ -9,15 +9,92 @@
 //! re-implement the same framing state machine (and drift apart in the details).
 //!
 //! Interpreting each payload — JSON shape, the `[DONE]` sentinel, etc. — stays
-//! with the caller, since that part genuinely differs per provider.
+//! with each provider's [`StreamParser`]; [`read_stream`] drives one over a
+//! response body.
+
+use tokio::sync::mpsc::UnboundedSender;
+
+use super::LlmChunk;
+use crate::core::models::Choice;
+use crate::error::{Error, Result};
+
+/// A provider's interpretation of its own SSE stream: one payload at a time,
+/// then the finished reply.
+pub(crate) trait StreamParser {
+    /// Handles one `data:` payload, sending any text or thinking it carries
+    /// to `chunk_tx`. Returns `true` once the provider has said the stream is
+    /// over, so reading stops there.
+    fn payload(&mut self, data: &str, chunk_tx: &UnboundedSender<LlmChunk>) -> Result<bool>;
+
+    /// The complete reply, or [`Error::IncompleteResponse`] if the stream
+    /// ended before the provider said the reply was finished. A connection
+    /// that closes early looks like a normal end of body, so without this
+    /// check a cut-off reply would be taken as complete.
+    fn finish(self) -> Result<Choice>;
+}
+
+/// Longest SSE line [`read_stream`] buffers. A body that sends more than this
+/// without a newline is rejected rather than held in memory.
+const MAX_LINE_LEN: usize = 1024 * 1024;
+
+/// Reads `response`'s SSE body through `parser` until the parser sees the
+/// end of the stream or the body ends, then returns `parser.finish()`.
+pub(crate) async fn read_stream<P: StreamParser>(
+    mut response: reqwest::Response,
+    mut parser: P,
+    chunk_tx: &UnboundedSender<LlmChunk>,
+) -> Result<Choice> {
+    let mut decoder = SseDecoder::new();
+    loop {
+        let bytes = response.chunk().await.map_err(Error::ReqwestError)?;
+        match &bytes {
+            Some(bytes) => decoder.feed(bytes),
+            // End of body: terminate a last line that arrived without its
+            // newline, so its payload still counts.
+            None => decoder.feed(b"\n"),
+        }
+        while let Some(data) = decoder.next_payload() {
+            if parser.payload(&data, chunk_tx)? {
+                return parser.finish();
+            }
+        }
+        // Every complete line is gone, so what's left is one unfinished line.
+        if decoder.buf.len() > MAX_LINE_LEN {
+            return Err(Error::ParseError(format!(
+                "stream line longer than {MAX_LINE_LEN} bytes"
+            )));
+        }
+        if bytes.is_none() {
+            return parser.finish();
+        }
+    }
+}
+
+/// Parses one payload as `T`, logging (not failing on) one that doesn't
+/// parse. Skipping it keeps an unexpected event type from failing the whole
+/// reply, but a skipped payload may have carried part of the reply, so it's
+/// worth a warning with enough of the payload to see what it was.
+pub(crate) fn parse_payload<T: serde::de::DeserializeOwned>(
+    provider: &str,
+    data: &str,
+) -> Option<T> {
+    match serde_json::from_str(data) {
+        Ok(value) => Some(value),
+        Err(e) => {
+            let shown: String = data.chars().take(200).collect();
+            tracing::warn!("{provider}: skipping unparseable stream payload ({e}): {shown}");
+            None
+        }
+    }
+}
 
 /// Accumulates raw byte chunks and yields complete SSE `data:` payloads.
-pub(crate) struct SseDecoder {
+struct SseDecoder {
     buf: Vec<u8>,
 }
 
 impl SseDecoder {
-    pub(crate) fn new() -> Self {
+    fn new() -> Self {
         Self { buf: Vec::new() }
     }
 
@@ -27,14 +104,14 @@ impl SseDecoder {
     /// a chunk boundary, and decoding each chunk in isolation would corrupt it
     /// into U+FFFD replacement characters. Decoding happens per complete line
     /// in [`SseDecoder::next_payload`].
-    pub(crate) fn feed(&mut self, bytes: &[u8]) {
+    fn feed(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);
     }
 
     /// Pops the next complete `data:` payload, or `None` if no full line is
     /// buffered yet. Blank lines, comment lines (`:` prefix), and non-`data`
     /// fields (`event:`, `id:`, …) are skipped. The returned payload is trimmed.
-    pub(crate) fn next_payload(&mut self) -> Option<String> {
+    fn next_payload(&mut self) -> Option<String> {
         while let Some(nl) = self.buf.iter().position(|&b| b == b'\n') {
             let line_bytes: Vec<u8> = self.buf.drain(..=nl).collect();
             let line = String::from_utf8_lossy(&line_bytes);
@@ -58,6 +135,67 @@ impl SseDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::models::Message;
+
+    /// Records every payload; says the stream is over at `"end"`, and only
+    /// then counts as complete.
+    #[derive(Default)]
+    struct Recorder {
+        payloads: Vec<String>,
+        ended: bool,
+    }
+
+    impl StreamParser for Recorder {
+        fn payload(&mut self, data: &str, _: &UnboundedSender<LlmChunk>) -> Result<bool> {
+            self.payloads.push(data.to_string());
+            self.ended = data == "end";
+            Ok(self.ended)
+        }
+
+        fn finish(self) -> Result<Choice> {
+            if !self.ended {
+                return Err(Error::IncompleteResponse(self.payloads.join(",")));
+            }
+            Ok(Choice {
+                message: Message::assistant(self.payloads.join(",")),
+                finish_reason: None,
+                usage: None,
+            })
+        }
+    }
+
+    async fn read(body: impl Into<reqwest::Body>) -> Result<Choice> {
+        let response = reqwest::Response::from(http::Response::new(body.into()));
+        let (chunk_tx, _chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+        read_stream(response, Recorder::default(), &chunk_tx).await
+    }
+
+    #[tokio::test]
+    async fn read_stream_stops_at_the_end_signal() {
+        let choice = read("data: a\n\ndata: end\n\ndata: ignored\n\n")
+            .await
+            .unwrap();
+        assert_eq!(choice.message.text().as_deref(), Some("a,end"));
+    }
+
+    #[tokio::test]
+    async fn read_stream_keeps_a_last_line_without_its_newline() {
+        let choice = read("data: a\n\ndata: end").await.unwrap();
+        assert_eq!(choice.message.text().as_deref(), Some("a,end"));
+    }
+
+    #[tokio::test]
+    async fn read_stream_reports_a_body_that_ends_early() {
+        let err = read("data: a\n\n").await.unwrap_err();
+        assert!(matches!(err, Error::IncompleteResponse(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn read_stream_rejects_a_line_over_the_limit() {
+        let body = format!("data: a\n\ndata: {}", "x".repeat(MAX_LINE_LEN));
+        let err = read(body).await.unwrap_err();
+        assert!(matches!(err, Error::ParseError(_)), "{err}");
+    }
 
     #[test]
     fn yields_payloads_split_across_chunks() {

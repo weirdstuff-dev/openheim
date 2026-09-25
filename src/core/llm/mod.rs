@@ -12,6 +12,13 @@ use tokio::sync::mpsc;
 use crate::core::models::{Choice, Message, Tool};
 use crate::error::Result;
 
+/// An id for a tool call the provider sent without one. It has to be unique
+/// across the whole session, not just within one reply: ACP clients and
+/// permission prompts tell tool calls apart by id.
+fn new_tool_call_id() -> String {
+    format!("call_{}", uuid::Uuid::new_v4().simple())
+}
+
 /// A single streaming chunk produced during an LLM call.
 #[derive(Debug)]
 pub enum LlmChunk {

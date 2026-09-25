@@ -59,7 +59,7 @@ Each key under `[providers]` defines a provider. The key name is the provider id
 | `env_var` | string | No | Name of the environment variable holding the API key (recommended) |
 | `api_key` | string | No | Inline API key — `env_var` takes precedence if both are set |
 | `timeout_secs` | integer | `120` | Connect and idle-read timeout in seconds — bounds the connect phase and the maximum gap between body reads, not total request duration, so long streaming responses are not cut off mid-stream |
-| `max_tokens` | integer | No | Maximum output tokens per response (provider default if omitted) |
+| `max_tokens` | integer | No | Maximum output tokens per response (provider default if omitted). An `openai`-kind provider sends it as `max_completion_tokens` (OpenAI's reasoning models reject `max_tokens`); an `openai_compatible` one sends `max_tokens`, which most compatible backends still expect. |
 | `thinking` | `"adaptive"` \| `"off"` | `"adaptive"` for an Anthropic-kind provider, `"off"` otherwise | Extended thinking. Only the Anthropic client reads this — other providers ignore it. Applies to every model under this entry, so set it to `"off"` if `default_model`/`models` includes one that doesn't support adaptive thinking (e.g. `claude-haiku-4-5`, `claude-3-7-sonnet`) — use a second `[providers.<other-name>]` entry with `kind = "anthropic"` for that model if you need both. |
 
 Key resolution order: `env_var` (if set and non-empty) → `api_key` → empty string (for keyless providers like Ollama).
@@ -84,8 +84,8 @@ env_var = "ANTHROPIC_API_KEY"
 
 [providers.gemini]
 api_base = "https://generativelanguage.googleapis.com/v1beta"
-default_model = "gemini-2.0-flash"
-models = ["gemini-2.0-flash", "gemini-2.5-pro"]
+default_model = "gemini-3.8-flash"
+models = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
 env_var = "GEMINI_API_KEY"
 
 # OpenAI-compatible local model — no API key needed

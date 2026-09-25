@@ -27,7 +27,7 @@ pub trait ToolHandler: Send + Sync {
 }
 ```
 
-The `definition` method runs once at startup to populate the list sent to the LLM. The `execute` method is called each time the LLM decides to use the tool. `capabilities` is consulted three places: Architect mode only exposes tools with `read_only: true`; the approval-remembering logic uses `approval_scope` to decide whether "Allow Always" covers every call to the tool (`ApprovalScope::ToolName`, the default) or only byte-identical arguments (`ApprovalScope::ExactArguments` — what `execute_command` uses, so approving `git status` can't silently cover `git status && rm -rf ~`); and the ACP transport uses `kind` for client-side icon treatment. A read-only tool (e.g. one that only queries an API) should set `read_only: true` so it works in Architect mode too:
+The `definition` method runs once at startup to populate the list sent to the LLM. The `execute` method is called each time the LLM decides to use the tool. `capabilities` is consulted three places: Architect mode only exposes tools with `read_only: true`; the approval-remembering logic uses `approval_scope` to decide whether "Allow Always" covers every call to the tool (`ApprovalScope::ToolName`, the default) or only calls with the same arguments (`ApprovalScope::ExactArguments`, compared as JSON so key order and whitespace don't matter — what `execute_command` uses, so approving `git status` can't silently cover `git status && rm -rf ~`); and the ACP transport uses `kind` for client-side icon treatment. A read-only tool (e.g. one that only queries an API) should set `read_only: true` so it works in Architect mode too:
 
 ```rust
 fn capabilities(&self) -> ToolCapabilities {
@@ -178,7 +178,7 @@ If you're driving the agent loop yourself, use `SystemToolExecutor::register` an
 
 ```rust
 use openheim::tools::SystemToolExecutor;
-use openheim::core::agent::run_agent_with_history;
+use openheim::core::agent::run_agent;
 use openheim::core::client_io::NoClientIo;
 use openheim::core::models::Message;
 use openheim::core::permission::{AllowAll, PermissionGate};
@@ -196,7 +196,6 @@ async fn main() -> openheim::Result<()> {
     let mut executor = SystemToolExecutor::new();
     executor.register_builtins(app_config.allow_shell);   // built-ins
     executor.register(Box::new(FetchUrlTool::new()));    // your tool
-    let executor = Arc::new(executor);
 
     // Build the LLM client from config
     let http = openheim::config::build_http_client(agent_config.timeout_secs)?;
@@ -212,13 +211,14 @@ async fn main() -> openheim::Result<()> {
         client_io: &NoClientIo, // no editor to delegate file I/O to
     };
 
-    let result = run_agent_with_history(
-        llm,
-        executor,
+    let result = run_agent(
+        &*llm,
+        &executor,
         &agent_config,
         &mut messages,
-        None, // prompt_builder
+        None,   // prompt_builder
         &turn,
+        |_| {}, // or handle each StreamEvent as it happens
     )
     .await?;
 

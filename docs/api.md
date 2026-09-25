@@ -561,16 +561,19 @@ Returns the full conversation for a session, including all messages.
 | `"tool"` | Tool execution result fed back to the LLM |
 | `"system"` | System prompt injected by the agent (skills, context) |
 
-**Content block types** (`content` is always an array, in order — an assistant
-turn commonly holds a leading `thinking` block followed by `text` and/or
-`tool_use` blocks; a `tool` message holds exactly one `tool_result` block):
+**Content block types** (`content` is always an array, in the order the model
+produced it — an assistant turn commonly holds a leading `thinking` block
+followed by `text` and/or `tool_use` blocks, and with interleaved thinking
+more `thinking` blocks can sit between them; a `tool` message holds exactly
+one `tool_result` block):
 
 | `type` | Fields | Description |
 |---|---|---|
 | `"text"` | `text: string` | Plain text (user, assistant, or system content) |
 | `"thinking"` | `thinking: string`, `signature?: string \| null` | Extended-thinking output. `signature` must be replayed unmodified — it's how the provider verifies the block wasn't tampered with. |
+| `"redacted_thinking"` | `data: string` | Thinking the provider returned encrypted (Anthropic). Nothing to display; kept so it can be sent back unchanged. |
 | `"image"` | `data: string` (base64), `mime_type: string` | User-supplied image, e.g. from an ACP client's `image` content block |
-| `"tool_use"` | `id: string`, `name: string`, `arguments: string` (JSON string) | A tool call the assistant requested |
+| `"tool_use"` | `id: string`, `name: string`, `arguments: string` (JSON string), `signature?: string` | A tool call the assistant requested. `signature` is an opaque provider token (Gemini's thought signature), present only when the provider sent one |
 | `"tool_result"` | `tool_call_id: string`, `tool_name: string`, `content: string`, `is_error?: boolean` | Result of executing a tool call. `is_error` omitted from JSON when `false` (absence means success); forwarded to Anthropic as `is_error` in the tool result block so the LLM receives accurate signal. |
 
 **Error `400`** — if `:id` is not a valid UUID:
@@ -1434,7 +1437,7 @@ Creates the directory and all parent directories (equivalent to `mkdir -p`).
 
 #### 3.3.6 Delete
 
-Deletes a file or directory (recursively if directory).
+Deletes a file or directory (recursively if directory). A symlink is deleted as a link; what it points to is left alone. The work directory itself can't be deleted: a path that names it (`""`, `.`, `sub/..`, its absolute path) gets an `error` reply. Both rules also apply to `from` and `to` of a rename, so renaming a symlink moves the link.
 
 **Request:**
 
@@ -1672,8 +1675,9 @@ interface Message {
 type ContentBlock =
   | { type: "text"; text: string }
   | { type: "thinking"; thinking: string; signature?: string | null }
+  | { type: "redacted_thinking"; data: string }
   | { type: "image"; data: string; mime_type: string } // data is base64-encoded
-  | { type: "tool_use"; id: string; name: string; arguments: string } // arguments is a JSON string
+  | { type: "tool_use"; id: string; name: string; arguments: string; signature?: string } // arguments is a JSON string
   | {
       type: "tool_result";
       tool_call_id: string;

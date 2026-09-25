@@ -15,7 +15,7 @@ use crate::core::permission::PermissionGate;
 
 /// Everything a single prompt turn carries down to the tools it runs.
 ///
-/// Grouped into one struct so `run_agent_loop`'s (and the tool traits')
+/// Grouped into one struct so `run_agent`'s (and the tool traits')
 /// parameter lists don't grow with every new hook. Every [`crate::tools::ToolHandler`]
 /// receives this on `execute`, so a built-in or custom tool can honour
 /// cancellation, confine itself to the work directory, and route file I/O
@@ -25,9 +25,10 @@ use crate::core::permission::PermissionGate;
 /// [`crate::tools::DelegateTool`] for subagents) pass the same context
 /// straight through rather than manufacturing their own: the subagent shares
 /// the parent turn's cancellation token, so a `session/cancel` on the outer
-/// turn stops the subagent too, and inherits the parent's permission gate, so
+/// turn stops the subagent too, and asks the parent's permission gate, so
 /// subagent tool calls go through the same approval flow as the
-/// orchestrator's own — there is no separate "subagent trust policy".
+/// orchestrator's own — there is no separate "subagent trust policy". The
+/// gate is wrapped so each request's `subagent` names who is asking.
 pub struct TurnContext<'a> {
     /// Fires when the turn is cancelled; long-running tools should race
     /// their work against it.

@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 
 use crate::{core::permission::PermissionDecision, memory::ConversationMeta};
 
-use super::permission::{PERMISSION_OPTIONS, PermissionRequest};
+use super::permission::{PERMISSION_OPTIONS, PendingPermission};
 use super::render;
 use super::types::{ChatItem, ConfigRow};
 
@@ -235,18 +235,17 @@ pub(super) enum Overlay {
 
 /// Tool-call approvals waiting on the user, shown one at a time on top of
 /// everything else. A queue rather than a single slot: tool calls are checked
-/// concurrently (see agent.rs's Phase 1b), so several requests can arrive
-/// before the first is answered; later ones wait their turn instead of
-/// overwriting (and orphaning) an earlier one.
+/// concurrently (see `run_agent`), so several requests can arrive before the
+/// first is answered; later ones wait their turn.
 #[derive(Default)]
 pub(super) struct PermissionQueue {
-    pending: VecDeque<PermissionRequest>,
+    pending: VecDeque<PendingPermission>,
     /// Highlighted option in [`PERMISSION_OPTIONS`] for the front request.
     selected: usize,
 }
 
 impl PermissionQueue {
-    pub(super) fn push(&mut self, request: PermissionRequest) {
+    pub(super) fn push(&mut self, request: PendingPermission) {
         if self.pending.is_empty() {
             self.selected = 0;
         }
@@ -263,7 +262,7 @@ impl PermissionQueue {
     }
 
     /// The request currently shown, if any.
-    pub(super) fn front(&self) -> Option<&PermissionRequest> {
+    pub(super) fn front(&self) -> Option<&PendingPermission> {
         self.pending.front()
     }
 
@@ -284,13 +283,15 @@ impl PermissionQueue {
     }
 
     /// Sends `decision` for the front request and moves on to the next one.
-    /// Returns the answered tool's name. A failed send means the agent task
-    /// already gave up waiting; the request is dropped either way.
+    /// Returns the answered call's [`PendingPermission::describe`]. A failed
+    /// send means the agent task already gave up waiting; the request is
+    /// dropped either way.
     pub(super) fn resolve(&mut self, decision: PermissionDecision) -> Option<String> {
         let request = self.pending.pop_front()?;
         self.selected = 0;
+        let description = request.describe();
         let _ = request.respond_to.send(decision);
-        Some(request.tool_name)
+        Some(description)
     }
 
     /// Drops requests nobody is waiting on any more (the agent task gave up,
@@ -336,4 +337,6 @@ pub(super) struct AgentChannels {
     pub(super) switch_session: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
     pub(super) list_sessions: mpsc::UnboundedSender<()>,
     pub(super) new_session: mpsc::UnboundedSender<()>,
+    /// Cancels the running turn, if any.
+    pub(super) cancel: mpsc::UnboundedSender<()>,
 }

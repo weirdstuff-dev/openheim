@@ -11,6 +11,12 @@ pub enum Error {
     #[error("HTTP {status}: {body}")]
     HttpError { status: u16, body: String },
 
+    /// A provider's streamed reply ended before the provider said it was
+    /// finished, typically a dropped connection. Retryable: nothing partial
+    /// is kept.
+    #[error("Incomplete response: {0}")]
+    IncompleteResponse(String),
+
     #[error("Tool execution error: {0}")]
     ToolExecutionError(String),
 
@@ -93,11 +99,13 @@ impl Error {
         Error::ConfigError(msg.to_string())
     }
 
-    /// Returns true for transient errors that may succeed on retry (429, 5xx, network errors).
+    /// Returns true for transient errors that may succeed on retry (429, 5xx,
+    /// network errors, a reply cut off mid-stream).
     pub fn is_retryable(&self) -> bool {
         match self {
             Error::HttpError { status, .. } => matches!(status, 429 | 500 | 502 | 503 | 504),
             Error::ReqwestError(e) => e.is_timeout() || e.is_connect(),
+            Error::IncompleteResponse(_) => true,
             _ => false,
         }
     }
@@ -151,6 +159,11 @@ mod tests {
         assert!(!http_err(400).is_retryable());
         assert!(!http_err(401).is_retryable());
         assert!(!http_err(404).is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_for_an_incomplete_response() {
+        assert!(Error::IncompleteResponse("cut off".into()).is_retryable());
     }
 
     #[test]

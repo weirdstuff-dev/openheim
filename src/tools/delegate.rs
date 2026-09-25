@@ -5,7 +5,7 @@
 //! optional model/tools overrides). Inline subagents exist only for the duration
 //! of the call and are never persisted anywhere.
 //!
-//! Each call to `delegate_task` runs a fresh, isolated [`run_agent_with_history`]
+//! Each call to `delegate_task` runs a fresh, isolated [`run_agent`]
 //! turn — its own message history, its own system prompt (the profile's persona,
 //! not the parent's `system.md`/skills), and optionally its own model/provider and
 //! restricted tool set — and returns only the subagent's final answer. The
@@ -19,11 +19,12 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::config::{AgentConfig, AppConfig, client_for_config};
-use crate::core::agent::run_agent_with_history;
+use crate::core::agent::run_agent;
 use crate::core::llm::LlmClient;
 use crate::core::models::{Message, StopReason, Tool};
+use crate::core::permission::{PermissionDecision, PermissionGate, PermissionRequest};
 use crate::core::turn::TurnContext;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::memory::PromptBuilder;
 use crate::subagents::AgentProfile;
 
@@ -33,7 +34,7 @@ use super::scoped_executor::ScopedExecutor;
 use super::{ToolExecutor, ToolHandler};
 
 /// `delegate_task`'s arguments; exactly one of `agent`/`system_prompt` must
-/// be set (checked in `execute`, which answers the LLM with how to fix it).
+/// be set (checked in `execute`, whose error tells the LLM how to fix it).
 #[derive(Deserialize)]
 struct DelegateArgs {
     task: String,
@@ -237,22 +238,23 @@ impl ToolHandler for DelegateTool {
         )
     }
 
-    /// Runs the delegated subagent turn under the *same* [`TurnContext`] as
-    /// the orchestrating turn rather than manufacturing a fresh one: a
-    /// `session/cancel` on the orchestrator must stop the subagent too, there
-    /// is no separate trust policy for subagent tool calls (they go through
-    /// the same approval flow, e.g. `session/request_permission`), and the
-    /// subagent is confined to the same work directory and client I/O.
+    /// Runs the delegated subagent turn under the orchestrating turn's
+    /// [`TurnContext`] rather than a fresh one: a `session/cancel` on the
+    /// orchestrator must stop the subagent too, there is no separate trust
+    /// policy for subagent tool calls (they go through the same gate, e.g.
+    /// `session/request_permission`), and the subagent is confined to the
+    /// same work directory and client I/O. The one change is that the gate is
+    /// wrapped in a `SubagentGate`, so each request names the subagent.
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
         let args: DelegateArgs = parse(args)?;
 
         let profile = match (args.agent.as_deref(), args.system_prompt.as_deref()) {
             (Some(_), Some(_)) => {
-                return Ok(
+                return Err(Error::ToolExecutionError(
                     "Provide either 'agent' (a pre-configured subagent) or 'system_prompt' \
                      (an inline one), not both."
                         .to_string(),
-                );
+                ));
             }
             (Some(agent_name), None) => match self.find_profile(agent_name) {
                 Some(profile) => profile.clone(),
@@ -263,19 +265,21 @@ impl ToolHandler for DelegateTool {
                         .map(|p| p.name.as_str())
                         .collect::<Vec<_>>()
                         .join(", ");
-                    return Ok(format!(
+                    return Err(Error::ToolExecutionError(format!(
                         "Unknown subagent '{agent_name}'. Available subagents: {available}. \
                          Alternatively, define an inline subagent via 'system_prompt'."
-                    ));
+                    )));
                 }
             },
-            (None, Some(system_prompt)) => inline_profile(system_prompt, &args),
+            (None, Some(system_prompt)) => {
+                inline_profile(system_prompt, &args, self.base_config.max_iterations)
+            }
             (None, None) => {
-                return Ok(
+                return Err(Error::ToolExecutionError(
                     "Missing subagent: provide 'agent' (a pre-configured subagent) or \
                      'system_prompt' (an inline one)."
                         .to_string(),
-                );
+                ));
             }
         };
         let profile = &profile;
@@ -289,13 +293,23 @@ impl ToolHandler for DelegateTool {
         // Fresh, isolated history — the subagent only ever sees its own task.
         let mut messages = vec![Message::user(args.task.clone())];
 
-        let result = run_agent_with_history(
-            llm,
-            executor,
+        let permission_gate: Arc<dyn PermissionGate> = Arc::new(SubagentGate {
+            parent: turn.permission_gate.clone(),
+            subagent: profile.name.clone(),
+        });
+        let subagent_turn = TurnContext {
+            permission_gate: &permission_gate,
+            ..*turn
+        };
+
+        let result = run_agent(
+            &*llm,
+            &*executor,
             &config,
             &mut messages,
             Some(&prompt_builder),
-            turn,
+            &subagent_turn,
+            |_| {},
         )
         .await?;
 
@@ -325,6 +339,23 @@ impl ToolHandler for DelegateTool {
     }
 }
 
+/// The parent turn's gate, with every request attributed to `subagent`: the
+/// subagent's tool calls never appear in the parent's transcript, so without
+/// this the user would be asked about calls they've never seen.
+struct SubagentGate {
+    parent: Arc<dyn PermissionGate>,
+    subagent: String,
+}
+
+#[async_trait]
+impl PermissionGate for SubagentGate {
+    async fn check(&self, request: &PermissionRequest<'_>) -> PermissionDecision {
+        self.parent
+            .check(&request.from_subagent(&self.subagent))
+            .await
+    }
+}
+
 /// Builds an ephemeral [`AgentProfile`] from `delegate_task`'s inline arguments.
 ///
 /// The profile lives only for this one call — it is never written to
@@ -332,14 +363,21 @@ impl ToolHandler for DelegateTool {
 /// same [`DelegateTool::resolve_runtime`]/[`DelegateTool::build_executor`] path
 /// as named profiles, inline subagents get the identical sandbox, permission
 /// gate, and no-recursion guarantees.
-fn inline_profile(system_prompt: &str, args: &DelegateArgs) -> AgentProfile {
+///
+/// The LLM-supplied `max_iterations` is capped at `session_max_iterations`
+/// so an orchestrator can't grant its subagent a longer run than its own.
+fn inline_profile(
+    system_prompt: &str,
+    args: &DelegateArgs,
+    session_max_iterations: usize,
+) -> AgentProfile {
     AgentProfile {
         name: "inline".to_string(),
         description: String::new(),
         model: args.model.clone(),
         provider: args.provider.clone(),
         tools: args.tools.clone(),
-        max_iterations: args.max_iterations,
+        max_iterations: args.max_iterations.map(|n| n.min(session_max_iterations)),
         system_prompt: system_prompt.to_string(),
     }
 }
@@ -349,8 +387,7 @@ mod tests {
     use super::*;
     use crate::core::client_io::NoClientIo;
     use crate::core::models::{Choice, ContentBlock, FinishReason, Role};
-    use crate::core::permission::{AllowAll, PermissionDecision, PermissionGate};
-    use crate::error::Error;
+    use crate::core::permission::AllowAll;
     use crate::tools::SystemToolExecutor;
     use crate::tools::test_support::TurnHarness;
     use std::path::Path;
@@ -395,11 +432,7 @@ mod tests {
         Choice {
             message: Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "call_1".into(),
-                    name: "nonexistent".into(),
-                    arguments: "{}".into(),
-                }],
+                content: vec![ContentBlock::tool_use("call_1", "nonexistent", "{}")],
             },
             finish_reason: Some(FinishReason::ToolCalls),
             usage: None,
@@ -480,21 +513,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_returns_message_for_unknown_agent() {
+    async fn execute_errors_for_unknown_agent() {
         let llm = Arc::new(MockLlm::new(vec![]));
         let tool = make_tool(vec![sample_profile("reviewer", "desc")], llm);
         let harness = TurnHarness::new();
 
-        let result = tool
+        let err = tool
             .execute(
                 r#"{"agent": "ghost", "task": "do something"}"#,
                 &harness.turn(),
             )
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert!(result.contains("Unknown subagent 'ghost'"));
-        assert!(result.contains("reviewer"));
+        assert!(matches!(err, Error::ToolExecutionError(_)), "{err}");
+        assert!(err.to_string().contains("Unknown subagent 'ghost'"));
+        assert!(err.to_string().contains("reviewer"));
     }
 
     #[tokio::test]
@@ -563,25 +597,29 @@ mod tests {
         assert_eq!(result, "");
     }
 
-    struct RejectPermissionGate;
+    /// Rejects everything, recording which subagent (if any) each request
+    /// named.
+    #[derive(Default)]
+    struct RejectPermissionGate {
+        asked_by: Mutex<Vec<Option<String>>>,
+    }
 
     #[async_trait]
     impl PermissionGate for RejectPermissionGate {
-        async fn check(
-            &self,
-            _tool_call_id: &str,
-            _tool_name: &str,
-            _arguments: &str,
-        ) -> PermissionDecision {
+        async fn check(&self, request: &PermissionRequest<'_>) -> PermissionDecision {
+            self.asked_by
+                .lock()
+                .unwrap()
+                .push(request.subagent.map(str::to_string));
             PermissionDecision::RejectOnce
         }
     }
 
     #[tokio::test]
-    async fn subagent_tool_calls_go_through_parent_permission_gate() {
+    async fn subagent_tool_calls_go_through_parent_permission_gate_named() {
         // Subagent tool calls must be checked by the same gate as the
         // orchestrator's own — there is no separate, more-trusting policy for
-        // subagents.
+        // subagents — and the request must say which subagent is asking.
         let llm = Arc::new(MockLlm::new(vec![
             tool_call_choice(),
             text_choice("denied"),
@@ -589,7 +627,8 @@ mod tests {
         let tool = make_tool(vec![sample_profile("reviewer", "desc")], llm);
 
         let cancel = CancellationToken::new();
-        let permission_gate: Arc<dyn PermissionGate> = Arc::new(RejectPermissionGate);
+        let gate = Arc::new(RejectPermissionGate::default());
+        let permission_gate: Arc<dyn PermissionGate> = gate.clone();
         let turn = TurnContext {
             cancel: &cancel,
             permission_gate: &permission_gate,
@@ -606,6 +645,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(result, "denied");
+        assert_eq!(
+            *gate.asked_by.lock().unwrap(),
+            vec![Some("reviewer".to_string())]
+        );
     }
 
     /// Subagents are built from a snapshot of the registry taken before
@@ -692,15 +735,16 @@ mod tests {
         let tool = make_tool(vec![sample_profile("reviewer", "desc")], llm);
         let harness = TurnHarness::new();
 
-        let result = tool
+        let err = tool
             .execute(
                 r#"{"agent": "reviewer", "system_prompt": "You are X.", "task": "go"}"#,
                 &harness.turn(),
             )
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert!(result.contains("not both"));
+        assert!(matches!(err, Error::ToolExecutionError(_)), "{err}");
+        assert!(err.to_string().contains("not both"));
     }
 
     #[tokio::test]
@@ -709,12 +753,34 @@ mod tests {
         let tool = make_tool(vec![], llm);
         let harness = TurnHarness::new();
 
-        let result = tool
+        let err = tool
             .execute(r#"{"task": "go"}"#, &harness.turn())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::ToolExecutionError(_)), "{err}");
+        assert!(err.to_string().contains("Missing subagent"));
+    }
+
+    #[tokio::test]
+    async fn inline_max_iterations_is_capped_at_the_sessions() {
+        // The session allows 5 iterations; asking for 100 must not lift that.
+        let llm = Arc::new(MockLlm::new((0..10).map(|_| tool_call_choice()).collect()));
+        let tool = make_tool(vec![], llm);
+        let harness = TurnHarness::new();
+
+        let result = tool
+            .execute(
+                r#"{"system_prompt": "Loop.", "max_iterations": 100, "task": "go"}"#,
+                &harness.turn(),
+            )
             .await
             .unwrap();
 
-        assert!(result.contains("Missing subagent"));
+        assert!(
+            result.contains("reached its iteration limit (5)"),
+            "{result}"
+        );
     }
 
     #[tokio::test]
@@ -750,7 +816,7 @@ mod tests {
         )
         .unwrap();
 
-        let profile = inline_profile("You are X.", &args);
+        let profile = inline_profile("You are X.", &args, 10);
         assert_eq!(profile.name, "inline");
         assert_eq!(profile.system_prompt, "You are X.");
         assert_eq!(profile.tools, Some(vec!["read_file".to_string()]));

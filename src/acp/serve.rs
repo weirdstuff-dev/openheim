@@ -463,9 +463,8 @@ mod to_acp_error_tests {
         }
     }
 
-    // Regression test (PR #61 review): a provider failing to convert the
-    // model's own malformed tool-call JSON while building a request surfaced
-    // as `invalid_params`, blaming the client for a server-side failure.
+    // A provider failing to convert the model's own malformed tool-call JSON
+    // is a server-side failure, not the client's `invalid_params`.
     #[test]
     fn parse_failures_inside_a_turn_are_internal_errors() {
         let e = Error::ParseError(

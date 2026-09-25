@@ -59,8 +59,8 @@ env_var = "ANTHROPIC_API_KEY"
 # Google Gemini
 # [providers.gemini]
 # api_base = "https://generativelanguage.googleapis.com/v1beta"
-# default_model = "gemini-2.0-flash"
-# models = ["gemini-2.0-flash"]
+# default_model = "gemini-3.8-flash"
+# models = ["gemini-3.8-flash"]
 # env_var = "GEMINI_API_KEY"
 
 # Custom/Generic OpenAI-compatible API

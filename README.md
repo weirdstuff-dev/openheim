@@ -122,8 +122,8 @@ env_var = "OPENAI_API_KEY"
 
 [providers.gemini]
 api_base = "https://generativelanguage.googleapis.com/v1beta"
-default_model = "gemini-2.0-flash"
-models = ["gemini-2.0-flash", "gemini-2.5-pro"]
+default_model = "gemini-3.8-flash"
+models = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
 env_var = "GEMINI_API_KEY"
 
 # Local Ollama (no API key needed)

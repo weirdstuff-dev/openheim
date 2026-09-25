@@ -213,6 +213,21 @@ fn user_bubble(text: &str, width: u16, theme: Color) -> Vec<Line<'static>> {
     out
 }
 
+/// The commands listed on the welcome screen: every command `:help` lists.
+pub(crate) const WELCOME_COMMANDS: &[(&str, &str)] = &[
+    (":help", "show all commands"),
+    (":new", "start a new session"),
+    (":sessions", "browse and restore saved sessions"),
+    (":config", "current config"),
+    (":models", "list available models"),
+    (":models <name>", "switch model mid-session"),
+    (":skills", "available skills"),
+    (":mcp", "MCP servers"),
+    (":theme", "change accent color"),
+    (":theme <name>", "apply color directly"),
+    (":q / :quit", "exit"),
+];
+
 pub(crate) fn render_welcome(
     f: &mut Frame,
     area: Rect,
@@ -223,19 +238,6 @@ pub(crate) fn render_welcome(
 ) {
     const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-    const COMMANDS: &[(&str, &str)] = &[
-        (":help", "show all commands"),
-        (":config", "current config"),
-        (":models", "list available models"),
-        (":models <name>", "switch model mid-session"),
-        (":sessions", "browse and restore saved sessions"),
-        (":skills", "available skills"),
-        (":mcp", "MCP servers"),
-        (":theme", "change accent color"),
-        (":theme <name>", "apply color directly"),
-        (":q / :quit", "exit"),
-    ];
-
     let subtitle = if skills.is_empty() {
         format!("{model}  ·  {provider}")
     } else {
@@ -244,7 +246,7 @@ pub(crate) fn render_welcome(
     let hint = "type a message to start";
 
     // title + blank + subtitle + blank*2 + hint + blank + commands
-    let content_h = 1 + 1 + 1 + 2 + 1 + 1 + COMMANDS.len();
+    let content_h = 1 + 1 + 1 + 2 + 1 + 1 + WELCOME_COMMANDS.len();
     let top_pad = (area.height as usize).saturating_sub(content_h) / 2;
     let w = area.width as usize;
 
@@ -283,12 +285,12 @@ pub(crate) fn render_welcome(
 
     lines.push(Line::default());
 
-    let cmd_key_w = COMMANDS
+    let cmd_key_w = WELCOME_COMMANDS
         .iter()
         .map(|(k, _)| k.chars().count())
         .max()
         .unwrap_or(0);
-    let cmd_desc_w = COMMANDS
+    let cmd_desc_w = WELCOME_COMMANDS
         .iter()
         .map(|(_, d)| d.chars().count())
         .max()
@@ -296,7 +298,7 @@ pub(crate) fn render_welcome(
     let cmd_block_w = cmd_key_w + 6 + cmd_desc_w;
     let cmd_pad = center(cmd_block_w);
 
-    for &(key, desc) in COMMANDS {
+    for &(key, desc) in WELCOME_COMMANDS {
         let gap = " ".repeat(cmd_key_w - key.chars().count() + 6);
         lines.push(Line::from(vec![
             Span::raw(cmd_pad.clone()),
@@ -848,6 +850,7 @@ pub(crate) fn render_permission_prompt(
     f: &mut Frame,
     area: Rect,
     tool_name: &str,
+    subagent: Option<&str>,
     arguments: &str,
     selected: usize,
     theme: Color,
@@ -867,6 +870,7 @@ pub(crate) fn render_permission_prompt(
     }
 
     let body_h = 1 /* tool name */
+        + subagent.is_some() as u16
         + 1 /* blank */
         + arg_lines.len() as u16
         + 1 /* blank */
@@ -905,6 +909,16 @@ pub(crate) fn render_permission_prompt(
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
+    // A subagent's calls aren't in the transcript; say whose call this is.
+    if let Some(subagent) = subagent {
+        lines.push(Line::from(vec![
+            Span::styled("from  ", Style::default().fg(theme)),
+            Span::styled(
+                format!("subagent '{subagent}'"),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+    }
     lines.push(Line::raw(""));
     for arg_line in arg_lines {
         lines.push(Line::styled(arg_line, Style::default().fg(Color::DarkGray)));

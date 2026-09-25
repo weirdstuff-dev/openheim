@@ -31,6 +31,41 @@ impl PermissionDecision {
     }
 }
 
+/// The tool call a [`PermissionGate`] is asked about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PermissionRequest<'a> {
+    pub tool_call_id: &'a str,
+    pub tool_name: &'a str,
+    /// The call's arguments as the model sent them (normally a JSON object).
+    pub arguments: &'a str,
+    /// Name of the `delegate_task` subagent that made the call (`"inline"`
+    /// for an inline one), or `None` for the session's own agent. A
+    /// subagent's calls never appear in the session's transcript, so show
+    /// this when asking the user.
+    pub subagent: Option<&'a str>,
+}
+
+impl<'a> PermissionRequest<'a> {
+    /// A request for a call the session's own agent made.
+    pub fn new(tool_call_id: &'a str, tool_name: &'a str, arguments: &'a str) -> Self {
+        Self {
+            tool_call_id,
+            tool_name,
+            arguments,
+            subagent: None,
+        }
+    }
+
+    /// This request, attributed to the subagent `name`.
+    pub fn from_subagent(self, name: &'a str) -> Self {
+        Self {
+            subagent: Some(name),
+            ..self
+        }
+    }
+}
+
 /// Asked before every tool call the agent loop is about to execute.
 ///
 /// Implementations only need to *ask*: the runtime wraps whatever gate a
@@ -39,12 +74,7 @@ impl PermissionDecision {
 /// matching calls never reach the gate again.
 #[async_trait]
 pub trait PermissionGate: Send + Sync {
-    async fn check(
-        &self,
-        tool_call_id: &str,
-        tool_name: &str,
-        arguments: &str,
-    ) -> PermissionDecision;
+    async fn check(&self, request: &PermissionRequest<'_>) -> PermissionDecision;
 }
 
 /// Key used to remember an `AllowAlways`/`RejectAlways` decision across tool
@@ -52,27 +82,45 @@ pub trait PermissionGate: Send + Sync {
 /// [`ToolCapabilities::approval_scope`](crate::tools::ToolCapabilities::approval_scope).
 /// For [`ApprovalScope::ToolName`] (most tools) this is just the tool name —
 /// one approval covers every future call to that tool. For
-/// [`ApprovalScope::ExactArguments`] (`execute_command`) this is scoped to
-/// the exact command string: keying on the program name alone let an
-/// approval for `git status` silently cover `git status && rm -rf ~`. The
-/// tradeoff is that "Allow Always" only sticks for byte-identical commands,
-/// so argument variations re-prompt — annoying, but the alternative re-opens
-/// the bypass. Falls back to a key containing the raw arguments if a
-/// `command` field can't be extracted: such calls fail at execution time
-/// anyway, and distinct raw arguments get distinct keys so one malformed
-/// approval can't cover another.
+/// [`ApprovalScope::ExactArguments`] (e.g. `execute_command`) it's the tool
+/// name plus the full arguments, so approving `git status` doesn't cover
+/// `git status && rm -rf ~`. The arguments are normalized first (parsed,
+/// object keys sorted, whitespace dropped), so the same call written
+/// differently still matches; any difference in value re-prompts. Arguments
+/// that aren't JSON are keyed as the raw string: such calls fail at
+/// execution anyway, and distinct raw arguments still get distinct keys.
 pub fn approval_key(scope: ApprovalScope, tool_name: &str, arguments: &str) -> String {
     match scope {
         ApprovalScope::ToolName => tool_name.to_string(),
         ApprovalScope::ExactArguments => {
-            let command = serde_json::from_str::<serde_json::Value>(arguments)
-                .ok()
-                .and_then(|v| v.get("command")?.as_str().map(str::to_string));
-            match command {
-                Some(cmd) => format!("{tool_name}:{cmd}"),
-                None => format!("{tool_name}:unparsed:{arguments}"),
+            match serde_json::from_str::<serde_json::Value>(arguments) {
+                Ok(value) => format!("{tool_name}:{}", sorted_keys(value)),
+                Err(_) => format!("{tool_name}:unparsed:{arguments}"),
             }
         }
+    }
+}
+
+/// `value` with every object's keys in sorted order, so two spellings of the
+/// same arguments serialize identically. Needed because serde_json may be
+/// built with `preserve_order` (another dependency enables it), in which case
+/// objects keep the model's key order.
+fn sorted_keys(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<_> = map.into_iter().collect();
+            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            serde_json::Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, sorted_keys(value)))
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(sorted_keys).collect())
+        }
+        other => other,
     }
 }
 
@@ -134,18 +182,13 @@ impl RememberingGate {
 
 #[async_trait]
 impl PermissionGate for RememberingGate {
-    async fn check(
-        &self,
-        tool_call_id: &str,
-        tool_name: &str,
-        arguments: &str,
-    ) -> PermissionDecision {
-        let scope = self.executor.capabilities(tool_name).approval_scope;
-        let key = approval_key(scope, tool_name, arguments);
+    async fn check(&self, request: &PermissionRequest<'_>) -> PermissionDecision {
+        let scope = self.executor.capabilities(request.tool_name).approval_scope;
+        let key = approval_key(scope, request.tool_name, request.arguments);
         if let Some(remembered) = self.approvals.get(&key) {
             return remembered;
         }
-        let decision = self.inner.check(tool_call_id, tool_name, arguments).await;
+        let decision = self.inner.check(request).await;
         self.approvals.remember(key, decision);
         decision
     }
@@ -157,12 +200,7 @@ pub struct AllowAll;
 
 #[async_trait]
 impl PermissionGate for AllowAll {
-    async fn check(
-        &self,
-        _tool_call_id: &str,
-        _tool_name: &str,
-        _arguments: &str,
-    ) -> PermissionDecision {
+    async fn check(&self, _request: &PermissionRequest<'_>) -> PermissionDecision {
         PermissionDecision::AllowOnce
     }
 }
@@ -193,13 +231,11 @@ mod tests {
 
     #[async_trait]
     impl PermissionGate for ScriptedGate {
-        async fn check(
-            &self,
-            tool_call_id: &str,
-            _tool_name: &str,
-            _arguments: &str,
-        ) -> PermissionDecision {
-            self.asked.lock().unwrap().push(tool_call_id.to_string());
+        async fn check(&self, request: &PermissionRequest<'_>) -> PermissionDecision {
+            self.asked
+                .lock()
+                .unwrap()
+                .push(request.tool_call_id.to_string());
             self.answers.lock().unwrap().remove(0)
         }
     }
@@ -210,17 +246,21 @@ mod tests {
         RememberingGate::new(inner, approvals, Arc::new(executor))
     }
 
+    fn request<'a>(id: &'a str, tool: &'a str, arguments: &'a str) -> PermissionRequest<'a> {
+        PermissionRequest::new(id, tool, arguments)
+    }
+
     #[tokio::test]
     async fn allow_always_is_remembered_for_later_calls_to_the_same_tool() {
         let inner = ScriptedGate::new(vec![PermissionDecision::AllowAlways]);
         let gate = remembering(inner.clone(), Approvals::default());
 
         assert_eq!(
-            gate.check("call_1", "read_file", "{}").await,
+            gate.check(&request("call_1", "read_file", "{}")).await,
             PermissionDecision::AllowAlways
         );
         assert_eq!(
-            gate.check("call_2", "read_file", "{}").await,
+            gate.check(&request("call_2", "read_file", "{}")).await,
             PermissionDecision::AllowAlways
         );
         assert_eq!(inner.asked(), vec!["call_1"], "second call must not re-ask");
@@ -231,9 +271,9 @@ mod tests {
         let inner = ScriptedGate::new(vec![PermissionDecision::RejectAlways]);
         let gate = remembering(inner.clone(), Approvals::default());
 
-        gate.check("call_1", "write_file", "{}").await;
+        gate.check(&request("call_1", "write_file", "{}")).await;
         assert_eq!(
-            gate.check("call_2", "write_file", "{}").await,
+            gate.check(&request("call_2", "write_file", "{}")).await,
             PermissionDecision::RejectAlways
         );
         assert_eq!(inner.asked(), vec!["call_1"]);
@@ -247,8 +287,8 @@ mod tests {
         ]);
         let gate = remembering(inner.clone(), Approvals::default());
 
-        gate.check("call_1", "read_file", "{}").await;
-        gate.check("call_2", "read_file", "{}").await;
+        gate.check(&request("call_1", "read_file", "{}")).await;
+        gate.check(&request("call_2", "read_file", "{}")).await;
         assert_eq!(inner.asked(), vec!["call_1", "call_2"]);
     }
 
@@ -260,15 +300,19 @@ mod tests {
         ]);
         let gate = remembering(inner.clone(), Approvals::default());
 
-        gate.check("call_1", "execute_command", r#"{"command": "git status"}"#)
-            .await;
+        gate.check(&request(
+            "call_1",
+            "execute_command",
+            r#"{"command": "git status"}"#,
+        ))
+        .await;
         // Shares the first word, but must be asked about on its own.
         let second = gate
-            .check(
+            .check(&request(
                 "call_2",
                 "execute_command",
                 r#"{"command": "git status && rm -rf ~"}"#,
-            )
+            ))
             .await;
         assert_eq!(second, PermissionDecision::RejectOnce);
         assert_eq!(inner.asked(), vec!["call_1", "call_2"]);
@@ -281,20 +325,36 @@ mod tests {
         let approvals = Approvals::default();
         let first_turn = ScriptedGate::new(vec![PermissionDecision::AllowAlways]);
         remembering(first_turn, approvals.clone())
-            .check("call_1", "read_file", "{}")
+            .check(&request("call_1", "read_file", "{}"))
             .await;
 
         let second_turn = ScriptedGate::new(vec![]);
         let decision = remembering(second_turn.clone(), approvals)
-            .check("call_2", "read_file", "{}")
+            .check(&request("call_2", "read_file", "{}"))
             .await;
         assert_eq!(decision, PermissionDecision::AllowAlways);
         assert!(second_turn.asked().is_empty());
     }
 
     #[tokio::test]
+    async fn a_subagents_allow_always_covers_the_parents_calls_too() {
+        // One session, one set of approvals: who made the call doesn't
+        // change what an earlier "Allow Always" covers.
+        let inner = ScriptedGate::new(vec![PermissionDecision::AllowAlways]);
+        let gate = remembering(inner.clone(), Approvals::default());
+
+        gate.check(&request("call_1", "read_file", "{}").from_subagent("reviewer"))
+            .await;
+        let decision = gate.check(&request("call_2", "read_file", "{}")).await;
+        assert_eq!(decision, PermissionDecision::AllowAlways);
+        assert_eq!(inner.asked(), vec!["call_1"]);
+    }
+
+    #[tokio::test]
     async fn allow_all_always_allows() {
-        let decision = AllowAll.check("call_1", "execute_command", "{}").await;
+        let decision = AllowAll
+            .check(&request("call_1", "execute_command", "{}"))
+            .await;
         assert!(decision.is_allowed());
     }
 
@@ -311,15 +371,27 @@ mod tests {
     }
 
     #[test]
-    fn shell_commands_are_scoped_by_their_full_command_string() {
+    fn exact_argument_keys_hold_the_full_normalized_arguments() {
         assert_eq!(
             approval_key(
                 ApprovalScope::ExactArguments,
                 "execute_command",
                 r#"{"command": "git status"}"#
             ),
-            "execute_command:git status"
+            r#"execute_command:{"command":"git status"}"#
         );
+    }
+
+    // Keys work for any tool declaring `ExactArguments`, not just
+    // `execute_command`, and don't depend on key order or whitespace.
+    #[test]
+    fn exact_argument_keys_ignore_key_order_and_whitespace() {
+        let key = |args: &str| approval_key(ApprovalScope::ExactArguments, "deploy", args);
+        assert_eq!(
+            key(r#"{"env": "prod", "opts": {"b": 2, "a": 1}}"#),
+            key(r#"{"opts":{"a":1,"b":2},"env":"prod"}"#)
+        );
+        assert_ne!(key(r#"{"env": "prod"}"#), key(r#"{"env": "staging"}"#));
     }
 
     #[test]
@@ -383,12 +455,12 @@ mod tests {
     }
 
     #[test]
-    fn unparseable_shell_arguments_fall_back_to_a_raw_arguments_key() {
+    fn unparseable_arguments_fall_back_to_a_raw_arguments_key() {
         assert_eq!(
             approval_key(ApprovalScope::ExactArguments, "execute_command", "not json"),
             "execute_command:unparsed:not json"
         );
-        // Distinct malformed arguments must not share a fallback key either.
+        // Distinct malformed arguments must not share a key either.
         assert_ne!(
             approval_key(ApprovalScope::ExactArguments, "execute_command", "not json"),
             approval_key(

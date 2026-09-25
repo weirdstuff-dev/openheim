@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
@@ -10,10 +12,29 @@ use crate::{
     memory::{ConversationMeta, SkillsManager},
 };
 
-use super::permission::PermissionRequest;
+use super::permission::PendingPermission;
 use super::render::{self, FooterLabels};
 use super::state::{AgentChannels, InputLine, Overlay, PermissionQueue, Theme, Transcript};
 use super::types::{AgentUpdate, ChatItem, ConfigRow, Screen, Status};
+
+/// What `:help` shows. The welcome screen lists the same commands
+/// (`render::WELCOME_COMMANDS`).
+const HELP_TEXT: &str = ":help              show this\n\
+                         :q / :quit         exit\n\
+                         :new               start a new session\n\
+                         :sessions          browse and restore saved sessions\n\
+                         :config            current config\n\
+                         :models            list available models\n\
+                         :models <name>     switch to model mid-session\n\
+                         :mcp               MCP servers\n\
+                         :skills            available skills\n\
+                         :theme             change accent color\n\
+                         :theme <name>      apply color directly\n\n\
+                         ↑/↓  scroll · PgUp/PgDn  page\n\
+                         Ctrl+C  cancel the running turn · Ctrl+C twice  quit";
+
+/// How long after a Ctrl-C a second one quits.
+const QUIT_CONFIRM_WINDOW: Duration = Duration::from_secs(2);
 
 /// Formats a token count for the footer: exact below 1000, `k`-suffixed with
 /// one decimal place above it (`1.2k`, `84.0k`) so the label stays short
@@ -54,6 +75,8 @@ pub(super) struct App {
     pub(super) spinner_frame: usize,
     pub(super) status: Status,
     pub(super) should_quit: bool,
+    /// Set by a Ctrl-C: another one before this instant quits.
+    quit_armed_until: Option<Instant>,
     /// The screen under any popup.
     screen: Screen,
     overlay: Option<Overlay>,
@@ -88,6 +111,7 @@ impl App {
             spinner_frame: 0,
             status: Status::Idle,
             should_quit: false,
+            quit_armed_until: None,
             screen: Screen::Welcome,
             overlay: None,
             permissions: PermissionQueue::default(),
@@ -198,29 +222,49 @@ impl App {
         }
     }
 
-    pub(super) fn handle_permission_request(&mut self, request: PermissionRequest) {
+    /// The first Ctrl-C cancels the running turn, if any; a second one
+    /// within [`QUIT_CONFIRM_WINDOW`] quits. Any other key in between starts
+    /// over.
+    fn handle_ctrl_c(&mut self, now: Instant) {
+        if self.quit_armed(now) {
+            self.should_quit = true;
+            return;
+        }
+        if self.status != Status::Idle {
+            let _ = self.channels.cancel.send(());
+        }
+        self.quit_armed_until = Some(now + QUIT_CONFIRM_WINDOW);
+    }
+
+    /// Whether a Ctrl-C now would quit.
+    fn quit_armed(&self, now: Instant) -> bool {
+        self.quit_armed_until.is_some_and(|until| now < until)
+    }
+
+    pub(super) fn handle_permission_request(&mut self, request: PendingPermission) {
         self.permissions.push(request);
     }
 
     /// Answers the permission prompt on screen and notes the decision in the
     /// transcript.
     fn resolve_permission(&mut self, decision: PermissionDecision) {
-        if let Some(tool_name) = self.permissions.resolve(decision) {
+        if let Some(call) = self.permissions.resolve(decision) {
             let label = match decision {
                 PermissionDecision::AllowOnce => "allowed",
                 PermissionDecision::AllowAlways => "always allowed",
                 PermissionDecision::RejectOnce => "rejected",
                 PermissionDecision::RejectAlways => "always rejected",
             };
-            self.push(ChatItem::SystemInfo(format!("{label} '{tool_name}'")));
+            self.push(ChatItem::SystemInfo(format!("{label} {call}")));
         }
     }
 
     pub(super) fn handle_key(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.should_quit = true;
+            self.handle_ctrl_c(Instant::now());
             return;
         }
+        self.quit_armed_until = None;
         // Topmost layer first: a permission prompt, then a popup, then the
         // input line.
         self.permissions.prune_stale();
@@ -368,21 +412,7 @@ impl App {
         let arg = parts.next().unwrap_or("").trim();
         match name {
             "q" | "quit" => self.should_quit = true,
-            "help" => self.push(ChatItem::SystemInfo(
-                ":help              show this\n\
-                 :q / :quit         exit\n\
-                 :new               start a new session\n\
-                 :sessions          browse and restore saved sessions\n\
-                 :config            current config\n\
-                 :models            list available models\n\
-                 :models <name>     switch to model mid-session\n\
-                 :mcp               MCP servers\n\
-                 :skills            available skills\n\
-                 :theme             change accent color\n\
-                 :theme <name>      apply color directly\n\n\
-                 ↑/↓  scroll · PgUp/PgDn  page · Ctrl+C  quit"
-                    .to_string(),
-            )),
+            "help" => self.push(ChatItem::SystemInfo(HELP_TEXT.to_string())),
             "new" => self.start_new_session(),
             "sessions" => {
                 let _ = self.channels.list_sessions.send(());
@@ -570,7 +600,7 @@ impl App {
     }
 
     /// Clears the transcript and requests the agent task load `meta`'s full
-    /// history via `SessionHandle::resume`, converted straight to `ChatItem`s
+    /// history via `OpenheimClient::resume_session`, converted straight to `ChatItem`s
     /// (see `message_to_chat_items`), so thinking blocks and image
     /// attachments show up instead of being silently dropped. That also
     /// keeps the history read off the UI task and on the agent task, where
@@ -632,9 +662,10 @@ impl App {
         let frame = SPINNER[self.spinner_frame % SPINNER.len()];
         let labels = FooterLabels {
             left: match &self.status {
+                _ if self.quit_armed(Instant::now()) => Some("Ctrl+C again to quit".to_string()),
                 Status::Idle => None,
-                Status::Thinking => Some(format!("{frame} thinking…")),
-                Status::Streaming => Some(format!("{frame} streaming…")),
+                Status::Thinking => Some(format!("{frame} thinking… · Ctrl+C to cancel")),
+                Status::Streaming => Some(format!("{frame} streaming… · Ctrl+C to cancel")),
             },
             right: match &self.context_usage {
                 Some(usage) => format!(
@@ -679,6 +710,7 @@ impl App {
                 f,
                 area,
                 &request.tool_name,
+                request.subagent.as_deref(),
                 &request.arguments,
                 self.permissions.selected(),
                 theme,
@@ -694,12 +726,18 @@ mod tests {
     use super::*;
 
     fn test_app() -> App {
+        test_app_with_cancel().0
+    }
+
+    /// A test app plus the receiving end of its cancel channel.
+    fn test_app_with_cancel() -> (App, mpsc::UnboundedReceiver<()>) {
         let (prompt, _) = mpsc::unbounded_channel();
         let (switch_model, _) = mpsc::unbounded_channel();
         let (switch_session, _) = mpsc::unbounded_channel();
         let (list_sessions, _) = mpsc::unbounded_channel();
         let (new_session, _) = mpsc::unbounded_channel();
-        App::new(
+        let (cancel, cancel_rx) = mpsc::unbounded_channel();
+        let app = App::new(
             AgentConfig::default(),
             AppConfig::for_tests("mock"),
             RuntimePaths {
@@ -713,16 +751,82 @@ mod tests {
                 switch_session,
                 list_sessions,
                 new_session,
+                cancel,
             },
-        )
+        );
+        (app, cancel_rx)
     }
 
-    fn permission_request() -> (PermissionRequest, oneshot::Receiver<PermissionDecision>) {
+    #[test]
+    fn help_and_welcome_screen_list_the_same_commands() {
+        let mut in_help: Vec<&str> = HELP_TEXT
+            .lines()
+            .filter(|line| line.starts_with(':'))
+            .map(|line| line.split("  ").next().unwrap().trim())
+            .collect();
+        let mut on_welcome: Vec<&str> = render::WELCOME_COMMANDS.iter().map(|(c, _)| *c).collect();
+        in_help.sort_unstable();
+        on_welcome.sort_unstable();
+
+        assert!(in_help.contains(&":new"), "{in_help:?}");
+        assert_eq!(in_help, on_welcome);
+    }
+
+    fn ctrl_c() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_c_during_a_turn_cancels_it_and_a_second_one_quits() {
+        let (mut app, mut cancel_rx) = test_app_with_cancel();
+        app.status = Status::Thinking;
+
+        app.handle_key(ctrl_c());
+        assert!(
+            cancel_rx.try_recv().is_ok(),
+            "first Ctrl-C cancels the turn"
+        );
+        assert!(!app.should_quit);
+
+        app.handle_key(ctrl_c());
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn ctrl_c_when_idle_cancels_nothing_and_still_needs_a_second_press() {
+        let (mut app, mut cancel_rx) = test_app_with_cancel();
+
+        app.handle_key(ctrl_c());
+        assert!(cancel_rx.try_recv().is_err());
+        assert!(!app.should_quit);
+
+        app.handle_key(ctrl_c());
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn another_key_or_the_window_passing_disarms_quit() {
+        let mut app = test_app();
+
+        app.handle_key(ctrl_c());
+        app.handle_key(key(KeyCode::Char('x')));
+        app.handle_key(ctrl_c());
+        assert!(!app.should_quit, "a key in between starts over");
+
+        let now = Instant::now();
+        app.handle_ctrl_c(now + QUIT_CONFIRM_WINDOW);
+        assert!(!app.should_quit, "the window has passed");
+        app.handle_ctrl_c(now + QUIT_CONFIRM_WINDOW + Duration::from_millis(500));
+        assert!(app.should_quit);
+    }
+
+    fn permission_request() -> (PendingPermission, oneshot::Receiver<PermissionDecision>) {
         let (respond_to, rx) = oneshot::channel();
         (
-            PermissionRequest {
+            PendingPermission {
                 tool_name: "read_file".into(),
                 arguments: "{}".into(),
+                subagent: None,
                 respond_to,
             },
             rx,
@@ -764,9 +868,9 @@ mod tests {
         assert_eq!(app.input.text(), "y");
     }
 
-    // Regression test (PR #61 review): pruning a stale request *behind* the
-    // prompt on screen reset its highlight to "Allow Once", so after the user
-    // moved to "Reject Once", Enter allowed the call anyway.
+    // Pruning a stale request *behind* the prompt on screen keeps its
+    // highlight; resetting it to "Allow Once" would let Enter allow a call
+    // the user had moved to "Reject Once".
     #[test]
     fn highlight_survives_a_stale_request_behind_the_prompt() {
         let mut app = test_app();
@@ -802,9 +906,8 @@ mod tests {
         assert_eq!(app.permissions.len(), 1);
     }
 
-    // Regression test: a permission prompt arriving while a popup was open
-    // overwrote the "screen to return to" with that popup, so after
-    // answering, Esc "returned" to the popup and could never close it.
+    // A permission prompt over an open popup doesn't replace what Esc
+    // returns to: after answering it, Esc still closes the popup.
     #[test]
     fn esc_closes_a_popup_after_a_permission_prompt_over_it() {
         let mut app = test_app();
