@@ -21,7 +21,8 @@
 //! The fs sidecar is rooted at the agent's resolved `work_dir` — the same
 //! sandbox boundary the agent's own tools are held to. Every request path is
 //! validated against it (relative paths resolve within it) and `watch` may
-//! only select directories inside it.
+//! only select directories inside it. `delete` and `rename` also refuse the
+//! root itself, so a client can't remove or move the whole workspace.
 //!
 //! `/acp` carries the same ACP protocol frames as `/ws`'s `agent` channel, but
 //! unwrapped: each WebSocket text message is exactly one JSON-RPC object, with
@@ -475,6 +476,25 @@ impl FsState {
         validate_path(path, &self.work_dir).map_err(|e| fs_error(e.to_string()))
     }
 
+    /// Like [`Self::validate`], but also refuses the work directory itself:
+    /// `delete`/`rename` on something *inside* the sandbox is fine, on the
+    /// sandbox root would remove or move the whole workspace. `path` may
+    /// name the root in many ways (`""`, `.`, `a/..`, its absolute path, a
+    /// symlink to it); all of them resolve to the canonical root.
+    fn validate_entry(&self, path: &str) -> Result<PathBuf, FsResponse> {
+        let validated = self.validate(path)?;
+        if self
+            .work_dir
+            .canonicalize()
+            .is_ok_and(|root| root == validated)
+        {
+            return Err(fs_error(format!(
+                "'{path}' is the work directory itself; it can't be deleted or renamed"
+            )));
+        }
+        Ok(validated)
+    }
+
     /// Carries out one request and returns its reply. `events` is where a
     /// `watch` sends its (unsolicited) change events from then on.
     async fn handle(&mut self, req: FsRequest, events: UnboundedSender<WsOutbound>) -> FsResponse {
@@ -528,7 +548,7 @@ impl FsState {
                 FsResponse::MkdirSuccess { path }
             }
             FsRequest::Delete { path } => {
-                let validated = self.validate(&path)?;
+                let validated = self.validate_entry(&path)?;
                 if validated.is_dir() {
                     fs::remove_dir_all(&validated)
                         .await
@@ -541,7 +561,7 @@ impl FsState {
                 FsResponse::DeleteSuccess { path }
             }
             FsRequest::Rename { from, to } => {
-                let (vf, vt) = (self.validate(&from)?, self.validate(&to)?);
+                let (vf, vt) = (self.validate_entry(&from)?, self.validate_entry(&to)?);
                 fs::rename(&vf, &vt)
                     .await
                     .map_err(|e| fs_error(format!("Failed to rename: {e}")))?;
@@ -743,6 +763,68 @@ mod tests {
         .await;
         assert!(matches!(resp, FsResponse::Error { .. }));
         assert!(victim.exists());
+    }
+
+    #[tokio::test]
+    async fn fs_delete_and_rename_refuse_the_work_dir_itself() {
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir(work.path().join("sub")).unwrap();
+        std::fs::write(work.path().join("keep.txt"), "data").unwrap();
+        let mut state = make_fs_state(work.path());
+
+        let mut names_for_root = vec![
+            String::new(),
+            ".".to_string(),
+            "sub/..".to_string(),
+            work.path().to_str().unwrap().to_string(),
+        ];
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(work.path(), work.path().join("root_link")).unwrap();
+            names_for_root.push("root_link".to_string());
+        }
+
+        for path in names_for_root {
+            let resp = run_request(&mut state, FsRequest::Delete { path: path.clone() }).await;
+            assert!(
+                matches!(&resp, FsResponse::Error { message } if message.contains("work directory itself")),
+                "delete {path:?}: {resp:?}"
+            );
+            let resp = run_request(
+                &mut state,
+                FsRequest::Rename {
+                    from: path.clone(),
+                    to: "moved".into(),
+                },
+            )
+            .await;
+            assert!(
+                matches!(&resp, FsResponse::Error { message } if message.contains("work directory itself")),
+                "rename {path:?}: {resp:?}"
+            );
+        }
+        let resp = run_request(
+            &mut state,
+            FsRequest::Rename {
+                from: "keep.txt".into(),
+                to: ".".into(),
+            },
+        )
+        .await;
+        assert!(matches!(resp, FsResponse::Error { .. }), "{resp:?}");
+        assert!(work.path().join("keep.txt").exists());
+        assert!(!work.path().join("moved").exists());
+
+        // Entries inside the work dir can still be deleted.
+        let resp = run_request(
+            &mut state,
+            FsRequest::Delete {
+                path: "keep.txt".into(),
+            },
+        )
+        .await;
+        assert!(matches!(resp, FsResponse::DeleteSuccess { .. }), "{resp:?}");
+        assert!(!work.path().join("keep.txt").exists());
     }
 
     #[tokio::test]
