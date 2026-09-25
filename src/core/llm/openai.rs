@@ -2,12 +2,12 @@ use async_trait::async_trait;
 use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool, Usage};
 use crate::error::{Error, Result};
 
-use super::sse::SseDecoder;
+use super::sse::{StreamParser, parse_payload, read_stream};
 use super::{LlmChunk, LlmClient};
 
 #[derive(Clone)]
@@ -527,116 +527,125 @@ impl LlmClient for OpenAiClient {
         let auth = self.auth_header();
         let headers = [("Authorization", auth.as_str())];
 
-        let mut response =
-            match super::http::post_json(&self.client, &endpoint, &headers, &body).await {
-                Ok(response) => response,
-                // Only a 400 that actually complains about `stream_options` is
-                // retried without it — any other 400 (bad request, context too
-                // long, …) would otherwise be retried for nothing, doubling its
-                // cost, and return unchanged.
-                Err(Error::HttpError {
-                    status,
-                    body: err_body,
-                }) if should_retry_without_stream_options(status, &err_body) => {
-                    let mut retry_body = body.clone();
-                    if let Some(obj) = retry_body.as_object_mut() {
-                        obj.remove("stream_options");
-                    }
-                    super::http::post_json(&self.client, &endpoint, &headers, &retry_body).await?
+        let response = match super::http::post_json(&self.client, &endpoint, &headers, &body).await
+        {
+            Ok(response) => response,
+            // Only a 400 that actually complains about `stream_options` is
+            // retried without it — any other 400 (bad request, context too
+            // long, …) would otherwise be retried for nothing, doubling its
+            // cost, and return unchanged.
+            Err(Error::HttpError {
+                status,
+                body: err_body,
+            }) if should_retry_without_stream_options(status, &err_body) => {
+                let mut retry_body = body.clone();
+                if let Some(obj) = retry_body.as_object_mut() {
+                    obj.remove("stream_options");
                 }
-                Err(e) => return Err(e),
-            };
+                super::http::post_json(&self.client, &endpoint, &headers, &retry_body).await?
+            }
+            Err(e) => return Err(e),
+        };
 
-        let mut text_buf = String::new();
-        // Accumulated alongside `text_buf` so the final message persists the
-        // reasoning (the live chunks are UI-only); without this, thinking
-        // displayed during a turn vanished on reload.
-        let mut reasoning_buf = String::new();
-        let mut tool_acc: Vec<ToolCallAcc> = Vec::new();
-        let mut finish_reason: Option<FinishReason> = None;
-        let mut usage: Option<Usage> = None;
-        let mut decoder = SseDecoder::new();
-        let mut done = false;
+        read_stream(response, OpenAiStream::default(), &chunk_tx).await
+    }
+}
 
-        while !done {
-            let Some(bytes) = response.chunk().await.map_err(Error::ReqwestError)? else {
-                break;
-            };
-            decoder.feed(&bytes);
+/// One streamed reply, assembled chunk by chunk.
+#[derive(Default)]
+struct OpenAiStream {
+    text: String,
+    /// Kept alongside `text` so the final message persists the reasoning
+    /// (the live chunks are UI-only).
+    reasoning: String,
+    tool_calls: Vec<ToolCallAcc>,
+    finish_reason: Option<FinishReason>,
+    usage: Option<Usage>,
+    /// Set by `[DONE]`.
+    done: bool,
+}
 
-            while let Some(data) = decoder.next_payload() {
-                if data == "[DONE]" {
-                    done = true;
-                    break;
+impl StreamParser for OpenAiStream {
+    fn payload(&mut self, data: &str, chunk_tx: &UnboundedSender<LlmChunk>) -> Result<bool> {
+        if data == "[DONE]" {
+            self.done = true;
+            return Ok(true);
+        }
+        let Some(event) = parse_payload::<OpenAiStreamChunk>("openai", data) else {
+            return Ok(false);
+        };
+
+        // The `include_usage` final chunk carries `usage` alongside an empty
+        // `choices` array, so this is read independently of the choice.
+        if let Some(u) = event.usage {
+            self.usage = Some(Usage::from(u));
+        }
+
+        let Some(choice) = event.choices.into_iter().next() else {
+            return Ok(false);
+        };
+
+        if let Some(fr) = choice.finish_reason {
+            self.finish_reason = Some(map_finish_reason(&fr));
+        }
+
+        if let Some(reasoning) = choice.delta.reasoning_content
+            && !reasoning.is_empty()
+        {
+            self.reasoning.push_str(&reasoning);
+            let _ = chunk_tx.send(LlmChunk::Thinking(reasoning));
+        }
+
+        if let Some(content) = choice.delta.content
+            && !content.is_empty()
+        {
+            self.text.push_str(&content);
+            let _ = chunk_tx.send(LlmChunk::Text(content));
+        }
+
+        for tc in choice.delta.tool_calls.unwrap_or_default() {
+            let idx = tc.index;
+            if self.tool_calls.len() <= idx {
+                self.tool_calls.resize_with(idx + 1, ToolCallAcc::default);
+            }
+            let acc = &mut self.tool_calls[idx];
+            if let Some(id) = tc.id {
+                acc.id = id;
+            }
+            if let Some(function) = tc.function {
+                if let Some(name) = function.name {
+                    acc.name.push_str(&name);
                 }
-
-                let Ok(event) = serde_json::from_str::<OpenAiStreamChunk>(&data) else {
-                    continue;
-                };
-
-                // The `include_usage` final chunk carries `usage` alongside an
-                // empty `choices` array, so this is checked independently of the
-                // choice fields below rather than folded into that branch.
-                if let Some(u) = event.usage {
-                    usage = Some(Usage::from(u));
-                }
-
-                let Some(choice) = event.choices.into_iter().next() else {
-                    continue;
-                };
-
-                if let Some(fr) = choice.finish_reason {
-                    finish_reason = Some(map_finish_reason(&fr));
-                }
-
-                if let Some(reasoning) = choice.delta.reasoning_content
-                    && !reasoning.is_empty()
-                {
-                    reasoning_buf.push_str(&reasoning);
-                    let _ = chunk_tx.send(LlmChunk::Thinking(reasoning));
-                }
-
-                if let Some(content) = choice.delta.content
-                    && !content.is_empty()
-                {
-                    text_buf.push_str(&content);
-                    let _ = chunk_tx.send(LlmChunk::Text(content));
-                }
-
-                if let Some(tcs) = choice.delta.tool_calls {
-                    for tc in tcs {
-                        let idx = tc.index;
-                        if tool_acc.len() <= idx {
-                            tool_acc.resize_with(idx + 1, ToolCallAcc::default);
-                        }
-                        if let Some(id) = tc.id {
-                            tool_acc[idx].id = id;
-                        }
-                        if let Some(function) = tc.function {
-                            if let Some(name) = function.name {
-                                tool_acc[idx].name.push_str(&name);
-                            }
-                            if let Some(args) = function.arguments {
-                                tool_acc[idx].args.push_str(&args);
-                            }
-                        }
-                    }
+                if let Some(args) = function.arguments {
+                    acc.args.push_str(&args);
                 }
             }
         }
+        Ok(false)
+    }
 
-        let tool_uses = tool_acc
+    /// Complete once `[DONE]` or a `finish_reason` arrived: some
+    /// OpenAI-compatible backends end the stream without `[DONE]`, but every
+    /// one sends the finish reason on the last choice chunk.
+    fn finish(self) -> Result<Choice> {
+        if !self.done && self.finish_reason.is_none() {
+            return Err(Error::IncompleteResponse(
+                "OpenAI stream ended before a finish_reason or [DONE]".to_string(),
+            ));
+        }
+
+        let tool_uses = self
+            .tool_calls
             .into_iter()
             .filter_map(ToolCallAcc::into_tool_use)
             .collect();
-
         Ok(Choice {
             message: Message {
                 role: Role::Assistant,
-                content: assemble_content(Some(reasoning_buf), Some(text_buf), tool_uses),
+                content: assemble_content(Some(self.reasoning), Some(self.text), tool_uses),
             },
-            finish_reason,
-            usage,
+            finish_reason: self.finish_reason,
+            usage: self.usage,
         })
     }
 }
@@ -671,6 +680,63 @@ mod tests {
     #[test]
     fn streamed_call_without_a_name_is_dropped() {
         assert!(acc("call_x", "").into_tool_use().is_none());
+    }
+
+    /// Feeds `payloads` through a fresh `OpenAiStream` as if they were the
+    /// whole response body.
+    fn parse_stream(payloads: &[&str]) -> Result<Choice> {
+        let (chunk_tx, _chunk_rx) = mpsc::unbounded_channel();
+        let mut stream = OpenAiStream::default();
+        for payload in payloads {
+            if stream.payload(payload, &chunk_tx)? {
+                break;
+            }
+        }
+        stream.finish()
+    }
+
+    const TOOL_REPLY: &[&str] = &[
+        r#"{"choices":[{"delta":{"content":"Reading."}}]}"#,
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\""}}]}}]}"#,
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"a.txt\"}"}}]}}]}"#,
+        r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+        "[DONE]",
+    ];
+
+    #[test]
+    fn complete_stream_becomes_a_choice() {
+        let choice = parse_stream(TOOL_REPLY).unwrap();
+        assert_eq!(
+            choice.message.content,
+            [
+                ContentBlock::from("Reading."),
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"a.txt"}"#.into(),
+                },
+            ]
+        );
+        assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
+        assert_eq!(choice.usage.unwrap().output_tokens, 5);
+    }
+
+    // Regression test: a connection that closed early looked like a normal
+    // end of body, so a cut-off reply (here: its tool call's arguments only
+    // half there) was taken as a complete one.
+    #[test]
+    fn stream_cut_off_before_the_finish_reason_is_an_incomplete_response() {
+        let err = parse_stream(&TOOL_REPLY[..2]).unwrap_err();
+        assert!(matches!(err, Error::IncompleteResponse(_)), "{err}");
+    }
+
+    // Some OpenAI-compatible backends never send `[DONE]`; the finish reason
+    // alone marks the reply complete.
+    #[test]
+    fn stream_with_a_finish_reason_but_no_done_is_complete() {
+        let choice = parse_stream(&TOOL_REPLY[..4]).unwrap();
+        assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
     }
 
     #[test]

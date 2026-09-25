@@ -2,12 +2,12 @@ use async_trait::async_trait;
 use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool, Usage};
 use crate::error::{Error, Result};
 
-use super::sse::SseDecoder;
+use super::sse::{StreamParser, parse_payload, read_stream};
 use super::{LlmChunk, LlmClient};
 
 #[derive(Clone)]
@@ -57,9 +57,11 @@ struct GeminiGenerationConfig {
     max_output_tokens: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 struct GeminiContent {
+    #[serde(default)]
     role: String,
+    #[serde(default)]
     parts: Vec<GeminiPart>,
 }
 
@@ -152,6 +154,9 @@ impl From<GeminiUsageMetadata> for Usage {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiCandidate {
+    /// Absent on a candidate that only reports its finish, e.g. one blocked
+    /// for safety.
+    #[serde(default)]
     content: GeminiContent,
     finish_reason: Option<String>,
 }
@@ -382,7 +387,7 @@ impl LlmClient for GeminiClient {
             self.model
         );
 
-        let mut response = super::http::post_json(
+        let response = super::http::post_json(
             &self.client,
             &endpoint,
             &[("x-goog-api-key", self.api_key.as_str())],
@@ -390,61 +395,75 @@ impl LlmClient for GeminiClient {
         )
         .await?;
 
-        let mut text_buf = String::new();
-        let mut tool_uses: Vec<ContentBlock> = Vec::new();
-        let mut finish_reason: Option<FinishReason> = None;
-        let mut usage: Option<Usage> = None;
-        let mut decoder = SseDecoder::new();
+        read_stream(response, GeminiStream::default(), &chunk_tx).await
+    }
+}
 
-        while let Some(bytes) = response.chunk().await.map_err(Error::ReqwestError)? {
-            decoder.feed(&bytes);
+/// One streamed reply, assembled chunk by chunk.
+#[derive(Default)]
+struct GeminiStream {
+    text: String,
+    tool_uses: Vec<ContentBlock>,
+    /// Gemini has no end-of-stream event; the chunk carrying the finish
+    /// reason is the last one, so a stream without one was cut off.
+    finish_reason: Option<FinishReason>,
+    usage: Option<Usage>,
+}
 
-            while let Some(data) = decoder.next_payload() {
-                let Ok(event) = serde_json::from_str::<GeminiResponse>(&data) else {
-                    continue;
-                };
+impl StreamParser for GeminiStream {
+    fn payload(&mut self, data: &str, chunk_tx: &UnboundedSender<LlmChunk>) -> Result<bool> {
+        let Some(event) = parse_payload::<GeminiResponse>("gemini", data) else {
+            return Ok(false);
+        };
 
-                // Each chunk's `usageMetadata` is cumulative, not a delta, so
-                // the last one seen before the stream ends is the true total.
-                if let Some(u) = event.usage_metadata {
-                    usage = Some(Usage::from(u));
-                }
+        // Each chunk's `usageMetadata` is cumulative, not a delta, so the
+        // last one seen before the stream ends is the true total.
+        if let Some(u) = event.usage_metadata {
+            self.usage = Some(Usage::from(u));
+        }
 
-                let Some(candidate) = event.candidates.into_iter().next() else {
-                    continue;
-                };
+        let Some(candidate) = event.candidates.into_iter().next() else {
+            return Ok(false);
+        };
 
-                if let Some(fr) = candidate.finish_reason {
-                    finish_reason = Some(map_finish_reason(&fr));
-                }
+        if let Some(fr) = candidate.finish_reason {
+            self.finish_reason = Some(map_finish_reason(&fr));
+        }
 
-                for part in candidate.content.parts {
-                    if let Some(text) = part.text
-                        && !text.is_empty()
-                    {
-                        text_buf.push_str(&text);
-                        let _ = chunk_tx.send(LlmChunk::Text(text));
-                    }
-                    if let Some(fc) = part.function_call {
-                        tool_uses.push(tool_use_block(fc)?);
-                    }
-                }
+        for part in candidate.content.parts {
+            if let Some(text) = part.text
+                && !text.is_empty()
+            {
+                self.text.push_str(&text);
+                let _ = chunk_tx.send(LlmChunk::Text(text));
             }
+            if let Some(fc) = part.function_call {
+                self.tool_uses.push(tool_use_block(fc)?);
+            }
+        }
+        Ok(false)
+    }
+
+    fn finish(self) -> Result<Choice> {
+        if self.finish_reason.is_none() {
+            return Err(Error::IncompleteResponse(
+                "Gemini stream ended before a finishReason".to_string(),
+            ));
         }
 
         let mut content = Vec::new();
-        if !text_buf.is_empty() {
-            content.push(ContentBlock::Text { text: text_buf });
+        if !self.text.is_empty() {
+            content.push(ContentBlock::Text { text: self.text });
         }
-        content.extend(tool_uses);
+        content.extend(self.tool_uses);
 
         Ok(Choice {
             message: Message {
                 role: Role::Assistant,
                 content,
             },
-            finish_reason,
-            usage,
+            finish_reason: self.finish_reason,
+            usage: self.usage,
         })
     }
 }
@@ -620,10 +639,60 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    // `send` builds its response from the streaming loop's chunk-by-chunk
-    // accumulation, not from a single complete `GeminiResponse`, so the
-    // pieces of that path are tested directly: `tool_use_block` above and
-    // `map_finish_reason` here.
+    /// Feeds `payloads` through a fresh `GeminiStream` as if they were the
+    /// whole response body.
+    fn parse_stream(payloads: &[&str]) -> Result<Choice> {
+        let (chunk_tx, _chunk_rx) = mpsc::unbounded_channel();
+        let mut stream = GeminiStream::default();
+        for payload in payloads {
+            if stream.payload(payload, &chunk_tx)? {
+                break;
+            }
+        }
+        stream.finish()
+    }
+
+    const TOOL_REPLY: &[&str] = &[
+        r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Reading."}]}}]}"#,
+        r#"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"fc_1","name":"read_file","args":{"path":"a.txt"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}"#,
+    ];
+
+    #[test]
+    fn complete_stream_becomes_a_choice() {
+        let choice = parse_stream(TOOL_REPLY).unwrap();
+        assert_eq!(
+            choice.message.content,
+            [
+                ContentBlock::from("Reading."),
+                ContentBlock::ToolUse {
+                    id: "fc_1".into(),
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"a.txt"}"#.into(),
+                },
+            ]
+        );
+        assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
+        assert_eq!(choice.usage.unwrap().output_tokens, 5);
+    }
+
+    // Regression test: a connection that closed early looked like a normal
+    // end of body, so a cut-off reply (here: missing its tool call) was
+    // taken as a complete one.
+    #[test]
+    fn stream_cut_off_before_the_finish_reason_is_an_incomplete_response() {
+        let err = parse_stream(&TOOL_REPLY[..1]).unwrap_err();
+        assert!(matches!(err, Error::IncompleteResponse(_)), "{err}");
+    }
+
+    // A blocked reply's last chunk has a finish reason but no content; it
+    // must still parse, or the refusal would look like a cut-off stream.
+    #[test]
+    fn finish_without_content_still_ends_the_stream() {
+        let choice = parse_stream(&[r#"{"candidates":[{"finishReason":"SAFETY"}]}"#]).unwrap();
+        assert_eq!(choice.finish_reason, Some(FinishReason::Refusal));
+        assert!(choice.message.content.is_empty());
+    }
+
     #[test]
     fn map_finish_reason_translates_known_values() {
         assert_eq!(map_finish_reason("STOP"), FinishReason::Stop);

@@ -2,12 +2,12 @@ use async_trait::async_trait;
 use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool, Usage};
 use crate::error::{Error, Result};
 
-use super::sse::SseDecoder;
+use super::sse::{StreamParser, parse_payload, read_stream};
 use super::{LlmChunk, LlmClient};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -131,9 +131,8 @@ struct AnthropicTool {
 // Unlike OpenAI/Gemini's single repeated envelope shape, each Anthropic SSE
 // event's fields depend on its `type` — an externally-tagged enum on `type`
 // models that directly. `#[serde(other)]` on `Other` absorbs any event type
-// this client doesn't special-case (`message_stop`, `ping`, and any future
-// addition), matching the previous `Value`-based code's silent-ignore
-// behavior for unrecognized types instead of failing the whole stream.
+// this client doesn't special-case (`ping`, and any future addition) instead
+// of failing the whole stream.
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -154,6 +153,9 @@ enum AnthropicStreamEvent {
         #[serde(default)]
         usage: Option<AnthropicDeltaUsage>,
     },
+    /// The last event of a complete reply.
+    #[serde(rename = "message_stop")]
+    MessageStop,
     #[serde(rename = "error")]
     Error { error: AnthropicStreamError },
     #[serde(other)]
@@ -220,6 +222,133 @@ struct AnthropicDeltaUsage {
 struct AnthropicStreamError {
     #[serde(default)]
     message: Option<String>,
+}
+
+/// One streamed reply, assembled event by event.
+#[derive(Default)]
+struct AnthropicStream {
+    current_tool_id: Option<String>,
+    current_tool_name: Option<String>,
+    current_tool_json: String,
+    text_content: String,
+    thinking_content: String,
+    thinking_signature: String,
+    tool_calls: Vec<ContentBlock>,
+    stop_reason: Option<String>,
+    usage: Usage,
+    /// Set by `message_stop`; a stream that ends without it was cut off.
+    complete: bool,
+}
+
+impl StreamParser for AnthropicStream {
+    fn payload(&mut self, data: &str, chunk_tx: &UnboundedSender<LlmChunk>) -> Result<bool> {
+        if data == "[DONE]" || data.is_empty() {
+            return Ok(false);
+        }
+        let Some(event) = parse_payload::<AnthropicStreamEvent>("anthropic", data) else {
+            return Ok(false);
+        };
+
+        match event {
+            AnthropicStreamEvent::MessageStart { message } => {
+                let u = message.usage;
+                self.usage.input_tokens = u.input_tokens;
+                self.usage.output_tokens = u.output_tokens;
+                self.usage.cache_creation_tokens = u.cache_creation_input_tokens;
+                self.usage.cache_read_tokens = u.cache_read_input_tokens;
+            }
+            AnthropicStreamEvent::ContentBlockStart { content_block } => {
+                if let AnthropicStreamContentBlock::ToolUse { id, name } = content_block {
+                    self.current_tool_id = Some(id);
+                    self.current_tool_name = Some(name);
+                    self.current_tool_json.clear();
+                }
+            }
+            AnthropicStreamEvent::ContentBlockDelta { delta } => match delta {
+                AnthropicStreamDelta::Text { text } => {
+                    self.text_content.push_str(&text);
+                    let _ = chunk_tx.send(LlmChunk::Text(text));
+                }
+                AnthropicStreamDelta::Thinking { thinking } => {
+                    self.thinking_content.push_str(&thinking);
+                    let _ = chunk_tx.send(LlmChunk::Thinking(thinking));
+                }
+                AnthropicStreamDelta::Signature { signature } => {
+                    self.thinking_signature.push_str(&signature);
+                }
+                AnthropicStreamDelta::InputJson { partial_json } => {
+                    self.current_tool_json.push_str(&partial_json);
+                }
+                AnthropicStreamDelta::Other => {}
+            },
+            AnthropicStreamEvent::ContentBlockStop => {
+                if let (Some(id), Some(name)) =
+                    (self.current_tool_id.take(), self.current_tool_name.take())
+                {
+                    self.tool_calls.push(ContentBlock::ToolUse {
+                        id,
+                        name,
+                        arguments: std::mem::take(&mut self.current_tool_json),
+                    });
+                }
+                self.current_tool_json.clear();
+            }
+            AnthropicStreamEvent::MessageDelta { delta, usage } => {
+                if let Some(reason) = delta.stop_reason {
+                    self.stop_reason = Some(reason);
+                }
+                // Anthropic reports `output_tokens` cumulatively on each
+                // `message_delta`, not as a per-event delta — the last value
+                // seen before the stream ends is the true total.
+                if let Some(ot) = usage.and_then(|u| u.output_tokens) {
+                    self.usage.output_tokens = ot;
+                }
+            }
+            AnthropicStreamEvent::MessageStop => {
+                self.complete = true;
+                return Ok(true);
+            }
+            AnthropicStreamEvent::Error { error } => {
+                let msg = error
+                    .message
+                    .unwrap_or_else(|| "unknown streaming error".to_string());
+                return Err(Error::ApiError(format!("Anthropic streaming error: {msg}")));
+            }
+            AnthropicStreamEvent::Other => {}
+        }
+        Ok(false)
+    }
+
+    fn finish(self) -> Result<Choice> {
+        if !self.complete {
+            return Err(Error::IncompleteResponse(
+                "Anthropic stream ended before message_stop".to_string(),
+            ));
+        }
+
+        let mut content = Vec::new();
+        if !self.thinking_content.is_empty() {
+            content.push(ContentBlock::Thinking {
+                thinking: self.thinking_content,
+                signature: (!self.thinking_signature.is_empty()).then_some(self.thinking_signature),
+            });
+        }
+        if !self.text_content.is_empty() {
+            content.push(ContentBlock::Text {
+                text: self.text_content,
+            });
+        }
+        content.extend(self.tool_calls);
+
+        Ok(Choice {
+            message: Message {
+                role: Role::Assistant,
+                content,
+            },
+            finish_reason: map_stop_reason(self.stop_reason.as_deref()),
+            usage: Some(self.usage),
+        })
+    }
 }
 
 // --- Conversions ---
@@ -449,127 +578,7 @@ impl LlmClient for AnthropicClient {
         let request = self.build_request(messages, tools)?;
         let response = self.post(&request).await?;
 
-        // Parse SSE stream.
-        let mut decoder = SseDecoder::new();
-        let mut current_tool_id: Option<String> = None;
-        let mut current_tool_name: Option<String> = None;
-        let mut current_tool_json = String::new();
-        let mut text_content = String::new();
-        let mut thinking_content = String::new();
-        let mut thinking_signature = String::new();
-        let mut tool_calls: Vec<ContentBlock> = Vec::new();
-        let mut stop_reason: Option<String> = None;
-        let mut usage = Usage::default();
-
-        let mut response = response;
-        while let Some(chunk) = response.chunk().await.map_err(Error::ReqwestError)? {
-            decoder.feed(&chunk);
-
-            while let Some(data) = decoder.next_payload() {
-                if data == "[DONE]" || data.is_empty() {
-                    continue;
-                }
-
-                let event: AnthropicStreamEvent = match serde_json::from_str(&data) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-
-                match event {
-                    AnthropicStreamEvent::MessageStart { message } => {
-                        let u = message.usage;
-                        usage.input_tokens = u.input_tokens;
-                        usage.output_tokens = u.output_tokens;
-                        usage.cache_creation_tokens = u.cache_creation_input_tokens;
-                        usage.cache_read_tokens = u.cache_read_input_tokens;
-                    }
-                    AnthropicStreamEvent::ContentBlockStart { content_block } => {
-                        if let AnthropicStreamContentBlock::ToolUse { id, name } = content_block {
-                            current_tool_id = Some(id);
-                            current_tool_name = Some(name);
-                            current_tool_json.clear();
-                        }
-                    }
-                    AnthropicStreamEvent::ContentBlockDelta { delta } => match delta {
-                        AnthropicStreamDelta::Text { text } => {
-                            text_content.push_str(&text);
-                            let _ = chunk_tx.send(LlmChunk::Text(text));
-                        }
-                        AnthropicStreamDelta::Thinking { thinking } => {
-                            thinking_content.push_str(&thinking);
-                            let _ = chunk_tx.send(LlmChunk::Thinking(thinking));
-                        }
-                        AnthropicStreamDelta::Signature { signature } => {
-                            thinking_signature.push_str(&signature);
-                        }
-                        AnthropicStreamDelta::InputJson { partial_json } => {
-                            current_tool_json.push_str(&partial_json);
-                        }
-                        AnthropicStreamDelta::Other => {}
-                    },
-                    AnthropicStreamEvent::ContentBlockStop => {
-                        if let (Some(id), Some(name)) =
-                            (current_tool_id.take(), current_tool_name.take())
-                        {
-                            tool_calls.push(ContentBlock::ToolUse {
-                                id,
-                                name,
-                                arguments: current_tool_json.clone(),
-                            });
-                        }
-                        current_tool_json.clear();
-                    }
-                    AnthropicStreamEvent::MessageDelta {
-                        delta,
-                        usage: delta_usage,
-                    } => {
-                        if let Some(reason) = delta.stop_reason {
-                            stop_reason = Some(reason);
-                        }
-                        // Anthropic reports `output_tokens` cumulatively on each
-                        // `message_delta`, not as a per-event delta — the last
-                        // value seen before the stream ends is the true total.
-                        if let Some(ot) = delta_usage.and_then(|u| u.output_tokens) {
-                            usage.output_tokens = ot;
-                        }
-                    }
-                    AnthropicStreamEvent::Error { error } => {
-                        let msg = error
-                            .message
-                            .unwrap_or_else(|| "unknown streaming error".to_string());
-                        return Err(Error::ApiError(format!("Anthropic streaming error: {msg}")));
-                    }
-                    AnthropicStreamEvent::Other => {}
-                }
-            }
-        }
-
-        let finish_reason = map_stop_reason(stop_reason.as_deref());
-
-        let mut content = Vec::new();
-        if !thinking_content.is_empty() {
-            content.push(ContentBlock::Thinking {
-                thinking: thinking_content,
-                signature: if thinking_signature.is_empty() {
-                    None
-                } else {
-                    Some(thinking_signature)
-                },
-            });
-        }
-        if !text_content.is_empty() {
-            content.push(ContentBlock::Text { text: text_content });
-        }
-        content.extend(tool_calls);
-
-        Ok(Choice {
-            message: Message {
-                role: Role::Assistant,
-                content,
-            },
-            finish_reason,
-            usage: Some(usage),
-        })
+        read_stream(response, AnthropicStream::default(), &chunk_tx).await
     }
 }
 
@@ -896,12 +905,73 @@ mod tests {
 
     #[test]
     fn stream_event_unknown_type_falls_back_to_other() {
-        // `ping` and `message_stop` (and anything future) must not fail
-        // deserialization — the previous `Value`-based code silently
-        // ignored unrecognized types instead of erroring the whole stream.
-        for json in [r#"{"type":"ping"}"#, r#"{"type":"message_stop"}"#] {
+        // `ping` (and anything future) must not fail deserialization, or one
+        // unrecognized event would fail the whole stream.
+        for json in [r#"{"type":"ping"}"#, r#"{"type":"future_event"}"#] {
             let event: AnthropicStreamEvent = serde_json::from_str(json).unwrap();
             assert!(matches!(event, AnthropicStreamEvent::Other));
         }
+    }
+
+    /// Feeds `payloads` through a fresh `AnthropicStream` as if they were
+    /// the whole response body.
+    fn parse_stream(payloads: &[&str]) -> Result<Choice> {
+        let (chunk_tx, _chunk_rx) = mpsc::unbounded_channel();
+        let mut stream = AnthropicStream::default();
+        for payload in payloads {
+            if stream.payload(payload, &chunk_tx)? {
+                break;
+            }
+        }
+        stream.finish()
+    }
+
+    const TOOL_REPLY: &[&str] = &[
+        r#"{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}"#,
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Reading."}}"#,
+        r#"{"type":"content_block_stop","index":0}"#,
+        r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file"}}"#,
+        r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a.txt\"}"}}"#,
+        r#"{"type":"content_block_stop","index":1}"#,
+        r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":20}}"#,
+        r#"{"type":"message_stop"}"#,
+    ];
+
+    #[test]
+    fn complete_stream_becomes_a_choice() {
+        let choice = parse_stream(TOOL_REPLY).unwrap();
+        assert_eq!(
+            choice.message.content,
+            [
+                ContentBlock::from("Reading."),
+                ContentBlock::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"a.txt"}"#.into(),
+                },
+            ]
+        );
+        assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
+        assert_eq!(choice.usage.unwrap().output_tokens, 20);
+    }
+
+    // Regression test: a connection that closed early looked like a normal
+    // end of body, so a cut-off reply (here: missing its tool call) was
+    // taken as a complete one that ended the turn.
+    #[test]
+    fn stream_cut_off_before_message_stop_is_an_incomplete_response() {
+        for cut in [3, TOOL_REPLY.len() - 1] {
+            let err = parse_stream(&TOOL_REPLY[..cut]).unwrap_err();
+            assert!(matches!(err, Error::IncompleteResponse(_)), "{err}");
+            assert!(err.is_retryable());
+        }
+    }
+
+    #[test]
+    fn unparseable_payload_is_skipped_not_fatal() {
+        let mut payloads = TOOL_REPLY.to_vec();
+        payloads.insert(1, "{not json");
+        assert!(parse_stream(&payloads).is_ok());
     }
 }
