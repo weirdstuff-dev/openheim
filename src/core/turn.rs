@@ -15,7 +15,7 @@ use crate::core::permission::PermissionGate;
 
 /// Everything a single prompt turn carries down to the tools it runs.
 ///
-/// Grouped into one struct so `run_agent_loop`'s (and the tool traits')
+/// Grouped into one struct so `run_agent`'s (and the tool traits')
 /// parameter lists don't grow with every new hook. Every [`crate::tools::ToolHandler`]
 /// receives this on `execute`, so a built-in or custom tool can honour
 /// cancellation, confine itself to the work directory, and route file I/O

@@ -19,7 +19,7 @@ use uuid::Uuid;
 use crate::{
     config::{AgentConfig, AppConfig, RuntimePaths, build_http_client, create_client},
     core::{
-        agent::run_agent_streaming_with_history,
+        agent::run_agent,
         client_io::ClientIo,
         models::{ContentBlock, Message, Role, StopReason as CoreStopReason, StreamEvent},
         permission::{Approvals, PermissionGate, RememberingGate},
@@ -437,9 +437,9 @@ impl AgentState {
             work_dir: &self.work_dir,
             client_io: &*client_io,
         };
-        let run_result = run_agent_streaming_with_history(
-            llm,
-            executor,
+        let run_result = run_agent(
+            &*llm,
+            &*executor,
             &config,
             &mut conversation.messages,
             Some(&prompt_builder),

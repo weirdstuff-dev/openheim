@@ -362,7 +362,7 @@ pub struct AgentResult {
 }
 
 /// Core streaming event emitted during an agent run — the one in-process
-/// event type produced by `run_agent_streaming_with_history` and passed
+/// event type produced by `run_agent` and passed
 /// through `AgentState::prompt` unmapped; ACP's `SessionUpdate` (the wire
 /// vocabulary transports actually send) is derived from it only at the ACP
 /// edge (`acp::util::stream_event_to_session_update`).
@@ -407,7 +407,7 @@ pub enum StreamEvent {
         iterations: usize,
     },
     /// `message` was just appended to the turn's message history (mirrors
-    /// exactly what `run_agent_loop` pushed onto its `messages` argument).
+    /// exactly what `run_agent` pushed onto its `messages` argument).
     /// Fired for every assistant and tool-result message, not just the final
     /// response — a caller that wants to persist history incrementally
     /// (rather than only once the whole turn completes) can checkpoint here

@@ -5,7 +5,7 @@
 //! optional model/tools overrides). Inline subagents exist only for the duration
 //! of the call and are never persisted anywhere.
 //!
-//! Each call to `delegate_task` runs a fresh, isolated [`run_agent_with_history`]
+//! Each call to `delegate_task` runs a fresh, isolated [`run_agent`]
 //! turn — its own message history, its own system prompt (the profile's persona,
 //! not the parent's `system.md`/skills), and optionally its own model/provider and
 //! restricted tool set — and returns only the subagent's final answer. The
@@ -19,7 +19,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::config::{AgentConfig, AppConfig, client_for_config};
-use crate::core::agent::run_agent_with_history;
+use crate::core::agent::run_agent;
 use crate::core::llm::LlmClient;
 use crate::core::models::{Message, StopReason, Tool};
 use crate::core::turn::TurnContext;
@@ -289,13 +289,14 @@ impl ToolHandler for DelegateTool {
         // Fresh, isolated history — the subagent only ever sees its own task.
         let mut messages = vec![Message::user(args.task.clone())];
 
-        let result = run_agent_with_history(
-            llm,
-            executor,
+        let result = run_agent(
+            &*llm,
+            &*executor,
             &config,
             &mut messages,
             Some(&prompt_builder),
             turn,
+            |_| {},
         )
         .await?;
 
