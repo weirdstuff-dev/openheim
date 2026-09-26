@@ -431,7 +431,7 @@ impl StreamParser for AnthropicStream {
 
 // --- Conversions ---
 
-fn convert_messages(messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
+fn convert_messages(messages: &[Message]) -> Vec<AnthropicMessage> {
     let mut result = Vec::new();
 
     for msg in messages {
@@ -490,15 +490,10 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
                             arguments,
                             ..
                         } => {
-                            let input: Value = serde_json::from_str(arguments).map_err(|e| {
-                                Error::ParseError(format!(
-                                    "invalid JSON in tool call arguments for '{name}': {e}"
-                                ))
-                            })?;
                             blocks.push(AnthropicContentBlock::ToolUse {
                                 id: id.clone(),
                                 name: name.clone(),
-                                input,
+                                input: super::tool_input(name, arguments),
                             });
                         }
                         _ => {}
@@ -546,7 +541,7 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
         }
     }
 
-    Ok(result)
+    result
 }
 
 fn convert_tools(tools: &[Tool]) -> Vec<AnthropicTool> {
@@ -606,16 +601,16 @@ fn thinking_config(enabled: bool) -> Option<AnthropicThinkingConfig> {
 }
 
 impl AnthropicClient {
-    fn build_request(&self, messages: &[Message], tools: &[Tool]) -> Result<AnthropicRequest> {
-        Ok(AnthropicRequest {
+    fn build_request(&self, messages: &[Message], tools: &[Tool]) -> AnthropicRequest {
+        AnthropicRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
             stream: true,
             system: extract_system(messages),
-            messages: convert_messages(messages)?,
+            messages: convert_messages(messages),
             tools: convert_tools(tools),
             thinking: thinking_config(self.thinking),
-        })
+        }
     }
 
     /// POSTs `request` and returns the response body stream, having already
@@ -661,7 +656,7 @@ impl LlmClient for AnthropicClient {
         tools: &[Tool],
         chunk_tx: mpsc::UnboundedSender<LlmChunk>,
     ) -> Result<Choice> {
-        let request = self.build_request(messages, tools)?;
+        let request = self.build_request(messages, tools);
         let response = self.post(&request).await?;
 
         read_stream(response, AnthropicStream::default(), &chunk_tx).await
@@ -676,7 +671,7 @@ mod tests {
     #[test]
     fn convert_messages_user_message() {
         let messages = vec![Message::user("hello")];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
         assert!(
@@ -698,7 +693,7 @@ mod tests {
                 },
             ],
         }];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].content.len(), 2);
         assert!(matches!(
@@ -716,7 +711,7 @@ mod tests {
                 text: "system prompt".into(),
             }],
         }];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         assert_eq!(result.len(), 0);
     }
 
@@ -731,7 +726,7 @@ mod tests {
                 ContentBlock::tool_use("call_1", "read_file", r#"{"path":"a.txt"}"#),
             ],
         }];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "assistant");
         assert_eq!(result[0].content.len(), 2); // text + tool_use
@@ -752,7 +747,7 @@ mod tests {
                 ContentBlock::tool_use("call_1", "read_file", r#"{"path":"a.txt"}"#),
             ],
         }];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].content.len(), 3); // thinking + text + tool_use
         assert!(matches!(
@@ -762,17 +757,24 @@ mod tests {
         ));
     }
 
+    // A stored call with malformed arguments (e.g. cut off at the output
+    // limit) must not fail every later request in the conversation.
     #[test]
-    fn convert_messages_invalid_tool_arguments_returns_error() {
-        let messages = vec![Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::tool_use(
-                "call_1",
-                "read_file",
-                "not valid json",
-            )],
-        }];
-        assert!(convert_messages(&messages).is_err());
+    fn convert_messages_sends_malformed_tool_arguments_as_an_empty_object() {
+        for arguments in [r#"{"path":"a.t"#, "[1]", ""] {
+            let messages = vec![Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::tool_use("call_1", "read_file", arguments)],
+            }];
+            let result = convert_messages(&messages);
+            assert!(
+                matches!(
+                    &result[0].content[0],
+                    AnthropicContentBlock::ToolUse { input, .. } if *input == json!({})
+                ),
+                "{arguments:?}"
+            );
+        }
     }
 
     #[test]
@@ -781,7 +783,7 @@ mod tests {
             Message::tool_result("call_1", "read_file", "content1", false),
             Message::tool_result("call_2", "write_file", "content2", false),
         ];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         // Both tool results should merge into a single user message
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
@@ -872,15 +874,11 @@ mod tests {
     fn build_request_always_streams_and_respects_thinking() {
         // `build_request` is the single request source for both `send` and
         // `send_streaming`; both must stream and honor the thinking config.
-        let request = client_with_thinking(true)
-            .build_request(&[Message::user("hi")], &[])
-            .unwrap();
+        let request = client_with_thinking(true).build_request(&[Message::user("hi")], &[]);
         assert!(request.stream);
         assert!(request.thinking.is_some());
 
-        let request = client_with_thinking(false)
-            .build_request(&[Message::user("hi")], &[])
-            .unwrap();
+        let request = client_with_thinking(false).build_request(&[Message::user("hi")], &[]);
         assert!(request.thinking.is_none());
     }
 
@@ -1108,7 +1106,7 @@ mod tests {
         );
 
         // And it goes back out block for block.
-        let sent = convert_messages(&[choice.message]).unwrap();
+        let sent = convert_messages(&[choice.message]);
         assert_eq!(
             serde_json::to_value(&sent[0].content).unwrap(),
             json!([

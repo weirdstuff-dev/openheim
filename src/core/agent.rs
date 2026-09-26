@@ -18,6 +18,31 @@ const CANCELLED_TOOL_RESULT: &str = "Cancelled by user.";
 const MISSING_TOOL_RESULT: &str =
     "No result: the turn was interrupted before this tool call finished.";
 
+/// Whether a tool call's arguments can be run: a JSON object, or nothing at
+/// all for a call without arguments.
+fn arguments_are_usable(arguments: &str) -> bool {
+    arguments.trim().is_empty()
+        || matches!(
+            serde_json::from_str(arguments),
+            Ok(serde_json::Value::Object(_))
+        )
+}
+
+/// The result recorded for a call whose arguments aren't a JSON object.
+/// Such a call is neither run nor put to the permission gate.
+fn malformed_arguments_result(cut_off: bool) -> String {
+    let mut result =
+        "Error: the arguments of this call are not a valid JSON object, so it was not run."
+            .to_string();
+    if cut_off {
+        result.push_str(
+            " The reply reached the output token limit before the call was complete. \
+             Make the call again with smaller arguments, splitting the work across several calls.",
+        );
+    }
+    result
+}
+
 /// `messages` with an error result added for every tool call that has none,
 /// right after the results that did arrive, or `None` if every call is
 /// answered. Providers reject a history with an unanswered tool call, so
@@ -241,6 +266,7 @@ where
             // tool call. So cancellation leaves this block, not the turn, and
             // every call without an outcome is answered as cancelled below.
             let mut outcomes: Vec<Option<(String, bool)>> = vec![None; tool_calls.len()];
+            let cut_off = choice.finish_reason == Some(FinishReason::MaxTokens);
             'calls: {
                 if turn.cancel.is_cancelled() {
                     break 'calls;
@@ -248,19 +274,23 @@ where
 
                 // Ask about every call concurrently, so a gate sees all the
                 // requests at once and may answer them in any order. The TUI
-                // gate queues them and shows one prompt at a time.
+                // gate queues them and shows one prompt at a time. A call
+                // with malformed arguments gets no decision: it can't run.
                 let decisions = tokio::select! {
                     // Dropping the `join_all` abandons every pending approval
                     // at once, so the turn (and `prompt_lock`) isn't held
                     // until the user answers each.
                     _ = turn.cancel.cancelled() => break 'calls,
                     decisions = futures::future::join_all(tool_calls.iter().map(|tool_call| async {
+                        if !arguments_are_usable(&tool_call.arguments) {
+                            return None;
+                        }
                         let request = PermissionRequest::new(
                             &tool_call.id,
                             &tool_call.name,
                             &tool_call.arguments,
                         );
-                        turn.permission_gate.check(&request).await
+                        Some(turn.permission_gate.check(&request).await)
                     })) => decisions,
                 };
 
@@ -273,17 +303,20 @@ where
                     .zip(&decisions)
                     .enumerate()
                     .map(|(index, (tool_call, decision))| async move {
-                        if decision.is_allowed() {
-                            match tool_executor
-                                .execute(&tool_call.name, &tool_call.arguments, turn)
-                                .await
-                            {
-                                Ok(r) => (index, r, false),
-                                Err(e) => (index, format!("Error: {e}"), true),
+                        let (result, is_error) = match decision {
+                            None => (malformed_arguments_result(cut_off), true),
+                            Some(decision) if decision.is_allowed() => {
+                                match tool_executor
+                                    .execute(&tool_call.name, &tool_call.arguments, turn)
+                                    .await
+                                {
+                                    Ok(r) => (r, false),
+                                    Err(e) => (format!("Error: {e}"), true),
+                                }
                             }
-                        } else {
-                            (index, "Permission denied by user.".to_string(), true)
-                        }
+                            Some(_) => ("Permission denied by user.".to_string(), true),
+                        };
+                        (index, result, is_error)
                     })
                     .collect();
 
@@ -1309,5 +1342,62 @@ mod tests {
             .unwrap();
         assert_eq!(tool_result_msg.content, "Permission denied by user.");
         assert!(tool_result_msg.is_error);
+    }
+
+    /// Counts the permission checks that reach it, allowing each.
+    struct CountingGate(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl PermissionGate for CountingGate {
+        async fn check(&self, _request: &PermissionRequest<'_>) -> PermissionDecision {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            PermissionDecision::AllowOnce
+        }
+    }
+
+    // A call cut off at the output limit is answered with an error the model
+    // can act on, without being run or put to the user.
+    #[tokio::test]
+    async fn call_with_malformed_arguments_is_answered_without_running() {
+        let mut cut_off = tool_call_choice("write_file", r#"{"path":"a.txt","content":"par"#);
+        cut_off.finish_reason = Some(FinishReason::MaxTokens);
+        let llm = MockLlm::new(vec![cut_off, text_choice("retrying")]);
+        let executor = MockToolExecutor::new("should not run");
+        let asked = Arc::new(AtomicUsize::new(0));
+        let mut messages = vec![Message::user("write a.txt")];
+
+        let result = Harness::new()
+            .gate(CountingGate(asked.clone()))
+            .run(&llm, &executor, &mut messages, |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(result.final_response, "retrying");
+        assert!(executor.calls.lock().unwrap().is_empty());
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+        let answer = messages
+            .iter()
+            .find_map(Message::tool_result_block)
+            .unwrap();
+        assert!(answer.is_error);
+        assert!(
+            answer.content.contains("output token limit"),
+            "{}",
+            answer.content
+        );
+    }
+
+    #[tokio::test]
+    async fn call_without_arguments_still_runs() {
+        let llm = MockLlm::new(vec![tool_call_choice("list_dir", ""), text_choice("done")]);
+        let executor = MockToolExecutor::new("a.txt");
+        let mut messages = vec![Message::user("list")];
+
+        Harness::new()
+            .run(&llm, &executor, &mut messages, |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(executor.calls.lock().unwrap().len(), 1);
     }
 }
