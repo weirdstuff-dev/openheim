@@ -7,9 +7,8 @@
 //! ```no_run
 //! use openheim::{OpenheimClient, Result};
 //!
-//! // `current_thread`: the library itself only needs `tokio`'s `rt` feature,
-//! // not `rt-multi-thread` (that's what the `cli` feature adds for the
-//! // `openheim` binary's own `#[tokio::main]`).
+//! // The library runs on a `current_thread` runtime; it doesn't need
+//! // tokio's `rt-multi-thread`.
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<()> {
 //!     let client = OpenheimClient::builder()
@@ -53,7 +52,7 @@
 //!
 //! | Feature  | Default    | Enables                                              |
 //! |----------|------------|------------------------------------------------------|
-//! | `cli`    | ✓          | The `openheim` binary (CLI, TUI, `serve`). Implies `tui` + `server` + `acp`. |
+//! | `cli`    | ✓          | The `openheim` binary (CLI, TUI, `serve`). Implies `tui` + `server` + `acp` + `rag`. |
 //! | `tui`    | via `cli`  | The `tui` module (ratatui/crossterm terminal UI). Doesn't need `acp`. |
 //! | `acp`    | via `cli`  | The `acp` and `transport` modules (Agent Client Protocol: `serve`, `stdio`, `run`, `ws`). |
 //! | `server` | via `cli`  | The `transport::ws` WebSocket/REST server (axum). Implies `acp`. |
@@ -63,10 +62,9 @@
 //! and config — is always available. Embedders that don't need ACP, the
 //! terminal UI, or the built-in server should depend on openheim with
 //! `default-features = false` (optionally adding back `"acp"`, `"tui"`, or
-//! `"server"`) to skip the `clap`, `ratatui`, `crossterm`, `axum`,
-//! `tower-http`, `notify`, `walkdir`, `tracing-subscriber`, and
-//! `agent-client-protocol{,-tokio}` dependency trees. `futures` is not
-//! behind any feature — the agent loop uses it directly.
+//! `"server"`, `"rag"`) to skip the `clap`, `ratatui`, `crossterm`, `axum`,
+//! `tower-http`, `notify`, `walkdir`, `tracing-subscriber`,
+//! `agent-client-protocol`, and `rusqlite` dependency trees.
 //!
 //! ## Key types
 //!

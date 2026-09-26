@@ -36,9 +36,7 @@ const HELP_TEXT: &str = ":help              show this\n\
 /// How long after a Ctrl-C a second one quits.
 const QUIT_CONFIRM_WINDOW: Duration = Duration::from_secs(2);
 
-/// Formats a token count for the footer: exact below 1000, `k`-suffixed with
-/// one decimal place above it (`1.2k`, `84.0k`) so the label stays short
-/// enough to sit next to the provider/model name.
+/// Formats a token count for the footer: exact below 1000, else `1.2k`.
 fn format_token_count(tokens: u64) -> String {
     if tokens < 1000 {
         format!("{tokens} ctx")
@@ -88,11 +86,8 @@ pub(super) struct App {
     skills: Vec<String>,
     theme: Theme,
     channels: AgentChannels,
-    /// Current context size: the most recent LLM call's usage, i.e. how
-    /// full the context window is right now — not a cumulative session
-    /// total. Refreshed after each completed turn and on session switch.
-    /// `None` until a turn has completed (never sent for a brand-new,
-    /// never-prompted session).
+    /// Current context size (the latest LLM call's usage), updated during
+    /// turns and on a session switch. `None` before a session's first turn.
     context_usage: Option<crate::core::models::Usage>,
 }
 
@@ -159,17 +154,13 @@ impl App {
                     });
                 }
             }
-            // Appended, not replacing the transcript — `open_session` already
-            // cleared it and pushed the header/warning synchronously, so this
-            // is just the replayed message history (plus a trailing
-            // "restored" marker) arriving once the load completes.
+            // Appended: `open_session` already cleared the transcript.
             AgentUpdate::History(items) => {
                 for item in items {
                     self.push(item);
                 }
             }
-            // Only now — creation confirmed — is it safe to drop the old
-            // session's transcript; see `start_new_session`.
+            // The new session exists, so the old transcript can go.
             AgentUpdate::NewSession(items) => {
                 self.transcript.clear();
                 self.context_usage = None;
@@ -209,9 +200,6 @@ impl App {
             } => {
                 self.push(ChatItem::ToolResult { result, is_error });
             }
-            // The current context size, refreshed live as each LLM call in
-            // the turn completes rather than once at the end, so the footer
-            // never needs a separate disk read after the turn finishes.
             StreamEvent::Usage { usage } => {
                 self.context_usage = Some(usage);
             }
@@ -581,14 +569,9 @@ impl App {
         rows
     }
 
-    /// Asks the agent task to start a brand-new, unsaved session — the same
-    /// `SessionBuilder::start` path `run()` uses on startup, just triggered
-    /// mid-session instead. Deliberately leaves the current transcript and
-    /// `Status::Idle` check gates prompt submission (see the `KeyCode::Enter`
-    /// handler) until then, keeping the request transactional: if
-    /// `client.new_session().start()` fails, `mod.rs` reports it as a plain
-    /// `AgentUpdate::Error`, `Status` falls back to `Idle`, and the old
-    /// session — still live in the agent task — is exactly where it was.
+    /// Asks the agent task for a new session. The transcript stays until
+    /// `AgentUpdate::NewSession` confirms it, and the busy status blocks
+    /// prompts meanwhile, so if creation fails the old session is untouched.
     fn start_new_session(&mut self) {
         self.status = Status::Thinking;
         if self.channels.new_session.send(()).is_err() {
@@ -599,13 +582,8 @@ impl App {
         }
     }
 
-    /// Clears the transcript and requests the agent task load `meta`'s full
-    /// history via `OpenheimClient::resume_session`, converted straight to `ChatItem`s
-    /// (see `message_to_chat_items`), so thinking blocks and image
-    /// attachments show up instead of being silently dropped. That also
-    /// keeps the history read off the UI task and on the agent task, where
-    /// the rest of I/O lives — the actual message items arrive later as
-    /// `AgentUpdate::History` once the load completes.
+    /// Clears the transcript and asks the agent task to resume `meta`'s
+    /// session; its history arrives as `AgentUpdate::History`.
     fn open_session(&mut self, meta: &ConversationMeta) {
         self.transcript.clear();
         self.status = Status::Idle;

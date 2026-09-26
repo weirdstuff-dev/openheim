@@ -103,12 +103,9 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Runs the TUI against `client` — caller-built, so an embedder with custom
-/// tools or a custom `LlmClient` can use this transport too.
+/// Runs the TUI against `client`.
 pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::Result<()> {
-    // Snapshots for `:config`/`:models` — read once here instead of a second
-    // `load_config()` duplicating the one `OpenheimClient::builder().build()`
-    // the caller did.
+    // Snapshots for `:config`/`:models`.
     let agent_config = client.state().config().clone();
     let app_config = client.state().app_config.clone();
     let paths = client.state().paths().clone();
@@ -135,15 +132,9 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
 
     let agent_handle = {
         let update_tx = update_tx.clone();
-        // Captured separately from the `skills` moved into `App::new` below —
-        // this copy lives inside the agent task so a `:new` command can spin
-        // up another session with the same skills, matching startup.
+        // For `:new`: the same skills as at startup, and the model the
+        // current session is on (a new session starts on the default).
         let session_skills = skills.clone();
-        // `client.new_session()` always starts from the client's original
-        // default config (see `AgentState::new_session`'s fallback), not
-        // whatever `:model`/`:models` had switched this session to — tracked
-        // here so a `:new` replacement can re-apply it instead of silently
-        // regressing to the default.
         let default_provider = agent_config.provider_name.clone();
         let default_model = agent_config.model.clone();
         tokio::spawn(async move {
@@ -160,11 +151,6 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
                                 // turn ended) isn't meant for this one.
                                 while cancel_rx.try_recv().is_ok() {}
                                 let tx_cb = update_tx.clone();
-                                // `StreamEvent::Finished`/`Usage` arrive as part of
-                                // this stream and drive the status/footer directly
-                                // (see `App::handle_stream_event`) — no separate
-                                // "done" signal or post-turn context-usage re-read
-                                // needed here.
                                 let turn = session.prompt(prompt, move |event| {
                                     let _ = tx_cb.send(AgentUpdate::Stream(event));
                                 });
@@ -218,10 +204,7 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
                     maybe_switch = switch_session_rx.recv() => {
                         match maybe_switch {
                             Some((session_id, cwd)) => {
-                                // Collected rather than streamed one at a time: a
-                                // history replay isn't "live" the way a turn is,
-                                // and batching means the app only clears/repaints
-                                // once instead of on every historical message.
+                                // Sent as one batch, so the app repaints once.
                                 match client.resume_session(&session_id, cwd).await {
                                     Ok((restored, loaded)) => {
                                         let restored =
@@ -237,13 +220,8 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
                                             "─── session restored".to_string(),
                                         ));
                                         let _ = update_tx.send(AgentUpdate::History(history));
-                                        // Refreshes the footer's context size to
-                                        // the restored session's own snapshot
-                                        // instead of leaving the previous
-                                        // session's stale. `Ok(None)` is sent
-                                        // through too, explicitly clearing the
-                                        // footer rather than leaving it showing
-                                        // the prior session's usage.
+                                        // The restored session's context size;
+                                        // `None` clears the previous one's.
                                         if let Ok(usage) = restored.context_usage().await {
                                             let _ = update_tx.send(AgentUpdate::Usage(usage));
                                         }
@@ -269,12 +247,8 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
                                     Ok(new_session) => {
                                         let new_session =
                                             new_session.permission_gate(permission_gate.clone());
-                                        // Re-apply the active model on top of the
-                                        // fresh session's default. If it's no
-                                        // longer valid (e.g. removed from the
-                                        // config file since startup), fall back to
-                                        // the default and let the UI know so the
-                                        // footer doesn't keep showing the stale one.
+                                        // Keep the active model; if it no longer
+                                        // resolves, tell the UI it's the default.
                                         match new_session.switch_model(&current_provider, &current_model).await {
                                             Ok(_) => {}
                                             Err(_) => {
@@ -409,12 +383,9 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
     }
 }
 
-/// The `ChatItem`s a live turn would have shown for one persisted
-/// [`Message`](crate::core::models::Message) from a history replay
-/// (`OpenheimClient::resume_session`'s `LoadedSession::messages`). Which
-/// blocks show, and in what order, is [`Message::transcript`]'s call
-/// (shared with ACP's replay); this only picks the `ChatItem`. An image
-/// renders as a placeholder line, since the terminal can't inline it.
+/// The `ChatItem`s a live turn would have shown for one saved message.
+/// [`Message::transcript`] decides what is shown; an image becomes a
+/// placeholder line.
 ///
 /// [`Message::transcript`]: crate::core::models::Message::transcript
 fn message_to_chat_items(msg: &crate::core::models::Message) -> Vec<ChatItem> {

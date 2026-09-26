@@ -12,24 +12,14 @@ pub(crate) enum AgentUpdate {
         provider: String,
         model: String,
     },
-    /// Current context size, refreshed on a session switch (a live turn's
-    /// footer instead updates from `StreamEvent::Usage` as it streams).
-    /// `None` clears the footer — e.g. switching to a session with no
-    /// completed turn yet.
+    /// The context size after a session switch; `None` clears the footer.
     Usage(Option<crate::core::models::Usage>),
     /// Answers a `:sessions` request — persisted conversation metadata,
     /// loaded off the UI task by the agent task.
     SessionList(Vec<crate::memory::ConversationMeta>),
-    /// A batch of chat items replayed from a restored session's history,
-    /// appended once the agent task's `OpenheimClient::resume_session` finishes
-    /// loading it (see `App::open_session`).
+    /// A restored session's history as chat items (see `App::open_session`).
     History(Vec<ChatItem>),
-    /// Confirms a `:new` request actually replaced the session — the agent
-    /// task only sends this once `client.new_session().start()` succeeds
-    /// (see `mod.rs`'s `new_session_rx` arm), so `App::start_new_session`
-    /// can leave the current transcript and status alone until creation is
-    /// known to have worked, instead of clearing them speculatively before
-    /// the replacement is confirmed.
+    /// A `:new` session was created (see `App::start_new_session`).
     NewSession(Vec<ChatItem>),
 }
 
