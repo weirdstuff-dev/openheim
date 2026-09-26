@@ -18,6 +18,30 @@ const CANCELLED_TOOL_RESULT: &str = "Cancelled by user.";
 const MISSING_TOOL_RESULT: &str =
     "No result: the turn was interrupted before this tool call finished.";
 
+/// Longest tool result kept, in bytes. A larger one is cut here, whatever
+/// the tool: it goes into the history and is resent with every later
+/// request, so one oversized result would push every request in the
+/// conversation past the model's context window.
+const MAX_TOOL_RESULT_BYTES: usize = 128 * 1024;
+
+/// `result` cut to [`MAX_TOOL_RESULT_BYTES`] (at a character boundary), with
+/// a note saying how much was left out.
+fn cap_tool_result(mut result: String) -> String {
+    if result.len() <= MAX_TOOL_RESULT_BYTES {
+        return result;
+    }
+    let total = result.len();
+    let mut end = MAX_TOOL_RESULT_BYTES;
+    while !result.is_char_boundary(end) {
+        end -= 1;
+    }
+    result.truncate(end);
+    result.push_str(&format!(
+        "\n[tool output truncated: showing the first {end} of {total} bytes]"
+    ));
+    result
+}
+
 /// Whether a tool call's arguments can be run: a JSON object, or nothing at
 /// all for a call without arguments.
 fn arguments_are_usable(arguments: &str) -> bool {
@@ -316,7 +340,7 @@ where
                             }
                             Some(_) => ("Permission denied by user.".to_string(), true),
                         };
-                        (index, result, is_error)
+                        (index, cap_tool_result(result), is_error)
                     })
                     .collect();
 
@@ -1399,5 +1423,47 @@ mod tests {
             .unwrap();
 
         assert_eq!(executor.calls.lock().unwrap().len(), 1);
+    }
+
+    // An oversized result is cut before it reaches the history, so it can't
+    // push every later request past the context window.
+    #[tokio::test]
+    async fn oversized_tool_result_is_truncated() {
+        let llm = MockLlm::new(vec![
+            tool_call_choice("read_file", r#"{"path":"big.txt"}"#),
+            text_choice("done"),
+        ]);
+        let executor = MockToolExecutor::new(&"é".repeat(MAX_TOOL_RESULT_BYTES));
+        let mut messages = vec![Message::user("read it")];
+        let mut streamed = String::new();
+
+        Harness::new()
+            .run(&llm, &executor, &mut messages, |event| {
+                if let StreamEvent::ToolResult { result, .. } = event {
+                    streamed = result;
+                }
+            })
+            .await
+            .unwrap();
+
+        let stored = messages
+            .iter()
+            .find_map(Message::tool_result_block)
+            .unwrap()
+            .content;
+        assert_eq!(stored, streamed);
+        let (kept, note) = stored.split_once("\n[tool output truncated").unwrap();
+        assert_eq!(kept, "é".repeat(MAX_TOOL_RESULT_BYTES / 2));
+        assert!(
+            note.contains(&format!("of {} bytes", 2 * MAX_TOOL_RESULT_BYTES)),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn small_tool_results_are_kept_whole() {
+        assert_eq!(cap_tool_result("ok".to_string()), "ok");
+        let exact = "a".repeat(MAX_TOOL_RESULT_BYTES);
+        assert_eq!(cap_tool_result(exact.clone()), exact);
     }
 }
