@@ -49,15 +49,8 @@ impl OpenheimClient {
         }
     }
 
-    /// The shared runtime handle behind this client. `pub(crate)` — for the
-    /// ACP-based transports (`transport::{run,stdio,ws}`), which need the
-    /// raw `AgentState` to hand to `acp::serve`, so every entry point builds
-    /// it the same way (config load, resolve, `MemoryContext::new`, custom
-    /// tools) instead of each hand-rolling that sequence; and for the TUI,
-    /// which reads `config`/`app_config`/`executor` off it directly for
-    /// `:config`/`:models` and the permission gate. `AgentState` itself has
-    /// no `acp` dependency, so this accessor doesn't need the feature either
-    /// — just one of its two callers.
+    /// The runtime behind this client, for the transports (which hand it to
+    /// `acp::serve`) and the TUI, so both build it through the builder.
     #[cfg(any(feature = "acp", feature = "tui"))]
     pub(crate) fn state(&self) -> &Arc<AgentState> {
         &self.state
@@ -75,24 +68,15 @@ impl OpenheimClient {
         }
     }
 
-    /// List persisted sessions — all of them (`None`) or only those whose
-    /// cwd matches (`Some`). Entries are [`ConversationMeta`]s (id, title,
-    /// cwd, timestamps, model/provider, context usage); ACP's `SessionInfo`
-    /// mapping happens at the ACP edge (`acp::serve`), not on the facade.
+    /// Saved sessions: all of them, or only those whose `cwd` matches.
     pub async fn list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<ConversationMeta>> {
         self.state.list_sessions(cwd).await
     }
 
-    /// Loads a persisted session and returns a live handle for it, plus what
-    /// was loaded: its messages (to show the conversation so far however you
-    /// like, or as ACP updates via `SessionHandle::acp_replay` with feature
-    /// `acp`), its mode,
-    /// its model, and a `warning` to show if its saved model no longer
-    /// resolves and it fell back to the default.
-    ///
-    /// Like a new session, the handle starts with the [`AllowAll`] permission
-    /// gate and [`NoClientIo`]; set your own with
-    /// [`SessionHandle::permission_gate`] / [`SessionHandle::client_io`].
+    /// Loads a saved session and returns a live handle for it plus what was
+    /// loaded (see [`LoadedSession`]; `SessionHandle::acp_replay` shows its
+    /// messages as ACP updates). Like a new session, the handle starts with
+    /// [`AllowAll`] and [`NoClientIo`].
     pub async fn resume_session(
         &self,
         session_id: &str,
@@ -177,7 +161,11 @@ impl<'a> SessionBuilder<'a> {
         self
     }
 
-    /// Working directory for this session (used for history filtering).
+    /// Working directory for this session: where its tools resolve relative
+    /// paths and run commands when it's inside `work_dir` (otherwise they use
+    /// `work_dir`). Also saved with the conversation for
+    /// [`OpenheimClient::list_sessions`] filtering. Defaults to the process's
+    /// current directory.
     pub fn cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
         self.cwd = cwd.into();
         self
@@ -213,11 +201,8 @@ impl SessionHandle {
         }
     }
 
-    /// Supply a permission gate consulted before every tool call this session
-    /// makes (see [`PermissionGate`]). Defaults to [`AllowAll`] — the caller
-    /// is trusted to have already consented to the run (e.g. `openheim run`,
-    /// a one-shot library embedding). An interactive embedder (like the TUI)
-    /// should set a real gate here instead of relying on the default.
+    /// The [`PermissionGate`] asked before each of this session's tool calls.
+    /// Defaults to [`AllowAll`]; an interactive embedder should set its own.
     pub fn permission_gate(mut self, gate: Arc<dyn PermissionGate>) -> Self {
         self.permission_gate = gate;
         self
@@ -287,11 +272,8 @@ impl SessionHandle {
         replay_history_messages(messages, self.state.executor.as_ref(), &mut on_update);
     }
 
-    /// Loads this session's persisted `ConversationMeta` (the source
-    /// [`Self::context_usage`] reads from), off the runtime thread since
-    /// it's synchronous file I/O. `None` if the session hasn't been
-    /// persisted yet — a brand-new session isn't written to disk until its
-    /// first turn completes.
+    /// This session's saved `ConversationMeta`, or `None` before its first
+    /// turn (a new session isn't saved until then).
     async fn conversation_meta(&self) -> Result<Option<crate::memory::ConversationMeta>> {
         let uuid = Uuid::parse_str(&self.id)
             .map_err(|_| crate::error::Error::InvalidArgument("invalid session id".to_string()))?;
@@ -399,19 +381,16 @@ impl From<Vec<ContentBlock>> for PromptInput {
 /// 2. **File-based** — call `OpenheimClient::from_config(path)` or leave
 ///    everything unset to load from `~/.openheim/config.toml`.
 ///
-/// `.model()` works in either mode: in file-based mode it overrides which
-/// configured model gets resolved (same as the config file's model with a
-/// different name picked); in programmatic mode it's the model of the
-/// from-scratch provider.
+/// `.model()` works in either mode: it picks a configured model in
+/// file-based mode, and is the provider's model in programmatic mode.
 ///
 /// MCP servers can be added in either mode with `.mcp_server()`.
 #[derive(Default)]
 pub struct OpenheimBuilder {
     // file-based path (None = ~/.openheim/config.toml)
     config_path: Option<PathBuf>,
-    // programmatic fields — if any of these (besides `model`) are set we
-    // skip the config file entirely; `model` alone is just a resolve()
-    // override on top of file-based config.
+    // Programmatic fields: setting any of these but `model` skips the
+    // config file.
     provider: Option<String>,
     api_key: Option<String>,
     model: Option<String>,
@@ -508,18 +487,14 @@ impl OpenheimBuilder {
 
     /// Directory backing history, skills, `system.md`, subagent profiles,
     /// and (absent an explicit `[memory].db_path`) the memory database.
-    /// Overrides `data_dir` from the config file. Defaults to `~/.openheim`
-    /// when not set — lets two agents share a process with separate state,
-    /// or a sandboxed caller keep everything project-local.
+    /// Overrides `data_dir` from the config file. Defaults to `~/.openheim`.
     pub fn data_dir(mut self, path: impl Into<PathBuf>) -> Self {
         self.data_dir = Some(path.into());
         self
     }
 
-    /// Register a custom tool (see [`crate::tools::ToolHandler`]). Registered
-    /// alongside the built-ins and any MCP-sourced tools, and subject to the
-    /// same `work_dir`/`allow_shell` sandbox boundary. Call multiple times to
-    /// register more than one.
+    /// Registers a custom tool (see [`crate::tools::ToolHandler`]) alongside
+    /// the built-in and MCP tools. Call once per tool.
     pub fn tool(mut self, handler: Box<dyn ToolHandler>) -> Self {
         self.tools.push(handler);
         self
@@ -651,9 +626,6 @@ impl OpenheimBuilder {
             data_dir: None,
         };
 
-        // Funnels through the same `AppConfig::agent_config` assembly every
-        // file-based `resolve()` path uses, instead of hand-building a second
-        // `AgentConfig` with the same field set alongside it.
         let agent_config = app_config.resolve_provider_default(&provider)?;
         Ok((agent_config, app_config))
     }

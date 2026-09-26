@@ -10,14 +10,9 @@ use crate::{
 /// Converts an ACP `session/prompt` payload into content blocks for a new
 /// user [`crate::core::models::Message`].
 ///
-/// `Text` and `Image` pass through directly (images require the `image`
-/// prompt capability, which `initialize` declares). `ResourceLink` agents
-/// must support unconditionally per the ACP spec, but embedding its content
-/// isn't implemented — it's surfaced as a text pointer instead, which the
-/// agent's own file tools can follow if needed. `Audio` and embedded
-/// `Resource` blocks (and anything the `#[non_exhaustive]` enum might add
-/// later) aren't supported at all: reject loudly instead of silently
-/// dropping part of the user's input.
+/// `Text` and `Image` pass through. A `ResourceLink` becomes a text pointer
+/// the agent's file tools can follow. `Audio`, embedded `Resource` and any
+/// other block are rejected rather than silently dropped.
 pub(crate) fn convert_prompt_blocks(blocks: &[AcpContentBlock]) -> Result<Vec<ContentBlock>> {
     let mut out = Vec::new();
     for block in blocks {

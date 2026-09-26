@@ -18,18 +18,13 @@
 //! - `{"channel":"agent","data":{…}}` — ACP protocol frames
 //! - `{"channel":"fs","data":{…}}` — filesystem sidecar (watch / list / read / write / mkdir / delete / rename)
 //!
-//! The fs sidecar is rooted at the agent's resolved `work_dir` — the same
-//! sandbox boundary the agent's own tools are held to. Every request path is
-//! validated against it (relative paths resolve within it) and `watch` may
-//! only select directories inside it. `delete` and `rename` act on a symlink
-//! itself rather than its target, and refuse the root itself, so a client
-//! can't remove or move the whole workspace.
+//! The fs sidecar is confined to the agent's `work_dir`, like the agent's
+//! own tools; relative paths resolve inside it. `delete` and `rename` act on
+//! a symlink rather than its target, and refuse `work_dir` itself.
 //!
-//! `/acp` carries the same ACP protocol frames as `/ws`'s `agent` channel, but
-//! unwrapped: each WebSocket text message is exactly one JSON-RPC object, with
-//! no `channel` tag and no filesystem sidecar. Use this endpoint for generic
-//! ACP clients that only speak the spec and don't know about openheim's `/ws`
-//! envelope or `fs` channel.
+//! `/acp` carries the same ACP frames as `/ws`'s `agent` channel, one
+//! JSON-RPC object per text message with no envelope and no fs sidecar, for
+//! clients that only speak ACP.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -209,11 +204,8 @@ pub enum FsResponse {
     Error { message: String },
 }
 
-/// Starts the HTTP/WebSocket server for `client` — caller-built, so an
-/// embedder with custom tools or a custom `LlmClient` can use this transport
-/// too.
-///
-/// Blocks until a Ctrl-C signal is received, then shuts down gracefully.
+/// Serves `client` over HTTP and WebSocket until Ctrl-C, then shuts down
+/// gracefully.
 pub async fn serve(client: OpenheimClient, host: String, port: u16) -> crate::error::Result<()> {
     let state = client.state().clone();
 
@@ -275,8 +267,7 @@ async fn mcp_servers_handler(State(state): State<Arc<AgentState>>) -> impl IntoR
 }
 
 async fn sessions_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
-    // History I/O is synchronous file access; run it off the runtime threads
-    // (same as the ACP layer does) instead of blocking a worker.
+    // History I/O is blocking, so it runs off the async workers.
     let history = state.memory.history.clone();
     match tokio::task::spawn_blocking(move || history.list_conversations()).await {
         Ok(Ok(metas)) => Json(metas).into_response(),
@@ -325,11 +316,9 @@ async fn ws_handler(
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 
-/// Starts an ACP server for one WebSocket connection, speaking JSON-RPC as
-/// one line per message over a pair of channels. Returns the sender for
-/// incoming lines (WS → ACP) and the receiver for outgoing ones (ACP → WS);
-/// dropping the sender ends the server. Shared by both socket handlers so the
-/// bridge can't drift between them.
+/// Starts an ACP server for one WebSocket connection, one JSON-RPC message
+/// per line. Returns the sender for incoming lines and the receiver for
+/// outgoing ones; dropping the sender ends the server.
 fn spawn_acp_server(
     state: Arc<AgentState>,
 ) -> (

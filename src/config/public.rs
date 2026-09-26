@@ -1,9 +1,7 @@
 //! The configuration view served to clients (`GET /api/config`).
 //!
-//! Built field by field from [`AppConfig`] rather than by serializing it and
-//! stripping known secrets: only what is listed here is ever exposed, so a
-//! field added to `AppConfig` later stays private until someone adds it here
-//! on purpose.
+//! Built field by field from [`AppConfig`] rather than by stripping secrets
+//! from it, so a new `AppConfig` field stays private unless added here.
 
 use std::collections::BTreeMap;
 use std::path::Path;

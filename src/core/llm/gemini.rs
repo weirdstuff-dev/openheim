@@ -178,7 +178,7 @@ struct GeminiCandidate {
 
 // --- Conversions ---
 
-fn convert_messages(messages: &[Message]) -> Result<Vec<GeminiContent>> {
+fn convert_messages(messages: &[Message]) -> Vec<GeminiContent> {
     let mut result = Vec::new();
 
     for msg in messages {
@@ -199,16 +199,11 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<GeminiContent>> {
                             arguments,
                             signature,
                         } => {
-                            let args: Value = serde_json::from_str(arguments).map_err(|e| {
-                                Error::ParseError(format!(
-                                    "invalid JSON in tool call arguments for '{name}': {e}"
-                                ))
-                            })?;
                             parts.push(GeminiPart {
                                 function_call: Some(GeminiFunctionCall {
                                     id: Some(id.clone()),
                                     name: name.clone(),
-                                    args,
+                                    args: super::tool_input(name, arguments),
                                 }),
                                 thought_signature: signature.clone(),
                                 ..Default::default()
@@ -290,7 +285,7 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<GeminiContent>> {
         }
     }
 
-    Ok(result)
+    result
 }
 
 fn convert_tools(tools: &[Tool]) -> Vec<GeminiToolDeclaration> {
@@ -313,9 +308,8 @@ fn convert_tools(tools: &[Tool]) -> Vec<GeminiToolDeclaration> {
 }
 
 /// Maps Gemini's `finishReason` vocabulary onto the provider-agnostic
-/// [`FinishReason`]; anything without a known equivalent passes through as
-/// [`FinishReason::Other`] (lowercased, matching this function's prior
-/// string-based behavior).
+/// [`FinishReason`]; anything without a known equivalent passes through,
+/// lowercased, as [`FinishReason::Other`].
 fn map_finish_reason(reason: &str) -> FinishReason {
     match reason {
         "STOP" => FinishReason::Stop,
@@ -373,35 +367,22 @@ fn gemini_system_instruction(messages: &[Message]) -> Option<GeminiContent> {
 }
 
 impl GeminiClient {
-    fn build_request(&self, messages: &[Message], tools: &[Tool]) -> Result<GeminiRequest> {
-        Ok(GeminiRequest {
-            contents: convert_messages(messages)?,
+    fn build_request(&self, messages: &[Message], tools: &[Tool]) -> GeminiRequest {
+        GeminiRequest {
+            contents: convert_messages(messages),
             tools: convert_tools(tools),
             generation_config: self.max_tokens.map(|t| GeminiGenerationConfig {
                 max_output_tokens: t,
             }),
             system_instruction: gemini_system_instruction(messages),
-        })
+        }
     }
 }
 
 #[async_trait]
 impl LlmClient for GeminiClient {
-    /// Implemented in terms of [`Self::send_streaming`] with a discarded
-    /// channel — same rationale as `AnthropicClient::send`: one request-
-    /// building and response-parsing path instead of two that could drift
-    /// (Gemini's streaming and non-streaming responses carry the same
-    /// information).
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
-        let (chunk_tx, chunk_rx) = mpsc::unbounded_channel();
-        // Dropped immediately, before any chunk is sent: an unbounded
-        // channel with a live receiver buffers every chunk in memory until
-        // something calls `recv()`, and nothing here ever will. Dropping it
-        // up front makes `chunk_tx.send()` fail fast (already ignored below
-        // and in `send_streaming`) instead of accumulating the whole
-        // response in the channel for the life of the request.
-        drop(chunk_rx);
-        self.send_streaming(messages, tools, chunk_tx).await
+        super::send_discarding_chunks(self, messages, tools).await
     }
 
     async fn send_streaming(
@@ -410,13 +391,10 @@ impl LlmClient for GeminiClient {
         tools: &[Tool],
         chunk_tx: mpsc::UnboundedSender<LlmChunk>,
     ) -> Result<Choice> {
-        let request = self.build_request(messages, tools)?;
+        let request = self.build_request(messages, tools);
 
-        // `alt=sse` is in the URL, not `.query()`, to keep the request
-        // builder entirely inside `post_json`; the key stays in a header,
-        // not a query param, since reqwest embeds the full URL (query
-        // included) in transport error strings, which would leak it into
-        // logs on any timeout/connect failure.
+        // The key goes in a header, not the query: reqwest puts the full URL
+        // in its error messages, which end up in logs.
         let endpoint = format!(
             "{}/models/{}:streamGenerateContent?alt=sse",
             self.api_base.trim_end_matches('/'),
@@ -513,7 +491,7 @@ mod tests {
     #[test]
     fn convert_messages_user() {
         let messages = vec![Message::user("hello")];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
         assert_eq!(result[0].parts[0].text.as_deref(), Some("hello"));
@@ -533,7 +511,7 @@ mod tests {
                 },
             ],
         }];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].parts.len(), 2);
         let inline = result[0].parts[1].inline_data.as_ref().unwrap();
@@ -544,7 +522,7 @@ mod tests {
     #[test]
     fn convert_messages_assistant_becomes_model() {
         let messages = vec![Message::assistant("response")];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "model");
         assert_eq!(result[0].parts[0].text.as_deref(), Some("response"));
@@ -560,7 +538,7 @@ mod tests {
                 r#"{"path":"a.txt"}"#,
             )],
         }];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "model");
         assert!(result[0].parts[0].function_call.is_some());
@@ -570,17 +548,19 @@ mod tests {
         );
     }
 
+    // A stored call with malformed arguments (e.g. cut off at the output
+    // limit) must not fail every later request in the conversation.
     #[test]
-    fn convert_messages_invalid_tool_arguments_returns_error() {
-        let messages = vec![Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::tool_use(
-                "call_1",
-                "read_file",
-                "not valid json",
-            )],
-        }];
-        assert!(convert_messages(&messages).is_err());
+    fn convert_messages_sends_malformed_tool_arguments_as_an_empty_object() {
+        for arguments in [r#"{"path":"a.t"#, "[1]", ""] {
+            let messages = vec![Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::tool_use("call_1", "read_file", arguments)],
+            }];
+            let result = convert_messages(&messages);
+            let call = result[0].parts[0].function_call.as_ref().unwrap();
+            assert_eq!(call.args, json!({}), "{arguments:?}");
+        }
     }
 
     #[test]
@@ -591,7 +571,7 @@ mod tests {
             "file content",
             false,
         )];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
         let fr = result[0].parts[0].function_response.as_ref().unwrap();
@@ -604,7 +584,7 @@ mod tests {
             Message::tool_result("call_1", "read_file", "a", false),
             Message::tool_result("call_2", "write_file", "b", false),
         ];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
         assert_eq!(result[0].parts.len(), 2);
@@ -652,7 +632,7 @@ mod tests {
             content: calls,
         }];
         messages.extend(results);
-        let request = convert_messages(&messages).unwrap();
+        let request = convert_messages(&messages);
         (
             serde_json::to_value(&request[0]).unwrap(),
             serde_json::to_value(&request[1]).unwrap(),

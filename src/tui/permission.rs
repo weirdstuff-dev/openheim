@@ -1,10 +1,5 @@
-//! [`PermissionGate`] implementation that hands tool-call approval to the
-//! interactive terminal UI instead of auto-allowing.
-//!
-//! The agent loop runs on a spawned task (see `tui::mod::run`), separate from
-//! the render/input loop. `check()` sends a [`PendingPermission`] over a
-//! channel to that render/input loop and blocks the agent task on a oneshot
-//! reply, which `App` sends once the user picks an option.
+//! [`PermissionGate`] that asks the user in the terminal UI: `check()` sends
+//! a [`PendingPermission`] to the UI loop and waits for `App` to answer it.
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};

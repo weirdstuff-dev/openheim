@@ -1,9 +1,8 @@
 //! Tool-call authorization: an embedder-supplied hook the agent loop consults
 //! before executing any tool call the LLM requests.
 //!
-//! This mirrors [`crate::core::llm::LlmClient`] and [`crate::tools::ToolExecutor`]:
-//! a protocol-agnostic trait defined here, with the ACP-specific implementation
-//! (backed by `session/request_permission`) living in `crate::acp` (needs the `acp` feature).
+//! The ACP implementation (backed by `session/request_permission`) lives in
+//! `crate::acp` (feature `acp`).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -77,18 +76,13 @@ pub trait PermissionGate: Send + Sync {
     async fn check(&self, request: &PermissionRequest<'_>) -> PermissionDecision;
 }
 
-/// Key used to remember an `AllowAlways`/`RejectAlways` decision across tool
-/// calls in a session, per the tool's declared
+/// Key under which an `AllowAlways`/`RejectAlways` decision is remembered,
+/// per the tool's
 /// [`ToolCapabilities::approval_scope`](crate::tools::ToolCapabilities::approval_scope).
-/// For [`ApprovalScope::ToolName`] (most tools) this is just the tool name —
-/// one approval covers every future call to that tool. For
-/// [`ApprovalScope::ExactArguments`] (e.g. `execute_command`) it's the tool
-/// name plus the full arguments, so approving `git status` doesn't cover
-/// `git status && rm -rf ~`. The arguments are normalized first (parsed,
-/// object keys sorted, whitespace dropped), so the same call written
-/// differently still matches; any difference in value re-prompts. Arguments
-/// that aren't JSON are keyed as the raw string: such calls fail at
-/// execution anyway, and distinct raw arguments still get distinct keys.
+/// [`ApprovalScope::ToolName`] keys by tool name alone.
+/// [`ApprovalScope::ExactArguments`] adds the arguments, normalized (keys
+/// sorted, whitespace dropped), so approving `git status` doesn't cover
+/// `git status && rm -rf ~`. Arguments that aren't JSON are keyed raw.
 pub fn approval_key(scope: ApprovalScope, tool_name: &str, arguments: &str) -> String {
     match scope {
         ApprovalScope::ToolName => tool_name.to_string(),
@@ -154,11 +148,9 @@ impl Approvals {
     }
 }
 
-/// Wraps the gate a session was given (ACP's `session/request_permission`,
-/// the TUI prompt, an embedder's own) with the session's [`Approvals`]: a
-/// remembered decision is returned without asking, and a new sticky decision
-/// is recorded. This is the only place approvals are remembered, so every
-/// front-end gets the same behaviour and only has to implement the asking.
+/// Wraps the gate a session was given with the session's [`Approvals`]: a
+/// remembered decision is returned without asking, and a new sticky one is
+/// recorded. Front-ends only implement the asking.
 pub(crate) struct RememberingGate {
     inner: Arc<dyn PermissionGate>,
     approvals: Approvals,

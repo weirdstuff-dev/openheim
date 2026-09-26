@@ -11,11 +11,9 @@ use super::sse::{StreamParser, parse_payload, read_stream};
 use super::{LlmChunk, LlmClient};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-/// Used when the provider sets no `max_tokens`. Adaptive thinking is on by
-/// default and spends from this same budget, so a low cap truncates replies
-/// (or leaves no room for any text at all). ~16k is Anthropic's recommended
-/// default for non-streaming requests; the agent loop always streams, but
-/// `send` is still public, so the default stays safe for callers of it.
+/// Used when the provider sets no `max_tokens`. Adaptive thinking spends
+/// from the same budget, so a low cap truncates replies or leaves no room
+/// for text at all.
 const DEFAULT_MAX_TOKENS: u32 = 16_000;
 
 fn is_false(b: &bool) -> bool {
@@ -130,11 +128,8 @@ struct AnthropicTool {
 
 // --- Anthropic streaming event types ---
 //
-// Unlike OpenAI/Gemini's single repeated envelope shape, each Anthropic SSE
-// event's fields depend on its `type` — an externally-tagged enum on `type`
-// models that directly. `#[serde(other)]` on `Other` absorbs any event type
-// this client doesn't special-case (`ping`, and any future addition) instead
-// of failing the whole stream.
+// Each event's fields depend on its `type`. `Other` absorbs event types this
+// client doesn't handle (`ping`, and any new ones).
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -325,8 +320,7 @@ struct AnthropicMessageDeltaFields {
 
 #[derive(Debug, Deserialize)]
 struct AnthropicDeltaUsage {
-    /// Cumulative, not a per-event delta — see the `message_delta` handling
-    /// in `send_streaming` for why the last value seen wins.
+    /// Cumulative, not a per-event delta.
     #[serde(default)]
     output_tokens: Option<u64>,
 }
@@ -383,9 +377,7 @@ impl StreamParser for AnthropicStream {
                 if let Some(reason) = delta.stop_reason {
                     self.stop_reason = Some(reason);
                 }
-                // Anthropic reports `output_tokens` cumulatively on each
-                // `message_delta`, not as a per-event delta — the last value
-                // seen before the stream ends is the true total.
+                // Cumulative, so the last value seen is the total.
                 if let Some(ot) = usage.and_then(|u| u.output_tokens) {
                     self.usage.output_tokens = ot;
                 }
@@ -431,7 +423,7 @@ impl StreamParser for AnthropicStream {
 
 // --- Conversions ---
 
-fn convert_messages(messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
+fn convert_messages(messages: &[Message]) -> Vec<AnthropicMessage> {
     let mut result = Vec::new();
 
     for msg in messages {
@@ -490,15 +482,10 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
                             arguments,
                             ..
                         } => {
-                            let input: Value = serde_json::from_str(arguments).map_err(|e| {
-                                Error::ParseError(format!(
-                                    "invalid JSON in tool call arguments for '{name}': {e}"
-                                ))
-                            })?;
                             blocks.push(AnthropicContentBlock::ToolUse {
                                 id: id.clone(),
                                 name: name.clone(),
-                                input,
+                                input: super::tool_input(name, arguments),
                             });
                         }
                         _ => {}
@@ -546,7 +533,7 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
         }
     }
 
-    Ok(result)
+    result
 }
 
 fn convert_tools(tools: &[Tool]) -> Vec<AnthropicTool> {
@@ -587,17 +574,13 @@ fn extract_system(messages: &[Message]) -> Option<String> {
     }
 }
 
-/// Returns Anthropic's adaptive-thinking request config when `enabled`.
+/// Anthropic's adaptive-thinking request config when `enabled`.
 ///
-/// Adaptive thinking (`type: "adaptive"`) is the form current Claude models
-/// accept; the fixed-budget form (`type: "enabled", budget_tokens: N`)
-/// returns a 400 on Opus 4.7/4.8, Sonnet 5, and Fable 5, and is deprecated
-/// on Opus 4.6 / Sonnet 4.6. Models predating adaptive thinking
-/// (Sonnet 3.7 and earlier Claude 4 releases) only support the fixed-budget
-/// form and reject adaptive thinking outright — set `thinking = "off"` on
-/// the provider entry for those (see [`crate::config::ProviderConfig::resolve_thinking`]).
-/// Adaptive thinking also enables interleaved thinking automatically, so no
-/// `anthropic-beta` header is needed here.
+/// Current Claude models accept only adaptive thinking (the fixed-budget
+/// form is rejected or deprecated); models that predate it reject it, and
+/// need `thinking = "off"` on their provider entry (see
+/// [`crate::config::ProviderConfig::resolve_thinking`]). Adaptive thinking
+/// is interleaved without an `anthropic-beta` header.
 fn thinking_config(enabled: bool) -> Option<AnthropicThinkingConfig> {
     enabled.then_some(AnthropicThinkingConfig {
         thinking_type: "adaptive",
@@ -606,16 +589,16 @@ fn thinking_config(enabled: bool) -> Option<AnthropicThinkingConfig> {
 }
 
 impl AnthropicClient {
-    fn build_request(&self, messages: &[Message], tools: &[Tool]) -> Result<AnthropicRequest> {
-        Ok(AnthropicRequest {
+    fn build_request(&self, messages: &[Message], tools: &[Tool]) -> AnthropicRequest {
+        AnthropicRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
             stream: true,
             system: extract_system(messages),
-            messages: convert_messages(messages)?,
+            messages: convert_messages(messages),
             tools: convert_tools(tools),
             thinking: thinking_config(self.thinking),
-        })
+        }
     }
 
     /// POSTs `request` and returns the response body stream, having already
@@ -639,20 +622,8 @@ impl AnthropicClient {
 
 #[async_trait]
 impl LlmClient for AnthropicClient {
-    /// Implemented in terms of [`Self::send_streaming`] with a discarded
-    /// channel: Anthropic's streaming and non-streaming responses carry the
-    /// same information, so there is no reason to maintain a second
-    /// request/response code path.
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
-        let (chunk_tx, chunk_rx) = mpsc::unbounded_channel();
-        // Dropped immediately, before any chunk is sent: an unbounded
-        // channel with a live receiver buffers every chunk in memory until
-        // something calls `recv()`, and nothing here ever will. Dropping it
-        // up front makes `chunk_tx.send()` fail fast (already ignored below
-        // and in `send_streaming`) instead of accumulating the whole
-        // response in the channel for the life of the request.
-        drop(chunk_rx);
-        self.send_streaming(messages, tools, chunk_tx).await
+        super::send_discarding_chunks(self, messages, tools).await
     }
 
     async fn send_streaming(
@@ -661,7 +632,7 @@ impl LlmClient for AnthropicClient {
         tools: &[Tool],
         chunk_tx: mpsc::UnboundedSender<LlmChunk>,
     ) -> Result<Choice> {
-        let request = self.build_request(messages, tools)?;
+        let request = self.build_request(messages, tools);
         let response = self.post(&request).await?;
 
         read_stream(response, AnthropicStream::default(), &chunk_tx).await
@@ -676,7 +647,7 @@ mod tests {
     #[test]
     fn convert_messages_user_message() {
         let messages = vec![Message::user("hello")];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
         assert!(
@@ -698,7 +669,7 @@ mod tests {
                 },
             ],
         }];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].content.len(), 2);
         assert!(matches!(
@@ -716,7 +687,7 @@ mod tests {
                 text: "system prompt".into(),
             }],
         }];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         assert_eq!(result.len(), 0);
     }
 
@@ -731,7 +702,7 @@ mod tests {
                 ContentBlock::tool_use("call_1", "read_file", r#"{"path":"a.txt"}"#),
             ],
         }];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "assistant");
         assert_eq!(result[0].content.len(), 2); // text + tool_use
@@ -752,7 +723,7 @@ mod tests {
                 ContentBlock::tool_use("call_1", "read_file", r#"{"path":"a.txt"}"#),
             ],
         }];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].content.len(), 3); // thinking + text + tool_use
         assert!(matches!(
@@ -762,17 +733,24 @@ mod tests {
         ));
     }
 
+    // A stored call with malformed arguments (e.g. cut off at the output
+    // limit) must not fail every later request in the conversation.
     #[test]
-    fn convert_messages_invalid_tool_arguments_returns_error() {
-        let messages = vec![Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::tool_use(
-                "call_1",
-                "read_file",
-                "not valid json",
-            )],
-        }];
-        assert!(convert_messages(&messages).is_err());
+    fn convert_messages_sends_malformed_tool_arguments_as_an_empty_object() {
+        for arguments in [r#"{"path":"a.t"#, "[1]", ""] {
+            let messages = vec![Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::tool_use("call_1", "read_file", arguments)],
+            }];
+            let result = convert_messages(&messages);
+            assert!(
+                matches!(
+                    &result[0].content[0],
+                    AnthropicContentBlock::ToolUse { input, .. } if *input == json!({})
+                ),
+                "{arguments:?}"
+            );
+        }
     }
 
     #[test]
@@ -781,7 +759,7 @@ mod tests {
             Message::tool_result("call_1", "read_file", "content1", false),
             Message::tool_result("call_2", "write_file", "content2", false),
         ];
-        let result = convert_messages(&messages).unwrap();
+        let result = convert_messages(&messages);
         // Both tool results should merge into a single user message
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
@@ -872,15 +850,11 @@ mod tests {
     fn build_request_always_streams_and_respects_thinking() {
         // `build_request` is the single request source for both `send` and
         // `send_streaming`; both must stream and honor the thinking config.
-        let request = client_with_thinking(true)
-            .build_request(&[Message::user("hi")], &[])
-            .unwrap();
+        let request = client_with_thinking(true).build_request(&[Message::user("hi")], &[]);
         assert!(request.stream);
         assert!(request.thinking.is_some());
 
-        let request = client_with_thinking(false)
-            .build_request(&[Message::user("hi")], &[])
-            .unwrap();
+        let request = client_with_thinking(false).build_request(&[Message::user("hi")], &[]);
         assert!(request.thinking.is_none());
     }
 
@@ -1108,7 +1082,7 @@ mod tests {
         );
 
         // And it goes back out block for block.
-        let sent = convert_messages(&[choice.message]).unwrap();
+        let sent = convert_messages(&[choice.message]);
         assert_eq!(
             serde_json::to_value(&sent[0].content).unwrap(),
             json!([

@@ -74,10 +74,7 @@ pub struct AgentState {
 }
 
 impl AgentState {
-    /// `custom_tools` are registered alongside the built-ins (`execute_command`,
-    /// `read_file`, `write_file`, …) and any MCP-sourced tools. Every handler
-    /// receives the turn's [`TurnContext`] — `work_dir`, cancel token, client
-    /// I/O — so custom tools can enforce the same boundary the built-ins do.
+    /// `custom_tools` are registered alongside the built-in and MCP tools.
     /// `paths` says where subagent profiles and (by default) the memory
     /// database live; `memory` should already be rooted at `paths.data_dir`.
     pub async fn new(
@@ -117,11 +114,9 @@ impl AgentState {
             sys_executor.register(Box::new(crate::rag::ForgetTool::new(m.clone())));
         }
 
-        // `delegate_task` is always exposed — even with no configured
-        // profiles the orchestrator can define an ephemeral subagent inline.
-        // It's built from a snapshot of the registry taken *before* it
-        // registers itself, so subagents structurally never see
-        // `delegate_task` and can't delegate recursively.
+        // `delegate_task` is always registered (a subagent can be defined
+        // inline). Subagents get the registry as it was before it was added,
+        // so they can't delegate recursively.
         let profiles = SubagentLoader::with_dir(paths.data_dir.join("agents")).load()?;
         let base: Arc<dyn ToolExecutor> = Arc::new(sys_executor.clone());
         let delegate = DelegateTool::new(
@@ -172,9 +167,15 @@ impl AgentState {
             Some(m) => self.app_config.resolve(Some(m))?,
             None => self.config.clone(),
         };
-        // No write lease taken here — merely creating/holding a session open
-        // doesn't touch history, so it doesn't contend with other processes.
-        // The cross-process write lease is acquired per-turn in `Self::prompt`.
+        // An unknown skill is the caller's mistake, so it's reported here
+        // rather than silently left out of every turn.
+        let skills_manager = self.memory.skills.clone();
+        let requested = skills.clone();
+        tokio::task::spawn_blocking(move || skills_manager.load_skills(&requested))
+            .await
+            .map_err(Error::from)??;
+        let tool_cwd = tool_cwd(&cwd, &self.work_dir);
+        // No write lease: only a running turn (`Self::prompt`) takes one.
         {
             let mut sessions = self.sessions.write().await;
             sessions.insert(
@@ -183,6 +184,7 @@ impl AgentState {
                     chat_id,
                     config,
                     cwd,
+                    tool_cwd,
                     skills,
                     cancel: CancellationToken::new(),
                     approved_tools: Approvals::default(),
@@ -303,7 +305,18 @@ impl AgentState {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| Error::InvalidArgument("invalid session id format".to_string()))?;
 
-        let (llm, executor, config, chat_id, skills, cwd, cancel, approvals, _prompt_guard) = {
+        let (
+            llm,
+            executor,
+            config,
+            chat_id,
+            skills,
+            cwd,
+            tool_cwd,
+            cancel,
+            approvals,
+            _prompt_guard,
+        ) = {
             // Write lock: each turn gets a fresh cancellation token, since a
             // cancelled token stays cancelled.
             let mut sessions = self.sessions.write().await;
@@ -347,6 +360,7 @@ impl AgentState {
                 s.chat_id,
                 s.skills.clone(),
                 s.cwd.clone(),
+                s.tool_cwd.clone(),
                 s.cancel.clone(),
                 s.approved_tools.clone(),
                 prompt_guard,
@@ -405,12 +419,11 @@ impl AgentState {
         let write_failed = AtomicBool::new(!started_ok);
         let write_failed_flag = &write_failed;
         let history_for_append = self.memory.history.clone();
-        // The work-directory boundary and client I/O hook reach every tool
-        // through this context; there is no per-session executor wrapper.
         let turn = TurnContext {
             cancel: &cancel,
             permission_gate: &permission_gate,
             work_dir: &self.work_dir,
+            cwd: &tool_cwd,
             client_io: &*client_io,
         };
         let run_result = run_agent(
@@ -445,10 +458,8 @@ impl AgentState {
         }
 
         // Every message is normally in the log by now, so only the metadata
-        // (context usage, `updated_at`) needs writing. If any write above
-        // failed, rewrite the whole log from memory instead, which
-        // `save_conversation` refuses to do if another process has written
-        // to it meanwhile.
+        // needs writing. If a write above failed, rewrite the whole log from
+        // memory instead (refused if another process wrote to it meanwhile).
         if !write_failed.load(Ordering::Relaxed) {
             let meta = conversation.meta.clone();
             self.persist("save conversation metadata", move |history| {
@@ -479,11 +490,8 @@ impl AgentState {
             .collect())
     }
 
-    /// Loads a persisted session as the active session for `session_id`,
-    /// returning the mode it's live under, its full message history (for the
-    /// caller to replay in whatever form its transport needs), and a
-    /// warning to surface if the session's saved provider no longer
-    /// resolves.
+    /// Makes the persisted session `session_id` live and returns what the
+    /// caller needs to show it (see [`LoadedSession`]).
     pub async fn load_session(&self, session_id: &str, cwd: PathBuf) -> Result<LoadedSession> {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| Error::InvalidArgument("invalid session id format".to_string()))?;
@@ -517,18 +525,17 @@ impl AgentState {
             session_config.model = model.clone();
         }
 
+        let tool_cwd = tool_cwd(&cwd, &self.work_dir);
         let (mode, model) = {
             let mut sessions = self.sessions.write().await;
-            // Attaching to an already-live session keeps its control state:
-            // a fresh `cancel` token would orphan a running turn, fresh
-            // `approved_tools` would forget "Always" answers, and a fresh
-            // `prompt_lock` would let two turns overlap. Loading takes no
-            // write lease; only a running turn does.
+            // An already-live session keeps its control state (see
+            // `insert_or_keep_live`). Loading takes no write lease.
             if !insert_or_keep_live(&mut sessions, session_id, || {
                 Ok(SessionState {
                     chat_id: uuid,
                     config: session_config,
                     cwd,
+                    tool_cwd,
                     skills: conversation.meta.skills.clone(),
                     cancel: CancellationToken::new(),
                     approved_tools: Approvals::default(),
@@ -572,16 +579,25 @@ impl AgentState {
     }
 }
 
-/// The result of [`AgentState::load_session`]: enough to both replay the
-/// conversation in whatever wire form the caller needs (see
-/// `acp::util::replay_history_messages` for the ACP shape) and reflect the
-/// mode it's now live under.
+/// Where a session's tools work: `cwd` when it's a directory inside
+/// `work_dir`, otherwise `work_dir` (e.g. for a client's own path that
+/// doesn't exist on this machine).
+fn tool_cwd(cwd: &Path, work_dir: &Path) -> PathBuf {
+    match (cwd.canonicalize(), work_dir.canonicalize()) {
+        (Ok(cwd), Ok(root)) if cwd.is_dir() && cwd.starts_with(&root) => cwd,
+        _ => work_dir.to_path_buf(),
+    }
+}
+
+/// The result of [`AgentState::load_session`].
 pub struct LoadedSession {
+    /// The mode the session is live under.
     pub mode: AgentMode,
+    /// The full saved conversation, for the caller to replay in its own form
+    /// (`acp::util::replay_history_messages` for ACP).
     pub messages: Vec<Message>,
-    /// The session's active model after resolution (falls back to the
-    /// default provider's model if the saved provider/model no longer
-    /// resolves — see `warning`).
+    /// The session's active model (the default provider's if the saved one
+    /// no longer resolves; see `warning`).
     pub model: String,
     /// Set if the session's saved provider/model no longer resolves and the
     /// load fell back to the default provider.
@@ -607,6 +623,7 @@ mod prompt_lease_ordering_tests {
                 5,
             ),
             cwd: PathBuf::from("/tmp"),
+            tool_cwd: PathBuf::from("/tmp"),
             skills: vec![],
             cancel: CancellationToken::new(),
             approved_tools: Approvals::default(),
@@ -699,6 +716,38 @@ mod new_session_tests {
             .new_session(Some("nope"), vec![], dir.path().to_path_buf())
             .await;
         assert!(result.is_err(), "{result:?}");
+    }
+
+    // A session's tools work in its cwd only when that lies inside the work
+    // directory; anything else (a client's own path, somewhere outside)
+    // falls back to the work directory.
+    #[test]
+    fn tool_cwd_is_the_session_cwd_only_inside_work_dir() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        let outside = tempdir().unwrap();
+
+        assert_eq!(tool_cwd(&root.join("sub"), dir.path()), root.join("sub"));
+        assert_eq!(tool_cwd(outside.path(), dir.path()), dir.path());
+        assert_eq!(tool_cwd(&root.join("missing"), dir.path()), dir.path());
+    }
+
+    #[tokio::test]
+    async fn unknown_skill_is_an_error() {
+        let dir = tempdir().unwrap();
+        let state = sample_state(dir.path()).await;
+        std::fs::write(dir.path().join("skills/known.md"), "x").unwrap();
+
+        let result = state
+            .new_session(None, vec!["nope".into()], dir.path().to_path_buf())
+            .await;
+        assert!(matches!(result, Err(Error::NotFound(_))), "{result:?}");
+
+        state
+            .new_session(None, vec!["known".into()], dir.path().to_path_buf())
+            .await
+            .unwrap();
     }
 
     /// Always answers with a final text reply, so a turn completes in one

@@ -1,13 +1,9 @@
-//! [`ToolCapabilities`]: the single declaration each [`super::ToolHandler`]
-//! makes about itself, consumed wherever a tool's coarse behavior matters —
-//! Architect mode's allowlist, how `approval_key` scopes remembered
-//! approvals, ACP's tool-kind-for-UI mapping, and `SystemToolExecutor::build`'s
-//! shell-tool gate.
+//! [`ToolCapabilities`]: what each [`super::ToolHandler`] declares about
+//! itself, read by Architect mode's allowlist, `approval_key`, and ACP's
+//! tool-kind mapping.
 
-/// Coarse hint of what kind of action a tool performs. Mirrors
-/// `agent_client_protocol::schema::ToolKind`'s variant set without depending
-/// on that crate — `core` and `tools` stay ACP-free; the mapping onto the
-/// real `ToolKind` lives in `acp::util`.
+/// Coarse hint of what kind of action a tool performs. Mirrors ACP's
+/// `ToolKind` without depending on it; `acp::util` maps one onto the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolKindHint {
     Read,
@@ -30,20 +26,18 @@ pub enum ApprovalScope {
     #[default]
     ToolName,
     /// Approval only covers calls with the same arguments (compared as JSON,
-    /// so key order and whitespace don't matter) — e.g. `execute_command`,
-    /// where approving `git status` must not silently cover
-    /// `git status && rm -rf ~`. Works for any tool, whatever its arguments.
+    /// so key order and whitespace don't matter), e.g. `execute_command`:
+    /// approving `git status` must not cover `git status && rm -rf ~`.
     ExactArguments,
 }
 
-/// What a [`super::ToolHandler`] declares about itself: whether it's safe to
-/// expose read-only (Architect mode), which [`ToolKindHint`] best describes
-/// it (client UI treatment), and how its approvals should be scoped.
+/// What a [`super::ToolHandler`] declares about itself: whether it's
+/// read-only (offered in Architect mode), its [`ToolKindHint`] (client UI),
+/// and how its approvals are scoped.
 ///
-/// The default — `read_only: false`, [`ToolKindHint::Other`],
-/// [`ApprovalScope::ToolName`] — is the conservative choice for a tool that
-/// declares nothing, and is what MCP-sourced tools get: there's no signal in
-/// an MCP tool definition to derive `read_only` or `kind` from.
+/// The default (not read-only, [`ToolKindHint::Other`],
+/// [`ApprovalScope::ToolName`]) is the conservative choice, and what MCP
+/// tools get.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ToolCapabilities {
     /// Safe to expose in Architect mode (no filesystem/shell/network writes,

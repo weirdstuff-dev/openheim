@@ -1,17 +1,12 @@
-//! Shared HTTP plumbing for the provider clients: every one of them POSTs a
-//! JSON body and needs the same status-check → `Error::HttpError { status,
-//! body }` handling. Centralized here so that check (and the error body
-//! read it requires) exists once instead of once per client.
+//! The POST-and-check-status step every provider client shares.
 
 use reqwest::{Client as ReqwestClient, Response};
 use serde::Serialize;
 
 use crate::error::{Error, Result};
 
-/// POSTs `body` as JSON to `url` with `headers` applied on top of it (`.json`
-/// already sets `Content-Type`), and turns a non-2xx response into
-/// `Error::HttpError { status, body }` — reading the error body here, once,
-/// instead of at every call site.
+/// POSTs `body` as JSON to `url` with `headers`, turning a non-2xx response
+/// into `Error::HttpError { status, body }`.
 pub(super) async fn post_json(
     client: &ReqwestClient,
     url: &str,

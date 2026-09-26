@@ -386,7 +386,7 @@ Returns all registered tool definitions (built-in + MCP). Each tool follows the 
 ]
 ```
 
-> `delegate_task` is always registered. `remember`/`search_memory`/`edit_memory`/`forget` are registered with the `rag` feature (on by default for the binary) — see configuration.md for the `[memory]` section. MCP tools are namespaced as `{server_name}__{tool_name}` (double underscore); the server name is sanitized: hyphens and spaces become underscores.
+> `delegate_task` is always registered. `remember`/`search_memory`/`edit_memory`/`forget` are registered with the `rag` feature (on by default for the binary) — see configuration.md for the `[memory]` section. MCP tools are namespaced as `{server_name}__{tool_name}` (double underscore); both parts are sanitized so every provider accepts the name (see configuration.md's `[mcp_servers]` section).
 
 ---
 
@@ -802,7 +802,7 @@ Creates a new blank conversation session. Returns a `sessionId` used for all sub
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `cwd` | `string` | No | Working directory for the session |
+| `cwd` | `string` | No | Working directory for the session: tools resolve relative paths and run commands here when it's inside the agent's `work_dir` (otherwise they use `work_dir`). Also stored for `session/list` filtering. |
 | `_meta.model` | `string` | No | Model override (must match a model from a configured provider) |
 | `_meta.skills` | `string[]` | No | Skills to load for this session |
 
@@ -922,7 +922,7 @@ The flow is:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `sessionId` | `string` | Yes | UUID of the session to resume |
-| `cwd` | `string` | Yes | Current working directory (used for any subsequent prompts) |
+| `cwd` | `string` | Yes | Current working directory, used by the session's tools like `session/new`'s `cwd` (unless the session is already live, which keeps its own) |
 | `mcpServers` | `array` | No | MCP server overrides for the loaded session (usually `[]`) |
 
 **History replay notifications (Server → Client, before the response):**

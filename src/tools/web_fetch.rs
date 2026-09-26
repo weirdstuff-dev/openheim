@@ -20,35 +20,21 @@ use super::capabilities::{ToolCapabilities, ToolKindHint};
 /// Wall-clock limit for the whole request (connect + headers + body).
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Response body cap. Past this the body is truncated with a marker, so a
-/// huge page can't balloon memory or the LLM's context.
+/// Response body cap; past it the body is truncated with a marker.
 const MAX_BODY_BYTES: usize = 256 * 1024;
 
 /// Fetches `url` over HTTP(S) and returns its content as plain text: HTML is
-/// stripped of markup, other text-like content types (plain text, JSON, XML)
-/// are returned verbatim.
+/// stripped of markup, other text-like types (plain text, JSON, XML) are
+/// returned verbatim. The URL is model-chosen, so every fetch is guarded:
 ///
-/// Single source of truth for the `web_fetch` behaviour.
-///
-/// Hardening applied to every fetch, since the URL is LLM-chosen input:
-/// - **Scheme allowlist** — only `http`/`https`; no `file://`, `data:`, etc.
-/// - **SSRF guard** — the host is resolved and every returned address is
-///   checked against loopback/private/link-local/documentation ranges
-///   (including the `169.254.169.254` cloud metadata address) before the
-///   request is made, so the agent can't be steered into the internal
-///   network. The checked address is then pinned for the actual connection
-///   (`ClientBuilder::resolve`), so a second, attacker-influenced DNS lookup
-///   inside the HTTP client (DNS rebinding) can't reach a different address
-///   than the one that was validated.
-/// - **No automatic redirects** — a 3xx response is reported back with its
-///   `Location` header instead of being followed blindly, so a public URL
-///   can't silently redirect the client into the internal network. The
-///   caller can fetch the target URL itself if it wants to follow it.
-/// - **Timeout** — the whole request is bounded by [`FETCH_TIMEOUT`].
-/// - **Body cap** — capped at [`MAX_BODY_BYTES`], with a truncation marker.
-/// - **Content-type allowlist** — only text-like responses are accepted;
-///   binary payloads (images, archives, executables, ...) are rejected
-///   rather than dumped into the model's context as noise.
+/// - **Scheme allowlist** — only `http`/`https`.
+/// - **SSRF guard** — every address the host resolves to is checked against
+///   non-public ranges (cloud metadata included), and the checked address is
+///   pinned for the connection, so DNS rebinding can't swap it.
+/// - **No automatic redirects** — a 3xx is reported with its `Location`
+///   instead of followed.
+/// - **Timeout** ([`FETCH_TIMEOUT`]) and **body cap** ([`MAX_BODY_BYTES`]).
+/// - **Content-type allowlist** — binary responses are rejected.
 pub(crate) async fn fetch_url(url: &str) -> Result<String> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| Error::ToolExecutionError(format!("Invalid URL '{url}': {e}")))?;
@@ -133,8 +119,7 @@ pub(crate) async fn fetch_url(url: &str) -> Result<String> {
 }
 
 /// Reads `response`'s body up to `cap` bytes, returning whether it was
-/// truncated. Streamed rather than buffered whole, so an oversized response
-/// stops as soon as the cap is hit instead of being downloaded in full.
+/// truncated. Stops downloading at the cap.
 async fn read_capped_body(response: reqwest::Response, cap: usize) -> Result<(Vec<u8>, bool)> {
     let mut stream = response.bytes_stream();
     let mut buf = Vec::new();
@@ -151,11 +136,9 @@ async fn read_capped_body(response: reqwest::Response, cap: usize) -> Result<(Ve
     Ok((buf, false))
 }
 
-/// Resolves `host` (if it's a hostname) and checks every candidate address
-/// against [`is_disallowed_ip`], returning the first address so the caller
-/// can pin the connection to exactly what was checked. Returns `None` for a
-/// literal IP host (nothing to pin — there's only the one address, and it's
-/// already been checked).
+/// Resolves `host` and checks every address against [`is_disallowed_ip`],
+/// returning the first to pin the connection to. `None` for a literal IP
+/// (checked, nothing to pin).
 async fn resolve_and_check(host: &str, port: u16) -> Result<Option<SocketAddr>> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_disallowed_ip(ip) {
@@ -186,10 +169,9 @@ async fn resolve_and_check(host: &str, port: u16) -> Result<Option<SocketAddr>> 
     Ok(Some(addrs[0]))
 }
 
-/// True for loopback, private, link-local, unspecified, and other
-/// non-publicly-routable addresses — including the `169.254.169.254`
-/// cloud-metadata address (covered by the IPv4 link-local check) and IPv6
-/// unique-local (`fc00::/7`) and link-local (`fe80::/10`) ranges.
+/// True for loopback, private, link-local (which covers the
+/// `169.254.169.254` cloud metadata address), unspecified, and other
+/// non-public addresses, IPv4 or IPv6.
 fn is_disallowed_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -202,16 +184,9 @@ fn is_disallowed_ip(ip: IpAddr) -> bool {
         }
         IpAddr::V6(v6) => {
             // IPv4-mapped (`::ffff:a.b.c.d`) and IPv4-compatible
-            // (`::a.b.c.d`) addresses embed an IPv4 address that the native
-            // IPv6 checks below wouldn't catch on their own — a request to
-            // `::ffff:169.254.169.254` would sail straight past them despite
-            // being cloud metadata. Run those embedded addresses back through
-            // the IPv4 checks too. `to_ipv4_mapped()` covers the first form;
-            // `ipv4_compatible` covers the second, deprecated (RFC 4291) one
-            // that `to_ipv4_mapped()` doesn't — between them, `::` and `::1`
-            // are still matched too (as 0.0.0.0 and 0.0.0.1, neither of
-            // which is IPv4-loopback), so this is additive, not a
-            // replacement for the native checks below.
+            // (`::a.b.c.d`) addresses embed an IPv4 address the IPv6 checks
+            // miss (`::ffff:169.254.169.254` is cloud metadata), so the
+            // embedded address gets the IPv4 checks as well.
             let embedded_v4 = v6.to_ipv4_mapped().or_else(|| ipv4_compatible(&v6));
             let embeds_disallowed_ipv4 =
                 embedded_v4.is_some_and(|v4| is_disallowed_ip(IpAddr::V4(v4)));
@@ -224,10 +199,9 @@ fn is_disallowed_ip(ip: IpAddr) -> bool {
     }
 }
 
-/// The deprecated (RFC 4291) "IPv4-compatible" IPv6 form `::a.b.c.d`: the
-/// first 96 bits are zero and the last 32 embed the IPv4 address directly —
-/// distinct from the still-current "IPv4-mapped" form `::ffff:a.b.c.d`
-/// that [`Ipv6Addr::to_ipv4_mapped`] already recognizes.
+/// The IPv4 address in a deprecated "IPv4-compatible" IPv6 address
+/// (`::a.b.c.d`, RFC 4291), which [`Ipv6Addr::to_ipv4_mapped`] doesn't
+/// recognize.
 fn ipv4_compatible(v6: &Ipv6Addr) -> Option<Ipv4Addr> {
     let segments = v6.segments();
     if segments[0..6] == [0, 0, 0, 0, 0, 0] {
@@ -241,13 +215,10 @@ fn ipv4_compatible(v6: &Ipv6Addr) -> Option<Ipv4Addr> {
 }
 
 /// Strips markup from an HTML document into roughly readable text:
-/// `<script>`/`<style>` bodies are dropped entirely, block-level tags become
-/// line breaks, remaining tags are removed, a handful of common entities are
-/// decoded, and runs of blank lines are collapsed.
-///
-/// This is not a full HTML parser (no dependency pulled in for it) — it's
-/// good enough to keep the model from paying for raw markup tokens, not for
-/// extracting structured data.
+/// `<script>`/`<style>` bodies are dropped, block-level tags become line
+/// breaks, other tags are removed, common entities are decoded, and blank
+/// runs are collapsed. Not a real HTML parser; enough to spare the model the
+/// markup.
 fn html_to_text(html: &str) -> String {
     let without_scripts = strip_element(html, "script");
     let without_scripts_and_styles = strip_element(&without_scripts, "style");
@@ -336,12 +307,8 @@ fn collapse_blank_lines(text: &str) -> String {
     out.trim_end().to_string()
 }
 
-/// Fetches a URL over HTTP(S) and returns its content as plain text.
-///
-/// HTML responses are stripped of markup; other text-like content types
-/// (plain text, JSON, XML) are returned verbatim. Only public, non-redirect,
-/// text-like responses under 256 KiB are supported — see [`fetch_url`] for
-/// the full list of guards applied.
+/// Fetches a public URL and returns its content as plain text; see
+/// [`fetch_url`] for the guards.
 pub struct WebFetchTool;
 
 #[derive(Deserialize)]

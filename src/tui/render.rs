@@ -343,15 +343,8 @@ pub(crate) fn render_input_bar(
     f.render_widget(block, area);
 
     let prompt_prefix = "  › ";
-    // `Paragraph` doesn't wrap here, so once `input` is wider than `inner`
-    // the tail just renders past the edge of the terminal and disappears —
-    // the cursor then clamps to the last visible column and appears stuck
-    // while the (invisible) text keeps growing behind it. Scroll the
-    // *displayed* slice of `input` instead, keeping the cursor's terminal
-    // column always inside the visible window, the way a normal line editor
-    // does. Done in terminal cells rather than chars/bytes so wide (CJK,
-    // emoji) and combining characters land in the right column instead of
-    // just being counted as one cell each.
+    // A line wider than the box scrolls, like a line editor, so the cursor
+    // stays visible.
     let visible_width = inner.width.saturating_sub(prompt_prefix.width() as u16) as usize;
     let (visible, cursor_col_offset) = scroll_input_line(input, cursor, visible_width);
 
@@ -372,15 +365,10 @@ pub(crate) fn render_input_bar(
     }
 }
 
-/// Picks the scrolled, grapheme-safe slice of `input` that fits within
-/// `visible_width` terminal cells while keeping the cursor (a byte offset
-/// into `input`) visible, plus the cursor's cell column within that slice.
-///
-/// Works in grapheme clusters (never splitting a base character from its
-/// combining marks) and terminal cell widths (so wide characters like CJK or
-/// emoji — which occupy two columns — scroll and place the cursor correctly)
-/// rather than `char`/byte counts, which both undercount wide characters and
-/// can split a cluster mid-character.
+/// The slice of `input` that fits in `visible_width` terminal cells with the
+/// cursor (a byte offset into `input`) visible, plus the cursor's column in
+/// it. Measured in grapheme clusters and cell widths, so combining marks
+/// aren't split and wide characters (CJK, emoji) take two columns.
 fn scroll_input_line(input: &str, cursor: usize, visible_width: usize) -> (String, usize) {
     let graphemes: Vec<&str> = input.graphemes(true).collect();
     // `cursor` is a byte offset that always lands on a grapheme boundary

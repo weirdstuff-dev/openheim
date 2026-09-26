@@ -16,11 +16,9 @@ pub enum Role {
     Tool,
 }
 
-/// A single piece of message content. Close to Anthropic's own content-block
-/// shape (and by extension ACP's), since both this codebase's richest
-/// provider and its host protocol already think in these terms; lossless
-/// providers convert directly, lossy ones (see `core::llm::openai`) flatten
-/// at their own edge instead of forcing the core type to be the lossy one.
+/// A single piece of message content, shaped like Anthropic's (and ACP's)
+/// content blocks. Providers with a flatter format (`core::llm::openai`)
+/// convert at their own edge.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
@@ -445,11 +443,9 @@ pub struct AgentResult {
     pub context_usage: Option<Usage>,
 }
 
-/// Core streaming event emitted during an agent run — the one in-process
-/// event type produced by `run_agent` and passed
-/// through `AgentState::prompt` unmapped; ACP's `SessionUpdate` (the wire
-/// vocabulary transports actually send) is derived from it only at the ACP
-/// edge (`acp::util::stream_event_to_session_update`).
+/// An event from a running agent turn, as `run_agent` and
+/// `AgentState::prompt` report it. ACP's `SessionUpdate` is derived from it
+/// at the ACP edge (`acp::util::stream_event_to_session_update`).
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "event_type")]
 pub enum StreamEvent {
@@ -490,12 +486,9 @@ pub enum StreamEvent {
         final_response: String,
         iterations: usize,
     },
-    /// `message` was just appended to the turn's message history (mirrors
-    /// exactly what `run_agent` pushed onto its `messages` argument).
-    /// Fired for every assistant and tool-result message, not just the final
-    /// response — a caller that wants to persist history incrementally
-    /// (rather than only once the whole turn completes) can checkpoint here
-    /// instead of reconstructing message content from the other event types.
+    /// `message` was just pushed onto the turn's history: every assistant
+    /// and tool-result message, in order. Persist history incrementally from
+    /// here.
     #[serde(rename = "message_appended")]
     MessageAppended { message: Message },
 }
@@ -633,14 +626,14 @@ mod tests {
         let json: Value = serde_json::to_value(&block).unwrap();
         assert_eq!(json["type"], "tool_use");
         assert_eq!(json["name"], "read_file");
-        // No signature: the field is left out, so history written before it
-        // existed and history written now read the same.
+        // An unset signature is left out, and a block without one reads back
+        // as `None`.
         assert!(json.get("signature").is_none());
-        let old: ContentBlock = serde_json::from_value(serde_json::json!({
+        let unsigned: ContentBlock = serde_json::from_value(serde_json::json!({
             "type": "tool_use", "id": "call_1", "name": "read_file", "arguments": "{}"
         }))
         .unwrap();
-        assert_eq!(old, block);
+        assert_eq!(unsigned, block);
 
         let block = ContentBlock::Thinking {
             thinking: "hmm".into(),

@@ -47,8 +47,20 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 /// Returns the resolved absolute path on success, or an error describing
 /// why the path is rejected.
 pub fn validate_path(requested: &str, work_dir: &Path) -> Result<PathBuf> {
-    let work_dir_canonical = canonical_work_dir(work_dir)?;
-    let resolved = resolve(requested, &work_dir_canonical);
+    validate_path_from(requested, work_dir, work_dir)
+}
+
+/// [`validate_path`], with a relative `requested` taken from `cwd` instead
+/// of from `work_dir`. The result must still lie inside `work_dir`, wherever
+/// `cwd` is.
+pub fn validate_path_from(requested: &str, cwd: &Path, work_dir: &Path) -> Result<PathBuf> {
+    let work_dir_canonical = canonical_dir(work_dir)?;
+    let base = if cwd == work_dir {
+        work_dir_canonical.clone()
+    } else {
+        canonical_dir(cwd)?
+    };
+    let resolved = resolve(requested, &base);
     check_inside(&resolved, requested, work_dir, &work_dir_canonical)
 }
 
@@ -64,7 +76,7 @@ pub fn validate_path(requested: &str, work_dir: &Path) -> Result<PathBuf> {
 /// The work directory itself is rejected: it is inside the sandbox, but
 /// deleting or moving it would take the whole workspace with it.
 pub fn validate_entry(requested: &str, work_dir: &Path) -> Result<PathBuf> {
-    let work_dir_canonical = canonical_work_dir(work_dir)?;
+    let work_dir_canonical = canonical_dir(work_dir)?;
     let resolved = resolve(requested, &work_dir_canonical);
     let is_root = resolved == work_dir_canonical || resolved == lexical_normalize(work_dir);
     let (Some(parent), Some(name), false) = (resolved.parent(), resolved.file_name(), is_root)
@@ -77,23 +89,20 @@ pub fn validate_entry(requested: &str, work_dir: &Path) -> Result<PathBuf> {
     Ok(parent.join(name))
 }
 
-fn canonical_work_dir(work_dir: &Path) -> Result<PathBuf> {
-    work_dir.canonicalize().map_err(|_| {
-        Error::ToolExecutionError(format!(
-            "work directory '{}' is inaccessible",
-            work_dir.display()
-        ))
+fn canonical_dir(dir: &Path) -> Result<PathBuf> {
+    dir.canonicalize().map_err(|_| {
+        Error::ToolExecutionError(format!("directory '{}' is inaccessible", dir.display()))
     })
 }
 
 /// `requested` as an absolute, lexically normalized path; relative paths
-/// are taken from `work_dir_canonical`.
-fn resolve(requested: &str, work_dir_canonical: &Path) -> PathBuf {
+/// are taken from `base`.
+fn resolve(requested: &str, base: &Path) -> PathBuf {
     let requested_path = Path::new(requested);
     let joined = if requested_path.is_absolute() {
         requested_path.to_path_buf()
     } else {
-        work_dir_canonical.join(requested_path)
+        base.join(requested_path)
     };
     // Normalize before probing the filesystem. Without this, a path like
     // `x/../../../outside/f` looks non-existent to `exists()` (the kernel
@@ -261,6 +270,42 @@ mod tests {
             !resolved
                 .components()
                 .any(|c| matches!(c, std::path::Component::ParentDir))
+        );
+    }
+
+    #[test]
+    fn relative_paths_resolve_from_cwd_but_stay_inside_work_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::create_dir(root.join("sub")).unwrap();
+        let cwd = root.join("sub");
+
+        assert_eq!(
+            validate_path_from("a.txt", &cwd, dir.path()).unwrap(),
+            root.join("sub/a.txt")
+        );
+        assert_eq!(
+            validate_path_from("../b.txt", &cwd, dir.path()).unwrap(),
+            root.join("b.txt")
+        );
+        let err = validate_path_from("../../c.txt", &cwd, dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("outside the work directory"),
+            "{err}"
+        );
+    }
+
+    // A `cwd` outside the work directory can't widen what's reachable.
+    #[test]
+    fn a_cwd_outside_work_dir_grants_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.txt"), "x").unwrap();
+
+        let err = validate_path_from("secret.txt", outside.path(), dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("outside the work directory"),
+            "{err}"
         );
     }
 

@@ -59,10 +59,8 @@ fn default_allow_shell() -> bool {
     false
 }
 
-/// Paths a running client resolved once, at `OpenheimBuilder::build`, and
-/// everything downstream uses as-is (see `AgentState::paths`). Kept out of
-/// [`AppConfig`], which is the config file's shape, where they could only be
-/// `Option`s that "are always set by the time anyone reads them".
+/// Paths resolved once, at `OpenheimBuilder::build`, and used as-is from
+/// then on (see `AgentState::paths`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimePaths {
     /// Where history, skills, `system.md`, subagent profiles and (by default)
@@ -180,9 +178,7 @@ pub struct McpServerConfig {
     /// Base URL for Streamable HTTP transport (e.g. `"http://localhost:8080/mcp"`).
     pub url: Option<String>,
     /// Extra HTTP headers sent with every request to an HTTP server, e.g.
-    /// `headers = { Authorization = "Bearer <token>" }`. The stdio equivalent
-    /// of this is `env` — same inline-table shape, applied to what an HTTP
-    /// server actually consumes (headers, not process env vars).
+    /// `headers = { Authorization = "Bearer <token>" }`.
     #[serde(default)]
     pub headers: HashMap<String, String>,
 }
@@ -266,7 +262,6 @@ pub enum ProviderKind {
 impl ProviderKind {
     /// The kind a provider gets when its config sets none: the built-in
     /// names map to their own kind, anything else is OpenAI-compatible.
-    /// Kept so configs written before `kind` existed behave as they did.
     pub fn infer_from_name(provider_name: &str) -> Self {
         match provider_name {
             "openai" => ProviderKind::OpenAi,
@@ -297,12 +292,9 @@ pub struct ProviderConfig {
     pub timeout_secs: Option<u64>,
     /// Maximum output tokens for LLM responses
     pub max_tokens: Option<u32>,
-    /// Extended thinking (`"adaptive"` or `"off"`). Defaults to `adaptive`
-    /// for an Anthropic-kind provider, `off` for everything else — see
-    /// [`Self::resolve_thinking`]. Set explicitly to `"off"` for an Anthropic
-    /// model that doesn't support adaptive thinking (e.g. `claude-haiku-4-5`,
-    /// `claude-3-7-sonnet`), since a single `[providers.<name>]` entry has no
-    /// per-model granularity.
+    /// Extended thinking (`"adaptive"` or `"off"`); see
+    /// [`Self::resolve_thinking`] for the default. Applies to every model of
+    /// the entry, so set `"off"` if one of them lacks adaptive thinking.
     #[serde(default)]
     pub thinking: Option<ThinkingMode>,
 }
@@ -382,9 +374,8 @@ pub struct AgentConfig {
     pub thinking: bool,
 }
 
-/// `AgentConfig`'s deserialization shape. `kind` is optional so data written
-/// before it existed resolves it from `provider_name`, the same inference
-/// config resolution uses, instead of silently becoming OpenAI-compatible.
+/// `AgentConfig`'s deserialization shape. A missing `kind` is inferred from
+/// `provider_name`, as in config resolution.
 #[derive(Deserialize)]
 struct AgentConfigWire {
     provider_name: String,
@@ -435,9 +426,7 @@ impl std::fmt::Debug for AgentConfig {
     }
 }
 
-/// The one source of truth for the request-timeout default; every path that
-/// needs a timeout when none is configured goes through this (or through
-/// [`ProviderConfig::resolve_timeout_secs`], which wraps it).
+/// The default request timeout, used wherever none is configured.
 pub(crate) fn default_timeout_secs() -> u64 {
     120
 }

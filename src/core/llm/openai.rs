@@ -139,14 +139,10 @@ struct OpenAiFunctionDef {
     parameters: Value,
 }
 
-// --- OpenAI response types ---
-
-#[derive(Debug, Deserialize)]
-struct OpenAiResponseEnvelope {
-    choices: Vec<OpenAiResponseChoice>,
-    #[serde(default)]
-    usage: Option<OpenAiUsage>,
-}
+// --- OpenAI streaming response types ---
+//
+// One SSE `data:` payload; `choices[0].delta` carries the piece of the
+// message that arrived in this chunk.
 
 #[derive(Debug, Deserialize)]
 struct OpenAiUsage {
@@ -182,54 +178,12 @@ impl From<OpenAiUsage> for Usage {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct OpenAiResponseChoice {
-    message: OpenAiResponseMessage,
-    finish_reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiResponseMessage {
-    #[serde(default)]
-    content: Option<String>,
-    /// Extended-thinking output, as returned by reasoning models behind
-    /// OpenAI-compatible APIs (GLM, DeepSeek, …). Absent on non-reasoning
-    /// models and plain OpenAI itself.
-    #[serde(default)]
-    reasoning_content: Option<String>,
-    #[serde(default)]
-    tool_calls: Option<Vec<OpenAiResponseToolCall>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiResponseToolCall {
-    id: String,
-    function: OpenAiResponseFunctionCall,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiResponseFunctionCall {
-    name: String,
-    arguments: String,
-}
-
-// --- OpenAI streaming response types ---
-//
-// One SSE `data:` payload's shape (`choices[0].delta` carries only the
-// incremental piece of the message that arrived in this chunk). Typed the
-// same way as the non-streaming envelope above instead of indexing into a
-// raw `serde_json::Value`, so a malformed/unexpected field is caught by
-// `serde` up front rather than silently reading as `None`/`0` deep inside
-// the accumulation loop.
-
 #[derive(Debug, Deserialize, Default)]
 struct OpenAiStreamChunk {
     #[serde(default)]
     choices: Vec<OpenAiStreamChoice>,
-    /// Only present on the final chunk when `stream_options.include_usage`
-    /// was set — arrives alongside an empty `choices` array, so it's read
-    /// independently of the choice fields below rather than folded into
-    /// that branch.
+    /// Only on the final chunk when `stream_options.include_usage` is set,
+    /// alongside an empty `choices`.
     #[serde(default)]
     usage: Option<OpenAiUsage>,
 }
@@ -246,7 +200,9 @@ struct OpenAiStreamChoice {
 struct OpenAiStreamDelta {
     #[serde(default)]
     content: Option<String>,
-    /// See `OpenAiResponseMessage::reasoning_content`.
+    /// Extended-thinking output, as returned by reasoning models behind
+    /// OpenAI-compatible APIs (GLM, DeepSeek, …). Absent on non-reasoning
+    /// models and plain OpenAI itself.
     #[serde(default)]
     reasoning_content: Option<String>,
     #[serde(default)]
@@ -314,10 +270,8 @@ fn map_finish_reason(reason: &str) -> FinishReason {
     }
 }
 
-/// Whether a failed streaming request should be retried once without
-/// `stream_options` — only when the body actually names it as the problem,
-/// so an unrelated 400 (bad request, context too long, …) isn't retried for
-/// nothing and doesn't double its cost.
+/// Whether a failed request should be retried once without `stream_options`:
+/// only a 400 whose body names it, so an unrelated 400 isn't paid for twice.
 fn should_retry_without_stream_options(status: u16, body: &str) -> bool {
     status == 400 && body.to_lowercase().contains("stream_options")
 }
@@ -420,30 +374,24 @@ fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
     result
 }
 
-/// Assembles an assistant message's content blocks: `Thinking` (when the
-/// provider returned reasoning) first, then `Text`, then tool uses. The
-/// OpenAI stream doesn't say how reasoning, text and calls interleave, so
-/// this fixed order is the best available. Empty strings produce no block,
-/// so an all-empty response yields empty content.
+/// An assistant message's content blocks: `Thinking`, then `Text`, then tool
+/// uses (the stream doesn't say how they interleave). Empty strings produce
+/// no block.
 fn assemble_content(
-    reasoning: Option<String>,
-    text: Option<String>,
+    reasoning: String,
+    text: String,
     tool_uses: Vec<ContentBlock>,
 ) -> Vec<ContentBlock> {
     let mut content = Vec::new();
-    if let Some(thinking) = reasoning
-        && !thinking.is_empty()
-    {
+    if !reasoning.is_empty() {
         content.push(ContentBlock::Thinking {
-            thinking,
+            thinking: reasoning,
             // The OpenAI-compatible `reasoning_content` field carries no
             // replayable signature — that's Anthropic-specific.
             signature: None,
         });
     }
-    if let Some(text) = text
-        && !text.is_empty()
-    {
+    if !text.is_empty() {
         content.push(ContentBlock::Text { text });
     }
     content.extend(tool_uses);
@@ -491,48 +439,7 @@ impl OpenAiClient {
 #[async_trait]
 impl LlmClient for OpenAiClient {
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
-        let request = self.request(messages, tools);
-        let auth = self.auth_header();
-
-        let response = super::http::post_json(
-            &self.client,
-            &self.endpoint(),
-            &[("Authorization", auth.as_str())],
-            &request,
-        )
-        .await?;
-
-        let envelope: OpenAiResponseEnvelope =
-            response.json().await.map_err(Error::ReqwestError)?;
-        let usage = envelope.usage.map(Usage::from);
-
-        let choice = envelope
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::ApiError("No response from LLM".to_string()))?;
-
-        let tool_uses = choice
-            .message
-            .tool_calls
-            .unwrap_or_default()
-            .into_iter()
-            .map(|tc| ContentBlock::tool_use(tc.id, tc.function.name, tc.function.arguments))
-            .collect();
-        let content = assemble_content(
-            choice.message.reasoning_content,
-            choice.message.content,
-            tool_uses,
-        );
-
-        Ok(Choice {
-            message: Message {
-                role: Role::Assistant,
-                content,
-            },
-            finish_reason: choice.finish_reason.as_deref().map(map_finish_reason),
-            usage,
-        })
+        super::send_discarding_chunks(self, messages, tools).await
     }
 
     async fn send_streaming(
@@ -546,13 +453,9 @@ impl LlmClient for OpenAiClient {
         let mut body =
             serde_json::to_value(&request).map_err(|e| Error::ParseError(e.to_string()))?;
         body["stream"] = serde_json::Value::Bool(true);
-        // Asks OpenAI (and most OpenAI-compatible backends, which pass unknown
-        // fields through) to emit one extra chunk at the end of the stream
-        // carrying the same `usage` object the non-streaming response has.
-        // Backends that don't understand it just ignore the field — but a few
-        // OpenAI-compatible endpoints validate the request body strictly and
-        // reject the unknown field with a 400, so that specific case is retried
-        // once without it below rather than failing the whole call.
+        // Asks for a final chunk carrying `usage`. A few strict compatible
+        // backends reject the field with a 400; that case is retried without
+        // it below.
         body["stream_options"] = serde_json::json!({ "include_usage": true });
 
         let endpoint = self.endpoint();
@@ -562,10 +465,6 @@ impl LlmClient for OpenAiClient {
         let response = match super::http::post_json(&self.client, &endpoint, &headers, &body).await
         {
             Ok(response) => response,
-            // Only a 400 that actually complains about `stream_options` is
-            // retried without it — any other 400 (bad request, context too
-            // long, …) would otherwise be retried for nothing, doubling its
-            // cost, and return unchanged.
             Err(Error::HttpError {
                 status,
                 body: err_body,
@@ -607,8 +506,6 @@ impl StreamParser for OpenAiStream {
             return Ok(false);
         };
 
-        // The `include_usage` final chunk carries `usage` alongside an empty
-        // `choices` array, so this is read independently of the choice.
         if let Some(u) = event.usage {
             self.usage = Some(Usage::from(u));
         }
@@ -674,7 +571,7 @@ impl StreamParser for OpenAiStream {
         Ok(Choice {
             message: Message {
                 role: Role::Assistant,
-                content: assemble_content(Some(self.reasoning), Some(self.text), tool_uses),
+                content: assemble_content(self.reasoning, self.text, tool_uses),
             },
             finish_reason: self.finish_reason,
             usage: self.usage,
@@ -845,10 +742,6 @@ mod tests {
         assert_eq!(tool_calls[0].function.name, "read_file");
     }
 
-    // `convert_messages` is the single conversion point shared by both
-    // `OpenAiClient::send` and `send_streaming` (via `OpenAiClient::request`),
-    // so this covers the continuation request built by either path.
-    //
     // Thinking is persisted to history and replayed through ACP (see
     // `assemble_content`) so the *user* sees it again, but it is
     // deliberately never sent back to the provider: reasoning traces from
@@ -936,8 +829,8 @@ mod tests {
     fn assemble_content_puts_thinking_before_text_and_tool_uses() {
         let tool = ContentBlock::tool_use("call_0", "read_file", "{}");
         let content = assemble_content(
-            Some("let me think".into()),
-            Some("here's the answer".into()),
+            "let me think".into(),
+            "here's the answer".into(),
             vec![tool],
         );
         assert_eq!(content.len(), 3);
@@ -952,21 +845,26 @@ mod tests {
 
     #[test]
     fn assemble_content_skips_empty_reasoning_and_text() {
-        assert!(assemble_content(Some(String::new()), None, vec![]).is_empty());
-        assert!(assemble_content(None, Some(String::new()), vec![]).is_empty());
+        assert!(assemble_content(String::new(), String::new(), vec![]).is_empty());
     }
 
     #[test]
-    fn response_message_deserializes_reasoning_content() {
-        let msg: OpenAiResponseMessage =
-            serde_json::from_str(r#"{"content":"hi","reasoning_content":"because"}"#).unwrap();
-        assert_eq!(msg.reasoning_content.as_deref(), Some("because"));
-    }
-
-    #[test]
-    fn response_message_reasoning_content_defaults_to_none_when_absent() {
-        let msg: OpenAiResponseMessage = serde_json::from_str(r#"{"content":"hi"}"#).unwrap();
-        assert!(msg.reasoning_content.is_none());
+    fn streamed_reasoning_becomes_a_thinking_block() {
+        let choice = parse_stream(&[
+            r#"{"choices":[{"delta":{"reasoning_content":"because"}}]}"#,
+            r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+        ])
+        .unwrap();
+        assert_eq!(
+            choice.message.content,
+            [
+                ContentBlock::Thinking {
+                    thinking: "because".into(),
+                    signature: None,
+                },
+                ContentBlock::from("hi"),
+            ]
+        );
     }
 
     #[test]

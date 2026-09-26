@@ -7,12 +7,8 @@ use crate::error::{Error, Result};
 use crate::memory::lease::{self, SessionLease};
 use std::path::PathBuf;
 
-/// Persistent metadata for a conversation session.
-///
-/// Stored in the `meta` field of each conversation's `.json` file. Does not
-/// include the full message history — see [`Conversation`] for that, and
-/// [`HistoryManager`]'s doc comment for how the two are actually laid out on
-/// disk.
+/// Persistent metadata for a conversation, stored in its `.json` file (see
+/// [`HistoryManager`] for the on-disk layout).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationMeta {
     pub id: Uuid,
@@ -22,8 +18,8 @@ pub struct ConversationMeta {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// Title derived from the first user message (up to 80 characters). Set on
-    /// the first [`HistoryManager::save_conversation`] call that includes messages.
+    /// The first 80 characters of the first user message (see
+    /// [`Self::fill_title_from`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// Names of skills active in this conversation (correspond to `~/.openheim/skills/*.md`).
@@ -31,10 +27,8 @@ pub struct ConversationMeta {
     pub skills: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cwd: Option<std::path::PathBuf>,
-    /// Snapshot of the most recent turn's context size — the last LLM
-    /// call's usage, i.e. how full the context window is right now.
-    /// Overwritten (not accumulated) each turn; `None` until the first turn
-    /// completes.
+    /// The last LLM call's usage, i.e. how full the context window is now.
+    /// `None` until the first turn completes.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub context_usage: Option<Usage>,
 }
@@ -63,8 +57,7 @@ impl ConversationMeta {
     }
 
     /// Sets `title` from `message` (its first 80 characters) if there is no
-    /// title yet and `message` is a user message with text. The one title
-    /// rule every save path applies.
+    /// title yet and `message` is a user message with text.
     pub fn fill_title_from(&mut self, message: &Message) {
         if self.title.is_none()
             && message.role == Role::User
@@ -76,8 +69,6 @@ impl ConversationMeta {
 }
 
 /// A complete conversation: metadata plus the full ordered message list.
-///
-/// Not itself the on-disk format — see [`HistoryManager`]'s doc comment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     pub meta: ConversationMeta,
@@ -96,10 +87,8 @@ struct ConversationEnvelope {
 /// custom directory via [`HistoryManager::with_dir`]): `{uuid}.json` holds
 /// [`ConversationMeta`], rewritten wholesale on every change; `{uuid}.jsonl`
 /// holds the message log, one [`Message`] per line, appended rather than
-/// rewritten (see [`Self::append_message`]). This bounds crash loss to the
-/// one message mid-write and keeps per-message persistence O(1).
-///
-/// Both files are written atomically (temp file + rename).
+/// rewritten, so a crash loses at most the message being written. Whole-file
+/// writes go through a temp file and rename.
 #[derive(Clone)]
 pub struct HistoryManager {
     history_dir: PathBuf,
@@ -114,33 +103,17 @@ impl HistoryManager {
         self.history_dir.join(format!("{}.jsonl", id))
     }
 
-    /// Acquires the write lease for conversation `id`: an advisory,
-    /// cross-process lock so this session can't be written to by two
-    /// `openheim` processes sharing the same history directory at once.
-    ///
-    /// Returns [`Error::SessionLocked`] if another still-live process
-    /// already holds it. A stale lease (its process has since exited or the
-    /// lock has aged past its TTL — see `memory::lease`) is taken over
-    /// automatically. Hold the returned [`SessionLease`] for exactly the
-    /// span that actually writes — a single `session/prompt` turn
-    /// (`core::runtime::AgentState::prompt` acquires and releases one per turn) —
-    /// not for as long as the session merely stays loaded/live; it releases
-    /// on drop.
-    ///
-    /// Only needed around an actual write — [`Self::load_conversation`] and
-    /// [`Self::list_conversations`] stay lease-free, since reading a
-    /// conversation never risks clobbering another process's writes, and
-    /// neither does merely activating/holding a session open without
-    /// prompting it.
+    /// Acquires the write lease for conversation `id`, an advisory lock
+    /// between `openheim` processes sharing this history directory (see
+    /// `memory::lease`). Fails with [`Error::SessionLocked`] if a live
+    /// process holds it; a stale one is taken over. Hold the returned
+    /// [`SessionLease`] only while writing (one turn); reads need no lease.
     pub fn acquire_lease(&self, id: &Uuid) -> Result<SessionLease> {
         lease::acquire(&self.history_dir, id)
     }
 
-    /// Writes `contents` to `path` via a temp file + rename in the same
-    /// directory, so a crash or kill mid-write leaves either the old content
-    /// or the new content, never a truncated mix of both (`std::fs::write`
-    /// truncates in place, which a crash mid-write can turn into an
-    /// unparseable file).
+    /// Writes `contents` to `path` via a temp file and rename, so a crash
+    /// leaves the old content or the new, never a truncated file.
     fn write_atomic(path: &std::path::Path, contents: &str) -> Result<()> {
         let mut tmp_path = path.as_os_str().to_owned();
         tmp_path.push(".tmp");
@@ -150,10 +123,8 @@ impl HistoryManager {
         Ok(())
     }
 
-    /// Reads and parses a conversation's message log, tolerating a corrupt or
-    /// truncated trailing line (the one a crash mid-append would produce) by
-    /// dropping it instead of failing the whole load — every complete line
-    /// before it is still a message that was actually, durably appended.
+    /// Reads a conversation's message log. A corrupt last line (what a crash
+    /// mid-append leaves) is dropped instead of failing the load.
     fn read_message_log(&self, id: &Uuid) -> Result<Vec<Message>> {
         let path = self.log_path(id);
         if !path.exists() {
@@ -177,10 +148,8 @@ impl HistoryManager {
         Ok(messages)
     }
 
-    /// Rewrites a conversation's message log from scratch. Used to write the
-    /// complete log for a [`Self::save_conversation`] call; per-message
-    /// persistence during a turn should use [`Self::append_message`] instead,
-    /// which doesn't pay this method's O(n) cost per call.
+    /// Rewrites a conversation's whole message log, for
+    /// [`Self::save_conversation`].
     fn write_message_log(&self, id: &Uuid, messages: &[Message]) -> Result<()> {
         let mut buf = String::new();
         for message in messages {
@@ -190,10 +159,7 @@ impl HistoryManager {
         Self::write_atomic(&self.log_path(id), &buf)
     }
 
-    /// Creates a new conversation, persists it immediately, and returns it.
-    ///
-    /// The conversation starts with no messages and no title. The title is
-    /// derived from the first user message once one is saved or appended.
+    /// Creates and saves a new, empty conversation.
     pub fn create_conversation(
         &self,
         model: Option<String>,
@@ -242,27 +208,14 @@ impl HistoryManager {
         })
     }
 
-    /// Saves a conversation to disk, updating `updated_at` to now.
+    /// Saves a whole conversation, rewriting its message log, and fills in
+    /// the title if there is none. For routine writes use
+    /// [`Self::append_message`] and [`Self::save_meta`] instead.
     ///
-    /// If the conversation has no title yet and contains at least one user message,
-    /// the title is set to the first 80 characters of that message.
-    ///
-    /// Rewrites the *entire* message log (see `write_message_log`). Use it
-    /// to create a conversation, or to recover when an append failed and the
-    /// log may be missing messages (what `AgentState::prompt` does). For
-    /// routine writes, [`Self::append_message`] adds messages and
-    /// [`Self::save_meta`] records metadata without rewriting the log.
-    ///
-    /// Refuses (returning [`Error::HistoryDiverged`]) instead of rewriting if
-    /// the on-disk log isn't exactly a prefix of `conv.messages` — either
-    /// longer, or any message it does share with `conv.messages` doesn't
-    /// match. Either way that can only mean another process appended to (or
-    /// otherwise changed) this conversation after `conv` was loaded, and a
-    /// full rewrite from `conv.messages` would silently drop or clobber that.
-    /// This process's own [`Self::append_message`] calls don't trigger it,
-    /// since callers are expected to push the same message onto
-    /// `conv.messages` when they append it (see the `acp` turn loop), so
-    /// `conv.messages` and the on-disk log grow in lockstep.
+    /// Fails with [`Error::HistoryDiverged`] rather than rewrite if the log
+    /// on disk isn't a prefix of `conv.messages`: another process has written
+    /// to it since `conv` was loaded. Messages this process appended are
+    /// expected in `conv.messages` too (as `AgentState::prompt` does).
     pub fn save_conversation(&self, conv: &Conversation) -> Result<()> {
         let on_disk = self.read_message_log(&conv.meta.id)?;
         let diverged = on_disk.len() > conv.messages.len()
@@ -285,11 +238,7 @@ impl HistoryManager {
         self.save_meta(&meta)
     }
 
-    /// Writes only a conversation's meta file, bumping `updated_at`; the
-    /// message log is left alone. For recording metadata changes (model
-    /// switch, cwd, context usage) when the messages are already on disk via
-    /// [`Self::append_message`], without paying [`Self::save_conversation`]'s
-    /// full log rewrite.
+    /// Writes only a conversation's meta file, bumping `updated_at`.
     pub fn save_meta(&self, meta: &ConversationMeta) -> Result<()> {
         let mut meta = meta.clone();
         meta.updated_at = Utc::now();
@@ -300,17 +249,10 @@ impl HistoryManager {
         )
     }
 
-    /// Appends one message to a conversation's on-disk log without rewriting
-    /// the rest of it, and bumps `updated_at` (deriving `title` too, if this
-    /// is the conversation's first user message) in the small meta file.
-    ///
-    /// Meant to be called as each message is produced during a turn — see
-    /// `StreamEvent::MessageAppended` — so a crash mid-turn loses at most the
-    /// message that was mid-write, rather than every message the turn had
-    /// produced so far. Silently a no-op-on-meta if the conversation's meta
-    /// file doesn't exist (shouldn't happen in practice — every conversation
-    /// is created via [`Self::save_conversation`] first — but a missing meta
-    /// file is not a reason to lose the message itself).
+    /// Appends one message to a conversation's log and updates its meta file
+    /// (`updated_at`, and the title if this is the first user message). Call
+    /// it as each message is produced (`StreamEvent::MessageAppended`). A
+    /// missing meta file is skipped; the message is still appended.
     pub fn append_message(&self, id: &Uuid, message: &Message) -> Result<()> {
         let line = format!("{}\n", serde_json::to_string(message)?);
         let mut file = std::fs::OpenOptions::new()
@@ -331,10 +273,8 @@ impl HistoryManager {
 
     /// Deletes a conversation's meta file and message log by UUID.
     ///
-    /// Returns an error if the meta file does not exist; the `.jsonl` log
-    /// and `.lock` lease file (neither of which necessarily exist — an empty
-    /// conversation has no log, and a session that was never activated for
-    /// writing has no lease) are removed on a best-effort basis.
+    /// Fails if the meta file doesn't exist; the log and lease file, which
+    /// may not exist, are removed if they do.
     pub fn delete_conversation(&self, id: &Uuid) -> Result<()> {
         let path = self.meta_path(id);
         if !path.exists() {
@@ -381,9 +321,7 @@ impl HistoryManager {
     /// - `chat_id` is `None` → creates a fresh conversation with a new UUID.
     ///
     /// `model`, `provider` and `skills` only seed a conversation created
-    /// here; an existing one is returned as saved. Callers that need to
-    /// record a changed model (`AgentState::prompt`) set it on the returned
-    /// `meta` themselves.
+    /// here; an existing one is returned as saved.
     pub fn resolve_conversation(
         &self,
         chat_id: Option<Uuid>,

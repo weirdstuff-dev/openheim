@@ -27,7 +27,7 @@ pub trait ToolHandler: Send + Sync {
 }
 ```
 
-The `definition` method runs once at startup to populate the list sent to the LLM. The `execute` method is called each time the LLM decides to use the tool. `capabilities` is consulted three places: Architect mode only exposes tools with `read_only: true`; the approval-remembering logic uses `approval_scope` to decide whether "Allow Always" covers every call to the tool (`ApprovalScope::ToolName`, the default) or only calls with the same arguments (`ApprovalScope::ExactArguments`, compared as JSON so key order and whitespace don't matter — what `execute_command` uses, so approving `git status` can't silently cover `git status && rm -rf ~`); and the ACP transport uses `kind` for client-side icon treatment. A read-only tool (e.g. one that only queries an API) should set `read_only: true` so it works in Architect mode too:
+The `definition` method runs once at startup to populate the list sent to the LLM. The `execute` method is called each time the LLM decides to use the tool; its result (or error text) is cut to 128 KiB before it reaches the model, so return a summary or one page of a large result rather than all of it. `capabilities` is consulted three places: Architect mode only exposes tools with `read_only: true`; the approval-remembering logic uses `approval_scope` to decide whether "Allow Always" covers every call to the tool (`ApprovalScope::ToolName`, the default) or only calls with the same arguments (`ApprovalScope::ExactArguments`, compared as JSON so key order and whitespace don't matter — what `execute_command` uses, so approving `git status` can't silently cover `git status && rm -rf ~`); and the ACP transport uses `kind` for client-side icon treatment. A read-only tool (e.g. one that only queries an API) should set `read_only: true` so it works in Architect mode too:
 
 ```rust
 fn capabilities(&self) -> ToolCapabilities {
@@ -44,7 +44,9 @@ fn capabilities(&self) -> ToolCapabilities {
 | Field | Type | Use it for |
 |-------|------|-----------|
 | `turn.cancel` | `&CancellationToken` | Race long-running work against it (`tokio::select!`) so a `session/cancel` can interrupt your tool. |
-| `turn.work_dir` | `&Path` | The sandbox boundary. Validate any user- or LLM-supplied path with `openheim::tools::sandbox::validate_path(path, turn.work_dir)` before touching the filesystem; it resolves relative paths against `work_dir`, follows symlinks, and rejects anything outside. |
+| `turn.work_dir` | `&Path` | The sandbox boundary: nothing your tool touches may lie outside it. |
+| `turn.cwd` | `&Path` | The session's working directory, inside `work_dir`: where relative paths resolve and where a command you spawn should run. |
+| `turn.resolve_path(path)` | method | Resolve any user- or LLM-supplied path before touching the filesystem: relative paths are taken from `cwd`, symlinks are followed, and anything outside `work_dir` is rejected. |
 | `turn.client_io` | `&dyn ClientIo` | Ask the client (e.g. an editor's unsaved buffers) to read/write a file before falling back to local I/O. Returns `None` when there is no client to ask. |
 | `turn.permission_gate` | `&Arc<dyn PermissionGate>` | Already consulted by the agent loop before your tool runs; only relevant if your tool spawns nested agent turns. |
 
@@ -150,11 +152,9 @@ async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
 A tool that touches the filesystem should validate its path first, and prefer the client's view of the file when there is one:
 
 ```rust
-use openheim::tools::sandbox::validate_path;
-
 async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
     let v = parse_args(args)?;
-    let path = validate_path(require_str(&v, "path")?, turn.work_dir)?;
+    let path = turn.resolve_path(require_str(&v, "path")?)?;
     let content = match turn.client_io.read_file(&path).await {
         Some(result) => result?,               // the client answered
         None => tokio::fs::read_to_string(&path).await?, // no client: local disk
@@ -208,6 +208,7 @@ async fn main() -> openheim::Result<()> {
         cancel: &CancellationToken::new(),
         permission_gate: &(Arc::new(AllowAll) as Arc<dyn PermissionGate>),
         work_dir: &work_dir,   // sandbox boundary for the file tools
+        cwd: &work_dir,        // where relative paths resolve and commands run
         client_io: &NoClientIo, // no editor to delegate file I/O to
     };
 

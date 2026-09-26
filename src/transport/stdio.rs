@@ -9,10 +9,7 @@ use agent_client_protocol::Stdio;
 
 use crate::{acp, client::OpenheimClient};
 
-/// Serves ACP over stdin/stdout for `client` — caller-built, so an embedder
-/// with custom tools or a custom `LlmClient` can use this transport too.
-///
-/// Blocks until the client closes the connection (EOF on stdin).
+/// Serves ACP over stdin/stdout for `client` until stdin closes.
 pub async fn run(client: OpenheimClient) -> crate::error::Result<()> {
     let state = client.state().clone();
 

@@ -114,6 +114,8 @@ default_skills = ["rules", "concise"]
 
 Default skills are merged with any per-session skills. Duplicates are deduplicated; defaults always appear first.
 
+A session can't be started with a skill that doesn't exist: `--skills`, `SessionBuilder::skills`, and ACP `session/new` fail with a "not found" error. A saved session keeps the skill list it started with; if one of those skill files is later deleted or renamed, the session still works and that skill is left out (with a warning in the log).
+
 ### Per-session via CLI
 
 Pass `--skills` as a comma-separated list of skill names:

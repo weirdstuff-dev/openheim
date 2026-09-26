@@ -95,9 +95,7 @@ impl LongTermMemory {
             }
             None => None,
         };
-        // `top_k = 0` is presumably a misconfiguration, not "never return
-        // results" — treat it the same as leaving `top_k` unset rather than
-        // silently making `search_memory` useless.
+        // `top_k = 0` would make `search_memory` useless; treat it as unset.
         let top_k = memory.map_or(DEFAULT_TOP_K, |m| {
             if m.top_k == 0 { DEFAULT_TOP_K } else { m.top_k }
         });

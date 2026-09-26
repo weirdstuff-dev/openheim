@@ -18,6 +18,55 @@ const CANCELLED_TOOL_RESULT: &str = "Cancelled by user.";
 const MISSING_TOOL_RESULT: &str =
     "No result: the turn was interrupted before this tool call finished.";
 
+/// Longest tool result kept, in bytes. A larger one is cut here, whatever
+/// the tool: it goes into the history and is resent with every later
+/// request, so one oversized result would push every request in the
+/// conversation past the model's context window.
+const MAX_TOOL_RESULT_BYTES: usize = 128 * 1024;
+
+/// `result` cut to [`MAX_TOOL_RESULT_BYTES`] (at a character boundary), with
+/// a note saying how much was left out.
+fn cap_tool_result(mut result: String) -> String {
+    if result.len() <= MAX_TOOL_RESULT_BYTES {
+        return result;
+    }
+    let total = result.len();
+    let mut end = MAX_TOOL_RESULT_BYTES;
+    while !result.is_char_boundary(end) {
+        end -= 1;
+    }
+    result.truncate(end);
+    result.push_str(&format!(
+        "\n[tool output truncated: showing the first {end} of {total} bytes]"
+    ));
+    result
+}
+
+/// Whether a tool call's arguments can be run: a JSON object, or nothing at
+/// all for a call without arguments.
+fn arguments_are_usable(arguments: &str) -> bool {
+    arguments.trim().is_empty()
+        || matches!(
+            serde_json::from_str(arguments),
+            Ok(serde_json::Value::Object(_))
+        )
+}
+
+/// The result recorded for a call whose arguments aren't a JSON object.
+/// Such a call is neither run nor put to the permission gate.
+fn malformed_arguments_result(cut_off: bool) -> String {
+    let mut result =
+        "Error: the arguments of this call are not a valid JSON object, so it was not run."
+            .to_string();
+    if cut_off {
+        result.push_str(
+            " The reply reached the output token limit before the call was complete. \
+             Make the call again with smaller arguments, splitting the work across several calls.",
+        );
+    }
+    result
+}
+
 /// `messages` with an error result added for every tool call that has none,
 /// right after the results that did arrive, or `None` if every call is
 /// answered. Providers reject a history with an unanswered tool call, so
@@ -67,11 +116,8 @@ fn answer_missing_tool_results(messages: &[Message]) -> Option<Vec<Message>> {
 }
 
 /// Every LLM call streams, even when nobody watches the chunks: the HTTP
-/// client's timeout is per read, not per request (see `build_http_client`),
-/// so a non-streaming reply that takes longer than `timeout_secs` to
-/// generate fails with nothing sent yet, while a streaming one keeps bytes
-/// arriving. Clients that implement only `send` still work: the default
-/// `send_streaming` wraps it.
+/// timeout is per read (see `build_http_client`), so only a streamed reply
+/// keeps a long generation from timing out.
 async fn call_llm_streaming(
     llm: &dyn LlmClient,
     messages: &[Message],
@@ -103,10 +149,9 @@ fn forward_chunk<F: FnMut(StreamEvent)>(callback: &mut F, chunk: LlmChunk) {
 /// "keep looping": the provider paused the turn and expects the
 /// conversation resent as-is to resume it.
 ///
-/// Any finish reason without a specific mapping (`Other`, a missing one, or
-/// `ToolCalls` with no tool calls attached) ends the turn: resending a
-/// history that ends in an assistant reply would at best make the model
-/// repeat itself, and at worst be rejected outright.
+/// Any other finish reason (`Other`, none, or `ToolCalls` without calls)
+/// ends the turn: resending a history that ends in an assistant reply would
+/// make the model repeat itself, or be rejected.
 fn stop_for_reply_without_tools(
     finish_reason: Option<&FinishReason>,
     has_text: bool,
@@ -185,9 +230,8 @@ where
             let choice_fut = call_llm_streaming(llm, messages, &tools, prompt_builder, chunk_tx);
             tokio::pin!(choice_fut);
 
-            // The reply ends the wait, not the chunk channel: a client may close
-            // its sender before its request finishes, and one that leaks the
-            // sender somewhere must not keep the turn waiting.
+            // The reply ends the wait, not the chunk channel, which a client
+            // may close early or keep open.
             let mut chunks_open = true;
             loop {
                 tokio::select! {
@@ -217,9 +261,8 @@ where
             message: choice.message.clone(),
         });
         if let Some(usage) = choice.usage {
-            // Overwritten (not summed) every iteration: the latest call's
-            // usage is what "context size right now" means, since each call
-            // resends the full history as its prompt.
+            // Overwritten, not summed: each call resends the whole history,
+            // so the latest call's usage is the current context size.
             context_usage = Some(usage);
             callback(StreamEvent::Usage { usage });
         }
@@ -241,49 +284,52 @@ where
             // tool call. So cancellation leaves this block, not the turn, and
             // every call without an outcome is answered as cancelled below.
             let mut outcomes: Vec<Option<(String, bool)>> = vec![None; tool_calls.len()];
+            let cut_off = choice.finish_reason == Some(FinishReason::MaxTokens);
             'calls: {
                 if turn.cancel.is_cancelled() {
                     break 'calls;
                 }
 
                 // Ask about every call concurrently, so a gate sees all the
-                // requests at once and may answer them in any order. The TUI
-                // gate queues them and shows one prompt at a time.
+                // requests at once. A call with malformed arguments gets no
+                // decision: it can't run.
                 let decisions = tokio::select! {
-                    // Dropping the `join_all` abandons every pending approval
-                    // at once, so the turn (and `prompt_lock`) isn't held
-                    // until the user answers each.
+                    // Dropping the `join_all` abandons every pending approval.
                     _ = turn.cancel.cancelled() => break 'calls,
                     decisions = futures::future::join_all(tool_calls.iter().map(|tool_call| async {
+                        if !arguments_are_usable(&tool_call.arguments) {
+                            return None;
+                        }
                         let request = PermissionRequest::new(
                             &tool_call.id,
                             &tool_call.name,
                             &tool_call.arguments,
                         );
-                        turn.permission_gate.check(&request).await
+                        Some(turn.permission_gate.check(&request).await)
                     })) => decisions,
                 };
 
-                // Run every allowed call concurrently (denied ones don't reach
-                // the executor), so e.g. several `delegate_task` subagents run
-                // in parallel. `ToolResult` goes out as each call finishes;
-                // the history below keeps the calls' original order.
+                // Run the allowed calls concurrently. `ToolResult` goes out as
+                // each finishes; the history below keeps the calls' order.
                 let mut pending: futures::stream::FuturesUnordered<_> = tool_calls
                     .iter()
                     .zip(&decisions)
                     .enumerate()
                     .map(|(index, (tool_call, decision))| async move {
-                        if decision.is_allowed() {
-                            match tool_executor
-                                .execute(&tool_call.name, &tool_call.arguments, turn)
-                                .await
-                            {
-                                Ok(r) => (index, r, false),
-                                Err(e) => (index, format!("Error: {e}"), true),
+                        let (result, is_error) = match decision {
+                            None => (malformed_arguments_result(cut_off), true),
+                            Some(decision) if decision.is_allowed() => {
+                                match tool_executor
+                                    .execute(&tool_call.name, &tool_call.arguments, turn)
+                                    .await
+                                {
+                                    Ok(r) => (r, false),
+                                    Err(e) => (format!("Error: {e}"), true),
+                                }
                             }
-                        } else {
-                            (index, "Permission denied by user.".to_string(), true)
-                        }
+                            Some(_) => ("Permission denied by user.".to_string(), true),
+                        };
+                        (index, cap_tool_result(result), is_error)
                     })
                     .collect();
 
@@ -436,6 +482,7 @@ mod tests {
                 cancel: &self.cancel,
                 permission_gate: &self.gate,
                 work_dir: std::path::Path::new("."),
+                cwd: std::path::Path::new("."),
                 client_io: &NoClientIo,
             };
             run_agent(llm, executor, &self.config, messages, None, &turn, callback).await
@@ -1309,5 +1356,104 @@ mod tests {
             .unwrap();
         assert_eq!(tool_result_msg.content, "Permission denied by user.");
         assert!(tool_result_msg.is_error);
+    }
+
+    /// Counts the permission checks that reach it, allowing each.
+    struct CountingGate(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl PermissionGate for CountingGate {
+        async fn check(&self, _request: &PermissionRequest<'_>) -> PermissionDecision {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            PermissionDecision::AllowOnce
+        }
+    }
+
+    // A call cut off at the output limit is answered with an error the model
+    // can act on, without being run or put to the user.
+    #[tokio::test]
+    async fn call_with_malformed_arguments_is_answered_without_running() {
+        let mut cut_off = tool_call_choice("write_file", r#"{"path":"a.txt","content":"par"#);
+        cut_off.finish_reason = Some(FinishReason::MaxTokens);
+        let llm = MockLlm::new(vec![cut_off, text_choice("retrying")]);
+        let executor = MockToolExecutor::new("should not run");
+        let asked = Arc::new(AtomicUsize::new(0));
+        let mut messages = vec![Message::user("write a.txt")];
+
+        let result = Harness::new()
+            .gate(CountingGate(asked.clone()))
+            .run(&llm, &executor, &mut messages, |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(result.final_response, "retrying");
+        assert!(executor.calls.lock().unwrap().is_empty());
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+        let answer = messages
+            .iter()
+            .find_map(Message::tool_result_block)
+            .unwrap();
+        assert!(answer.is_error);
+        assert!(
+            answer.content.contains("output token limit"),
+            "{}",
+            answer.content
+        );
+    }
+
+    #[tokio::test]
+    async fn call_without_arguments_still_runs() {
+        let llm = MockLlm::new(vec![tool_call_choice("list_dir", ""), text_choice("done")]);
+        let executor = MockToolExecutor::new("a.txt");
+        let mut messages = vec![Message::user("list")];
+
+        Harness::new()
+            .run(&llm, &executor, &mut messages, |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(executor.calls.lock().unwrap().len(), 1);
+    }
+
+    // An oversized result is cut before it reaches the history, so it can't
+    // push every later request past the context window.
+    #[tokio::test]
+    async fn oversized_tool_result_is_truncated() {
+        let llm = MockLlm::new(vec![
+            tool_call_choice("read_file", r#"{"path":"big.txt"}"#),
+            text_choice("done"),
+        ]);
+        let executor = MockToolExecutor::new(&"é".repeat(MAX_TOOL_RESULT_BYTES));
+        let mut messages = vec![Message::user("read it")];
+        let mut streamed = String::new();
+
+        Harness::new()
+            .run(&llm, &executor, &mut messages, |event| {
+                if let StreamEvent::ToolResult { result, .. } = event {
+                    streamed = result;
+                }
+            })
+            .await
+            .unwrap();
+
+        let stored = messages
+            .iter()
+            .find_map(Message::tool_result_block)
+            .unwrap()
+            .content;
+        assert_eq!(stored, streamed);
+        let (kept, note) = stored.split_once("\n[tool output truncated").unwrap();
+        assert_eq!(kept, "é".repeat(MAX_TOOL_RESULT_BYTES / 2));
+        assert!(
+            note.contains(&format!("of {} bytes", 2 * MAX_TOOL_RESULT_BYTES)),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn small_tool_results_are_kept_whole() {
+        assert_eq!(cap_tool_result("ok".to_string()), "ok");
+        let exact = "a".repeat(MAX_TOOL_RESULT_BYTES);
+        assert_eq!(cap_tool_result(exact.clone()), exact);
     }
 }

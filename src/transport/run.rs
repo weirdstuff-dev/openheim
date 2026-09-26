@@ -10,12 +10,8 @@ use crate::core::models::StreamEvent;
 /// Runs the agent against `prompt` in a fresh session and prints the
 /// streamed response to stdout as it arrives.
 ///
-/// `client` is caller-built — via `OpenheimClient::builder().model(..)` for a
-/// model override, or with custom tools / a custom `LlmClient` an embedder
-/// needs — so this transport doesn't have to hand-roll its own build path.
-/// The session's permission gate defaults to `AllowAll`: `openheim run` is a
-/// one-shot, non-interactive CLI invocation with no human to prompt, and the
-/// user already consented to this run by invoking it.
+/// Every tool call is allowed: there's no one to ask, and running the
+/// command was the consent.
 pub async fn run_headless(client: OpenheimClient, prompt: String) -> crate::error::Result<()> {
     let session = client.new_session().start().await?;
     let stop_reason = session
