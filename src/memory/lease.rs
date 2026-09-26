@@ -113,7 +113,7 @@ fn create_lease_exclusively(path: &Path, contents: &str) -> std::io::Result<()> 
 }
 
 /// A held write lease; dropping it removes the lockfile. A crash leaves the
-/// file behind for the next [`acquire`] to take over as stale.
+/// file behind for the next `acquire` to take over as stale.
 #[derive(Debug)]
 pub struct SessionLease {
     path: PathBuf,
