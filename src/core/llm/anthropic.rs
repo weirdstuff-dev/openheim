@@ -634,20 +634,8 @@ impl AnthropicClient {
 
 #[async_trait]
 impl LlmClient for AnthropicClient {
-    /// Implemented in terms of [`Self::send_streaming`] with a discarded
-    /// channel: Anthropic's streaming and non-streaming responses carry the
-    /// same information, so there is no reason to maintain a second
-    /// request/response code path.
     async fn send(&self, messages: &[Message], tools: &[Tool]) -> Result<Choice> {
-        let (chunk_tx, chunk_rx) = mpsc::unbounded_channel();
-        // Dropped immediately, before any chunk is sent: an unbounded
-        // channel with a live receiver buffers every chunk in memory until
-        // something calls `recv()`, and nothing here ever will. Dropping it
-        // up front makes `chunk_tx.send()` fail fast (already ignored below
-        // and in `send_streaming`) instead of accumulating the whole
-        // response in the channel for the life of the request.
-        drop(chunk_rx);
-        self.send_streaming(messages, tools, chunk_tx).await
+        super::send_discarding_chunks(self, messages, tools).await
     }
 
     async fn send_streaming(

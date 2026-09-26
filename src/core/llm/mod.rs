@@ -36,6 +36,20 @@ fn tool_input(name: &str, arguments: &str) -> serde_json::Value {
     }
 }
 
+/// `send` for a built-in client: its `send_streaming` with the chunks thrown
+/// away, so each client has one request and response path. The receiver is
+/// dropped up front, so chunks are discarded as they're sent instead of
+/// piling up in the channel until the reply is complete.
+async fn send_discarding_chunks<C: LlmClient + ?Sized>(
+    client: &C,
+    messages: &[Message],
+    tools: &[Tool],
+) -> Result<Choice> {
+    let (chunk_tx, chunk_rx) = mpsc::unbounded_channel();
+    drop(chunk_rx);
+    client.send_streaming(messages, tools, chunk_tx).await
+}
+
 /// A single streaming chunk produced during an LLM call.
 #[derive(Debug)]
 pub enum LlmChunk {
