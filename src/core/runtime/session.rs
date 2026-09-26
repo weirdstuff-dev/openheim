@@ -15,7 +15,12 @@ use crate::error::{Error, Result};
 pub struct SessionState {
     pub chat_id: Uuid,
     pub config: AgentConfig,
+    /// The client's working directory, as sent; saved with the conversation
+    /// and used to filter `list_sessions`.
     pub cwd: PathBuf,
+    /// Where this session's tools work (`TurnContext::cwd`): `cwd` when it's
+    /// a directory inside the work directory, otherwise the work directory.
+    pub tool_cwd: PathBuf,
     pub skills: Vec<String>,
     /// Cancelled when a `session/cancel` notification arrives for this session,
     /// so an in-flight prompt turn (running in its own spawned task) can stop.
@@ -163,6 +168,7 @@ mod tests {
                 5,
             ),
             cwd: PathBuf::from("/tmp"),
+            tool_cwd: PathBuf::from("/tmp"),
             skills: vec![],
             cancel: CancellationToken::new(),
             approved_tools: Approvals::default(),

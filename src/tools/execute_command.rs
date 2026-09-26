@@ -303,7 +303,7 @@ impl ToolHandler for ExecuteCommandTool {
         run_command(
             &args.command,
             &RunCommandOptions {
-                cwd: Some(turn.work_dir),
+                cwd: Some(turn.cwd),
                 cancel: Some(turn.cancel),
                 ..Default::default()
             },
@@ -355,6 +355,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.trim(), "marker.txt");
+    }
+
+    #[cfg(target_family = "unix")]
+    #[tokio::test]
+    async fn execute_runs_in_the_working_directory() {
+        let harness = TurnHarness::new().with_cwd("sub");
+        std::fs::write(harness.work_dir().join("sub/inner.txt"), "x").unwrap();
+        let result = ExecuteCommandTool
+            .execute(r#"{"command": "ls"}"#, &harness.turn())
+            .await
+            .unwrap();
+        assert_eq!(result.trim(), "inner.txt");
     }
 
     #[tokio::test]

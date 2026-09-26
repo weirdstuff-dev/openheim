@@ -22,7 +22,6 @@ use crate::error::{Error, Result};
 use super::ToolHandler;
 use super::args::parse;
 use super::capabilities::{ToolCapabilities, ToolKindHint};
-use super::sandbox::validate_path;
 
 /// Matches beyond this count are omitted, with a marker noting the cut-off,
 /// so a broad pattern over a large tree can't blow out the LLM's context.
@@ -123,8 +122,8 @@ fn search_blocking(pattern: &str, root: &Path, case_insensitive: bool) -> Result
 ///
 /// Respects `.gitignore`/`.ignore` and skips hidden files and binary files,
 /// matching ripgrep's own defaults. Returns matches as `path:line: content`.
-/// Defaults to searching the work directory if no path is given; the path
-/// must be inside the work directory.
+/// Defaults to searching the turn's working directory (`TurnContext::cwd`)
+/// if no path is given; the path must be inside the work directory.
 pub struct SearchTool;
 
 #[derive(Deserialize)]
@@ -153,7 +152,7 @@ impl ToolHandler for SearchTool {
                     },
                     "path": {
                         "type": "string",
-                        "description": "The file or directory to search. Defaults to the work directory if omitted."
+                        "description": "The file or directory to search. Defaults to the current working directory if omitted."
                     },
                     "case_insensitive": {
                         "type": "boolean",
@@ -167,7 +166,7 @@ impl ToolHandler for SearchTool {
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
         let args: SearchArgs = parse(args)?;
-        let validated = validate_path(args.path.as_deref().unwrap_or("."), turn.work_dir)?;
+        let validated = turn.resolve_path(args.path.as_deref().unwrap_or("."))?;
         search(
             &args.pattern,
             &validated,

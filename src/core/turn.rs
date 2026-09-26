@@ -5,13 +5,14 @@
 //! [`crate::tools::ToolHandler`] can depend on it without introducing a
 //! dependency on the agent loop itself.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
 use crate::core::client_io::ClientIo;
 use crate::core::permission::PermissionGate;
+use crate::error::Result;
 
 /// Everything a single prompt turn carries down to the tools it runs.
 ///
@@ -35,12 +36,23 @@ pub struct TurnContext<'a> {
     pub cancel: &'a CancellationToken,
     /// Approval hook consulted by the agent loop before each tool call.
     pub permission_gate: &'a Arc<dyn PermissionGate>,
-    /// Sandbox boundary for filesystem tools (see
-    /// [`crate::tools::sandbox::validate_path`]) and the working directory
-    /// for `execute_command`.
+    /// Sandbox boundary for filesystem tools: no path they touch may lie
+    /// outside it.
     pub work_dir: &'a Path,
+    /// Where relative paths resolve and `execute_command` runs: the
+    /// session's `cwd` when that is inside `work_dir`, otherwise `work_dir`.
+    pub cwd: &'a Path,
     /// Optional delegation of file reads/writes to the client (e.g. an
     /// editor's unsaved buffers); [`crate::core::client_io::NoClientIo`]
     /// when there is none.
     pub client_io: &'a dyn ClientIo,
+}
+
+impl TurnContext<'_> {
+    /// `requested` resolved against [`Self::cwd`] and checked to lie inside
+    /// [`Self::work_dir`]; what every filesystem tool opens. See
+    /// [`crate::tools::sandbox::validate_path_from`].
+    pub fn resolve_path(&self, requested: &str) -> Result<PathBuf> {
+        crate::tools::sandbox::validate_path_from(requested, self.cwd, self.work_dir)
+    }
 }

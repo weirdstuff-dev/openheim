@@ -14,7 +14,6 @@ use crate::error::{Error, Result};
 use super::ToolHandler;
 use super::args::parse;
 use super::capabilities::{ToolCapabilities, ToolKindHint};
-use super::sandbox::validate_path;
 
 /// Reads `path` as UTF-8 text, asking `turn.client_io` first (e.g. an ACP
 /// client's editor buffers) and falling back to local `tokio::fs` when it
@@ -68,7 +67,7 @@ impl ToolHandler for ReadFileTool {
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
         let args: ReadFileArgs = parse(args)?;
-        let validated = validate_path(&args.path, turn.work_dir)?;
+        let validated = turn.resolve_path(&args.path)?;
         read_text(&validated, turn).await
     }
 
@@ -117,6 +116,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, "relative");
+    }
+
+    #[tokio::test]
+    async fn execute_resolves_relative_paths_against_the_working_directory() {
+        let harness = TurnHarness::new().with_cwd("sub");
+        std::fs::write(harness.work_dir().join("sub/rel.txt"), "in sub").unwrap();
+        std::fs::write(harness.work_dir().join("top.txt"), "at the top").unwrap();
+
+        let turn = harness.turn();
+        let read = |path: &'static str| {
+            let args = serde_json::json!({ "path": path }).to_string();
+            let turn = &turn;
+            async move { ReadFileTool.execute(&args, turn).await.unwrap() }
+        };
+        assert_eq!(read("rel.txt").await, "in sub");
+        assert_eq!(read("../top.txt").await, "at the top");
     }
 
     #[tokio::test]

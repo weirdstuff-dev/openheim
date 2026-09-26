@@ -179,6 +179,7 @@ impl AgentState {
         tokio::task::spawn_blocking(move || skills_manager.load_skills(&requested))
             .await
             .map_err(Error::from)??;
+        let tool_cwd = tool_cwd(&cwd, &self.work_dir);
         // No write lease taken here — merely creating/holding a session open
         // doesn't touch history, so it doesn't contend with other processes.
         // The cross-process write lease is acquired per-turn in `Self::prompt`.
@@ -190,6 +191,7 @@ impl AgentState {
                     chat_id,
                     config,
                     cwd,
+                    tool_cwd,
                     skills,
                     cancel: CancellationToken::new(),
                     approved_tools: Approvals::default(),
@@ -310,7 +312,18 @@ impl AgentState {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| Error::InvalidArgument("invalid session id format".to_string()))?;
 
-        let (llm, executor, config, chat_id, skills, cwd, cancel, approvals, _prompt_guard) = {
+        let (
+            llm,
+            executor,
+            config,
+            chat_id,
+            skills,
+            cwd,
+            tool_cwd,
+            cancel,
+            approvals,
+            _prompt_guard,
+        ) = {
             // Write lock: each turn gets a fresh cancellation token, since a
             // cancelled token stays cancelled.
             let mut sessions = self.sessions.write().await;
@@ -354,6 +367,7 @@ impl AgentState {
                 s.chat_id,
                 s.skills.clone(),
                 s.cwd.clone(),
+                s.tool_cwd.clone(),
                 s.cancel.clone(),
                 s.approved_tools.clone(),
                 prompt_guard,
@@ -412,12 +426,14 @@ impl AgentState {
         let write_failed = AtomicBool::new(!started_ok);
         let write_failed_flag = &write_failed;
         let history_for_append = self.memory.history.clone();
-        // The work-directory boundary and client I/O hook reach every tool
-        // through this context; there is no per-session executor wrapper.
+        // The work-directory boundary, working directory and client I/O hook
+        // reach every tool through this context; there is no per-session
+        // executor wrapper.
         let turn = TurnContext {
             cancel: &cancel,
             permission_gate: &permission_gate,
             work_dir: &self.work_dir,
+            cwd: &tool_cwd,
             client_io: &*client_io,
         };
         let run_result = run_agent(
@@ -524,6 +540,7 @@ impl AgentState {
             session_config.model = model.clone();
         }
 
+        let tool_cwd = tool_cwd(&cwd, &self.work_dir);
         let (mode, model) = {
             let mut sessions = self.sessions.write().await;
             // Attaching to an already-live session keeps its control state:
@@ -536,6 +553,7 @@ impl AgentState {
                     chat_id: uuid,
                     config: session_config,
                     cwd,
+                    tool_cwd,
                     skills: conversation.meta.skills.clone(),
                     cancel: CancellationToken::new(),
                     approved_tools: Approvals::default(),
@@ -579,6 +597,16 @@ impl AgentState {
     }
 }
 
+/// Where a session's tools work: `cwd` when it's a directory inside
+/// `work_dir`, otherwise `work_dir` (e.g. for a client's own path that
+/// doesn't exist on this machine).
+fn tool_cwd(cwd: &Path, work_dir: &Path) -> PathBuf {
+    match (cwd.canonicalize(), work_dir.canonicalize()) {
+        (Ok(cwd), Ok(root)) if cwd.is_dir() && cwd.starts_with(&root) => cwd,
+        _ => work_dir.to_path_buf(),
+    }
+}
+
 /// The result of [`AgentState::load_session`]: enough to both replay the
 /// conversation in whatever wire form the caller needs (see
 /// `acp::util::replay_history_messages` for the ACP shape) and reflect the
@@ -614,6 +642,7 @@ mod prompt_lease_ordering_tests {
                 5,
             ),
             cwd: PathBuf::from("/tmp"),
+            tool_cwd: PathBuf::from("/tmp"),
             skills: vec![],
             cancel: CancellationToken::new(),
             approved_tools: Approvals::default(),
@@ -706,6 +735,21 @@ mod new_session_tests {
             .new_session(Some("nope"), vec![], dir.path().to_path_buf())
             .await;
         assert!(result.is_err(), "{result:?}");
+    }
+
+    // A session's tools work in its cwd only when that lies inside the work
+    // directory; anything else (a client's own path, somewhere outside)
+    // falls back to the work directory.
+    #[test]
+    fn tool_cwd_is_the_session_cwd_only_inside_work_dir() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        let outside = tempdir().unwrap();
+
+        assert_eq!(tool_cwd(&root.join("sub"), dir.path()), root.join("sub"));
+        assert_eq!(tool_cwd(outside.path(), dir.path()), dir.path());
+        assert_eq!(tool_cwd(&root.join("missing"), dir.path()), dir.path());
     }
 
     #[tokio::test]

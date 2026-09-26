@@ -582,6 +582,7 @@ mod tests {
             cancel: &cancel,
             permission_gate: &permission_gate,
             work_dir: Path::new("."),
+            cwd: Path::new("."),
             client_io: &NoClientIo,
         };
 
@@ -633,6 +634,7 @@ mod tests {
             cancel: &cancel,
             permission_gate: &permission_gate,
             work_dir: Path::new("."),
+            cwd: Path::new("."),
             client_io: &NoClientIo,
         };
 

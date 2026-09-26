@@ -177,7 +177,11 @@ impl<'a> SessionBuilder<'a> {
         self
     }
 
-    /// Working directory for this session (used for history filtering).
+    /// Working directory for this session: where its tools resolve relative
+    /// paths and run commands when it's inside `work_dir` (otherwise they use
+    /// `work_dir`). Also saved with the conversation for
+    /// [`OpenheimClient::list_sessions`] filtering. Defaults to the process's
+    /// current directory.
     pub fn cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
         self.cwd = cwd.into();
         self

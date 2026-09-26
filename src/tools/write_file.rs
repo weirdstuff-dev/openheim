@@ -14,7 +14,6 @@ use crate::error::{Error, Result};
 use super::ToolHandler;
 use super::args::parse;
 use super::capabilities::{ToolCapabilities, ToolKindHint};
-use super::sandbox::validate_path;
 
 /// Writes `content` to `path`, asking `turn.client_io` first and falling back
 /// to local `tokio::fs` (creating any missing parent directories) when it
@@ -81,7 +80,7 @@ impl ToolHandler for WriteFileTool {
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
         let args: WriteFileArgs = parse(args)?;
-        let validated = validate_path(&args.path, turn.work_dir)?;
+        let validated = turn.resolve_path(&args.path)?;
         write_text(&validated, &args.content, turn).await?;
         Ok(format!("Successfully wrote to {}", validated.display()))
     }

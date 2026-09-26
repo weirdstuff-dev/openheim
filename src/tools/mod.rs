@@ -16,8 +16,9 @@
 //! | `search` | Regex search across files, ripgrep-style (built on ripgrep's own crates, `.gitignore`-aware) |
 //! | `web_fetch` | Fetch a public http(s) URL and return its content as text, with an SSRF guard and size/time caps |
 //!
-//! Every filesystem tool validates its path against the turn's work
-//! directory ([`sandbox::validate_path`]) and delegates reads/writes to the
+//! Every filesystem tool resolves its path with
+//! [`TurnContext::resolve_path`] (relative to the turn's `cwd`, confined to
+//! its `work_dir`) and delegates reads/writes to the
 //! turn's [`ClientIo`](crate::core::client_io::ClientIo) when one is
 //! available; there is no separate sandbox wrapper.
 //!
@@ -63,9 +64,10 @@
 //!
 //!     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
 //!         let GreetArgs { name } = parse(args)?;
-//!         // `turn` carries the cancel token, the work directory, and the
-//!         // client I/O hook; see `TurnContext` for what to do with each.
-//!         Ok(format!("Hello, {name}! (from {})", turn.work_dir.display()))
+//!         // `turn` carries the cancel token, the work and working
+//!         // directories, and the client I/O hook; see `TurnContext` for
+//!         // what to do with each.
+//!         Ok(format!("Hello, {name}! (from {})", turn.cwd.display()))
 //!     }
 //! }
 //! ```
@@ -134,8 +136,8 @@ pub trait ToolHandler: Send + Sync {
     /// Executes the tool with the given JSON-encoded arguments.
     ///
     /// `turn` is the calling turn's [`TurnContext`]: race long work against
-    /// `turn.cancel`, confine filesystem access to `turn.work_dir` (via
-    /// [`sandbox::validate_path`]), and prefer `turn.client_io` for file
+    /// `turn.cancel`, resolve every path with [`TurnContext::resolve_path`]
+    /// (which confines it to `turn.work_dir`), and prefer `turn.client_io` for file
     /// reads/writes so an editor-hosted client can serve its own buffers.
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String>;
 
@@ -280,7 +282,7 @@ impl ToolExecutor for SystemToolExecutor {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use async_trait::async_trait;
@@ -293,11 +295,13 @@ pub(crate) mod test_support {
 
     /// Owns the pieces a test [`TurnContext`] borrows from, so callers can do
     /// `let turn = harness.turn();` without fighting temporary lifetimes.
-    /// The work directory is a fresh temp dir per harness.
+    /// The work directory is a fresh temp dir per harness, and is also the
+    /// working directory unless [`Self::with_cwd`] sets another.
     pub(crate) struct TurnHarness {
         cancel: CancellationToken,
         permission_gate: Arc<dyn PermissionGate>,
         work_dir: tempfile::TempDir,
+        cwd: Option<PathBuf>,
         client_io: Arc<dyn ClientIo>,
     }
 
@@ -307,12 +311,22 @@ pub(crate) mod test_support {
                 cancel: CancellationToken::new(),
                 permission_gate: Arc::new(AllowAll),
                 work_dir: tempfile::tempdir().expect("create temp work dir"),
+                cwd: None,
                 client_io: Arc::new(NoClientIo),
             }
         }
 
         pub(crate) fn with_client_io(mut self, client_io: Arc<dyn ClientIo>) -> Self {
             self.client_io = client_io;
+            self
+        }
+
+        /// Makes `sub` (created inside the work directory) the working
+        /// directory.
+        pub(crate) fn with_cwd(mut self, sub: &str) -> Self {
+            let cwd = self.work_dir.path().join(sub);
+            std::fs::create_dir_all(&cwd).expect("create working directory");
+            self.cwd = Some(cwd);
             self
         }
 
@@ -325,6 +339,7 @@ pub(crate) mod test_support {
                 cancel: &self.cancel,
                 permission_gate: &self.permission_gate,
                 work_dir: self.work_dir.path(),
+                cwd: self.cwd.as_deref().unwrap_or(self.work_dir.path()),
                 client_io: &*self.client_io,
             }
         }

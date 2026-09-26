@@ -15,7 +15,6 @@ use crate::error::{Error, Result};
 use super::ToolHandler;
 use super::args::parse;
 use super::capabilities::{ToolCapabilities, ToolKindHint};
-use super::sandbox::validate_path;
 
 /// Entries beyond this count are omitted, with a marker noting how many were
 /// left out, so a directory with tens of thousands of entries can't blow out
@@ -79,8 +78,8 @@ async fn list_dir(path: &Path) -> Result<String> {
 /// Lists the immediate contents of a directory at the given path.
 ///
 /// Not recursive. Directories are suffixed with `/` and symlinks show their
-/// target. Defaults to the work directory if no path is given; the path must
-/// be inside the work directory.
+/// target. Defaults to the turn's working directory (`TurnContext::cwd`) if
+/// no path is given; the path must be inside the work directory.
 pub struct ListDirTool;
 
 #[derive(Deserialize)]
@@ -94,13 +93,13 @@ impl ToolHandler for ListDirTool {
     fn definition(&self) -> Tool {
         Tool::function(
             "list_dir",
-            "List the immediate contents of a directory (not recursive). Directories are suffixed with '/' and symlinks are shown as 'name -> target'. Defaults to the work directory if no path is given.",
+            "List the immediate contents of a directory (not recursive). Directories are suffixed with '/' and symlinks are shown as 'name -> target'. Defaults to the current working directory if no path is given.",
             json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "The directory to list. Defaults to the work directory if omitted."
+                        "description": "The directory to list. Defaults to the current working directory if omitted."
                     }
                 }
             }),
@@ -109,7 +108,7 @@ impl ToolHandler for ListDirTool {
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
         let args: ListDirArgs = parse(args)?;
-        let validated = validate_path(args.path.as_deref().unwrap_or("."), turn.work_dir)?;
+        let validated = turn.resolve_path(args.path.as_deref().unwrap_or("."))?;
         list_dir(&validated).await
     }
 

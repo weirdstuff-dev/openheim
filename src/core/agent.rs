@@ -493,6 +493,7 @@ mod tests {
                 cancel: &self.cancel,
                 permission_gate: &self.gate,
                 work_dir: std::path::Path::new("."),
+                cwd: std::path::Path::new("."),
                 client_io: &NoClientIo,
             };
             run_agent(llm, executor, &self.config, messages, None, &turn, callback).await

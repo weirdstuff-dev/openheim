@@ -15,7 +15,6 @@ use super::ToolHandler;
 use super::args::parse;
 use super::capabilities::{ToolCapabilities, ToolKindHint};
 use super::read_file::read_text;
-use super::sandbox::validate_path;
 use super::write_file::write_text;
 
 /// Applies a find-and-replace edit to `content`, returning the edited text
@@ -127,7 +126,7 @@ impl ToolHandler for EditFileTool {
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
         let args: EditFileArgs = parse(args)?;
-        let validated = validate_path(&args.path, turn.work_dir)?;
+        let validated = turn.resolve_path(&args.path)?;
 
         let content = read_text(&validated, turn).await?;
         let (edited, count) = apply_edit(
