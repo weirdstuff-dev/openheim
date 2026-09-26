@@ -386,7 +386,7 @@ Returns all registered tool definitions (built-in + MCP). Each tool follows the 
 ]
 ```
 
-> `delegate_task` is always registered. `remember`/`search_memory`/`edit_memory`/`forget` are registered with the `rag` feature (on by default for the binary) — see configuration.md for the `[memory]` section. MCP tools are namespaced as `{server_name}__{tool_name}` (double underscore); the server name is sanitized: hyphens and spaces become underscores.
+> `delegate_task` is always registered. `remember`/`search_memory`/`edit_memory`/`forget` are registered with the `rag` feature (on by default for the binary) — see configuration.md for the `[memory]` section. MCP tools are namespaced as `{server_name}__{tool_name}` (double underscore); both parts are sanitized so every provider accepts the name (see configuration.md's `[mcp_servers]` section).
 
 ---
 

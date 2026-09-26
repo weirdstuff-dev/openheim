@@ -40,6 +40,8 @@ work_dir = "/home/user/projects/myproject"
 
 **`work_dir`** is enforced at the application layer for `read_file`, `write_file`, `edit_file`, `list_dir`, and `search`, and for the `/ws` filesystem sidecar (all `fs`-channel operations are validated against the same boundary). Symlinks are followed and canonicalized so they cannot be used to escape the boundary. Shell commands (`execute_command`) are launched with `work_dir` as their working directory so relative paths resolve correctly, but absolute paths inside a shell command are not blocked — OS-level sandboxing (chroot, containers) is required for full shell isolation. Shell commands are additionally bounded: each runs in its own process group, is killed after a 120-second timeout (or on turn cancellation), and has stdout/stderr capped at 64 KiB per stream with a truncation marker.
 
+Every tool result, built-in, MCP or custom, is cut to 128 KiB (with a note saying how much was left out) before it goes into the conversation, since the history is resent with every request.
+
 `web_fetch` is not subject to `work_dir` — it fetches remote URLs, not local files. It's bounded instead by an SSRF guard (rejects loopback/private/link-local addresses, including cloud metadata endpoints), a 20-second timeout, a 256 KiB response cap, and no automatic redirect following.
 
 **`allow_shell`** gates whether `execute_command` appears in the tool list sent to the LLM. It defaults to `false` — the LLM never sees the tool and cannot request it. Set it to `true` to expose the tool (bounded as described above).
@@ -139,7 +141,9 @@ headers = { Authorization = "Bearer my-key" }
 
 `headers` is rejected over a plain `http://` URL — credentials must not be sent unencrypted; use `https://` or drop the headers for a keyless local server.
 
-The `name` key is sanitized when building tool names: hyphens and spaces become underscores. So `my-db` → `my_db__query_table`.
+The `name` key is sanitized when building tool names: anything but ASCII letters, digits and underscores (hyphens and spaces included) becomes an underscore. So `my-db` → `my_db__query_table`. The tool's own name keeps hyphens but is sanitized the same way otherwise, so `fs.read` is exposed as `files__fs_read`. A full name starting with a digit gets a leading `_`, and one longer than 64 characters is shortened and ends in a hash of the original, so every provider accepts it.
+
+Servers start concurrently when openheim starts. One that hasn't connected and listed its tools within 60 seconds is reported as failed (see `GET /api/mcp-servers`) and its tools are left out; the others are unaffected.
 
 ---
 
