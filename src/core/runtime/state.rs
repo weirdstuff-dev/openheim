@@ -172,6 +172,13 @@ impl AgentState {
             Some(m) => self.app_config.resolve(Some(m))?,
             None => self.config.clone(),
         };
+        // An unknown skill is the caller's mistake, so it's reported here
+        // rather than silently left out of every turn.
+        let skills_manager = self.memory.skills.clone();
+        let requested = skills.clone();
+        tokio::task::spawn_blocking(move || skills_manager.load_skills(&requested))
+            .await
+            .map_err(Error::from)??;
         // No write lease taken here — merely creating/holding a session open
         // doesn't touch history, so it doesn't contend with other processes.
         // The cross-process write lease is acquired per-turn in `Self::prompt`.
@@ -699,6 +706,23 @@ mod new_session_tests {
             .new_session(Some("nope"), vec![], dir.path().to_path_buf())
             .await;
         assert!(result.is_err(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn unknown_skill_is_an_error() {
+        let dir = tempdir().unwrap();
+        let state = sample_state(dir.path()).await;
+        std::fs::write(dir.path().join("skills/known.md"), "x").unwrap();
+
+        let result = state
+            .new_session(None, vec!["nope".into()], dir.path().to_path_buf())
+            .await;
+        assert!(matches!(result, Err(Error::NotFound(_))), "{result:?}");
+
+        state
+            .new_session(None, vec!["known".into()], dir.path().to_path_buf())
+            .await
+            .unwrap();
     }
 
     /// Always answers with a final text reply, so a turn completes in one

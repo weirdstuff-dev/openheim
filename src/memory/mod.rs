@@ -81,7 +81,8 @@ impl MemoryContext {
     /// Load or create a conversation and build the prompt context for an agent turn.
     ///
     /// Returns the resolved [`Conversation`] and a [`PromptBuilder`] already populated
-    /// with the system identity and any requested skills.
+    /// with the system identity and the requested skills that load (a missing
+    /// one is logged and left out).
     ///
     /// For **new** conversations, `default_skills` are merged with `skill_names` (defaults
     /// first, deduplicated) and persisted on the conversation. For **existing** conversations
@@ -110,11 +111,15 @@ impl MemoryContext {
 
         // Load skills from the conversation's stored list (already contains merged
         // defaults for new conversations, or the original set for existing ones).
-        if !conversation.meta.skills.is_empty() {
-            let loaded = self.skills.load_skills(&conversation.meta.skills)?;
-            for (name, content) in &loaded {
-                tracing::debug!(skill = %name, "prepare: loaded skill");
-                builder.add_skill(name, content);
+        // One that no longer loads (deleted or renamed since) is left out
+        // rather than failing this and every later turn of the conversation.
+        for name in &conversation.meta.skills {
+            match self.skills.load_skill(name) {
+                Ok(content) => {
+                    tracing::debug!(skill = %name, "prepare: loaded skill");
+                    builder.add_skill(name, &content);
+                }
+                Err(e) => tracing::warn!(skill = %name, "prepare: skipping skill: {e}"),
             }
         }
 
@@ -163,6 +168,22 @@ mod tests {
         let defaults = vec!["rules".to_string(), "rules".to_string()];
         let merged = merge_skills(&defaults, &[]);
         assert_eq!(merged, vec!["rules"]);
+    }
+
+    // A conversation whose stored skill has since been deleted still gets
+    // its turns, with the skills that remain.
+    #[test]
+    fn prepare_skips_a_skill_that_no_longer_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = MemoryContext::new(vec![], dir.path()).unwrap();
+        std::fs::write(dir.path().join("system.md"), "I am the agent.").unwrap();
+        std::fs::write(dir.path().join("skills/kept.md"), "KEPT SKILL").unwrap();
+        let skills = vec!["gone".to_string(), "kept".to_string()];
+
+        let (_, builder) = ctx.prepare(None, &skills, None, None).unwrap();
+
+        let system = builder.build(&[])[0].text().unwrap();
+        assert!(system.contains("KEPT SKILL"), "{system}");
     }
 
     #[test]
