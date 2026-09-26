@@ -74,10 +74,7 @@ pub struct AgentState {
 }
 
 impl AgentState {
-    /// `custom_tools` are registered alongside the built-ins (`execute_command`,
-    /// `read_file`, `write_file`, …) and any MCP-sourced tools. Every handler
-    /// receives the turn's [`TurnContext`] — `work_dir`, cancel token, client
-    /// I/O — so custom tools can enforce the same boundary the built-ins do.
+    /// `custom_tools` are registered alongside the built-in and MCP tools.
     /// `paths` says where subagent profiles and (by default) the memory
     /// database live; `memory` should already be rooted at `paths.data_dir`.
     pub async fn new(
@@ -117,11 +114,9 @@ impl AgentState {
             sys_executor.register(Box::new(crate::rag::ForgetTool::new(m.clone())));
         }
 
-        // `delegate_task` is always exposed — even with no configured
-        // profiles the orchestrator can define an ephemeral subagent inline.
-        // It's built from a snapshot of the registry taken *before* it
-        // registers itself, so subagents structurally never see
-        // `delegate_task` and can't delegate recursively.
+        // `delegate_task` is always registered (a subagent can be defined
+        // inline). Subagents get the registry as it was before it was added,
+        // so they can't delegate recursively.
         let profiles = SubagentLoader::with_dir(paths.data_dir.join("agents")).load()?;
         let base: Arc<dyn ToolExecutor> = Arc::new(sys_executor.clone());
         let delegate = DelegateTool::new(
@@ -180,9 +175,7 @@ impl AgentState {
             .await
             .map_err(Error::from)??;
         let tool_cwd = tool_cwd(&cwd, &self.work_dir);
-        // No write lease taken here — merely creating/holding a session open
-        // doesn't touch history, so it doesn't contend with other processes.
-        // The cross-process write lease is acquired per-turn in `Self::prompt`.
+        // No write lease: only a running turn (`Self::prompt`) takes one.
         {
             let mut sessions = self.sessions.write().await;
             sessions.insert(
@@ -426,9 +419,6 @@ impl AgentState {
         let write_failed = AtomicBool::new(!started_ok);
         let write_failed_flag = &write_failed;
         let history_for_append = self.memory.history.clone();
-        // The work-directory boundary, working directory and client I/O hook
-        // reach every tool through this context; there is no per-session
-        // executor wrapper.
         let turn = TurnContext {
             cancel: &cancel,
             permission_gate: &permission_gate,
@@ -468,10 +458,8 @@ impl AgentState {
         }
 
         // Every message is normally in the log by now, so only the metadata
-        // (context usage, `updated_at`) needs writing. If any write above
-        // failed, rewrite the whole log from memory instead, which
-        // `save_conversation` refuses to do if another process has written
-        // to it meanwhile.
+        // needs writing. If a write above failed, rewrite the whole log from
+        // memory instead (refused if another process wrote to it meanwhile).
         if !write_failed.load(Ordering::Relaxed) {
             let meta = conversation.meta.clone();
             self.persist("save conversation metadata", move |history| {
@@ -502,11 +490,8 @@ impl AgentState {
             .collect())
     }
 
-    /// Loads a persisted session as the active session for `session_id`,
-    /// returning the mode it's live under, its full message history (for the
-    /// caller to replay in whatever form its transport needs), and a
-    /// warning to surface if the session's saved provider no longer
-    /// resolves.
+    /// Makes the persisted session `session_id` live and returns what the
+    /// caller needs to show it (see [`LoadedSession`]).
     pub async fn load_session(&self, session_id: &str, cwd: PathBuf) -> Result<LoadedSession> {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| Error::InvalidArgument("invalid session id format".to_string()))?;
@@ -543,11 +528,8 @@ impl AgentState {
         let tool_cwd = tool_cwd(&cwd, &self.work_dir);
         let (mode, model) = {
             let mut sessions = self.sessions.write().await;
-            // Attaching to an already-live session keeps its control state:
-            // a fresh `cancel` token would orphan a running turn, fresh
-            // `approved_tools` would forget "Always" answers, and a fresh
-            // `prompt_lock` would let two turns overlap. Loading takes no
-            // write lease; only a running turn does.
+            // An already-live session keeps its control state (see
+            // `insert_or_keep_live`). Loading takes no write lease.
             if !insert_or_keep_live(&mut sessions, session_id, || {
                 Ok(SessionState {
                     chat_id: uuid,
@@ -607,16 +589,15 @@ fn tool_cwd(cwd: &Path, work_dir: &Path) -> PathBuf {
     }
 }
 
-/// The result of [`AgentState::load_session`]: enough to both replay the
-/// conversation in whatever wire form the caller needs (see
-/// `acp::util::replay_history_messages` for the ACP shape) and reflect the
-/// mode it's now live under.
+/// The result of [`AgentState::load_session`].
 pub struct LoadedSession {
+    /// The mode the session is live under.
     pub mode: AgentMode,
+    /// The full saved conversation, for the caller to replay in its own form
+    /// (`acp::util::replay_history_messages` for ACP).
     pub messages: Vec<Message>,
-    /// The session's active model after resolution (falls back to the
-    /// default provider's model if the saved provider/model no longer
-    /// resolves — see `warning`).
+    /// The session's active model (the default provider's if the saved one
+    /// no longer resolves; see `warning`).
     pub model: String,
     /// Set if the session's saved provider/model no longer resolves and the
     /// load fell back to the default provider.

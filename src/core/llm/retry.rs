@@ -47,13 +47,10 @@ impl LlmClient for RetryClient {
         unreachable!("loop always returns via Ok or Err arm")
     }
 
-    /// Retries a failed streaming request **only while it is still safe to do
-    /// so** — i.e. before any chunk has reached the caller. Once the first token
-    /// has been forwarded a mid-stream failure can't be replayed without
-    /// duplicating output, so it is returned as-is.
-    ///
-    /// Each attempt streams through a private channel; a forwarder relays chunks
-    /// to the caller's `chunk_tx` and records whether anything was emitted.
+    /// Retries a failed streaming request only before any chunk has reached
+    /// the caller; after that a retry would duplicate output, so the error is
+    /// returned. Each attempt streams through a forwarder that records
+    /// whether anything was passed on.
     async fn send_streaming(
         &self,
         messages: &[Message],

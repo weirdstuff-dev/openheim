@@ -2,9 +2,8 @@
 //! inside an editor sandbox that owns the filesystem view (unsaved buffers,
 //! virtual filesystems, etc.) rather than the process's own `tokio::fs`.
 //!
-//! Mirrors [`crate::core::permission`]: a protocol-agnostic trait here, with
-//! the ACP-specific implementation (backed by `fs/read_text_file` and
-//! `fs/write_text_file`) living in `crate::acp` (needs the `acp` feature).
+//! The ACP implementation (backed by `fs/read_text_file` and
+//! `fs/write_text_file`) lives in `crate::acp` (feature `acp`).
 
 use std::path::Path;
 

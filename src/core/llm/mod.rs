@@ -20,10 +20,8 @@ fn new_tool_call_id() -> String {
 }
 
 /// A stored tool call's arguments as the JSON object Anthropic and Gemini
-/// require. Arguments that aren't one (a reply cut off mid-call, or a
-/// malformed call from another provider) go out as `{}`: rejecting them
-/// would fail every later request in the conversation, and the call's
-/// result already says it failed.
+/// require, or `{}` if they aren't one (e.g. a call cut off mid-reply):
+/// rejecting them would fail every later request in the conversation.
 fn tool_input(name: &str, arguments: &str) -> serde_json::Value {
     match serde_json::from_str(arguments) {
         Ok(value @ serde_json::Value::Object(_)) => value,
@@ -36,10 +34,8 @@ fn tool_input(name: &str, arguments: &str) -> serde_json::Value {
     }
 }
 
-/// `send` for a built-in client: its `send_streaming` with the chunks thrown
-/// away, so each client has one request and response path. The receiver is
-/// dropped up front, so chunks are discarded as they're sent instead of
-/// piling up in the channel until the reply is complete.
+/// `send` for a built-in client: its `send_streaming` with the chunks
+/// discarded as they're sent (the receiver is dropped up front).
 async fn send_discarding_chunks<C: LlmClient + ?Sized>(
     client: &C,
     messages: &[Message],

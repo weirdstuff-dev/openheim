@@ -25,33 +25,25 @@ pub struct SessionState {
     /// Cancelled when a `session/cancel` notification arrives for this session,
     /// so an in-flight prompt turn (running in its own spawned task) can stop.
     pub cancel: CancellationToken,
-    /// Remembered `AllowAlways`/`RejectAlways` decisions, so the same tool
-    /// call isn't asked about again for the rest of the session, whichever
-    /// front-end's gate answered it. Each turn's
-    /// `RememberingGate` (in `core::permission`) reads and writes it; see
-    /// [`crate::core::permission::approval_key`] for how calls are keyed.
+    /// Remembered `AllowAlways`/`RejectAlways` decisions, read and written by
+    /// each turn's `RememberingGate`; keyed by
+    /// [`crate::core::permission::approval_key`].
     pub approved_tools: Approvals,
     /// Set via `session/set_mode`. Controls which tools are offered to the LLM.
     pub mode: AgentMode,
-    /// Held for the duration of a `session/prompt` turn so a second, overlapping
-    /// prompt on the same session (in this process) is rejected instead of
-    /// racing the first one (both would otherwise reset `cancel` and clobber
-    /// the saved history). The cross-process write lease (`memory::lease`) is a
-    /// separate, turn-scoped guard acquired directly in `AgentState::prompt` —
-    /// not stored here — so merely loading/viewing a session never locks it
-    /// against other processes; only an in-flight turn does.
+    /// Held for a whole turn, so an overlapping prompt on the same session in
+    /// this process is rejected instead of racing it. (The cross-process
+    /// lease, `memory::lease`, is taken separately by `AgentState::prompt`.)
     pub prompt_lock: Arc<Mutex<()>>,
-    /// Last time this session was used (prompt, cancel, model/mode switch,
-    /// load). Drives least-recently-active ordering in
-    /// `evict_idle_sessions`; bumped under the sessions map's write lock.
+    /// Last time this session was used; orders `evict_idle_sessions`.
+    /// Updated under the sessions map's write lock.
     pub last_active: Instant,
 }
 
 impl SessionState {
-    /// Acquires [`Self::prompt_lock`] for the caller's turn, or a clean error
-    /// if another turn already holds it. `session_id` is only used to name
-    /// the session in the error message; hold the returned guard for the
-    /// duration of the turn — it releases automatically when dropped.
+    /// Acquires [`Self::prompt_lock`] for the caller's turn, or
+    /// `Error::SessionBusy` (naming `session_id`) if another turn holds it.
+    /// The lock is released when the guard drops.
     pub fn try_acquire_prompt_lock(&self, session_id: &str) -> Result<OwnedMutexGuard<()>> {
         self.prompt_lock
             .clone()
@@ -62,35 +54,23 @@ impl SessionState {
     }
 }
 
-/// How long a live session may sit unused before it becomes eligible for
-/// eviction. Long enough that no realistic workflow (a TUI left open over a
-/// weekend, an editor reconnecting Monday) loses state; short enough that a
-/// long-lived server's session map doesn't accumulate stale entries forever.
+/// How long a live session may sit unused before it can be evicted: a week,
+/// so a TUI left open over a weekend keeps its state.
 pub(crate) const SESSION_IDLE_EVICTION_AFTER: Duration = Duration::from_secs(60 * 60 * 24 * 7);
 
-/// Hard cap on live sessions. Bounds the map even under sustained churn
-/// (idle eviction alone can't, if every session stays active). Evicted
-/// sessions are reconstructible: their history lives on disk and
-/// `session/load` re-materializes the state.
+/// Hard cap on live sessions, for when every session stays active. An
+/// evicted session loses nothing durable: `session/load` rebuilds it from
+/// disk.
 pub(crate) const MAX_LIVE_SESSIONS: usize = 512;
 
-/// Inserts a freshly-built `SessionState` under `session_id` unless that
-/// session is already live, in which case the live entry wins and only its
-/// `last_active` is bumped. Returns `true` when a fresh state was inserted.
+/// Inserts the state `build_fresh` returns under `session_id` unless that
+/// session is already live, in which case the live entry is kept and only
+/// its `last_active` is bumped. Returns `true` when a fresh state was
+/// inserted; `build_fresh` isn't called otherwise.
 ///
-/// `build_fresh` is called at most once, and only once we've confirmed
-/// there's no live entry to keep, so a redundant build (and the disk read it
-/// implies) never happens when the *live* entry is the one that ends up
-/// owning the session.
-///
-/// Replacing a live entry would break the cross-connection session UX: a
-/// fresh `CancellationToken` orphans any in-flight turn (`session/cancel`
-/// would cancel the new token, not the running turn's), a fresh `prompt_lock`
-/// would let a second turn overlap a still-running one on the same chat, and
-/// wiping `approved_tools` loses remembered AllowAlways decisions. The live
-/// entry is also strictly newer than the disk snapshot a load builds its
-/// fresh state from. Either way the caller still replays the on-disk history
-/// to *its* connection — that part is per-connection, not session state.
+/// The live entry wins because replacing it would orphan a running turn
+/// (its cancel token), let a second turn overlap it (its `prompt_lock`), and
+/// forget remembered approvals.
 pub(crate) fn insert_or_keep_live(
     sessions: &mut HashMap<String, SessionState>,
     session_id: &str,
@@ -111,10 +91,8 @@ pub(crate) fn insert_or_keep_live(
 /// Evicts sessions so the live map stays bounded: first anything idle longer
 /// than `idle_after`, then — if the map still exceeds `max_sessions` — the
 /// least-recently-active ones until it fits. A session with a prompt in
-/// flight is never evicted. Must be called while holding the sessions map's
-/// *write* lock: `AgentState::prompt` acquires `prompt_lock` under that same
-/// lock, so a lock observed free here cannot be acquired by a new turn until
-/// the sweep finishes, and a running turn holds its lock for the whole turn.
+/// flight is never evicted. Call it with the sessions map's write lock held:
+/// turns take `prompt_lock` under that lock, so none can start mid-sweep.
 pub(crate) fn evict_idle_sessions(
     sessions: &mut HashMap<String, SessionState>,
     now: Instant,

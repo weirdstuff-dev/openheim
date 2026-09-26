@@ -1,17 +1,10 @@
-//! The agent runtime core: [`AgentState`] is the process-wide,
-//! per-connection-shared handle every entry point (ACP, the other
-//! transports, the library facade) is a method on; [`session`] is the live
-//! session map's own state and eviction policy; [`AgentMode`] controls which
-//! tools a session's turns are offered.
+//! The agent runtime core: [`AgentState`] is the shared handle every entry
+//! point (ACP, the other transports, the library facade) calls into;
+//! [`session`] holds the live session map and its eviction policy;
+//! [`AgentMode`] controls which tools a session's turns are offered.
 //!
-//! `AgentState` speaks only `core::models` types — no `agent_client_protocol`
-//! import anywhere in this module. `prompt` takes `core::models::ContentBlock`
-//! directly and streams `core::models::StreamEvent`; `load_session` returns
-//! the persisted `Message`s as-is. Mapping any of that onto ACP's wire
-//! vocabulary (`SessionUpdate`, `SessionInfo`, `SessionConfigOption`,
-//! `convert_prompt_blocks`, `replay_history_messages`) is entirely the
-//! caller's concern — `acp::serve` and the library facade (`client.rs`) do
-//! it at their own edges.
+//! Only `core::models` types cross this module's boundary. Mapping them onto
+//! ACP's wire types is done by the callers (`acp::serve`, `client.rs`).
 
 pub mod session;
 
@@ -27,11 +20,10 @@ pub enum AgentMode {
     /// Full tool access; tool calls go through the permission gate as normal.
     #[default]
     Code,
-    /// Read-only: only `read_file`, `list_dir`, `search` (and
-    /// `search_memory` with the `rag` feature) are offered to the LLM, so
-    /// nothing mutating can run. All of them still go through the
-    /// permission gate and can trigger a permission prompt unless already
-    /// approved.
+    /// Read-only: only tools that declare `read_only` are offered (the
+    /// built-in `read_file`, `list_dir`, `search`, `web_fetch`,
+    /// `search_memory`, and any custom tool that opts in). They still go
+    /// through the permission gate.
     Architect,
 }
 

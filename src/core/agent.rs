@@ -116,11 +116,8 @@ fn answer_missing_tool_results(messages: &[Message]) -> Option<Vec<Message>> {
 }
 
 /// Every LLM call streams, even when nobody watches the chunks: the HTTP
-/// client's timeout is per read, not per request (see `build_http_client`),
-/// so a non-streaming reply that takes longer than `timeout_secs` to
-/// generate fails with nothing sent yet, while a streaming one keeps bytes
-/// arriving. Clients that implement only `send` still work: the default
-/// `send_streaming` wraps it.
+/// timeout is per read (see `build_http_client`), so only a streamed reply
+/// keeps a long generation from timing out.
 async fn call_llm_streaming(
     llm: &dyn LlmClient,
     messages: &[Message],
@@ -152,10 +149,9 @@ fn forward_chunk<F: FnMut(StreamEvent)>(callback: &mut F, chunk: LlmChunk) {
 /// "keep looping": the provider paused the turn and expects the
 /// conversation resent as-is to resume it.
 ///
-/// Any finish reason without a specific mapping (`Other`, a missing one, or
-/// `ToolCalls` with no tool calls attached) ends the turn: resending a
-/// history that ends in an assistant reply would at best make the model
-/// repeat itself, and at worst be rejected outright.
+/// Any other finish reason (`Other`, none, or `ToolCalls` without calls)
+/// ends the turn: resending a history that ends in an assistant reply would
+/// make the model repeat itself, or be rejected.
 fn stop_for_reply_without_tools(
     finish_reason: Option<&FinishReason>,
     has_text: bool,
@@ -234,9 +230,8 @@ where
             let choice_fut = call_llm_streaming(llm, messages, &tools, prompt_builder, chunk_tx);
             tokio::pin!(choice_fut);
 
-            // The reply ends the wait, not the chunk channel: a client may close
-            // its sender before its request finishes, and one that leaks the
-            // sender somewhere must not keep the turn waiting.
+            // The reply ends the wait, not the chunk channel, which a client
+            // may close early or keep open.
             let mut chunks_open = true;
             loop {
                 tokio::select! {
@@ -266,9 +261,8 @@ where
             message: choice.message.clone(),
         });
         if let Some(usage) = choice.usage {
-            // Overwritten (not summed) every iteration: the latest call's
-            // usage is what "context size right now" means, since each call
-            // resends the full history as its prompt.
+            // Overwritten, not summed: each call resends the whole history,
+            // so the latest call's usage is the current context size.
             context_usage = Some(usage);
             callback(StreamEvent::Usage { usage });
         }
@@ -297,13 +291,10 @@ where
                 }
 
                 // Ask about every call concurrently, so a gate sees all the
-                // requests at once and may answer them in any order. The TUI
-                // gate queues them and shows one prompt at a time. A call
-                // with malformed arguments gets no decision: it can't run.
+                // requests at once. A call with malformed arguments gets no
+                // decision: it can't run.
                 let decisions = tokio::select! {
-                    // Dropping the `join_all` abandons every pending approval
-                    // at once, so the turn (and `prompt_lock`) isn't held
-                    // until the user answers each.
+                    // Dropping the `join_all` abandons every pending approval.
                     _ = turn.cancel.cancelled() => break 'calls,
                     decisions = futures::future::join_all(tool_calls.iter().map(|tool_call| async {
                         if !arguments_are_usable(&tool_call.arguments) {
@@ -318,10 +309,8 @@ where
                     })) => decisions,
                 };
 
-                // Run every allowed call concurrently (denied ones don't reach
-                // the executor), so e.g. several `delegate_task` subagents run
-                // in parallel. `ToolResult` goes out as each call finishes;
-                // the history below keeps the calls' original order.
+                // Run the allowed calls concurrently. `ToolResult` goes out as
+                // each finishes; the history below keeps the calls' order.
                 let mut pending: futures::stream::FuturesUnordered<_> = tool_calls
                     .iter()
                     .zip(&decisions)

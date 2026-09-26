@@ -11,11 +11,9 @@ use super::sse::{StreamParser, parse_payload, read_stream};
 use super::{LlmChunk, LlmClient};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-/// Used when the provider sets no `max_tokens`. Adaptive thinking is on by
-/// default and spends from this same budget, so a low cap truncates replies
-/// (or leaves no room for any text at all). ~16k is Anthropic's recommended
-/// default for non-streaming requests; the agent loop always streams, but
-/// `send` is still public, so the default stays safe for callers of it.
+/// Used when the provider sets no `max_tokens`. Adaptive thinking spends
+/// from the same budget, so a low cap truncates replies or leaves no room
+/// for text at all.
 const DEFAULT_MAX_TOKENS: u32 = 16_000;
 
 fn is_false(b: &bool) -> bool {
@@ -130,11 +128,8 @@ struct AnthropicTool {
 
 // --- Anthropic streaming event types ---
 //
-// Unlike OpenAI/Gemini's single repeated envelope shape, each Anthropic SSE
-// event's fields depend on its `type` — an externally-tagged enum on `type`
-// models that directly. `#[serde(other)]` on `Other` absorbs any event type
-// this client doesn't special-case (`ping`, and any future addition) instead
-// of failing the whole stream.
+// Each event's fields depend on its `type`. `Other` absorbs event types this
+// client doesn't handle (`ping`, and any new ones).
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -325,8 +320,7 @@ struct AnthropicMessageDeltaFields {
 
 #[derive(Debug, Deserialize)]
 struct AnthropicDeltaUsage {
-    /// Cumulative, not a per-event delta — see the `message_delta` handling
-    /// in `send_streaming` for why the last value seen wins.
+    /// Cumulative, not a per-event delta.
     #[serde(default)]
     output_tokens: Option<u64>,
 }
@@ -383,9 +377,7 @@ impl StreamParser for AnthropicStream {
                 if let Some(reason) = delta.stop_reason {
                     self.stop_reason = Some(reason);
                 }
-                // Anthropic reports `output_tokens` cumulatively on each
-                // `message_delta`, not as a per-event delta — the last value
-                // seen before the stream ends is the true total.
+                // Cumulative, so the last value seen is the total.
                 if let Some(ot) = usage.and_then(|u| u.output_tokens) {
                     self.usage.output_tokens = ot;
                 }
@@ -582,17 +574,13 @@ fn extract_system(messages: &[Message]) -> Option<String> {
     }
 }
 
-/// Returns Anthropic's adaptive-thinking request config when `enabled`.
+/// Anthropic's adaptive-thinking request config when `enabled`.
 ///
-/// Adaptive thinking (`type: "adaptive"`) is the form current Claude models
-/// accept; the fixed-budget form (`type: "enabled", budget_tokens: N`)
-/// returns a 400 on Opus 4.7/4.8, Sonnet 5, and Fable 5, and is deprecated
-/// on Opus 4.6 / Sonnet 4.6. Models predating adaptive thinking
-/// (Sonnet 3.7 and earlier Claude 4 releases) only support the fixed-budget
-/// form and reject adaptive thinking outright — set `thinking = "off"` on
-/// the provider entry for those (see [`crate::config::ProviderConfig::resolve_thinking`]).
-/// Adaptive thinking also enables interleaved thinking automatically, so no
-/// `anthropic-beta` header is needed here.
+/// Current Claude models accept only adaptive thinking (the fixed-budget
+/// form is rejected or deprecated); models that predate it reject it, and
+/// need `thinking = "off"` on their provider entry (see
+/// [`crate::config::ProviderConfig::resolve_thinking`]). Adaptive thinking
+/// is interleaved without an `anthropic-beta` header.
 fn thinking_config(enabled: bool) -> Option<AnthropicThinkingConfig> {
     enabled.then_some(AnthropicThinkingConfig {
         thinking_type: "adaptive",

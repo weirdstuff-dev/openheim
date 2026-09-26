@@ -141,11 +141,8 @@ struct OpenAiFunctionDef {
 
 // --- OpenAI streaming response types ---
 //
-// One SSE `data:` payload's shape (`choices[0].delta` carries only the
-// incremental piece of the message that arrived in this chunk). Typed rather
-// than read out of a raw `serde_json::Value`, so a malformed or unexpected
-// field is caught by `serde` up front rather than silently reading as
-// `None`/`0` deep inside the accumulation loop.
+// One SSE `data:` payload; `choices[0].delta` carries the piece of the
+// message that arrived in this chunk.
 
 #[derive(Debug, Deserialize)]
 struct OpenAiUsage {
@@ -185,10 +182,8 @@ impl From<OpenAiUsage> for Usage {
 struct OpenAiStreamChunk {
     #[serde(default)]
     choices: Vec<OpenAiStreamChoice>,
-    /// Only present on the final chunk when `stream_options.include_usage`
-    /// was set — arrives alongside an empty `choices` array, so it's read
-    /// independently of the choice fields below rather than folded into
-    /// that branch.
+    /// Only on the final chunk when `stream_options.include_usage` is set,
+    /// alongside an empty `choices`.
     #[serde(default)]
     usage: Option<OpenAiUsage>,
 }
@@ -275,10 +270,8 @@ fn map_finish_reason(reason: &str) -> FinishReason {
     }
 }
 
-/// Whether a failed streaming request should be retried once without
-/// `stream_options` — only when the body actually names it as the problem,
-/// so an unrelated 400 (bad request, context too long, …) isn't retried for
-/// nothing and doesn't double its cost.
+/// Whether a failed request should be retried once without `stream_options`:
+/// only a 400 whose body names it, so an unrelated 400 isn't paid for twice.
 fn should_retry_without_stream_options(status: u16, body: &str) -> bool {
     status == 400 && body.to_lowercase().contains("stream_options")
 }
@@ -381,11 +374,9 @@ fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
     result
 }
 
-/// Assembles an assistant message's content blocks: `Thinking` (when the
-/// provider returned reasoning) first, then `Text`, then tool uses. The
-/// OpenAI stream doesn't say how reasoning, text and calls interleave, so
-/// this fixed order is the best available. Empty strings produce no block,
-/// so an all-empty response yields empty content.
+/// An assistant message's content blocks: `Thinking`, then `Text`, then tool
+/// uses (the stream doesn't say how they interleave). Empty strings produce
+/// no block.
 fn assemble_content(
     reasoning: String,
     text: String,
@@ -462,13 +453,9 @@ impl LlmClient for OpenAiClient {
         let mut body =
             serde_json::to_value(&request).map_err(|e| Error::ParseError(e.to_string()))?;
         body["stream"] = serde_json::Value::Bool(true);
-        // Asks OpenAI (and most OpenAI-compatible backends, which pass unknown
-        // fields through) to emit one extra chunk at the end of the stream
-        // carrying the same `usage` object the non-streaming response has.
-        // Backends that don't understand it just ignore the field — but a few
-        // OpenAI-compatible endpoints validate the request body strictly and
-        // reject the unknown field with a 400, so that specific case is retried
-        // once without it below rather than failing the whole call.
+        // Asks for a final chunk carrying `usage`. A few strict compatible
+        // backends reject the field with a 400; that case is retried without
+        // it below.
         body["stream_options"] = serde_json::json!({ "include_usage": true });
 
         let endpoint = self.endpoint();
@@ -478,10 +465,6 @@ impl LlmClient for OpenAiClient {
         let response = match super::http::post_json(&self.client, &endpoint, &headers, &body).await
         {
             Ok(response) => response,
-            // Only a 400 that actually complains about `stream_options` is
-            // retried without it — any other 400 (bad request, context too
-            // long, …) would otherwise be retried for nothing, doubling its
-            // cost, and return unchanged.
             Err(Error::HttpError {
                 status,
                 body: err_body,
@@ -523,8 +506,6 @@ impl StreamParser for OpenAiStream {
             return Ok(false);
         };
 
-        // The `include_usage` final chunk carries `usage` alongside an empty
-        // `choices` array, so this is read independently of the choice.
         if let Some(u) = event.usage {
             self.usage = Some(Usage::from(u));
         }

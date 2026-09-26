@@ -1,15 +1,6 @@
-//! Minimal incremental Server-Sent Events decoder shared by the streaming
-//! provider clients.
-//!
-//! Each provider's streaming endpoint frames its response as SSE: UTF-8 chunks
-//! arrive over the wire, split into `\n`-terminated lines, and the payloads we
-//! care about are carried on `data:` lines. This decoder owns the cross-chunk
-//! line buffering and `data:` extraction so the three providers
-//! ([`super::anthropic`], [`super::gemini`], [`super::openai`]) don't each
-//! re-implement the same framing state machine (and drift apart in the details).
-//!
-//! Interpreting each payload — JSON shape, the `[DONE]` sentinel, etc. — stays
-//! with each provider's [`StreamParser`]; [`read_stream`] drives one over a
+//! Server-Sent Events decoding shared by the provider clients: line
+//! buffering across chunks and `data:` extraction. Interpreting each payload
+//! is the provider's [`StreamParser`]; [`read_stream`] drives one over a
 //! response body.
 
 use tokio::sync::mpsc::UnboundedSender;
@@ -27,9 +18,8 @@ pub(crate) trait StreamParser {
     fn payload(&mut self, data: &str, chunk_tx: &UnboundedSender<LlmChunk>) -> Result<bool>;
 
     /// The complete reply, or [`Error::IncompleteResponse`] if the stream
-    /// ended before the provider said the reply was finished. A connection
-    /// that closes early looks like a normal end of body, so without this
-    /// check a cut-off reply would be taken as complete.
+    /// ended before the provider said the reply was finished (a dropped
+    /// connection looks like a normal end of body).
     fn finish(self) -> Result<Choice>;
 }
 
@@ -70,10 +60,9 @@ pub(crate) async fn read_stream<P: StreamParser>(
     }
 }
 
-/// Parses one payload as `T`, logging (not failing on) one that doesn't
-/// parse. Skipping it keeps an unexpected event type from failing the whole
-/// reply, but a skipped payload may have carried part of the reply, so it's
-/// worth a warning with enough of the payload to see what it was.
+/// Parses one payload as `T`. One that doesn't parse is skipped with a
+/// warning showing its start, so an unexpected event type doesn't fail the
+/// whole reply.
 pub(crate) fn parse_payload<T: serde::de::DeserializeOwned>(
     provider: &str,
     data: &str,
@@ -98,12 +87,8 @@ impl SseDecoder {
         Self { buf: Vec::new() }
     }
 
-    /// Appends a raw byte chunk (as received from the HTTP body) to the buffer.
-    ///
-    /// Bytes are buffered undecoded: a multi-byte UTF-8 sequence can straddle
-    /// a chunk boundary, and decoding each chunk in isolation would corrupt it
-    /// into U+FFFD replacement characters. Decoding happens per complete line
-    /// in [`SseDecoder::next_payload`].
+    /// Appends a raw byte chunk to the buffer. Bytes stay undecoded until a
+    /// line is complete, since a UTF-8 character can straddle two chunks.
     fn feed(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);
     }

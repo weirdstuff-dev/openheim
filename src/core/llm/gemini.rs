@@ -308,9 +308,8 @@ fn convert_tools(tools: &[Tool]) -> Vec<GeminiToolDeclaration> {
 }
 
 /// Maps Gemini's `finishReason` vocabulary onto the provider-agnostic
-/// [`FinishReason`]; anything without a known equivalent passes through as
-/// [`FinishReason::Other`] (lowercased, matching this function's prior
-/// string-based behavior).
+/// [`FinishReason`]; anything without a known equivalent passes through,
+/// lowercased, as [`FinishReason::Other`].
 fn map_finish_reason(reason: &str) -> FinishReason {
     match reason {
         "STOP" => FinishReason::Stop,
@@ -394,11 +393,8 @@ impl LlmClient for GeminiClient {
     ) -> Result<Choice> {
         let request = self.build_request(messages, tools);
 
-        // `alt=sse` is in the URL, not `.query()`, to keep the request
-        // builder entirely inside `post_json`; the key stays in a header,
-        // not a query param, since reqwest embeds the full URL (query
-        // included) in transport error strings, which would leak it into
-        // logs on any timeout/connect failure.
+        // The key goes in a header, not the query: reqwest puts the full URL
+        // in its error messages, which end up in logs.
         let endpoint = format!(
             "{}/models/{}:streamGenerateContent?alt=sse",
             self.api_base.trim_end_matches('/'),
