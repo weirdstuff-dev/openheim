@@ -15,14 +15,10 @@ use super::ToolHandler;
 use super::args::parse;
 use super::capabilities::{ToolCapabilities, ToolKindHint};
 
-/// Reads `path` as UTF-8 text, asking `turn.client_io` first (e.g. an ACP
-/// client's editor buffers) and falling back to local `tokio::fs` when it
-/// defers. The `client_io` await is raced against `turn.cancel` so a slow or
-/// unresponsive client can't block `session/cancel` from interrupting the
-/// turn.
-///
-/// `path` must already be validated against the work directory; shared by
-/// [`ReadFileTool`] and `edit_file`.
+/// Reads `path` (already resolved with `TurnContext::resolve_path`) as
+/// UTF-8, asking `turn.client_io` first and falling back to local disk. The
+/// client is raced against `turn.cancel`, so a hung client can't block
+/// cancellation. Shared by [`ReadFileTool`] and `edit_file`.
 pub(crate) async fn read_text(path: &Path, turn: &TurnContext<'_>) -> Result<String> {
     tokio::select! {
         _ = turn.cancel.cancelled() => Err(Error::ToolExecutionError(

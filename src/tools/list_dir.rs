@@ -16,25 +16,18 @@ use super::ToolHandler;
 use super::args::parse;
 use super::capabilities::{ToolCapabilities, ToolKindHint};
 
-/// Entries beyond this count are omitted, with a marker noting how many were
-/// left out, so a directory with tens of thousands of entries can't blow out
-/// the LLM's context.
+/// Entries beyond this count are omitted, with a marker saying how many.
 const MAX_ENTRIES: usize = 500;
 
 /// Lists `path`'s immediate contents (not recursive) and returns them as
-/// newline-separated text, one entry per line, sorted by name. Directories
-/// are suffixed with `/` and symlinks are shown as `name -> target`, so the
-/// model can tell entry kinds apart without a second call.
+/// text, one entry per line, sorted by name. Directories end in `/` and
+/// symlinks show as `name -> target`.
 async fn list_dir(path: &Path) -> Result<String> {
     let mut read_dir = fs::read_dir(path).await.map_err(Error::IoError)?;
 
-    // Keep only the `MAX_ENTRIES` alphabetically-first entries as we go, via a
-    // bounded max-heap: pushing past the cap and popping the greatest keeps
-    // the heap holding the smallest names seen so far. This avoids buffering
-    // every name and rendered label for directories with huge entry counts,
-    // while `total` still tracks the true count for the omitted-entries
-    // marker. Ord on the tuple compares the raw name first, so a `/` or
-    // ` -> target` suffix on the label never perturbs the ordering.
+    // A max-heap capped at `MAX_ENTRIES` keeps the alphabetically-first
+    // entries without buffering a huge directory; `total` counts them all.
+    // Tuples compare by raw name first, so a label's suffix can't reorder.
     let mut entries: BinaryHeap<(String, String)> = BinaryHeap::with_capacity(MAX_ENTRIES + 1);
     let mut total = 0usize;
     while let Some(entry) = read_dir.next_entry().await.map_err(Error::IoError)? {

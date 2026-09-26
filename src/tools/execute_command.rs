@@ -19,22 +19,18 @@ use super::ToolHandler;
 use super::args::parse;
 use super::capabilities::{ApprovalScope, ToolCapabilities, ToolKindHint};
 
-/// Default hard wall-clock limit on a single command. Anything still running
-/// past this is killed (whole process group) and reported as an error, so a
-/// `sleep infinity` can't pin the agent turn forever.
+/// Default wall-clock limit on a single command; past it the command's
+/// process group is killed.
 pub(crate) const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Default per-stream output cap (stdout and stderr each). Past the cap the
-/// pipe is closed and the output is returned with a truncation marker, so a
-/// chatty command can't balloon memory or the LLM context.
+/// Default output cap per stream (stdout and stderr each).
 pub(crate) const MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// How long to wait for the child to disappear after a SIGKILL before giving
 /// up on reaping it (the `kill_on_drop` backstop remains either way).
 const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Knobs for [`run_command`]; see the [`DEFAULT_COMMAND_TIMEOUT`] and
-/// [`MAX_COMMAND_OUTPUT_BYTES`] consts for the default values' rationale.
+/// Knobs for [`run_command`].
 pub(crate) struct RunCommandOptions<'a> {
     pub cwd: Option<&'a Path>,
     /// Turn cancellation; when it fires the command is killed as on timeout.
@@ -56,24 +52,16 @@ impl Default for RunCommandOptions<'_> {
 }
 
 /// Runs `command` via the platform shell (`sh -c` on Unix, `cmd /C` on
-/// Windows), optionally pinned to `cwd`. Returns stdout on success, or an
-/// error carrying the combined stdout+stderr diagnostic on a non-zero exit.
+/// Windows), optionally in `cwd`. Returns stdout on success, or an error
+/// carrying stdout and stderr on a non-zero exit.
 ///
-/// [`ExecuteCommandTool`] passes the turn's work directory as `cwd` so
-/// relative paths resolve inside the sandbox.
-///
-/// Hardening applied to every invocation:
-///
-/// - **Timeout** — killed after `opts.timeout`, so runaway commands can't hang
-///   the turn. The error carries whatever output was collected first.
-/// - **Output cap** — each stream stops at `opts.max_output_bytes` and is
-///   returned with a truncation marker; the closed pipe makes further writes
-///   fail with `SIGPIPE`/`EPIPE` instead of buffering without bound.
-/// - **Cancellation** — a fired `opts.cancel` [`CancellationToken`] kills the
-///   command the same way the timeout does.
-/// - **Process group + reaping** — the child leads its own process group
-///   (Unix), so `sh -c "sleep 999 &"` grandchildren die with it, and the exit
-///   is always waited on so no zombie is left behind.
+/// - **Timeout** — killed after `opts.timeout`; the error carries the output
+///   collected so far.
+/// - **Output cap** — each stream stops at `opts.max_output_bytes`, with a
+///   truncation marker; the closed pipe makes further writes fail.
+/// - **Cancellation** — `opts.cancel` firing kills it like the timeout.
+/// - **Process group** — the child leads its own group (Unix), so
+///   backgrounded grandchildren die with it, and its exit is always reaped.
 pub(crate) async fn run_command(command: &str, opts: &RunCommandOptions<'_>) -> Result<String> {
     #[cfg(target_family = "unix")]
     let mut cmd = {
@@ -164,12 +152,9 @@ pub(crate) async fn run_command(command: &str, opts: &RunCommandOptions<'_>) -> 
         ))),
         Termination::TimedOut => {
             kill_and_reap(&mut child).await;
-            // The collect future can be dropped mid-read when the timeout
-            // fires, so the `*_truncated` flags (assigned only after both
-            // reads finish) may be stale `false` even though a buffer already
-            // reached the cap. Derive the marker state from the buffers:
-            // `read_capped` never appends past the cap, so `len() == cap`
-            // means the stream was clipped.
+            // The `*_truncated` flags are only set once both reads finish,
+            // which the timeout may have cut short; a buffer at the cap was
+            // clipped either way.
             let out_capped = out_buf.len() >= opts.max_output_bytes;
             let err_capped = err_buf.len() >= opts.max_output_bytes;
             let stdout_s = render_stream(&out_buf, out_capped, opts.max_output_bytes);
@@ -231,19 +216,15 @@ async fn wait_for_cancel(cancel: Option<&CancellationToken>) {
     }
 }
 
-/// Kills the child's whole process group (Unix) or just the child (Windows),
-/// then waits so the exit is reaped instead of leaving a zombie. Bounded: if
-/// something somehow survives SIGKILL, give up rather than hang the turn —
-/// `kill_on_drop` remains as a backstop.
+/// Kills the child's whole process group (Unix) or just the child (Windows)
+/// and reaps it, giving up after [`REAP_TIMEOUT`] rather than hang the turn.
 async fn kill_and_reap(child: &mut tokio::process::Child) {
     #[cfg(target_family = "unix")]
     {
         use nix::sys::signal::{Signal, killpg};
         use nix::unistd::Pid;
-        // `process_group(0)` at spawn made the child its own group leader, so
-        // its pid doubles as the pgid and the group signal reaches every
-        // descendant (`sh -c "sleep 999 &"` included). The `> 0` filter guards
-        // against pid 0, which would otherwise signal *our* group.
+        // The child leads its own group, so its pid is the pgid. Pid 0 would
+        // signal our own group, hence the `> 0`.
         if let Some(pgid) = child.id().map(|pid| pid as i32).filter(|&pgid| pgid > 0)
             && let Err(e) = killpg(Pid::from_raw(pgid), Signal::SIGKILL)
         {
@@ -260,18 +241,10 @@ async fn kill_and_reap(child: &mut tokio::process::Child) {
     }
 }
 
-/// Executes an arbitrary shell command and returns stdout on success, or a
-/// combined stdout+stderr diagnostic string on failure.
-///
-/// Uses `sh -c` on Unix and `cmd /C` on Windows, with the turn's work
-/// directory as the working directory. Non-zero exit codes produce a
-/// descriptive string rather than an error so the LLM can interpret and react
-/// to the failure output. The command is killed if the turn is cancelled.
-///
-/// Only registered when `allow_shell` is enabled (see
-/// [`super::SystemToolExecutor::build`]). Note that absolute paths inside the
-/// shell command are not blocked at the application layer — OS-level
-/// sandboxing is required for that.
+/// Runs a shell command in the turn's working directory (`TurnContext::cwd`)
+/// with [`run_command`]'s limits. Only registered when `allow_shell` is set.
+/// Paths inside the command aren't confined to the work directory; that
+/// needs OS-level sandboxing.
 pub struct ExecuteCommandTool;
 
 #[derive(Deserialize)]

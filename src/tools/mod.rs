@@ -149,10 +149,8 @@ pub trait ToolHandler: Send + Sync {
     }
 }
 
-/// Routes LLM tool-call requests to the correct [`ToolHandler`].
-///
-/// The production implementation is [`SystemToolExecutor`]. Tests typically use
-/// lightweight mock implementations of this trait.
+/// Routes LLM tool calls to the right [`ToolHandler`]; the built-in
+/// implementation is [`SystemToolExecutor`].
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {
     /// Returns the list of tools available to the LLM.
@@ -173,22 +171,15 @@ pub trait ToolExecutor: Send + Sync {
     }
 }
 
-/// The default tool executor used by the agent runtime.
+/// The default tool executor: a registry of [`ToolHandler`]s keyed by name.
 ///
-/// Maintains a registry of [`ToolHandler`]s keyed by tool name and dispatches
-/// LLM tool calls to the appropriate handler. Built-in tools are registered via
-/// [`register_builtins`](Self::register_builtins); MCP tools are added during
-/// [`build`](Self::build).
-///
-/// Cloning is cheap and yields an independent registry sharing the same
-/// handlers — a snapshot of the tool set as it exists at that moment. The
-/// runtime uses this to hand [`DelegateTool`] a view that predates its own
-/// registration, so subagents can never delegate recursively.
+/// Cloning is cheap and gives an independent registry sharing the same
+/// handlers: a snapshot of the tool set (how [`DelegateTool`] gets one
+/// without itself in it).
 #[derive(Clone)]
 pub struct SystemToolExecutor {
-    /// Ordered so `list_tools` returns the same order in every process: the
-    /// tool list leads each LLM request, so a stable order keeps the
-    /// provider's prompt cache reusable across restarts and resumed sessions.
+    /// Ordered, so the tool list that leads every request is the same in
+    /// every process and the provider's prompt cache stays reusable.
     handlers: BTreeMap<String, Arc<dyn ToolHandler>>,
 }
 
@@ -200,15 +191,9 @@ impl SystemToolExecutor {
         }
     }
 
-    /// Builds a fully-configured executor: registers built-in tools then connects
-    /// to all configured MCP servers and registers their tools.
-    ///
-    /// This is the one place `allow_shell` is enforced: when it's `false` the
-    /// `execute_command` tool is never registered, so the LLM neither sees it
-    /// nor can call it.
-    ///
-    /// Returns the executor alongside [`McpServerStatus`](crate::mcp::McpServerStatus)
-    /// entries for each server so callers can inspect which connections succeeded.
+    /// An executor with the built-in tools and those of every configured MCP
+    /// server, plus each server's
+    /// [`McpServerStatus`](crate::mcp::McpServerStatus).
     pub async fn build(
         mcp_configs: &BTreeMap<String, McpServerConfig>,
         allow_shell: bool,
@@ -223,10 +208,8 @@ impl SystemToolExecutor {
     }
 
     /// Registers the built-in tools: `read_file`, `write_file`, `edit_file`,
-    /// `list_dir`, `search`, `web_fetch`, and — when `allow_shell` is `true`
-    /// — `execute_command`. This is the one place `allow_shell` is enforced:
-    /// when it's `false`, `execute_command` is simply never registered, so
-    /// the LLM neither sees it nor can call it.
+    /// `list_dir`, `search`, `web_fetch`, and `execute_command` only when
+    /// `allow_shell` is set (the one place it's enforced).
     pub fn register_builtins(&mut self, allow_shell: bool) {
         if allow_shell {
             self.register(Box::new(execute_command::ExecuteCommandTool));

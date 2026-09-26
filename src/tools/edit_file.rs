@@ -20,12 +20,8 @@ use super::write_file::write_text;
 /// Applies a find-and-replace edit to `content`, returning the edited text
 /// and how many occurrences were replaced.
 ///
-/// `old_string` must occur in `content` at least once; unless `replace_all`
-/// is set it must occur *exactly* once, so a call can't silently touch more
-/// of the file than the caller intended to.
-///
-/// Pure and I/O-free; [`EditFileTool`] supplies the current content via
-/// `client_io`/local disk and writes the result back the same way.
+/// `old_string` must occur exactly once, or at least once with
+/// `replace_all`, so a call can't touch more of the file than intended.
 pub(crate) fn apply_edit(
     content: &str,
     old_string: &str,
@@ -72,14 +68,8 @@ fn success_message(path: &Path, count: usize) -> String {
     )
 }
 
-/// Edits a file at the given path by replacing an exact occurrence of one
-/// string with another, without rewriting the rest of the file.
-///
-/// `old_string` must match the file's existing content exactly (including
-/// whitespace/indentation) and must be unique in the file unless
-/// `replace_all` is set. It's a read followed by a write, so both go through
-/// `client_io` when the client provides one, and the path must be inside the
-/// work directory.
+/// Replaces an exact string in a file (see [`apply_edit`]), reading and
+/// writing through `client_io` when the client provides one.
 pub struct EditFileTool;
 
 #[derive(Deserialize)]

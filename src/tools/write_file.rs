@@ -15,13 +15,10 @@ use super::ToolHandler;
 use super::args::parse;
 use super::capabilities::{ToolCapabilities, ToolKindHint};
 
-/// Writes `content` to `path`, asking `turn.client_io` first and falling back
-/// to local `tokio::fs` (creating any missing parent directories) when it
-/// defers. The `client_io` await is raced against `turn.cancel` so an
-/// unresponsive client can't block cancellation.
-///
-/// `path` must already be validated against the work directory; shared by
-/// [`WriteFileTool`] and `edit_file`.
+/// Writes `content` to `path` (already resolved with
+/// `TurnContext::resolve_path`), asking `turn.client_io` first and falling
+/// back to local disk, creating missing parent directories. The client is
+/// raced against `turn.cancel`. Shared by [`WriteFileTool`] and `edit_file`.
 pub(crate) async fn write_text(path: &Path, content: &str, turn: &TurnContext<'_>) -> Result<()> {
     tokio::select! {
         _ = turn.cancel.cancelled() => Err(Error::ToolExecutionError(
