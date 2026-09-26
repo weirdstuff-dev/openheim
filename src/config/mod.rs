@@ -19,13 +19,9 @@ use crate::error::{Error, Result};
 
 const DEFAULT_CONFIG: &str = include_str!("config.toml.default");
 
-/// `(provider name, default api_base, default model)` for openheim's
-/// first-class providers. This is the one place these values are written —
-/// `client::OpenheimBuilder`'s programmatic path (no config file) reads it
-/// directly via [`builtin_provider_defaults`], and `config.toml.default`'s
-/// `[providers.*]` sections are hand-kept in sync with it (enforced by
-/// `config_toml_default_matches_builtin_provider_defaults` below) rather than
-/// each independently guessing at "the current default model".
+/// `(provider name, default api_base, default model)` for the built-in
+/// providers, used by `OpenheimBuilder`'s programmatic mode.
+/// `config.toml.default` must match (a test checks).
 const BUILTIN_PROVIDER_DEFAULTS: &[(&str, &str, &str)] = &[
     ("openai", "https://api.openai.com/v1", "gpt-4o"),
     (
@@ -40,10 +36,8 @@ const BUILTIN_PROVIDER_DEFAULTS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// Looks up `(api_base, default_model)` for a built-in provider name.
-/// Anything not in [`BUILTIN_PROVIDER_DEFAULTS`] (e.g. a fully custom
-/// OpenAI-compatible endpoint) falls back to the `openai` entry, since that's
-/// the wire format `OpenAiCompatibleClient` speaks.
+/// `(api_base, default_model)` for a built-in provider name; any other name
+/// gets the `openai` entry, whose wire format compatible endpoints speak.
 pub(crate) fn builtin_provider_defaults(provider: &str) -> (&'static str, &'static str) {
     BUILTIN_PROVIDER_DEFAULTS
         .iter()
@@ -67,19 +61,13 @@ pub fn config_path() -> Result<PathBuf> {
 
 const DEFAULT_SYSTEM_MD: &str = "You are Openheim, a multipurpose, multiprovider LLM agent.";
 
-/// Initialize the config file at ~/.openheim/config.toml with the default template.
-/// Also writes ~/.openheim/system.md if it does not already exist.
-/// Returns the path of the config file written.
-///
-/// Errors if `config.toml` already exists. `system.md` is written regardless —
-/// so existing users who already have a config can still run `openheim init` to
-/// get their `system.md` created.
+/// Writes the default `~/.openheim/config.toml` and returns its path, and
+/// writes `~/.openheim/system.md` if missing. Fails if `config.toml` already
+/// exists, but still writes `system.md` first.
 pub fn init_config() -> Result<PathBuf> {
     let dir = config_dir()?;
     std::fs::create_dir_all(&dir)?;
 
-    // Always write system.md first so existing users who re-run `init` get it
-    // even though config.toml already exists and will cause an early return below.
     let system_path = dir.join("system.md");
     let system_written = !system_path.exists();
     if system_written {
@@ -132,25 +120,15 @@ pub fn load_config() -> Result<AppConfig> {
     load_config_from(config_path()?)
 }
 
-/// Sets or updates the `theme_color` key inside the `[tui]` table in the
-/// config file at `path`, leaving every other line untouched. Deliberately
-/// not a full TOML round-trip (no `toml_edit` dependency pulled in for one
-/// field): it only ever touches a line that already looks like
-/// `theme_color = "..."` within an existing `[tui]` section (bounded by that
-/// section's header and the next table header or EOF), or — if there is
-/// no `[tui]` section yet — appends a new one at the end of the file.
+/// Sets `theme_color` in the `[tui]` table of the config file at `path`,
+/// leaving every other line untouched: it replaces the existing
+/// `theme_color` line in `[tui]`, adds one, or appends a `[tui]` section.
 ///
-/// Lines alone can't always tell a table header apart: `["a"]` on its own
-/// line is also the last element of a multi-line array, and a multi-line
-/// string can hold anything. So the edited file is parsed before it's
-/// written, and must equal the original with only `tui.theme_color` set;
-/// if it doesn't, the file is left alone and an error is returned.
-///
-/// `name` is interpolated into a TOML basic string rather than run through a
-/// full TOML encoder, so quotes, backslashes, and newlines are rejected
-/// outright instead of being escaped — a caller passing one of those through
-/// (this is `pub`, so an embedder could pass anything) can't break out of
-/// the string and inject arbitrary lines into the config file.
+/// Lines alone can't always tell a table header from array or string
+/// content, so the edited file is parsed first and must equal the original
+/// with only `tui.theme_color` set; otherwise nothing is written and an
+/// error is returned. `name` may not contain quotes, backslashes or
+/// newlines, so it can't break out of its TOML string.
 pub fn save_theme_to_config_at(path: &std::path::Path, name: &str) -> Result<()> {
     if name.contains(['"', '\\', '\n', '\r']) {
         return Err(Error::config(format!(
