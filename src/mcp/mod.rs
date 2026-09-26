@@ -17,8 +17,7 @@ use crate::{
 
 /// Connection status and tool-count summary for a single MCP server.
 ///
-/// Returned by [`crate::OpenheimClient::mcp_servers`] so callers can inspect which
-/// servers connected successfully and how many tools each one exposed.
+/// Returned by [`crate::OpenheimClient::mcp_servers`].
 #[derive(Debug, Clone, Serialize)]
 pub struct McpServerStatus {
     /// Name of the server as defined in the configuration.
@@ -38,10 +37,8 @@ pub struct McpServerStatus {
     pub error: Option<String>,
 }
 
-/// How long a server gets to connect and list its tools. Generous, since a
-/// stdio server launched through `npx`/`uvx` may download itself first; a
-/// server that takes longer is reported as failed instead of holding up
-/// startup indefinitely.
+/// How long a server gets to connect and list its tools; generous, since an
+/// `npx`/`uvx` server may download itself first.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Longest tool name every supported provider accepts.
@@ -49,10 +46,9 @@ const MAX_TOOL_NAME_LEN: usize = 64;
 
 /// Connects to all configured MCP servers and returns their tool handlers and statuses.
 ///
-/// Servers start concurrently, each within [`STARTUP_TIMEOUT`]. Connection
-/// failures are non-fatal: a server that fails to connect (or times out)
-/// produces a [`McpServerStatus`] with `connected: false` and an error
-/// message, and the remaining servers are unaffected.
+/// Servers start concurrently, each within [`STARTUP_TIMEOUT`]. One that
+/// fails or times out gets a [`McpServerStatus`] with `connected: false`;
+/// the others are unaffected.
 pub(crate) async fn load_mcp_tools(
     configs: &BTreeMap<String, McpServerConfig>,
 ) -> (Vec<Box<dyn ToolHandler>>, Vec<McpServerStatus>) {

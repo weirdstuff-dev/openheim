@@ -2,10 +2,9 @@
 //! agent can delegate self-contained tasks to via the `delegate_task` tool
 //! (see [`crate::tools::delegate`]).
 //!
-//! A profile is a Markdown file in `~/.openheim/agents/{name}.md`, discovered the
-//! same way [`crate::memory::SkillsManager`] discovers skill files. The file may start
-//! with a `+++`-delimited TOML frontmatter block describing the profile; the rest
-//! of the file is used verbatim as the subagent's system prompt.
+//! A profile is a Markdown file, `~/.openheim/agents/{name}.md`, optionally
+//! starting with a `+++`-delimited TOML frontmatter block; the rest is the
+//! subagent's system prompt.
 //!
 //! ```markdown
 //! +++
@@ -60,10 +59,8 @@ struct AgentProfileMeta {
     max_iterations: Option<usize>,
 }
 
-/// Discovers and loads [`AgentProfile`]s from `~/.openheim/agents/`.
-///
-/// Mirrors [`crate::memory::SkillsManager`]: a profile is named after its file
-/// (`{name}.md`), and the directory is created on first use if missing.
+/// Loads [`AgentProfile`]s from `~/.openheim/agents/`, each named after its
+/// file (`{name}.md`).
 #[derive(Clone)]
 pub struct SubagentLoader {
     agents_dir: PathBuf,
@@ -77,13 +74,9 @@ impl SubagentLoader {
         Self { agents_dir: dir }
     }
 
-    /// Loads every valid `.md` profile in the agents directory, sorted by name.
-    ///
-    /// Returns no profiles (rather than an error) if the directory doesn't
-    /// exist, so callers aren't forced to create it just to check for
-    /// profiles. A file whose frontmatter fails to parse is skipped with a
-    /// warning rather than failing the whole load — one malformed profile
-    /// shouldn't prevent the agent from starting.
+    /// Loads every valid `.md` profile in the agents directory, sorted by
+    /// name; none if the directory doesn't exist. A file whose frontmatter
+    /// doesn't parse is skipped with a warning, so it can't stop startup.
     pub fn load(&self) -> Result<Vec<AgentProfile>> {
         if !self.agents_dir.exists() {
             return Ok(Vec::new());

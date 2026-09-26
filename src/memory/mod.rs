@@ -1,11 +1,8 @@
 //! Agent memory: persisted conversation history, skill files, the system
 //! identity, and the prompt assembly that stitches them into an LLM request.
 //!
-//! This module is *not* retrieval-augmented generation — nothing here embeds
-//! or searches anything. It is the agent's record of its own sessions plus
-//! the static instructions it is given. Tool-driven long-term memory
-//! (`remember` / `search_memory` / `edit_memory` / `forget`) lives in
-//! `crate::rag` (needs the `rag` feature).
+//! Nothing here embeds or searches; tool-driven long-term memory
+//! (`remember`, `search_memory`, …) is `crate::rag` (feature `rag`).
 //!
 //! | Submodule | Responsibility |
 //! |-----------|----------------|
@@ -84,9 +81,8 @@ impl MemoryContext {
     /// with the system identity and the requested skills that load (a missing
     /// one is logged and left out).
     ///
-    /// For **new** conversations, `default_skills` are merged with `skill_names` (defaults
-    /// first, deduplicated) and persisted on the conversation. For **existing** conversations
-    /// the stored skill list is used as-is, preserving the state from when the session began.
+    /// A new conversation saves `default_skills` followed by `skill_names`
+    /// (deduplicated); an existing one keeps the list it was saved with.
     pub fn prepare(
         &self,
         chat_id: Option<Uuid>,
@@ -94,8 +90,6 @@ impl MemoryContext {
         model: Option<String>,
         provider: Option<String>,
     ) -> Result<(Conversation, PromptBuilder)> {
-        // Always pass merged skills to resolve_conversation. For existing conversations
-        // the parameter is ignored (stored list wins); for new ones it gets persisted.
         let merged_skills = merge_skills(&self.default_skills, skill_names);
 
         let conversation =
@@ -109,10 +103,8 @@ impl MemoryContext {
         tracing::debug!(chars = system_content.len(), "prepare: loaded system.md");
         builder.set_system(system_content);
 
-        // Load skills from the conversation's stored list (already contains merged
-        // defaults for new conversations, or the original set for existing ones).
-        // One that no longer loads (deleted or renamed since) is left out
-        // rather than failing this and every later turn of the conversation.
+        // A skill that no longer loads (deleted or renamed since) is left out
+        // rather than failing this and every later turn.
         for name in &conversation.meta.skills {
             match self.skills.load_skill(name) {
                 Ok(content) => {

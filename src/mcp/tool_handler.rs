@@ -11,16 +11,13 @@ use crate::{
 
 use super::client::McpClient;
 
-/// [`ToolHandler`] implementation that proxies calls to a remote MCP tool.
-///
-/// The tool is exposed to the LLM under a namespaced name
-/// (`{server_prefix}__{tool_name}`) to prevent collisions when multiple MCP
-/// servers expose tools with the same name.
+/// A [`ToolHandler`] that proxies calls to an MCP server's tool, offered to
+/// the LLM as `{server}__{tool}` so servers can't collide.
 pub struct McpToolHandler {
     client: Arc<McpClient>,
     /// Original tool name as reported by the MCP server.
     tool_name: String,
-    /// Name exposed to the LLM: `{server_prefix}__{tool_name}`.
+    /// Name offered to the LLM (see `mcp::exposed_tool_name`).
     prefixed_name: String,
     description: String,
     schema: serde_json::Value,
