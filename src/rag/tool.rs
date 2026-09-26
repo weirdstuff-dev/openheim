@@ -1,7 +1,5 @@
-//! Built-in tools: `remember`, `search_memory`, `edit_memory`, and `forget` —
-//! the agent's long-term memory, used only when it decides to (typically
-//! because the user asked it to remember, recall, correct, or drop
-//! something).
+//! Built-in tools for long-term memory: `remember`, `search_memory`,
+//! `edit_memory`, and `forget`.
 
 use std::sync::Arc;
 

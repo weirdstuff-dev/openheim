@@ -20,9 +20,8 @@ use crate::error::{Error, Result};
 pub use gemini::GeminiEmbeddingClient;
 pub use openai::OpenAiEmbeddingClient;
 
-/// Largest number of inputs sent in one HTTP request. OpenAI accepts up to
-/// 2048, Gemini 100; 64 keeps individual requests small enough that one
-/// oversized chunk batch can't blow a provider's per-request token limit.
+/// Largest number of inputs per request, well under every provider's limit
+/// (OpenAI 2048, Gemini 100) so a batch can't exceed its token limit.
 pub(crate) const MAX_BATCH: usize = 64;
 
 /// Turns text into fixed-size float vectors.

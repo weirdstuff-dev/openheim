@@ -22,10 +22,8 @@ use crate::{
 /// `session/set_config_option` id for the model selector.
 pub(super) const MODEL_CONFIG_ID: &str = "model";
 
-/// Every model configured across every provider, tagged with `provider` in
-/// each entry's `_meta` — the `session/new`, `session/load`, and
-/// `session/set_config_option` shape for advertising available models as a
-/// `select`-kind session config option.
+/// The model selector config option: every configured model, each tagged
+/// with its `provider` in `_meta`.
 pub(super) fn session_model_config_option(
     app_config: &AppConfig,
     current_model: &str,
@@ -81,10 +79,8 @@ pub(super) fn session_mode_state(current_mode: AgentMode) -> SessionModeState {
     )
 }
 
-/// Wraps reasoning text in a plain text block tagged `_meta.kind == "thinking"`
-/// — the tunnel ACP uses for thinking content (ACP's own content model has no
-/// thinking variant; the `thinking` entry in the session metadata advertised
-/// by `initialize` documents this convention for clients).
+/// Wraps reasoning text in a text block tagged `_meta.kind == "thinking"`,
+/// since ACP has no thinking content; `initialize` advertises the tag.
 pub(super) fn thinking_chunk(content: String) -> TextContent {
     let mut meta = serde_json::Map::new();
     meta.insert(
@@ -94,14 +90,9 @@ pub(super) fn thinking_chunk(content: String) -> TextContent {
     TextContent::new(content).meta(meta)
 }
 
-/// Replays persisted history to a (re)attaching connection as the same
-/// stream of session updates a live turn would have produced, so a reloaded
-/// session renders identically to one that stayed open — including assistant
-/// thinking blocks, which are tunneled through `agent_message_chunk` with
-/// `content._meta.kind == "thinking"` exactly as the live streaming path
-/// does. Which blocks are replayed, and in what order, is
-/// [`Message::transcript`]'s call (shared with the TUI); this only picks
-/// the `SessionUpdate`.
+/// Replays saved history as the session updates a live turn would have sent,
+/// thinking included. [`Message::transcript`] decides what is shown; this
+/// only picks each `SessionUpdate`.
 pub(crate) fn replay_history_messages<F>(
     messages: &[Message],
     executor: &dyn ToolExecutor,
@@ -158,9 +149,8 @@ pub(crate) fn replay_history_messages<F>(
     }
 }
 
-/// Maps a [`ToolKindHint`] (a tool's own [`capabilities()`](crate::tools::ToolHandler::capabilities)
-/// declaration) onto the closest ACP [`ToolKind`], purely for client UI
-/// treatment (icons etc.) — has no bearing on execution.
+/// Maps a tool's [`ToolKindHint`] onto the closest ACP [`ToolKind`], for the
+/// client's UI only.
 pub(super) fn acp_tool_kind(hint: ToolKindHint) -> ToolKind {
     match hint {
         ToolKindHint::Read => ToolKind::Read,

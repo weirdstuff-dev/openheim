@@ -49,9 +49,7 @@ pub async fn serve(
     let state_set_mode = state.clone();
     let state_cancel = state.clone();
 
-    // Client capabilities are per-connection (learned once, at `initialize`),
-    // not per-session — `serve()` runs fresh per connection even though
-    // `AgentState` itself is shared, so this is scoped correctly here.
+    // Client capabilities are per connection, learned at `initialize`.
     let client_capabilities = Arc::new(RwLock::new(ClientCapabilities::default()));
     let client_capabilities_init = client_capabilities.clone();
     let client_capabilities_prompt = client_capabilities.clone();
@@ -77,9 +75,7 @@ pub async fn serve(
                 if let Ok(val) = serde_json::to_value(state_init.executor.list_tools()) {
                     meta.insert("tools".to_string(), val);
                 }
-                // Resolved sandbox root, shared by every session this connection
-                // opens — not per-session, so `initialize` (not `session/new`)
-                // is the natural home for it.
+                // The sandbox root, the same for every session.
                 meta.insert(
                     "work_dir".to_string(),
                     serde_json::Value::String(state_init.work_dir.display().to_string()),
@@ -160,13 +156,9 @@ pub async fn serve(
                     client_capabilities: client_capabilities_prompt.clone(),
                 }) as Arc<dyn ClientIo>;
 
-                // The prompt turn can run for a long time (many LLM/tool round-trips)
-                // and, once permission requests land, will itself await replies from
-                // the client. Handlers run on the single-task event loop, which can't
-                // read new messages (including those replies, or a session/cancel
-                // notification) while a handler is executing — so this must be moved
-                // off the event loop via `cx.spawn`, with the response sent from
-                // inside the spawned task once the turn actually finishes.
+                // The turn runs in its own task: handlers block the event loop,
+                // which must stay free to read the client's replies to
+                // permission requests and `session/cancel`.
                 cx.spawn(async move {
                     let prompt_blocks = match prompt_blocks {
                         Ok(blocks) => blocks,
@@ -197,9 +189,8 @@ pub async fn serve(
                         )
                         .await;
 
-                    // A spawned task returning an error shuts down the whole
-                    // connection, so per-turn failures must never propagate past
-                    // here — they're reported via the response instead.
+                    // An error returned from this task would close the
+                    // connection, so a failed turn is reported in the response.
                     let respond_result = match result {
                         Ok(stop_reason) => {
                             responder.respond(PromptResponse::new(map_stop_reason(stop_reason)))
@@ -328,13 +319,9 @@ pub async fn serve(
             async move |message: Dispatch,
                         _cx: ConnectionTo<Client>|
                         -> agent_client_protocol::Result<Handled<Dispatch>> {
-                // Responses to requests *this agent* sent (e.g.
-                // session/request_permission, fs/read_text_file) are also
-                // routed through here if nothing else claims them first.
-                // `respond_with_error` would convert a legitimate success
-                // response into an error delivered to whatever is awaiting
-                // it — so those must be declined, not rejected, letting the
-                // crate's own default handling forward the real result.
+                // Responses to this agent's own requests (permission, fs) can
+                // land here too; decline them so the crate forwards them to
+                // whoever is waiting.
                 match message {
                     Dispatch::Response(..) => {
                         return Ok(Handled::No {
@@ -356,20 +343,14 @@ pub async fn serve(
         .await
 }
 
-/// Maps an `Error` onto the ACP JSON-RPC error to send back; every handler
-/// goes through here so the same error always gets the same code.
+/// Maps an `Error` onto the JSON-RPC error every handler sends back:
 ///
-/// - `NotFound` (unknown session, …) → `resource_not_found` (-32002).
+/// - `NotFound` → `resource_not_found` (-32002).
 /// - `InvalidArgument` / `ConfigError` → `invalid_params` (-32602): the
-///   client sent something invalid (a malformed session id, unsupported
-///   prompt content, an unknown model or mode). `ParseError` is *not* here:
-///   it means openheim failed to parse something itself (e.g. the model's
-///   own tool-call JSON when converting history), which is a server-side
-///   failure.
-/// - `SessionLocked` / `SessionBusy` carry structured fields a caller needs
-///   to build a "busy, retry" UX instead of a generic failure, encoded into
-///   `data` so they survive the trip instead of collapsing to
-///   `e.to_string()`.
+///   client sent something invalid. (`ParseError` is openheim's own failure,
+///   so it's internal.)
+/// - `SessionLocked` / `SessionBusy` → `internal_error` with their fields as
+///   structured `data`, so a client can offer "busy, retry".
 /// - Anything else → `internal_error` (-32603).
 ///
 /// Every case but the structured two puts `e.to_string()` in `data`.

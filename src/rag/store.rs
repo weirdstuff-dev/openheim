@@ -10,14 +10,11 @@
 //! | `memories_fts` | FTS5 index over `memories.content`, kept in sync by triggers |
 //! | `vec_memories` | `vec0` virtual table keyed by memory id, cosine distance (only once an embedder is configured) |
 //!
-//! The `vec0` table needs a fixed dimension at creation time, which is only
-//! known once the first embedding comes back — so it's created lazily by
-//! [`VectorStore::ensure_embedding_space`]. If the model or dimension later
-//! differs from what's recorded, the vectors are dropped and re-embedded from
-//! the stored text (see [`VectorStore::unembedded`]): vectors from two
-//! models aren't comparable, and a silent mix would return nonsense. Notes
-//! written while no embedder was configured show up in `unembedded` too, so
-//! enabling embeddings later back-fills them.
+//! `vec0` needs its dimension up front, so the table is created by
+//! [`VectorStore::ensure_embedding_space`] once the first embedding arrives.
+//! A different model or dimension later drops the vectors (vectors from two
+//! models aren't comparable); they, and notes saved with no embedder, are
+//! re-embedded from their text (see [`VectorStore::unembedded`]).
 //!
 //! [`rusqlite::Connection`] is `!Sync`, so it sits behind a `Mutex`; every
 //! method here is blocking and callers run them on `spawn_blocking`.
