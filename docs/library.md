@@ -211,7 +211,7 @@ let session = client
     .new_session()
     .model("gpt-4o")                          // optional — overrides the config default
     .skills(vec!["rust".into(), "tdd".into()]) // optional — names of ~/.openheim/skills/*.md
-    .cwd("/my/workspace")                      // optional — used for history filtering
+    .cwd("/my/workspace")                      // optional — tools' working directory, inside work_dir
     .start()
     .await?;
 

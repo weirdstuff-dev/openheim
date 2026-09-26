@@ -310,6 +310,7 @@ async fn main() -> openheim::Result<()> {
         cancel: &CancellationToken::new(),
         permission_gate: &(Arc::new(AllowAll) as Arc<dyn PermissionGate>),
         work_dir: &work_dir,
+        cwd: &work_dir,
         client_io: &openheim::core::client_io::NoClientIo,
     };
 
