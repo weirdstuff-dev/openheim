@@ -157,7 +157,7 @@ let client = OpenheimClient::builder()
     .await?;
 ```
 
-**`.work_dir(path)`** — sets the root directory the agent may read and write. The agent cannot access files outside this tree. Relative paths in tool arguments are resolved against this directory. Defaults to the directory from which the process was invoked when not set in the builder or config file.
+**`.work_dir(path)`** — sets the root directory the agent may read and write. The agent cannot access files outside this tree. Relative paths in tool arguments are resolved against this directory. Defaults to the directory from which the process was invoked when not set in the builder or config file. Whichever `work_dir` is used is resolved in `build()` (relative to the current directory, symlinks followed) and must be an existing directory, or `build()` fails with `Error::ConfigError`.
 
 **`.allow_shell(bool)`** — controls whether the `execute_command` tool is exposed to the LLM. When `false` the tool is removed from the tool list entirely; the LLM never sees it and cannot request it. Defaults to `false`.
 

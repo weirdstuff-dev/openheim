@@ -15,7 +15,7 @@ openheim init
 | `default_provider` | string | — | Provider to use when no `--model` override is given (must match a key under `[providers]`) |
 | `max_iterations` | integer | `10` | Maximum number of agent loop iterations per prompt before stopping |
 | `default_skills` | string[] | `[]` | Skills loaded automatically in every new session. Merged with per-session `--skills`; defaults appear first, duplicates removed. |
-| `work_dir` | path | cwd at invocation | Root directory the agent is allowed to read and write. The agent cannot access files outside this tree. When unset, defaults to the directory from which openheim was invoked. |
+| `work_dir` | path | cwd at invocation | Root directory the agent is allowed to read and write. The agent cannot access files outside this tree. When unset, defaults to the directory from which openheim was invoked. A relative path is taken from that directory too (no `~` expansion). It's resolved at startup, symlinks followed, and must be an existing directory, or openheim refuses to start. |
 | `allow_shell` | boolean | `false` | Whether to expose the `execute_command` shell tool to the LLM. Disabled by default — set to `true` to expose the tool. When `false`, the LLM never sees it in its tool list. |
 | `data_dir` | path | `~/.openheim` | Root directory for openheim's own data: conversation history (`history/`), skills (`skills/`), `system.md`, subagent profiles (`agents/`), and the long-term memory database (`memory.db`, unless `[memory].db_path` overrides it). The config file itself is still read from `~/.openheim/config.toml`. Lets two agents in one process keep separate state, or a sandboxed run stay out of the real home directory. |
 
