@@ -101,9 +101,9 @@ The following implements a provider that speaks a hypothetical OpenAI-compatible
 
 ```rust
 use async_trait::async_trait;
+use openheim::core::llm::LlmClient;
 use openheim::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool};
 use openheim::error::{Error, Result};
-use openheim::llm::LlmClient;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -262,7 +262,7 @@ If you override `send_streaming`, check that the stream actually finished: a con
 `RetryClient` wraps any `LlmClient` and retries on transient errors (rate limits, 5xx, network timeouts, `IncompleteResponse`) with exponential backoff. Non-streaming `send` calls are retried up to three times; streaming `send_streaming` calls are retried only while it is still safe — i.e. before your provider has emitted the first chunk to the caller. Once the first token has been forwarded, a mid-stream failure is returned as-is rather than replayed (which would duplicate output):
 
 ```rust
-use openheim::llm::RetryClient;
+use openheim::core::llm::RetryClient;
 use std::sync::Arc;
 
 let base_provider = MyCustomProvider::new(
@@ -284,7 +284,7 @@ use openheim::core::models::Message;
 use openheim::core::permission::{AllowAll, PermissionGate};
 use openheim::core::turn::TurnContext;
 use openheim::config::load_config;
-use openheim::llm::RetryClient;
+use openheim::core::llm::RetryClient;
 use openheim::tools::SystemToolExecutor;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -340,9 +340,9 @@ Use a mock `LlmClient` to test prompt logic without making real API calls. The a
 ```rust
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
+use openheim::core::llm::LlmClient;
 use openheim::core::models::{Choice, Message, Role, Tool};
 use openheim::error::{Error, Result};
-use openheim::llm::LlmClient;
 
 struct MockLlm {
     responses: Mutex<Vec<Choice>>,

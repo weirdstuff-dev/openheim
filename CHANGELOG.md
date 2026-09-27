@@ -38,6 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   | `transport::ws::{FsRequest, FsResponse, FsRequestEnvelope, FsReply, FileEntry}` | the JSON shapes in `docs/api.md` |
 
   `config::ThinkingMode`, the type of `ProviderConfig::thinking`, was never exported; it is now.
+- **Each public item has one path.** The crate root no longer re-exports the `agent`, `llm` and `models` modules, and `tools::capabilities` is private. Use `openheim::core::{agent, llm, models}::…` (the most used types, like `Message`, `StreamEvent` and `LlmClient`, are still at the crate root too) and `openheim::tools::{ToolCapabilities, ToolKindHint, ApprovalScope}`.
+- **The `acp` feature follows `agent-client-protocol`'s major version.** Its API is built on that crate's types (`acp::serve` takes its transports, `acp::schema` is its wire vocabulary), so a new major version of it will be a breaking openheim release. If you also depend on `agent-client-protocol` directly, ask for the same major version (2.x today) so one copy resolves.
 
 ### Fixed
 
