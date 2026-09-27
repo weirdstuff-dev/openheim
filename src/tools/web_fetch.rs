@@ -196,6 +196,11 @@ fn is_disallowed_ip(ip: IpAddr) -> bool {
                 || a >= 240 // reserved and broadcast, 240.0.0.0/4
         }
         IpAddr::V6(v6) => {
+            // `::1` and `::` also look IPv4-compatible (`0.0.0.1`,
+            // `0.0.0.0`); refuse them for what they are, not by that.
+            if v6.is_loopback() || v6.is_unspecified() {
+                return true;
+            }
             // Addresses that carry an IPv4 address reach it (or are
             // translated to it), so it gets the IPv4 checks:
             // `::ffff:169.254.169.254` and `64:ff9b::a9fe:a9fe` are both
@@ -204,9 +209,7 @@ fn is_disallowed_ip(ip: IpAddr) -> bool {
                 return is_disallowed_ip(IpAddr::V4(v4));
             }
             let s = v6.segments();
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast() // ff00::/8
+            v6.is_multicast() // ff00::/8
                 || (s[0] & 0xfe00) == 0xfc00 // unique local, fc00::/7
                 || (s[0] & 0xffc0) == 0xfe80 // link-local, fe80::/10
                 || (s[0] & 0xffc0) == 0xfec0 // site-local (deprecated), fec0::/10
