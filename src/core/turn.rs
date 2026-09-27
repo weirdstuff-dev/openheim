@@ -20,6 +20,7 @@ use crate::error::Result;
 /// A tool that runs nested turns ([`crate::tools::DelegateTool`]) passes it
 /// straight through, so a subagent is cancelled with its parent and asks the
 /// same permission gate (wrapped so each request names the subagent).
+#[non_exhaustive]
 pub struct TurnContext<'a> {
     /// Fires when the turn is cancelled; long-running tools should race
     /// their work against it.
@@ -38,7 +39,29 @@ pub struct TurnContext<'a> {
     pub client_io: &'a dyn ClientIo,
 }
 
-impl TurnContext<'_> {
+impl<'a> TurnContext<'a> {
+    /// A context whose `cwd` is `work_dir`; set another with
+    /// [`Self::with_cwd`].
+    pub fn new(
+        cancel: &'a CancellationToken,
+        permission_gate: &'a Arc<dyn PermissionGate>,
+        work_dir: &'a Path,
+        client_io: &'a dyn ClientIo,
+    ) -> Self {
+        Self {
+            cancel,
+            permission_gate,
+            work_dir,
+            cwd: work_dir,
+            client_io,
+        }
+    }
+
+    pub fn with_cwd(mut self, cwd: &'a Path) -> Self {
+        self.cwd = cwd;
+        self
+    }
+
     /// `requested` resolved against [`Self::cwd`] and checked to lie inside
     /// [`Self::work_dir`]; what every filesystem tool opens. See
     /// [`crate::tools::sandbox::validate_path_from`].

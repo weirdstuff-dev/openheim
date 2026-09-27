@@ -16,6 +16,7 @@ pub(super) const REDACTED: &str = "<redacted>";
 /// Public view of [`AppConfig`]. See the module docs for why it's an
 /// allow-list.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct PublicConfig {
     pub default_provider: String,
     pub max_iterations: usize,
@@ -30,6 +31,7 @@ pub struct PublicConfig {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct PublicTuiConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme_color: Option<String>,
@@ -38,6 +40,7 @@ pub struct PublicTuiConfig {
 /// A provider entry without its API key. `api_base` has any credentials or
 /// query string removed.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct PublicProviderConfig {
     /// Resolved, so it's present even when the config infers it from the name.
     pub kind: ProviderKind,
@@ -59,6 +62,7 @@ pub struct PublicProviderConfig {
 /// carry tokens), `env`/`headers` keep their keys but not their values, and
 /// `url` is scrubbed like a provider's `api_base`.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct PublicMcpServerConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
@@ -70,6 +74,7 @@ pub struct PublicMcpServerConfig {
 
 /// The `[memory]` section without `db_path` (a local filesystem path).
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct PublicMemoryConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedding_provider: Option<String>,

@@ -763,7 +763,7 @@ mod tests {
         let (cancel, cancel_rx) = mpsc::unbounded_channel();
         let app = App::new(
             AgentConfig::default(),
-            AppConfig::for_tests("mock"),
+            AppConfig::new("mock"),
             RuntimePaths {
                 data_dir: "/nonexistent/openheim".into(),
                 config_path: "/nonexistent/openheim/config.toml".into(),

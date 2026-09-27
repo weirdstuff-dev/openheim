@@ -48,6 +48,7 @@ async fn send_discarding_chunks<C: LlmClient + ?Sized>(
 
 /// A single streaming chunk produced during an LLM call.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum LlmChunk {
     /// A token or partial text from the model's response.
     Text(String),

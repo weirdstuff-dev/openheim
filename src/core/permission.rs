@@ -13,6 +13,7 @@ use crate::tools::{ApprovalScope, ToolExecutor};
 
 /// The user's (or embedder's) decision on a single tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PermissionDecision {
     /// Allow this call only.
     AllowOnce,

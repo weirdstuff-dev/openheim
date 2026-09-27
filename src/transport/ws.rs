@@ -83,6 +83,7 @@ enum WsOutbound {
 /// reply so a client with several requests in flight can tell which reply
 /// (or error) belongs to which: `{"action": "read", "path": "a.txt", "id": 7}`.
 #[derive(Debug, Deserialize)]
+#[non_exhaustive]
 pub struct FsRequestEnvelope {
     #[serde(default)]
     pub id: Option<Value>,
@@ -94,6 +95,7 @@ pub struct FsRequestEnvelope {
 /// for unsolicited messages (the connection greeting, watcher events, an
 /// unparseable payload).
 #[derive(Debug, Serialize)]
+#[non_exhaustive]
 pub struct FsReply {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Value>,
@@ -109,6 +111,7 @@ impl FsReply {
 
 /// Entry in the file tree
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[non_exhaustive]
 pub struct FileEntry {
     pub path: String,
     pub name: String,
@@ -122,6 +125,7 @@ pub struct FileEntry {
 /// Requests from the frontend to the filesystem WebSocket
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action")]
+#[non_exhaustive]
 pub enum FsRequest {
     /// Initialize watching on a workspace directory
     #[serde(rename = "watch")]
@@ -162,6 +166,7 @@ pub enum FsRequest {
 /// Responses/events from the filesystem WebSocket to the frontend
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "type")]
+#[non_exhaustive]
 pub enum FsResponse {
     #[serde(rename = "connected")]
     Connected { message: String },

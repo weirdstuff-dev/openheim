@@ -27,6 +27,7 @@ use crate::error::{Error, Result};
 
 /// A user-defined subagent persona loaded from `~/.openheim/agents/{name}.md`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct AgentProfile {
     /// Derived from the filename (without the `.md` extension).
     pub name: String,

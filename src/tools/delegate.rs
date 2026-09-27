@@ -363,7 +363,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn sample_app_config() -> AppConfig {
-        AppConfig::for_tests("mock")
+        AppConfig::new("mock")
     }
 
     fn sample_agent_config() -> AgentConfig {

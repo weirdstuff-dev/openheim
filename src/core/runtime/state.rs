@@ -590,6 +590,7 @@ fn tool_cwd(cwd: &Path, work_dir: &Path) -> PathBuf {
 }
 
 /// The result of [`AgentState::load_session`].
+#[non_exhaustive]
 pub struct LoadedSession {
     /// The mode the session is live under.
     pub mode: AgentMode,
@@ -682,7 +683,7 @@ mod new_session_tests {
     /// A minimal, network-free `AgentState`: one provider/model, empty MCP
     /// servers, everything rooted at a temp `data_dir`.
     async fn sample_state(dir: &std::path::Path) -> AgentState {
-        let mut app_config = AppConfig::for_tests("mock");
+        let mut app_config = AppConfig::new("mock");
         app_config.max_iterations = 5;
         app_config.work_dir = Some(dir.to_path_buf());
         app_config.providers.insert(
