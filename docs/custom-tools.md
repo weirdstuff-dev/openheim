@@ -152,6 +152,8 @@ async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
 A tool that touches the filesystem should validate its path first, and prefer the client's view of the file when there is one:
 
 ```rust
+use openheim::core::client_io::LineRange;
+
 async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
     let v = parse_args(args)?;
     let path = turn.resolve_path(require_str(&v, "path")?)?;

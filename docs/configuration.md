@@ -166,9 +166,9 @@ embedding_provider = "openai"
 embedding_model = "text-embedding-3-small"
 ```
 
-Notes are capped at 4000 characters each. Enabling embeddings later back-fills vectors for existing notes, and changing `embedding_model` (or a model returning a different vector size) re-embeds every note, so switching is safe. The back-fill embeds up to 256 notes per memory tool call, so a large store catches up over several calls; until then, notes without a vector don't show up in semantic search.
+Notes are capped at 4000 characters each. Enabling embeddings later back-fills vectors for existing notes, and changing `embedding_model` (or a model returning a different vector size) re-embeds every note, so switching is safe. The back-fill embeds up to 256 notes per memory tool call, so a large store catches up over several calls. Until a note has a vector, `search_memory` finds it by keyword: those matches are listed first, and the result says how many notes aren't indexed yet.
 
-Memory keeps working when the embeddings provider doesn't. Rate limits, 5xx responses and network errors are retried twice with a short backoff. If embedding still fails, `remember` and `edit_memory` save the note without a vector (it's keyword-searchable at once and embedded by a later back-fill), and `search_memory` falls back to keyword search and says so in its result. A failing back-fill is logged and retried on a later call.
+Memory keeps working when the embeddings provider doesn't. Rate limits (429), server errors (500, 502, 503, 504), timeouts and failed connections are retried twice with a short backoff. If embedding still fails, `remember` and `edit_memory` save the note without a vector (it's keyword-searchable at once and embedded by a later back-fill), and `search_memory` falls back to keyword search and says so in its result, even when nothing matched. A failing back-fill is logged and retried on a later call. A note the provider refuses outright (not a transient error) is skipped by the back-fill until openheim restarts, so it can't hold up the others; it stays keyword-searchable.
 
 In `architect` mode only `search_memory` is available; `remember`, `edit_memory`, and `forget` are treated as writes.
 
