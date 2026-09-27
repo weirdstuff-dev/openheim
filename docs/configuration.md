@@ -6,6 +6,8 @@ Openheim loads its configuration from `~/.openheim/config.toml`. Generate a defa
 openheim init
 ```
 
+A key openheim doesn't know, such as a typo like `allow-shell` for `allow_shell`, is ignored with a warning on stderr naming it (`ignoring unknown config key `allow-shell``). It isn't an error, so a config written for a newer version still loads. Set `RUST_LOG=error` to silence the warnings.
+
 ---
 
 ## Top-level fields
