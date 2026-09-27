@@ -42,7 +42,7 @@ work_dir = "/home/user/projects/myproject"
 
 Every tool result, built-in, MCP or custom, is cut to 128 KiB (with a note saying how much was left out) before it goes into the conversation, since the history is resent with every request.
 
-`web_fetch` is not subject to `work_dir` — it fetches remote URLs, not local files. It's bounded instead by an SSRF guard (rejects loopback/private/link-local addresses, including cloud metadata endpoints), a 20-second timeout, a 256 KiB response cap, and no automatic redirect following.
+`web_fetch` is not subject to `work_dir` — it fetches remote URLs, not local files. It's bounded instead by an SSRF guard (rejects every address that isn't publicly routable unicast: loopback, private, shared/CGNAT, link-local including cloud metadata endpoints, multicast, reserved and documentation ranges, and NAT64/6to4/Teredo addresses that lead to them), a 20-second timeout, a 256 KiB response cap, and no automatic redirect following.
 
 **`allow_shell`** gates whether `execute_command` appears in the tool list sent to the LLM. It defaults to `false` — the LLM never sees the tool and cannot request it. Set it to `true` to expose the tool (bounded as described above).
 

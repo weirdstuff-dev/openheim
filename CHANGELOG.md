@@ -66,6 +66,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **An unreadable session lease no longer locks its session for good.** A lockfile that wasn't a valid lease (for example, left empty by a crash right after it was created) made every later prompt on that session fail with `SessionLocked` ("pid 0 on unknown") until the file was deleted by hand. Such a file is now taken over once it's 10 seconds old; a newer one may still be a lease another process is writing, so it's respected.
 - **MCP tool names are always accepted by the provider.** Tool names were sent as the server reported them, and the server-name prefix kept non-ASCII letters, so one tool named e.g. `fs.read`, or a name over 64 characters, got every request rejected, since the tool list goes out with each one. In the exposed `{server}__{tool}` name, characters other than ASCII letters, digits, `_` and (in the tool part) `-` now become `_`, a name starting with a digit gets a leading `_`, and a name over 64 characters is shortened and ends in a hash of the full name. Names that were already valid are unchanged.
 
+### Security
+
+- **`web_fetch` refuses every non-public address.** Its SSRF guard blocked loopback, private and link-local addresses but let several other non-public ranges through, some of which reach internal services. Now also refused: IPv4 `0.0.0.0/8`, `100.64.0.0/10` (shared address space, used by carrier-grade NAT and Tailscale), `192.0.0.0/24`, `198.18.0.0/15` (benchmarking), `224.0.0.0/4` (multicast) and `240.0.0.0/4` (reserved); IPv6 multicast `ff00::/8`, documentation `2001:db8::/32`, Teredo `2001::/32`, local-use NAT64 `64:ff9b:1::/48`, site-local `fec0::/10` and discard-only `100::/64`. NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) addresses are checked by the IPv4 address they carry, so `64:ff9b::a9fe:a9fe` and `2002:a9fe:a9fe::`, which both reach the cloud metadata address `169.254.169.254`, are refused. IPv6 literals in URLs (`http://[2606:4700::1111]/`) are now checked as addresses; they used to go to DNS with their brackets, where a public one failed to resolve.
+
 ## [0.13.0] - 2026-09-24
 
 ### Added
