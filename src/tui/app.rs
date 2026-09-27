@@ -14,7 +14,9 @@ use crate::{
 
 use super::permission::PendingPermission;
 use super::render::{self, FooterLabels};
-use super::state::{AgentChannels, InputLine, Overlay, PermissionQueue, Theme, Transcript};
+use super::state::{
+    AgentChannels, AgentCommand, InputLine, Overlay, PermissionQueue, Theme, Transcript,
+};
 use super::types::{AgentUpdate, ChatItem, ConfigRow, Screen, Status};
 
 /// What `:help` shows. The welcome screen lists the same commands
@@ -328,10 +330,10 @@ impl App {
             Overlay::ModelPicker { items, selected } => {
                 if key.code == KeyCode::Enter {
                     if let Some((provider, model)) = items.get(*selected) {
-                        let _ = self
-                            .channels
-                            .switch_model
-                            .send((provider.clone(), model.clone()));
+                        let _ = self.channels.commands.send(AgentCommand::SwitchModel {
+                            provider: provider.clone(),
+                            model: model.clone(),
+                        });
                     }
                     self.screen = Screen::Chat;
                     false
@@ -400,7 +402,7 @@ impl App {
                     self.push(ChatItem::UserMessage(line.clone()));
                     self.status = Status::Thinking;
                     self.transcript.pin();
-                    let _ = self.channels.prompt.send(line);
+                    let _ = self.channels.commands.send(AgentCommand::Prompt(line));
                 }
             }
             KeyCode::Char(c) => self.input.insert(c),
@@ -439,7 +441,7 @@ impl App {
             "help" => self.push(ChatItem::SystemInfo(HELP_TEXT.to_string())),
             "new" => self.start_new_session(),
             "sessions" => {
-                let _ = self.channels.list_sessions.send(());
+                let _ = self.channels.commands.send(AgentCommand::ListSessions);
             }
             "config" => {
                 self.overlay = Some(Overlay::ConfigViewer {
@@ -480,10 +482,10 @@ impl App {
                 } else {
                     match self.app_config.resolve(Some(arg)) {
                         Ok(config) => {
-                            let _ = self
-                                .channels
-                                .switch_model
-                                .send((config.provider_name, config.model));
+                            let _ = self.channels.commands.send(AgentCommand::SwitchModel {
+                                provider: config.provider_name,
+                                model: config.model,
+                            });
                         }
                         Err(e) => {
                             self.push(ChatItem::SystemInfo(format!("unknown model: {e}")));
@@ -610,7 +612,12 @@ impl App {
     /// prompts meanwhile, so if creation fails the old session is untouched.
     fn start_new_session(&mut self) {
         self.status = Status::Thinking;
-        if self.channels.new_session.send(()).is_err() {
+        if self
+            .channels
+            .commands
+            .send(AgentCommand::NewSession)
+            .is_err()
+        {
             self.status = Status::Idle;
             self.push(ChatItem::Err(
                 "failed to start new session: agent task is gone".to_string(),
@@ -643,10 +650,10 @@ impl App {
             .cwd
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
-        let _ = self
-            .channels
-            .switch_session
-            .send((meta.id.to_string(), cwd));
+        let _ = self.channels.commands.send(AgentCommand::SwitchSession {
+            id: meta.id.to_string(),
+            cwd,
+        });
     }
 
     pub(super) fn draw(&mut self, f: &mut Frame) {
@@ -749,17 +756,13 @@ mod tests {
         (app, cancel_rx)
     }
 
-    /// A test app plus the receiving ends of its prompt and cancel channels.
+    /// A test app plus the receiving ends of its command and cancel channels.
     fn test_app_with_receivers() -> (
         App,
-        mpsc::UnboundedReceiver<String>,
+        mpsc::UnboundedReceiver<AgentCommand>,
         mpsc::UnboundedReceiver<()>,
     ) {
-        let (prompt, prompt_rx) = mpsc::unbounded_channel();
-        let (switch_model, _) = mpsc::unbounded_channel();
-        let (switch_session, _) = mpsc::unbounded_channel();
-        let (list_sessions, _) = mpsc::unbounded_channel();
-        let (new_session, _) = mpsc::unbounded_channel();
+        let (commands, commands_rx) = mpsc::unbounded_channel();
         let (cancel, cancel_rx) = mpsc::unbounded_channel();
         let app = App::new(
             AgentConfig::default(),
@@ -769,16 +772,9 @@ mod tests {
                 config_path: "/nonexistent/openheim/config.toml".into(),
             },
             vec![],
-            AgentChannels {
-                prompt,
-                switch_model,
-                switch_session,
-                list_sessions,
-                new_session,
-                cancel,
-            },
+            AgentChannels { commands, cancel },
         );
-        (app, prompt_rx, cancel_rx)
+        (app, commands_rx, cancel_rx)
     }
 
     #[test]
@@ -863,7 +859,7 @@ mod tests {
 
     #[test]
     fn paste_inserts_at_the_cursor_without_sending() {
-        let (mut app, mut prompt_rx, _) = test_app_with_receivers();
+        let (mut app, mut commands_rx, _) = test_app_with_receivers();
         for c in "ab".chars() {
             app.handle_key(key(KeyCode::Char(c)));
         }
@@ -873,7 +869,7 @@ mod tests {
 
         assert_eq!(app.input.text(), "aone\ntwo\nb");
         assert_eq!(app.input.cursor(), "aone\ntwo\n".len());
-        assert!(prompt_rx.try_recv().is_err(), "a paste must not send");
+        assert!(commands_rx.try_recv().is_err(), "a paste must not send");
     }
 
     #[test]
@@ -885,21 +881,24 @@ mod tests {
 
     #[test]
     fn enter_sends_a_pasted_prompt_with_its_newlines() {
-        let (mut app, mut prompt_rx, _) = test_app_with_receivers();
+        let (mut app, mut commands_rx, _) = test_app_with_receivers();
         app.handle_paste("line one\nline two");
         app.handle_key(key(KeyCode::Enter));
-        assert_eq!(prompt_rx.try_recv().unwrap(), "line one\nline two");
+        assert_eq!(
+            commands_rx.try_recv().unwrap(),
+            AgentCommand::Prompt("line one\nline two".into())
+        );
         assert_eq!(app.input.text(), "");
     }
 
     #[test]
     fn a_pasted_prompt_keeps_its_indentation() {
-        let (mut app, mut prompt_rx, _) = test_app_with_receivers();
+        let (mut app, mut commands_rx, _) = test_app_with_receivers();
         app.handle_paste("\n\n    fn main() {\n        run();\n    }\n\n");
         app.handle_key(key(KeyCode::Enter));
         assert_eq!(
-            prompt_rx.try_recv().unwrap(),
-            "    fn main() {\n        run();\n    }"
+            commands_rx.try_recv().unwrap(),
+            AgentCommand::Prompt("    fn main() {\n        run();\n    }".into())
         );
     }
 
@@ -912,10 +911,10 @@ mod tests {
 
     #[test]
     fn commands_are_still_trimmed() {
-        let (mut app, mut prompt_rx, _) = test_app_with_receivers();
+        let (mut app, mut commands_rx, _) = test_app_with_receivers();
         app.handle_paste("  \n  :theme  \n");
         app.handle_key(key(KeyCode::Enter));
-        assert!(prompt_rx.try_recv().is_err(), "a command is not a prompt");
+        assert!(commands_rx.try_recv().is_err(), "a command is not a prompt");
         assert!(matches!(app.overlay, Some(Overlay::ThemePicker { .. })));
     }
 
