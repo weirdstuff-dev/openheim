@@ -1,11 +1,12 @@
 use tokio::sync::mpsc;
 
 use crate::config::AgentConfig;
+use crate::core::context::{ContextFitter, Fitted, MAX_OVERFLOW_RETRIES};
 use crate::core::llm::{LlmChunk, LlmClient};
 use crate::core::models::*;
 use crate::core::permission::PermissionRequest;
 use crate::core::turn::TurnContext;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::memory::PromptBuilder;
 use crate::tools::ToolExecutor;
 
@@ -115,25 +116,44 @@ fn answer_missing_tool_results(messages: &[Message]) -> Option<Vec<Message>> {
     Some(repaired)
 }
 
-/// Every LLM call streams, even when nobody watches the chunks: the HTTP
-/// timeout is per read (see `build_http_client`), so only a streamed reply
-/// keeps a long generation from timing out.
-async fn call_llm_streaming(
-    llm: &dyn LlmClient,
+/// One LLM request as it's sent.
+struct Request {
+    /// The system prompt, then the history fitted to the context window.
+    messages: Vec<Message>,
+    fitted: Fitted,
+    /// Estimated size, system prompt and tools included.
+    bytes: usize,
+}
+
+/// The request for `messages`: unanswered tool calls answered, the oldest
+/// turns left out if `fitter` says they don't fit, and the system prompt
+/// from `prompt_builder` in front.
+fn prepare_request(
     messages: &[Message],
-    tools: &[Tool],
     prompt_builder: Option<&PromptBuilder>,
-    chunk_tx: mpsc::UnboundedSender<LlmChunk>,
-) -> Result<Choice> {
+    fitter: &ContextFitter,
+) -> Request {
     let repaired = answer_missing_tool_results(messages);
-    let messages = repaired.as_deref().unwrap_or(messages);
-    match prompt_builder {
-        Some(builder) => {
-            let built = builder.build(messages);
-            llm.send_streaming(&built, tools, chunk_tx).await
-        }
-        None => llm.send_streaming(messages, tools, chunk_tx).await,
+    let mut fitted = fitter.fit(repaired.as_deref().unwrap_or(messages));
+    let bytes = fitter.request_bytes(&fitted.messages);
+    let messages = match prompt_builder {
+        Some(builder) => builder.build(&fitted.messages),
+        None => std::mem::take(&mut fitted.messages),
+    };
+    Request {
+        messages,
+        fitted,
+        bytes,
     }
+}
+
+/// The error for a request that stays too long with every earlier turn left
+/// out.
+fn turn_too_long(provider_message: &str) -> Error {
+    Error::ContextOverflow(format!(
+        "the current turn alone doesn't fit in the model's context window; \
+         start a new session (provider said: {provider_message})"
+    ))
 }
 
 /// Passes one streamed chunk to the caller's callback as the matching event.
@@ -178,6 +198,13 @@ fn stop_for_reply_without_tools(
 /// persisting them is the caller's job. `prompt_builder`, if set, adds the
 /// system prompt and skills to each request.
 ///
+/// A request that doesn't fit the context window leaves out the oldest whole
+/// turns, never the one in progress; `messages` itself keeps them. That
+/// happens before sending when `config.context_window` is set and the
+/// request is estimated at over 90% of it, and after the provider rejects a
+/// request as too long (up to two retries per call). Each change in how
+/// many messages are left out is reported as [`StreamEvent::ContextTrimmed`].
+///
 /// `callback` receives a [`StreamEvent`] for each step: iteration start,
 /// streamed text and thinking, tool calls, tool results, and completion. It
 /// runs on the loop's own task and must not block; pass `|_| {}` to ignore
@@ -189,7 +216,8 @@ fn stop_for_reply_without_tools(
 /// with an error result), so the history stays valid to send.
 ///
 /// Returns `Ok` unless an LLM call fails; [`AgentResult::stop_reason`] says
-/// why the turn ended.
+/// why the turn ended. [`Error::ContextOverflow`] means the turn in progress
+/// alone is too long for the model.
 pub async fn run_agent<F>(
     llm: &dyn LlmClient,
     tool_executor: &dyn ToolExecutor,
@@ -203,6 +231,10 @@ where
     F: FnMut(StreamEvent) + Send,
 {
     let tools = tool_executor.list_tools();
+    let system = prompt_builder.map(|b| b.build(&[])).unwrap_or_default();
+    let mut fitter = ContextFitter::new(config.context_window, &system, &tools);
+    // The last `ContextTrimmed` count sent, so it goes out only on a change.
+    let mut reported_dropped = 0;
     let mut final_response = String::new();
     let mut iterations_used = 0;
     let mut context_usage: Option<Usage> = None;
@@ -223,17 +255,29 @@ where
             iteration: iter_num,
         });
 
-        // Scoped so the in-flight request's borrow of `messages` ends before
-        // the reply is pushed onto it.
-        let choice = {
+        // A request rejected as too long is rebuilt with more of the oldest
+        // turns left out and sent again, a bounded number of times.
+        let mut overflow_retries = 0;
+        let choice = loop {
+            let request = prepare_request(messages, prompt_builder, &fitter);
+            if request.fitted.dropped > 0 && request.fitted.dropped != reported_dropped {
+                reported_dropped = request.fitted.dropped;
+                callback(StreamEvent::ContextTrimmed {
+                    dropped: reported_dropped,
+                });
+            }
+
             let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<LlmChunk>();
-            let choice_fut = call_llm_streaming(llm, messages, &tools, prompt_builder, chunk_tx);
+            // Every LLM call streams, even when nobody watches the chunks: the
+            // HTTP timeout is per read (see `build_http_client`), so only a
+            // streamed reply keeps a long generation from timing out.
+            let choice_fut = llm.send_streaming(&request.messages, &tools, chunk_tx);
             tokio::pin!(choice_fut);
 
             // The reply ends the wait, not the chunk channel, which a client
             // may close early or keep open.
             let mut chunks_open = true;
-            loop {
+            let result = loop {
                 tokio::select! {
                     _ = turn.cancel.cancelled() => {
                         // Dropping `choice_fut` here aborts the in-flight LLM
@@ -254,7 +298,29 @@ where
                         None => chunks_open = false,
                     },
                 }
-            }?
+            };
+
+            match result {
+                Ok(choice) => {
+                    if let Some(usage) = &choice.usage {
+                        fitter.record_usage(request.bytes, usage);
+                    }
+                    break choice;
+                }
+                Err(Error::ContextOverflow(provider_message)) => {
+                    if overflow_retries == MAX_OVERFLOW_RETRIES
+                        || !fitter.record_overflow(&request.fitted, request.bytes)
+                    {
+                        return Err(turn_too_long(&provider_message));
+                    }
+                    overflow_retries += 1;
+                    tracing::warn!(
+                        dropped = request.fitted.dropped,
+                        "request exceeded the context window; retrying with fewer earlier turns"
+                    );
+                }
+                Err(e) => return Err(e),
+            }
         };
         messages.push(choice.message.clone());
         callback(StreamEvent::MessageAppended {
@@ -1448,6 +1514,126 @@ mod tests {
             note.contains(&format!("of {} bytes", 2 * MAX_TOOL_RESULT_BYTES)),
             "{note}"
         );
+    }
+
+    /// Records every request and rejects as too long any request over
+    /// `max_messages` messages.
+    struct WindowedLlm {
+        max_messages: usize,
+        requests: Mutex<Vec<Vec<Message>>>,
+    }
+
+    impl WindowedLlm {
+        fn new(max_messages: usize) -> Self {
+            Self {
+                max_messages,
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<Vec<Message>> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for WindowedLlm {
+        async fn send(&self, messages: &[Message], _tools: &[Tool]) -> Result<Choice> {
+            self.requests.lock().unwrap().push(messages.to_vec());
+            if messages.len() > self.max_messages {
+                return Err(Error::ContextOverflow("prompt is too long".into()));
+            }
+            Ok(text_choice("fits"))
+        }
+    }
+
+    /// Two finished turns of about 2 KB each and a new prompt.
+    fn long_history() -> Vec<Message> {
+        let long = |text: &str| format!("{text} {}", ".".repeat(1000));
+        vec![
+            Message::user(long("first")),
+            Message::assistant(long("one")),
+            Message::user(long("second")),
+            Message::assistant(long("two")),
+            Message::user("third"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn overflow_is_retried_with_earlier_turns_left_out() {
+        let llm = WindowedLlm::new(3);
+        let mut messages = long_history();
+        let mut trimmed = Vec::new();
+
+        let result = Harness::new()
+            .run(&llm, &MockToolExecutor::new(""), &mut messages, |event| {
+                if let StreamEvent::ContextTrimmed { dropped } = event {
+                    trimmed.push(dropped);
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.final_response, "fits");
+        let requests = llm.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0], long_history());
+        // The retry starts at the second turn, with the note in front of it.
+        let retry = &requests[1];
+        assert_eq!(retry.len(), 3);
+        assert_eq!(
+            retry[0].content[0],
+            ContentBlock::from("[2 earlier messages omitted to fit the context window]")
+        );
+        assert_eq!(retry[0].content[1..], long_history()[2].content);
+        assert_eq!(retry[1..], long_history()[3..]);
+        assert_eq!(trimmed, [2]);
+        // The stored history keeps everything and gains the reply.
+        assert_eq!(messages[..5], long_history());
+        assert_eq!(messages[5], Message::assistant("fits"));
+    }
+
+    #[tokio::test]
+    async fn overflow_of_the_latest_turn_alone_fails_clearly() {
+        let llm = WindowedLlm::new(0);
+        let mut messages = long_history();
+
+        let err = Harness::new()
+            .run(&llm, &MockToolExecutor::new(""), &mut messages, |_| {})
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::ContextOverflow(_)), "{err}");
+        assert!(err.to_string().contains("start a new session"), "{err}");
+        // The full request, then one per turn left out, down to the latest.
+        let sizes: Vec<_> = llm.requests().iter().map(Vec::len).collect();
+        assert_eq!(sizes, [5, 3, 1]);
+        assert_eq!(messages, long_history());
+    }
+
+    #[tokio::test]
+    async fn known_window_trims_before_sending() {
+        let llm = WindowedLlm::new(usize::MAX);
+        let mut messages = long_history();
+        let mut harness = Harness::new();
+        // About 2.9 KB at the default 4 bytes per token: room for the last
+        // two turns.
+        harness.config.context_window = Some(800);
+        let mut trimmed = Vec::new();
+
+        harness
+            .run(&llm, &MockToolExecutor::new(""), &mut messages, |event| {
+                if let StreamEvent::ContextTrimmed { dropped } = event {
+                    trimmed.push(dropped);
+                }
+            })
+            .await
+            .unwrap();
+
+        let requests = llm.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].len(), 3);
+        assert_eq!(trimmed, [2]);
     }
 
     #[test]

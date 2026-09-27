@@ -203,6 +203,11 @@ impl App {
             StreamEvent::Usage { usage } => {
                 self.context_usage = Some(usage);
             }
+            StreamEvent::ContextTrimmed { dropped } => {
+                self.push(ChatItem::SystemInfo(format!(
+                    "{dropped} earlier messages left out of the request to fit the context window"
+                )));
+            }
             StreamEvent::Finished { .. } => {
                 self.status = Status::Idle;
             }

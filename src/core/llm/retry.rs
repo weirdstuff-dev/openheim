@@ -210,6 +210,33 @@ mod tests {
         ));
     }
 
+    struct AlwaysOverflow {
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmClient for AlwaysOverflow {
+        async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> Result<Choice> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Err(Error::ContextOverflow("prompt is too long".into()))
+        }
+    }
+
+    // Resending the same request can't help; the agent loop shortens it.
+    #[tokio::test]
+    async fn context_overflow_is_not_retried() {
+        let inner = Arc::new(AlwaysOverflow {
+            call_count: AtomicUsize::new(0),
+        });
+        let client = RetryClient::new(inner.clone());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let result = client.send_streaming(&[], &[], tx).await;
+
+        assert!(matches!(result, Err(Error::ContextOverflow(_))));
+        assert_eq!(inner.call_count.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn success_after_transient_failure() {
         let inner = Arc::new(FailThenSucceed {

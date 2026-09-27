@@ -22,6 +22,12 @@ fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<()> {
             name, provider.api_base
         )));
     }
+    if provider.context_window == Some(0) {
+        return Err(Error::config(format!(
+            "Provider '{}' context_window must be greater than 0",
+            name
+        )));
+    }
     if !provider.models.is_empty() && !provider.models.contains(&provider.default_model) {
         return Err(Error::config(format!(
             "Provider '{}' default_model '{}' is not listed in models: [{}]",
@@ -53,6 +59,7 @@ impl AppConfig {
             max_iterations: self.max_iterations,
             timeout_secs: provider.resolve_timeout_secs(),
             max_tokens: provider.max_tokens,
+            context_window: provider.context_window,
             thinking: provider.resolve_thinking(kind),
         }
     }
@@ -265,6 +272,25 @@ mod tests {
         p.default_model = "gpt-5".into();
         let err = validate_provider("test", &p).unwrap_err();
         assert!(err.to_string().contains("gpt-5"));
+    }
+
+    #[test]
+    fn validate_rejects_a_zero_context_window() {
+        let mut p = provider_with_base("https://api.example.com");
+        p.context_window = Some(0);
+        let err = validate_provider("test", &p).unwrap_err();
+        assert!(err.to_string().contains("context_window"));
+    }
+
+    #[test]
+    fn context_window_is_carried_into_the_agent_config() {
+        let mut config = sample_config();
+        config.providers.get_mut("openai").unwrap().context_window = Some(128_000);
+        assert_eq!(config.resolve(None).unwrap().context_window, Some(128_000));
+        assert_eq!(
+            config.resolve(Some("claude-3")).unwrap().context_window,
+            None
+        );
     }
 
     #[test]
