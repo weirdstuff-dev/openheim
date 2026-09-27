@@ -35,6 +35,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
   `config::ThinkingMode`, the type of `ProviderConfig::thinking`, was never exported; it is now.
 
+### Fixed
+
+- **A session on a non-default model no longer slows down every other session.** Each turn of a session that had switched models (or started on another one) built a new HTTP client, with its own connection pool and TLS handshake, while holding the lock every session's requests go through. Now the client is built once, when the session switches (or starts or resumes) on that model, outside the lock, and reused for every turn. All LLM clients with the same timeout share one HTTP client and its connections, including those `delegate_task` builds for subagent profiles that name their own model.
+
 ## [0.14.0] - 2026-09-27
 
 ### Added
