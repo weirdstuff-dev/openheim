@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-28
+
 ### Added
 
 - **Unknown config keys are reported.** A typo such as `allow-shell` or `[providers.openai] api-key` was silently ignored, so the setting just didn't take effect. `load_config_from` (and so every way of starting openheim from a config file) now logs a warning naming each unknown key by its path, e.g. `providers.openai.api-key`. Unknown keys are still not an error, so a config written for a newer version keeps loading.
