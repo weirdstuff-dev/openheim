@@ -40,7 +40,7 @@ work_dir = "/home/user/projects/myproject"
 
 ### Security notes
 
-**`work_dir`** is enforced at the application layer for `read_file`, `write_file`, `edit_file`, `list_dir`, and `search`, and for the `/ws` filesystem sidecar (all `fs`-channel operations are validated against the same boundary). Within it, each session's tools work in the session's `cwd` (ACP `session/new`, `SessionBuilder::cwd`, or the directory openheim was started from) when that is inside `work_dir`: relative paths resolve there and `execute_command` runs there. A `cwd` outside `work_dir` is ignored and `work_dir` is used instead; it never widens what's reachable. Symlinks are followed and canonicalized so they cannot be used to escape the boundary. Shell commands (`execute_command`) are launched with `work_dir` as their working directory so relative paths resolve correctly, but absolute paths inside a shell command are not blocked — OS-level sandboxing (chroot, containers) is required for full shell isolation. Shell commands are additionally bounded: each runs in its own process group, is killed after a 120-second timeout (or on turn cancellation), and has stdout/stderr capped at 64 KiB per stream with a truncation marker.
+**`work_dir`** is enforced at the application layer for `read_file`, `write_file`, `edit_file`, `list_dir`, and `search`, and for the `/ws` filesystem sidecar (all `fs`-channel operations are validated against the same boundary). Within it, each session's tools work in the session's `cwd` (ACP `session/new`, `SessionBuilder::cwd`, or the directory openheim was started from) when that is inside `work_dir`: relative paths resolve there and `execute_command` runs there. A `cwd` outside `work_dir` is ignored and `work_dir` is used instead; it never widens what's reachable. Symlinks are followed and canonicalized so they cannot be used to escape the boundary. Shell commands (`execute_command`) are launched with `work_dir` as their working directory so relative paths resolve correctly, but absolute paths inside a shell command are not blocked — OS-level sandboxing (chroot, containers) is required for full shell isolation. Shell commands are additionally bounded: each runs in its own process group, is killed after a 120-second timeout (or on turn cancellation, or when the `openheim` process gets SIGINT, SIGTERM or SIGHUP), and has stdout/stderr capped at 64 KiB per stream with a truncation marker.
 
 Every tool result, built-in, MCP or custom, is cut to 128 KiB (with a note saying how much was left out) before it goes into the conversation, since the history is resent with every request.
 
@@ -116,6 +116,9 @@ Use either `command` (stdio transport) or `url` (Streamable HTTP transport), not
 | `env` | table | No | Extra environment variables for the spawned process |
 | `url` | string | HTTP only | Base URL for Streamable HTTP transport |
 | `headers` | table | No | Extra HTTP headers sent with every request, e.g. auth (HTTP only) |
+| `tool_timeout_secs` | integer | No | Longest one tool call may take before it fails with a timeout error. Default: 600 |
+
+If a server's connection closes (a stdio server exits, an HTTP server drops it), the next call to one of its tools reconnects. A call that was in flight when it closed fails and isn't retried, since the tool may already have run.
 
 `env` and `headers` are inline tables, so a server with credentials still fits on one `[mcp_servers.<name>]` block — no separate `[mcp_servers.<name>.env]` section needed:
 
