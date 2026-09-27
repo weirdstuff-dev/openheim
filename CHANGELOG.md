@@ -37,6 +37,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Containers sharing a data volume no longer take over each other's session leases.** The host recorded in a session lease came from running the `hostname` program, and was `unknown-host` wherever that's missing, as in slim container images. Two such containers sharing `~/.openheim` looked like one host, so each checked the other's process ids against its own and could take over a lease for a turn still running. The hostname now comes from the operating system directly. On a system with none, it's a random id kept in the temp directory, which containers don't share.
 - **A session on a non-default model no longer slows down every other session.** Each turn of a session that had switched models (or started on another one) built a new HTTP client, with its own connection pool and TLS handshake, while holding the lock every session's requests go through. Now the client is built once, when the session switches (or starts or resumes) on that model, outside the lock, and reused for every turn. All LLM clients with the same timeout share one HTTP client and its connections, including those `delegate_task` builds for subagent profiles that name their own model.
 
 ## [0.14.0] - 2026-09-27
