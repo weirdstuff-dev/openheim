@@ -555,7 +555,7 @@ impl AgentState {
 
         let llm = self.session_llm(&session_config)?;
         let tool_cwd = tool_cwd(&cwd, &self.work_dir);
-        let (mode, model) = {
+        let (mode, provider, model) = {
             let mut sessions = self.sessions.write().await;
             // An already-live session keeps its control state (see
             // `insert_or_keep_live`). Loading takes no write lease.
@@ -595,14 +595,19 @@ impl AgentState {
                     session_id: session_id.to_string(),
                 });
             }
-            // The live session's mode and model, which may differ from the
+            // The live session's mode, provider and model, which may differ from the
             // saved ones (e.g. after `session/set_config_option`).
-            (live.mode, live.config.model.clone())
+            (
+                live.mode,
+                live.config.provider_name.clone(),
+                live.config.model.clone(),
+            )
         };
 
         Ok(LoadedSession {
             mode,
             messages: conversation.messages,
+            provider,
             model,
             warning,
         })
@@ -628,6 +633,9 @@ pub struct LoadedSession {
     /// The full saved conversation, for the caller to replay in its own form
     /// (`acp::util::replay_history_messages` for ACP).
     pub messages: Vec<Message>,
+    /// The session's active provider (the default one if the saved one no
+    /// longer resolves; see `warning`).
+    pub provider: String,
     /// The session's active model (the default provider's if the saved one
     /// no longer resolves; see `warning`).
     pub model: String,

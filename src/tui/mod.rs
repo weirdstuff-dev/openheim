@@ -270,7 +270,10 @@ impl AgentTask {
                     }
                 }
                 AgentCommand::SwitchSession { id, cwd } => {
-                    if let Some(restored) = self.resume(&id, cwd).await {
+                    let resumed = self
+                        .resume(&id, cwd, &mut current_provider, &mut current_model)
+                        .await;
+                    if let Some(restored) = resumed {
                         session = restored;
                     }
                 }
@@ -331,9 +334,15 @@ impl AgentTask {
         }
     }
 
-    /// Resumes saved session `id` and sends its history, or reports why it
-    /// couldn't.
-    async fn resume(&self, id: &str, cwd: std::path::PathBuf) -> Option<SessionHandle> {
+    /// Resumes saved session `id` and sends its history, setting `provider`
+    /// and `model` to the ones it's on, or reports why it couldn't.
+    async fn resume(
+        &self,
+        id: &str,
+        cwd: std::path::PathBuf,
+        provider: &mut String,
+        model: &mut String,
+    ) -> Option<SessionHandle> {
         let (restored, loaded) = match self.client.resume_session(id, cwd).await {
             Ok(resumed) => resumed,
             Err(e) => {
@@ -352,6 +361,14 @@ impl AgentTask {
         }
         history.push(ChatItem::SystemInfo("─── session restored".to_string()));
         self.send(AgentUpdate::History(history));
+        if loaded.provider != *provider || loaded.model != *model {
+            provider.clone_from(&loaded.provider);
+            model.clone_from(&loaded.model);
+            self.send(AgentUpdate::ModelChanged {
+                provider: loaded.provider,
+                model: loaded.model,
+            });
+        }
         // The restored session's context size; `None` clears the previous
         // one's.
         if let Ok(usage) = restored.context_usage().await {
@@ -505,6 +522,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(loaded.model, "m2");
+    }
+
+    // Resuming a session on another model makes that model the active one.
+    #[tokio::test]
+    async fn resuming_a_session_switches_to_its_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AppConfig::new("local").with_provider(
+            "local",
+            ProviderConfig::new("http://127.0.0.1:1/v1", "m1").with_models(["m1", "m2"]),
+        );
+        let client = OpenheimClient::builder()
+            .app_config(config)
+            .data_dir(dir.path())
+            .work_dir(dir.path())
+            .build()
+            .await
+            .unwrap();
+        let history = client.state().memory.history.clone();
+        let saved = history
+            .create_conversation(Some("m2".into()), Some("local".into()), vec![])
+            .unwrap();
+        history.save_conversation(&saved).unwrap();
+
+        let (updates_tx, mut updates) = mpsc::unbounded_channel();
+        let (commands_tx, commands) = mpsc::unbounded_channel();
+        let (_cancel_tx, cancel) = mpsc::unbounded_channel();
+        commands_tx
+            .send(AgentCommand::SwitchSession {
+                id: saved.meta.id.to_string(),
+                cwd: dir.path().to_path_buf(),
+            })
+            .unwrap();
+        drop(commands_tx);
+
+        let task = AgentTask {
+            client: client.clone(),
+            permission_gate: Arc::new(crate::core::permission::AllowAll),
+            skills: vec![],
+            default_provider: "local".into(),
+            default_model: "m1".into(),
+            updates: updates_tx,
+        };
+        let session = client.new_session().start().await.unwrap();
+        task.run(session, commands, cancel).await;
+
+        let mut models = Vec::new();
+        while let Ok(update) = updates.try_recv() {
+            if let AgentUpdate::ModelChanged { provider, model } = update {
+                models.push((provider, model));
+            }
+        }
+        assert_eq!(models, [("local".to_string(), "m2".to_string())]);
     }
 
     // Interleaved thinking stores several thinking blocks between text and

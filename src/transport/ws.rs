@@ -756,14 +756,16 @@ mod tests {
         );
 
         let reply = next_frame(&mut out, "agent", |data| data["id"] == 1).await;
-        assert!(reply.is_some(), "the ACP reply was held up by the fs read");
 
-        // Unblock the read: its reply still arrives, with its id.
+        // Unblock the read before asserting, so a failure can't leave the
+        // runtime's shutdown waiting on it. Its reply still arrives, with its
+        // id.
         let writer = fifo.clone();
         tokio::task::spawn_blocking(move || std::fs::write(writer, "done"))
             .await
             .unwrap()
             .unwrap();
+        assert!(reply.is_some(), "the ACP reply was held up by the fs read");
         let read = next_frame(&mut out, "fs", |data| data["id"] == 1)
             .await
             .expect("no fs reply");
