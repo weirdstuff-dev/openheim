@@ -65,6 +65,16 @@ fn move_scroll(scroll: &mut usize, code: KeyCode) {
     }
 }
 
+/// The prompt to send for the input `text`: blank lines before it and
+/// whitespace after it are dropped, but the first line keeps its
+/// indentation, which matters in pasted code.
+fn prompt_text(text: &str) -> &str {
+    let text = text.trim_end();
+    let first_visible = text.find(|c: char| !c.is_whitespace()).unwrap_or(0);
+    let line_start = text[..first_visible].rfind('\n').map_or(0, |i| i + 1);
+    &text[line_start..]
+}
+
 /// The terminal UI's state: a base screen (welcome or chat), at most one
 /// popup over it, and the permission-prompt queue over everything.
 pub(super) struct App {
@@ -376,14 +386,16 @@ impl App {
                 if self.status != Status::Idle {
                     return;
                 }
-                let line = self.input.text().trim().to_string();
-                if line.is_empty() {
+                let text = self.input.text();
+                if text.trim().is_empty() {
                     return;
                 }
+                let command = text.trim().strip_prefix(':').map(|c| c.trim().to_string());
+                let line = prompt_text(text).to_string();
                 self.input.clear();
                 self.screen = Screen::Chat;
-                if let Some(rest) = line.strip_prefix(':') {
-                    self.handle_command(rest.trim());
+                if let Some(command) = command {
+                    self.handle_command(&command);
                 } else {
                     self.push(ChatItem::UserMessage(line.clone()));
                     self.status = Status::Thinking;
@@ -878,6 +890,33 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
         assert_eq!(prompt_rx.try_recv().unwrap(), "line one\nline two");
         assert_eq!(app.input.text(), "");
+    }
+
+    #[test]
+    fn a_pasted_prompt_keeps_its_indentation() {
+        let (mut app, mut prompt_rx, _) = test_app_with_receivers();
+        app.handle_paste("\n\n    fn main() {\n        run();\n    }\n\n");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            prompt_rx.try_recv().unwrap(),
+            "    fn main() {\n        run();\n    }"
+        );
+    }
+
+    #[test]
+    fn prompt_text_drops_only_blank_edges() {
+        assert_eq!(prompt_text("  hi  "), "  hi");
+        assert_eq!(prompt_text(" \n\t\n  a\n b \n\n"), "  a\n b");
+        assert_eq!(prompt_text("x"), "x");
+    }
+
+    #[test]
+    fn commands_are_still_trimmed() {
+        let (mut app, mut prompt_rx, _) = test_app_with_receivers();
+        app.handle_paste("  \n  :theme  \n");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(prompt_rx.try_recv().is_err(), "a command is not a prompt");
+        assert!(matches!(app.overlay, Some(Overlay::ThemePicker { .. })));
     }
 
     #[test]

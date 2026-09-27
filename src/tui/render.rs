@@ -380,35 +380,30 @@ fn input_display(grapheme: &str) -> &str {
 /// it, as displayed by [`input_display`]. Measured in grapheme clusters and
 /// cell widths, so combining marks aren't split and wide characters (CJK,
 /// emoji) take two columns.
+///
+/// Only the graphemes around the cursor are visited, so a long pasted
+/// prompt costs no more to draw than a short one.
 fn scroll_input_line(input: &str, cursor: usize, visible_width: usize) -> (String, usize) {
-    let graphemes: Vec<&str> = input.graphemes(true).map(input_display).collect();
-    // `cursor` is a byte offset that always lands on a grapheme boundary
-    // (see `App`'s cursor-movement code), so counting clusters whose start
-    // byte precedes it gives the cluster index right after the cursor.
-    let cursor_idx = input
-        .grapheme_indices(true)
-        .take_while(|(byte_idx, _)| *byte_idx < cursor)
-        .count();
-
-    // Walk backwards from the cursor, accumulating cell width, to find the
-    // earliest cluster that still fits in `visible_width - 1` cells (the
-    // last column is reserved for the cursor itself) — this both scrolls
-    // the line and gives the cursor's column within the scrolled slice.
+    // Walk backwards from the cursor (always on a grapheme boundary),
+    // accumulating cell width, to find the earliest cluster that still fits
+    // in `visible_width - 1` cells (the last column is reserved for the
+    // cursor itself) — this both scrolls the line and gives the cursor's
+    // column within the scrolled slice.
     let budget = visible_width.saturating_sub(1);
-    let mut start_idx = cursor_idx;
+    let mut start = cursor;
     let mut cursor_col = 0usize;
-    while start_idx > 0 {
-        let w = graphemes[start_idx - 1].width();
+    for (byte_idx, g) in input[..cursor].grapheme_indices(true).rev() {
+        let w = input_display(g).width();
         if cursor_col + w > budget {
             break;
         }
         cursor_col += w;
-        start_idx -= 1;
+        start = byte_idx;
     }
 
     let mut visible = String::new();
     let mut used = 0usize;
-    for g in &graphemes[start_idx..] {
+    for g in input[start..].graphemes(true).map(input_display) {
         let w = g.width();
         if used + w > visible_width.max(1) {
             break;
