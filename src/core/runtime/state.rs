@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    config::{AgentConfig, AppConfig, RuntimePaths, build_http_client, create_client},
+    config::{AgentConfig, AppConfig, HttpClients, RuntimePaths, create_client, same_model},
     core::{
         agent::run_agent,
         client_io::ClientIo,
@@ -46,10 +46,13 @@ use super::{
 type Sessions = Arc<RwLock<HashMap<String, SessionState>>>;
 
 pub struct AgentState {
-    /// Client for `config`. Private, together with `config`: sessions reuse
-    /// this client only while their config matches `config`
-    /// (`client_for_config`), so the two must never be changed separately.
+    /// Client for `config`. Private, together with `config`: sessions on the
+    /// same model use this client (their `SessionState::llm` is `None`), so
+    /// the two must never be changed separately.
     llm: Arc<dyn LlmClient>,
+    /// The `reqwest::Client`s every LLM client here is built on, one per
+    /// timeout, shared with `delegate`.
+    http: Arc<HttpClients>,
     pub executor: Arc<dyn ToolExecutor>,
     /// The default model/provider new sessions start on (read it via
     /// [`Self::config`]).
@@ -88,8 +91,8 @@ impl AgentState {
         custom_tools: Vec<Box<dyn ToolHandler>>,
         #[cfg(feature = "rag")] long_term_memory: Option<crate::rag::LongTermMemory>,
     ) -> Result<Self> {
-        let http_client = build_http_client(config.timeout_secs)?;
-        let llm = create_client(&config, &http_client);
+        let http = Arc::new(HttpClients::default());
+        let llm = create_client(&config, &http.get(config.timeout_secs)?);
         let allow_shell = app_config.allow_shell;
         let work_dir = match app_config.work_dir.clone() {
             Some(wd) => wd,
@@ -129,12 +132,14 @@ impl AgentState {
             llm.clone(),
             app_config.clone(),
             config.clone(),
+            http.clone(),
         );
         sys_executor.register(Box::new(delegate.clone()));
         let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
 
         Ok(Self {
             llm,
+            http,
             executor,
             config,
             app_config,
@@ -161,6 +166,17 @@ impl AgentState {
         &self.paths
     }
 
+    /// The client for a session on `config` ([`SessionState::llm`]): `None`
+    /// on the default model, otherwise a new client on the shared
+    /// `reqwest::Client`. Call it before taking the sessions lock.
+    fn session_llm(&self, config: &AgentConfig) -> Result<Option<Arc<dyn LlmClient>>> {
+        if same_model(config, &self.config) {
+            return Ok(None);
+        }
+        let http_client = self.http.get(config.timeout_secs)?;
+        Ok(Some(create_client(config, &http_client)))
+    }
+
     pub async fn new_session(
         &self,
         model: Option<&str>,
@@ -173,6 +189,7 @@ impl AgentState {
             Some(m) => self.app_config.resolve(Some(m))?,
             None => self.config.clone(),
         };
+        let llm = self.session_llm(&config)?;
         // An unknown skill is the caller's mistake, so it's reported here
         // rather than silently left out of every turn.
         let skills_manager = self.memory.skills.clone();
@@ -189,6 +206,7 @@ impl AgentState {
                 SessionState {
                     chat_id,
                     config,
+                    llm,
                     cwd,
                     tool_cwd,
                     skills,
@@ -231,11 +249,13 @@ impl AgentState {
     ) -> Result<(String, String)> {
         let provider_name = new_config.provider_name.clone();
         let model_name = new_config.model.clone();
+        let llm = self.session_llm(&new_config)?;
         let mut sessions = self.sessions.write().await;
         let s = sessions
             .get_mut(session_id)
             .ok_or_else(|| Error::NotFound(format!("session not found: {session_id}")))?;
         s.config = new_config;
+        s.llm = llm;
         s.last_active = Instant::now();
         Ok((provider_name, model_name))
     }
@@ -339,7 +359,7 @@ impl AgentState {
             let prompt_guard = s.try_acquire_prompt_lock(session_id)?;
             s.cancel = CancellationToken::new();
             s.last_active = Instant::now();
-            let llm = crate::config::client_for_config(&s.config, &self.config, &self.llm)?;
+            let llm = s.llm.clone().unwrap_or_else(|| self.llm.clone());
             let executor: Arc<dyn ToolExecutor> = if s.mode == AgentMode::Architect {
                 // Architect mode gets every tool that declares itself
                 // read-only, built-in or custom.
@@ -533,6 +553,7 @@ impl AgentState {
             session_config.model = model.clone();
         }
 
+        let llm = self.session_llm(&session_config)?;
         let tool_cwd = tool_cwd(&cwd, &self.work_dir);
         let (mode, model) = {
             let mut sessions = self.sessions.write().await;
@@ -542,6 +563,7 @@ impl AgentState {
                 Ok(SessionState {
                     chat_id: uuid,
                     config: session_config,
+                    llm,
                     cwd,
                     tool_cwd,
                     skills: conversation.meta.skills.clone(),
@@ -632,6 +654,7 @@ mod prompt_lease_ordering_tests {
                 "mock-model".into(),
                 5,
             ),
+            llm: None,
             cwd: PathBuf::from("/tmp"),
             tool_cwd: PathBuf::from("/tmp"),
             skills: vec![],
@@ -801,6 +824,86 @@ mod new_session_tests {
             .unwrap();
     }
 
+    /// Replaces the client of `session_id`, which switched models, with `llm`.
+    async fn set_session_llm(state: &AgentState, session_id: &str, llm: Arc<dyn LlmClient>) {
+        let mut sessions = state.sessions.write().await;
+        let session = sessions.get_mut(session_id).unwrap();
+        assert!(session.llm.is_some(), "the session is on the default model");
+        session.llm = Some(llm);
+    }
+
+    /// Counts its calls and ends every turn.
+    #[derive(Default)]
+    struct CountingLlm(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl LlmClient for CountingLlm {
+        async fn send(
+            &self,
+            messages: &[Message],
+            tools: &[crate::core::models::Tool],
+        ) -> Result<crate::core::models::Choice> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            EndTurnLlm.send(messages, tools).await
+        }
+    }
+
+    // A session that switched models keeps the client built at the switch
+    // for every turn; turns don't build their own.
+    #[tokio::test]
+    async fn switched_session_reuses_its_client_across_turns() {
+        let dir = tempdir().unwrap();
+        let (state, session_id) = state_with_session(dir.path()).await;
+        state
+            .set_session_model(&session_id, "other-model")
+            .await
+            .unwrap();
+        let counting = Arc::new(CountingLlm::default());
+        set_session_llm(&state, &session_id, counting.clone()).await;
+
+        run_turn(&state, &session_id).await;
+        run_turn(&state, &session_id).await;
+
+        assert_eq!(counting.0.load(Ordering::SeqCst), 2);
+        let sessions = state.sessions.read().await;
+        let kept = sessions[&session_id].llm.clone().unwrap();
+        assert!(Arc::ptr_eq(&kept, &(counting as Arc<dyn LlmClient>)));
+    }
+
+    // Sessions on another model get a client of their own, on the same
+    // `reqwest::Client` as the default model when the timeout matches.
+    // Switching back to the default model returns to the default's client.
+    #[tokio::test]
+    async fn sessions_on_other_models_share_the_http_client() {
+        let dir = tempdir().unwrap();
+        let state = sample_state(dir.path()).await;
+
+        let default = state
+            .new_session(None, vec![], dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let other = state
+            .new_session(Some("other-model"), vec![], dir.path().to_path_buf())
+            .await
+            .unwrap();
+        state
+            .switch_model(&default, "mock", "other-model")
+            .await
+            .unwrap();
+        {
+            let sessions = state.sessions.read().await;
+            assert!(sessions[&default].llm.is_some());
+            assert!(sessions[&other].llm.is_some());
+        }
+        assert_eq!(state.http.len(), 1);
+
+        state
+            .switch_model(&other, "mock", "mock-model")
+            .await
+            .unwrap();
+        assert!(state.sessions.read().await[&other].llm.is_none());
+    }
+
     /// A state answering every turn with `EndTurnLlm`, plus a fresh session.
     async fn state_with_session(dir: &std::path::Path) -> (AgentState, String) {
         std::fs::write(dir.join("system.md"), "You are a test agent.").unwrap();
@@ -936,10 +1039,8 @@ mod new_session_tests {
             .set_session_model(&session_id, "other-model")
             .await
             .unwrap();
-        // `client_for_config` reuses `state.llm` only when the session's
-        // config matches `state.config`; line them up so the second turn
-        // stays on the mock instead of building a real HTTP client.
-        state.config = state.app_config.resolve(Some("other-model")).unwrap();
+        // The switch built a real client for the session; swap in the mock.
+        set_session_llm(&state, &session_id, Arc::new(EndTurnLlm)).await;
         run_turn(&state, &session_id).await;
 
         let uuid = Uuid::parse_str(&session_id).unwrap();
@@ -977,7 +1078,7 @@ mod new_session_tests {
 
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
-        let mut state = sample_state(dir.path()).await;
+        let state = sample_state(dir.path()).await;
 
         let delegate_call = Choice {
             message: Message {
@@ -996,7 +1097,7 @@ mod new_session_tests {
             finish_reason: Some(FinishReason::Stop),
             usage: None,
         };
-        state.llm = Arc::new(ScriptedLlm(std::sync::Mutex::new(
+        let script = Arc::new(ScriptedLlm(std::sync::Mutex::new(
             [delegate_call, text("hi from the subagent"), text("done")].into(),
         )));
 
@@ -1008,9 +1109,7 @@ mod new_session_tests {
             .set_session_model(&session_id, "other-model")
             .await
             .unwrap();
-        // Same alignment as the test above: keeps the session's turn on
-        // `state.llm` (the script) instead of building a real client.
-        state.config = state.app_config.resolve(Some("other-model")).unwrap();
+        set_session_llm(&state, &session_id, script).await;
 
         let mut tool_results = Vec::new();
         state

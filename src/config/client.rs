@@ -1,5 +1,6 @@
 use reqwest::{Client as ReqwestClient, redirect::Policy};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use super::types::{AgentConfig, ProviderKind};
@@ -61,19 +62,50 @@ pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<d
     Arc::new(RetryClient::new(inner))
 }
 
+/// One `reqwest::Client` per timeout, built on first use and shared by
+/// every LLM client made from it, so they share connection pools and TLS
+/// sessions instead of each opening their own.
+#[derive(Debug, Default)]
+pub(crate) struct HttpClients(Mutex<HashMap<u64, ReqwestClient>>);
+
+impl HttpClients {
+    /// The shared client for `timeout_secs` (see [`build_http_client`]).
+    pub(crate) fn get(&self, timeout_secs: u64) -> Result<ReqwestClient> {
+        // A poisoned lock still holds a usable map: entries are only ever
+        // inserted whole.
+        let mut clients = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(client) = clients.get(&timeout_secs) {
+            return Ok(client.clone());
+        }
+        let client = build_http_client(timeout_secs)?;
+        clients.insert(timeout_secs, client.clone());
+        Ok(client)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+}
+
+/// Whether `a` and `b` name the same model, so one LLM client serves both.
+pub(crate) fn same_model(a: &AgentConfig, b: &AgentConfig) -> bool {
+    a.provider_name == b.provider_name && a.model == b.model
+}
+
 /// The LLM client for `target`: `baseline_llm` when it has the same provider
-/// and model, otherwise a new one. Used for sessions that switched models
-/// and for subagents.
-pub fn client_for_config(
+/// and model, otherwise a new one on `http`'s shared `reqwest::Client`. Used
+/// for sessions that switched models and for subagents.
+pub(crate) fn client_for_config(
     target: &AgentConfig,
     baseline: &AgentConfig,
     baseline_llm: &Arc<dyn LlmClient>,
+    http: &HttpClients,
 ) -> Result<Arc<dyn LlmClient>> {
-    if target.provider_name == baseline.provider_name && target.model == baseline.model {
+    if same_model(target, baseline) {
         Ok(baseline_llm.clone())
     } else {
-        let http_client = build_http_client(target.timeout_secs)?;
-        Ok(create_client(target, &http_client))
+        Ok(create_client(target, &http.get(target.timeout_secs)?))
     }
 }
 
@@ -116,7 +148,8 @@ mod tests {
         let mut target = baseline.clone();
         target.timeout_secs = 999;
 
-        let client = client_for_config(&target, &baseline, &baseline_llm).unwrap();
+        let client =
+            client_for_config(&target, &baseline, &baseline_llm, &HttpClients::default()).unwrap();
         assert!(Arc::ptr_eq(&client, &baseline_llm));
     }
 
@@ -128,7 +161,8 @@ mod tests {
         let mut target = baseline.clone();
         target.model = "gpt-4o".into();
 
-        let client = client_for_config(&target, &baseline, &baseline_llm).unwrap();
+        let client =
+            client_for_config(&target, &baseline, &baseline_llm, &HttpClients::default()).unwrap();
         assert!(!Arc::ptr_eq(&client, &baseline_llm));
     }
 
@@ -145,7 +179,30 @@ mod tests {
             10,
         );
 
-        let client = client_for_config(&target, &baseline, &baseline_llm).unwrap();
+        let client =
+            client_for_config(&target, &baseline, &baseline_llm, &HttpClients::default()).unwrap();
         assert!(!Arc::ptr_eq(&client, &baseline_llm));
+    }
+
+    /// Clients for different models share one `reqwest::Client` per
+    /// timeout rather than building their own.
+    #[test]
+    fn client_for_config_shares_http_clients_by_timeout() {
+        let baseline = baseline_config();
+        let baseline_llm: Arc<dyn LlmClient> = Arc::new(DummyClient);
+        let http = HttpClients::default();
+
+        for model in ["gpt-4o", "gpt-4o-mini"] {
+            let mut target = baseline.clone();
+            target.model = model.into();
+            client_for_config(&target, &baseline, &baseline_llm, &http).unwrap();
+        }
+        assert_eq!(http.len(), 1);
+
+        let mut slow = baseline.clone();
+        slow.model = "o3".into();
+        slow.timeout_secs = 600;
+        client_for_config(&slow, &baseline, &baseline_llm, &http).unwrap();
+        assert_eq!(http.len(), 2);
     }
 }
