@@ -8,8 +8,9 @@ use crate::memory::lease::{self, SessionLease};
 use std::path::PathBuf;
 
 /// Persistent metadata for a conversation, stored in its `.json` file (see
-/// [`HistoryManager`] for the on-disk layout).
+/// `HistoryManager` for the on-disk layout).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ConversationMeta {
     pub id: Uuid,
     pub created_at: DateTime<Utc>,
@@ -70,6 +71,7 @@ impl ConversationMeta {
 
 /// A complete conversation: metadata plus the full ordered message list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Conversation {
     pub meta: ConversationMeta,
     pub messages: Vec<Message>,

@@ -46,6 +46,7 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 ///
 /// Returns the resolved absolute path on success, or an error describing
 /// why the path is rejected.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub fn validate_path(requested: &str, work_dir: &Path) -> Result<PathBuf> {
     validate_path_from(requested, work_dir, work_dir)
 }
@@ -75,6 +76,7 @@ pub fn validate_path_from(requested: &str, cwd: &Path, work_dir: &Path) -> Resul
 ///
 /// The work directory itself is rejected: it is inside the sandbox, but
 /// deleting or moving it would take the whole workspace with it.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub fn validate_entry(requested: &str, work_dir: &Path) -> Result<PathBuf> {
     let work_dir_canonical = canonical_dir(work_dir)?;
     let resolved = resolve(requested, &work_dir_canonical);

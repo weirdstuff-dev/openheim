@@ -95,6 +95,8 @@ RUST_LOG=info openheim serve
 RUST_LOG=openheim=debug openheim serve   # debug only openheim internals
 ```
 
+Logs go to stderr, except in the TUI: once it's on screen, they're appended to `~/.openheim/openheim.log` instead.
+
 ---
 
 ## Docker

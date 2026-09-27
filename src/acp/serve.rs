@@ -19,6 +19,7 @@ use agent_client_protocol::{
 use tokio::sync::RwLock;
 
 use crate::{
+    client::OpenheimClient,
     core::client_io::ClientIo,
     core::permission::PermissionGate,
     core::runtime::{AgentMode, AgentState},
@@ -36,7 +37,17 @@ use super::{
     },
 };
 
+/// Serves `client` as an ACP agent over `transport` until the connection
+/// closes. `transport` can be [`agent_client_protocol::Stdio`], a byte
+/// stream pair, or an in-memory duplex for an in-process client.
 pub async fn serve(
+    transport: impl ConnectTo<Agent>,
+    client: OpenheimClient,
+) -> agent_client_protocol::Result<()> {
+    serve_state(transport, client.state().clone()).await
+}
+
+pub(crate) async fn serve_state(
     transport: impl ConnectTo<Agent>,
     state: Arc<AgentState>,
 ) -> agent_client_protocol::Result<()> {

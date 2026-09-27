@@ -121,7 +121,7 @@ User / Client
 │  stdio ── ws (HTTP + WebSocket) ── headless │
 │                                             │
 │  All transports call acp::serve(transport,  │
-│  state) and speak the ACP wire protocol.    │
+│  client) and speak the ACP wire protocol.   │
 └────────────────────┬────────────────────────┘
                      │ ACP PromptRequest
                      ▼
@@ -221,7 +221,7 @@ All persistence lives under `~/.openheim/` by default.
 ```
 ~/.openheim/
 ├── config.toml              Agent configuration (providers, MCP servers, default_skills, …)
-├── system.md                Agent identity — loaded on every session (required)
+├── system.md                Agent identity — loaded on every turn (optional)
 ├── history/
 │   ├── {uuid}.json          Conversation metadata (rewritten wholesale)
 │   ├── {uuid}.jsonl         Conversation messages (appended one per line)
@@ -232,7 +232,7 @@ All persistence lives under `~/.openheim/` by default.
 └── memory.db                Long-term memory notes, FTS5 index, and (optionally) sqlite-vec vectors
 ```
 
-`SystemLoader` reads `system.md` on every `prepare()` call — missing file is a hard error (run `openheim init` to create it). `HistoryManager` reads and writes each conversation's metadata (`.json`) and message log (`.jsonl`) — see `src/memory/history.rs`'s doc comment for why they're split. `SkillsManager` reads `.md` files from the skills directory. Both history and skills paths are configurable at construction time, which is how the test suite uses temporary directories.
+`SystemLoader` reads `system.md` on every `prepare()` call; a missing file means the default identity, the same text `openheim init` writes. `HistoryManager` reads and writes each conversation's metadata (`.json`) and message log (`.jsonl`) — see `src/memory/history.rs`'s doc comment for why they're split. `SkillsManager` reads `.md` files from the skills directory. Both history and skills paths are configurable at construction time, which is how the test suite uses temporary directories.
 
 ### Long-term memory
 
@@ -251,7 +251,7 @@ The `OpenheimClient` facade (`src/client.rs`) wraps the same `core::runtime::Age
 
 The headless `openheim run` mode (`src/transport/run.rs`) is itself just a facade caller. There is no separate "library mode" agent logic: the facade and every transport share the exact same session and agent-loop code path.
 
-Every transport (`stdio`, `ws`, `run`) builds its `AgentState` the same way: `OpenheimClient::builder().build().await?` followed by `OpenheimClient::state()` (`pub(crate)`, so only reachable from inside this crate) to get the `Arc<AgentState>` `acp::serve` wants. That's the same load-config → resolve → `MemoryContext::new` → `AgentState::new` sequence the builder already does for library users, so there's exactly one place that canonicalizes `work_dir`, merges builder-registered MCP servers, and registers custom tools — a hand-rolled sequence in a transport would silently skip all of that.
+Every transport (`stdio`, `ws`, `run`) builds its `AgentState` the same way: `OpenheimClient::builder().build().await?`, then `acp::serve(transport, client)` (the `ws` transport, which serves one ACP connection per socket, uses the crate-private `acp::serve_state` with `OpenheimClient::state()`). `AgentState`, `MemoryContext` and the managers behind it are crate-private; embedders go through `OpenheimClient`. That's the same load-config → resolve → `MemoryContext::new` → `AgentState::new` sequence the builder already does for library users, so there's exactly one place that canonicalizes `work_dir`, merges builder-registered MCP servers, and registers custom tools — a hand-rolled sequence in a transport would silently skip all of that.
 
 ---
 
@@ -260,11 +260,11 @@ Every transport (`stdio`, `ws`, `run`) builds its `AgentState` the same way: `Op
 | What to extend | Where | How |
 |----------------|-------|-----|
 | Add a new LLM provider | `src/core/llm/` | Implement `LlmClient` |
-| Add an embeddings backend | `src/rag/embedding/` | Implement `EmbeddingClient`, pass to `LongTermMemory::new` |
+| Add an embeddings backend | `src/rag/embedding/` | Implement `EmbeddingClient`, pass to `LongTermMemory::new`, hand that to `OpenheimBuilder::long_term_memory()` |
 | Add a built-in tool | `src/tools/` | Implement `ToolHandler`, register in `register_builtins` |
 | Add a tool without touching source | any embedder | Implement `ToolHandler`, register via `OpenheimBuilder::tool()` |
-| Add an external tool source | `src/mcp/` | MCP servers via configuration or `McpClient` |
-| Add a new transport | `src/transport/` | Build via `OpenheimClient::builder().build()`, then call `acp::serve(your_transport, client.state().clone())` |
+| Add an external tool source | `src/mcp/` | MCP servers via configuration or `OpenheimBuilder::mcp_server()` |
+| Add a new transport | `src/transport/` | Build via `OpenheimClient::builder().build()`, then call `acp::serve(your_transport, client)` |
 | Gate tool calls on user approval | any embedder | Implement `PermissionGate`, set via `SessionHandle::permission_gate()` |
 
 See [custom-tools.md](./custom-tools.md) and [custom-llm-provider.md](./custom-llm-provider.md) for step-by-step guides.

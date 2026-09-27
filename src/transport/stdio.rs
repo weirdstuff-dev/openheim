@@ -11,9 +11,7 @@ use crate::{acp, client::OpenheimClient};
 
 /// Serves ACP over stdin/stdout for `client` until stdin closes.
 pub async fn run(client: OpenheimClient) -> crate::error::Result<()> {
-    let state = client.state().clone();
-
-    acp::serve(Stdio::new(), state)
+    acp::serve(Stdio::new(), client)
         .await
         .map_err(|e| crate::error::Error::Other(e.to_string()))
 }

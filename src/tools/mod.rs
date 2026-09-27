@@ -22,9 +22,9 @@
 //! turn's [`ClientIo`](crate::core::client_io::ClientIo) when one is
 //! available; there is no separate sandbox wrapper.
 //!
-//! With the `rag` feature, `AgentState` also registers `remember`,
-//! `search_memory`, `edit_memory`, and `forget` (see `crate::rag::tool`), and
-//! `delegate_task` ([`DelegateTool`]) is always registered.
+//! With the `rag` feature, an [`OpenheimClient`](crate::OpenheimClient) also
+//! registers `remember`, `search_memory`, `edit_memory`, and `forget`, and
+//! `delegate_task` is always registered.
 //!
 //! Additional tools are loaded from MCP servers and registered under the
 //! `{server_name}__{tool_name}` namespace.
@@ -96,18 +96,19 @@
 //!
 //! `SystemToolExecutor::register` (shown below) is the lower-level entry
 //! point `OpenheimBuilder::tool` uses internally — reach for it directly only
-//! if you're constructing an [`crate::core::runtime::AgentState`] yourself instead of
-//! going through the builder.
+//! if you're driving the agent loop yourself with
+//! [`run_agent`](crate::core::agent::run_agent) instead of going through the
+//! builder.
 
 pub mod args;
-pub mod capabilities;
-pub mod delegate;
+mod capabilities;
+pub(crate) mod delegate;
 mod edit_file;
 mod execute_command;
 mod list_dir;
 mod overlay_executor;
 mod read_file;
-pub mod sandbox;
+pub(crate) mod sandbox;
 mod scoped_executor;
 mod search;
 mod web_fetch;
@@ -124,9 +125,10 @@ use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 
 pub use capabilities::{ApprovalScope, ToolCapabilities, ToolKindHint};
-pub use delegate::{DELEGATE_TOOL_NAME, DelegateTool};
+pub(crate) use delegate::DelegateTool;
+pub use execute_command::kill_running_commands;
 pub(crate) use overlay_executor::OverlayExecutor;
-pub use scoped_executor::ScopedExecutor;
+pub(crate) use scoped_executor::ScopedExecutor;
 
 #[async_trait]
 pub trait ToolHandler: Send + Sync {
@@ -174,7 +176,7 @@ pub trait ToolExecutor: Send + Sync {
 /// The default tool executor: a registry of [`ToolHandler`]s keyed by name.
 ///
 /// Cloning is cheap and gives an independent registry sharing the same
-/// handlers: a snapshot of the tool set (how [`DelegateTool`] gets one
+/// handlers: a snapshot of the tool set (how `delegate_task` gets one
 /// without itself in it).
 #[derive(Clone)]
 pub struct SystemToolExecutor {

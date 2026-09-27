@@ -1,6 +1,5 @@
 //! Subagent profiles: named, user-defined agent personas that the orchestrating
-//! agent can delegate self-contained tasks to via the `delegate_task` tool
-//! (see [`crate::tools::delegate`]).
+//! agent can delegate self-contained tasks to via the `delegate_task` tool.
 //!
 //! A profile is a Markdown file, `~/.openheim/agents/{name}.md`, optionally
 //! starting with a `+++`-delimited TOML frontmatter block; the rest is the
@@ -27,6 +26,7 @@ use crate::error::{Error, Result};
 
 /// A user-defined subagent persona loaded from `~/.openheim/agents/{name}.md`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct AgentProfile {
     /// Derived from the filename (without the `.md` extension).
     pub name: String,

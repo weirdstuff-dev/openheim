@@ -124,10 +124,24 @@ struct GeminiToolDeclaration {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GeminiFunctionDeclaration {
     name: String,
     description: String,
-    parameters: Value,
+    /// The tool's parameters as JSON Schema. Not `parameters`, which takes
+    /// Gemini's own OpenAPI-subset `Schema` and rejects the keys MCP servers'
+    /// schemas commonly carry (`$schema`, `additionalProperties`, …), failing
+    /// every request that lists the tool.
+    parameters_json_schema: Value,
+}
+
+/// `schema` without its top-level `$schema` key: it only names the JSON
+/// Schema dialect, and Gemini has no use for it.
+fn without_dialect(mut schema: Value) -> Value {
+    if let Some(object) = schema.as_object_mut() {
+        object.remove("$schema");
+    }
+    schema
 }
 
 // --- Gemini response types ---
@@ -298,7 +312,7 @@ fn convert_tools(tools: &[Tool]) -> Vec<GeminiToolDeclaration> {
         .map(|t| GeminiFunctionDeclaration {
             name: t.function.name.clone(),
             description: t.function.description.clone(),
-            parameters: t.function.parameters.clone(),
+            parameters_json_schema: without_dialect(t.function.parameters.clone()),
         })
         .collect();
 
@@ -692,6 +706,35 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].function_declarations.len(), 1);
         assert_eq!(result[0].function_declarations[0].name, "test_tool");
+    }
+
+    // An MCP tool's schema goes out as JSON Schema, keeping keys Gemini's own
+    // `Schema` type would reject.
+    #[test]
+    fn convert_tools_sends_parameters_as_json_schema() {
+        let tools = vec![Tool::function(
+            "fs__read",
+            "Read a file",
+            json!({
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+        )];
+        let declaration =
+            &serde_json::to_value(convert_tools(&tools)).unwrap()[0]["functionDeclarations"][0];
+        assert!(declaration.get("parameters").is_none(), "{declaration}");
+        assert_eq!(
+            declaration["parametersJsonSchema"],
+            json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"],
+                "additionalProperties": false
+            })
+        );
     }
 
     #[test]

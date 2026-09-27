@@ -31,13 +31,13 @@ The `definition` method runs once at startup to populate the list sent to the LL
 
 ```rust
 fn capabilities(&self) -> ToolCapabilities {
-    ToolCapabilities {
-        read_only: true,
-        kind: ToolKindHint::Search,
-        ..Default::default()
-    }
+    ToolCapabilities::default()
+        .with_read_only(true)
+        .with_kind(ToolKindHint::Search)
 }
 ```
+
+`ToolCapabilities` is `#[non_exhaustive]`, so start from `default()` and use the `with_*` setters; a struct literal, even with `..Default::default()`, doesn't compile outside openheim.
 
 `turn` is the calling turn's `openheim::core::turn::TurnContext`. It carries everything the built-in tools use to behave well inside an agent session, and custom tools get exactly the same:
 
@@ -157,7 +157,7 @@ use openheim::core::client_io::LineRange;
 async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
     let v = parse_args(args)?;
     let path = turn.resolve_path(require_str(&v, "path")?)?;
-    // `LineRange::default()` is the whole file; set `line`/`limit` for a range.
+    // `LineRange::default()` is the whole file; `LineRange::new(line, limit)` a range.
     let content = match turn.client_io.read_file(&path, LineRange::default()).await {
         Some(result) => result?,               // the client answered
         None => tokio::fs::read_to_string(&path).await?, // no client: local disk
@@ -177,7 +177,7 @@ let client = OpenheimClient::builder()
     .await?;
 ```
 
-If you're driving the agent loop yourself, use `SystemToolExecutor::register` and build the `TurnContext` by hand:
+If you're driving the agent loop yourself, use `SystemToolExecutor::register` and build the `TurnContext` with `TurnContext::new` (its `cwd` is `work_dir` unless you set another with `with_cwd`):
 
 ```rust
 use openheim::tools::SystemToolExecutor;
@@ -207,13 +207,14 @@ async fn main() -> openheim::Result<()> {
     let mut messages = vec![Message::user("Fetch https://example.com and summarise it.")];
 
     let work_dir = std::env::current_dir()?;
-    let turn = TurnContext {
-        cancel: &CancellationToken::new(),
-        permission_gate: &(Arc::new(AllowAll) as Arc<dyn PermissionGate>),
-        work_dir: &work_dir,   // sandbox boundary for the file tools
-        cwd: &work_dir,        // where relative paths resolve and commands run
-        client_io: &NoClientIo, // no editor to delegate file I/O to
-    };
+    let cancel = CancellationToken::new();
+    let gate: Arc<dyn PermissionGate> = Arc::new(AllowAll);
+    let turn = TurnContext::new(
+        &cancel,
+        &gate,
+        &work_dir,   // sandbox boundary for the file tools
+        &NoClientIo, // no editor to delegate file I/O to
+    );
 
     let result = run_agent(
         &*llm,

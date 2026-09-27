@@ -1,4 +1,4 @@
-//! Agent Client Protocol (ACP) adapter over [`crate::core::runtime::AgentState`].
+//! Agent Client Protocol (ACP) adapter over an [`OpenheimClient`](crate::OpenheimClient).
 //!
 //! - `permission`, `client_io`: ACP's `session/request_permission` and
 //!   `fs/*` as `core`'s `PermissionGate` and `ClientIo`.
@@ -7,6 +7,13 @@
 //!   `StreamEvent → SessionUpdate` mapping (also behind
 //!   `SessionHandle::acp_updates`).
 //! - [`serve`]: the connection loop.
+//!
+//! This module's API is built on `agent-client-protocol`'s types ([`serve`]
+//! takes its transports, [`schema`] is its wire vocabulary), so moving to a
+//! new major version of that crate is a breaking release of openheim's
+//! `acp` feature. An embedder that also depends on `agent-client-protocol`
+//! directly (to be an ACP client, say) must ask for the same major version,
+//! so that one copy of it resolves.
 
 pub(crate) mod convert;
 pub(crate) mod util;
@@ -16,6 +23,8 @@ mod permission;
 mod serve;
 
 pub use serve::serve;
+#[cfg(feature = "server")]
+pub(crate) use serve::serve_state;
 
 // ACP's own wire vocabulary, for library users of the ACP adapters
 // (`SessionHandle::acp_updates`, `SessionHandle::acp_replay`) without a

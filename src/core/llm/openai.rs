@@ -334,6 +334,12 @@ fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
             Role::Assistant => {
                 let text = msg.text();
                 let calls = msg.tool_calls();
+                // A stored reply with neither (empty, or reasoning only) is
+                // left out: OpenAI rejects an assistant message without
+                // content or tool calls, which would fail every later request.
+                if text.is_none() && calls.is_empty() {
+                    continue;
+                }
                 let tool_calls = if calls.is_empty() {
                     None
                 } else {
@@ -769,6 +775,27 @@ mod tests {
         // never appears in the JSON sent over the wire.
         let json = serde_json::to_value(&result[0]).unwrap();
         assert!(json.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn convert_messages_leaves_out_an_assistant_reply_with_nothing_to_send() {
+        let messages = vec![
+            Message::user("hi"),
+            Message::new(Role::Assistant, vec![]),
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::Thinking {
+                    thinking: "ran out of tokens while thinking".into(),
+                    signature: None,
+                }],
+            ),
+            Message::user("still there?"),
+        ];
+        let roles: Vec<_> = convert_messages(&messages)
+            .into_iter()
+            .map(|m| m.role)
+            .collect();
+        assert_eq!(roles, ["user", "user"]);
     }
 
     #[test]

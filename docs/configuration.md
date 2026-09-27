@@ -6,6 +6,8 @@ Openheim loads its configuration from `~/.openheim/config.toml`. Generate a defa
 openheim init
 ```
 
+A key openheim doesn't know, such as a typo like `allow-shell` for `allow_shell`, is ignored with a warning on stderr naming it (``ignoring unknown config key `allow-shell` ``). It isn't an error, so a config written for a newer version still loads. Set `RUST_LOG=error` to silence the warnings.
+
 ---
 
 ## Top-level fields
@@ -15,7 +17,7 @@ openheim init
 | `default_provider` | string | — | Provider to use when no `--model` override is given (must match a key under `[providers]`) |
 | `max_iterations` | integer | `10` | Maximum number of agent loop iterations per prompt before stopping |
 | `default_skills` | string[] | `[]` | Skills loaded automatically in every new session. Merged with per-session `--skills`; defaults appear first, duplicates removed. |
-| `work_dir` | path | cwd at invocation | Root directory the agent is allowed to read and write. The agent cannot access files outside this tree. When unset, defaults to the directory from which openheim was invoked. |
+| `work_dir` | path | cwd at invocation | Root directory the agent is allowed to read and write. The agent cannot access files outside this tree. When unset, defaults to the directory from which openheim was invoked. A relative path is taken from that directory too (no `~` expansion). It's resolved at startup, symlinks followed, and must be an existing directory, or openheim refuses to start. |
 | `allow_shell` | boolean | `false` | Whether to expose the `execute_command` shell tool to the LLM. Disabled by default — set to `true` to expose the tool. When `false`, the LLM never sees it in its tool list. |
 | `data_dir` | path | `~/.openheim` | Root directory for openheim's own data: conversation history (`history/`), skills (`skills/`), `system.md`, subagent profiles (`agents/`), and the long-term memory database (`memory.db`, unless `[memory].db_path` overrides it). The config file itself is still read from `~/.openheim/config.toml`. Lets two agents in one process keep separate state, or a sandboxed run stay out of the real home directory. |
 
@@ -38,7 +40,7 @@ work_dir = "/home/user/projects/myproject"
 
 ### Security notes
 
-**`work_dir`** is enforced at the application layer for `read_file`, `write_file`, `edit_file`, `list_dir`, and `search`, and for the `/ws` filesystem sidecar (all `fs`-channel operations are validated against the same boundary). Within it, each session's tools work in the session's `cwd` (ACP `session/new`, `SessionBuilder::cwd`, or the directory openheim was started from) when that is inside `work_dir`: relative paths resolve there and `execute_command` runs there. A `cwd` outside `work_dir` is ignored and `work_dir` is used instead; it never widens what's reachable. Symlinks are followed and canonicalized so they cannot be used to escape the boundary. Shell commands (`execute_command`) are launched with `work_dir` as their working directory so relative paths resolve correctly, but absolute paths inside a shell command are not blocked — OS-level sandboxing (chroot, containers) is required for full shell isolation. Shell commands are additionally bounded: each runs in its own process group, is killed after a 120-second timeout (or on turn cancellation), and has stdout/stderr capped at 64 KiB per stream with a truncation marker.
+**`work_dir`** is enforced at the application layer for `read_file`, `write_file`, `edit_file`, `list_dir`, and `search`, and for the `/ws` filesystem sidecar (all `fs`-channel operations are validated against the same boundary). Within it, each session's tools work in the session's `cwd` (ACP `session/new`, `SessionBuilder::cwd`, or the directory openheim was started from) when that is inside `work_dir`: relative paths resolve there and `execute_command` runs there. A `cwd` outside `work_dir` is ignored and `work_dir` is used instead; it never widens what's reachable. Symlinks are followed and canonicalized so they cannot be used to escape the boundary. Shell commands (`execute_command`) are launched with `work_dir` as their working directory so relative paths resolve correctly, but absolute paths inside a shell command are not blocked — OS-level sandboxing (chroot, containers) is required for full shell isolation. Shell commands are additionally bounded: each runs in its own process group, is killed after a 120-second timeout (or on turn cancellation, or when the `openheim` process gets SIGINT, SIGTERM or SIGHUP), and has stdout/stderr capped at 64 KiB per stream with a truncation marker.
 
 Every tool result, built-in, MCP or custom, is cut to 128 KiB (with a note saying how much was left out) before it goes into the conversation, since the history is resent with every request.
 
@@ -114,6 +116,9 @@ Use either `command` (stdio transport) or `url` (Streamable HTTP transport), not
 | `env` | table | No | Extra environment variables for the spawned process |
 | `url` | string | HTTP only | Base URL for Streamable HTTP transport |
 | `headers` | table | No | Extra HTTP headers sent with every request, e.g. auth (HTTP only) |
+| `tool_timeout_secs` | integer | No | Longest one tool call may take, including any wait for a reconnect, before it fails with a timeout error. At least 1. Default: 600 |
+
+If a server's connection closes (a stdio server exits, an HTTP server drops it), the next call to one of its tools reconnects. A call that was in flight when it closed fails and isn't retried, since the tool may already have run. If reconnecting fails, calls to that server fail with the same error for 30 seconds before the next attempt.
 
 `env` and `headers` are inline tables, so a server with credentials still fits on one `[mcp_servers.<name>]` block — no separate `[mcp_servers.<name>.env]` section needed:
 

@@ -23,13 +23,13 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
 use crate::{
-    client::OpenheimClient,
+    client::{OpenheimClient, SessionHandle},
     core::{models::StopReason, permission::PermissionGate},
 };
 
 use app::App;
 use permission::TuiPermissionGate;
-use state::AgentChannels;
+use state::{AgentChannels, AgentCommand};
 use types::{AgentUpdate, ChatItem};
 
 type PanicHook = dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync;
@@ -123,176 +123,20 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
         .permission_gate(permission_gate.clone());
 
     let (update_tx, mut update_rx) = mpsc::unbounded_channel::<AgentUpdate>();
-    let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<String>();
-    let (switch_model_tx, mut switch_model_rx) = mpsc::unbounded_channel::<(String, String)>();
-    let (switch_session_tx, mut switch_session_rx) =
-        mpsc::unbounded_channel::<(String, std::path::PathBuf)>();
-    let (list_sessions_tx, mut list_sessions_rx) = mpsc::unbounded_channel::<()>();
-    let (new_session_tx, mut new_session_rx) = mpsc::unbounded_channel::<()>();
-    let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel::<()>();
+    let (commands_tx, commands_rx) = mpsc::unbounded_channel::<AgentCommand>();
+    let (cancel_tx, cancel_rx) = mpsc::unbounded_channel::<()>();
 
-    let agent_handle = {
-        let update_tx = update_tx.clone();
-        // For `:new`: the same skills as at startup, and the model the
-        // current session is on (a new session starts on the default).
-        let session_skills = skills.clone();
-        let default_provider = agent_config.provider_name.clone();
-        let default_model = agent_config.model.clone();
-        tokio::spawn(async move {
-            let mut session = session;
-            let mut current_provider = default_provider.clone();
-            let mut current_model = default_model.clone();
-            loop {
-                tokio::select! {
-                    maybe_prompt = prompt_rx.recv() => {
-                        match maybe_prompt {
-                            Some(prompt) => {
-                                // A cancel sent while no turn was running
-                                // (e.g. during `:new`, or just as the last
-                                // turn ended) isn't meant for this one.
-                                while cancel_rx.try_recv().is_ok() {}
-                                let tx_cb = update_tx.clone();
-                                let turn = session.prompt(prompt, move |event| {
-                                    let _ = tx_cb.send(AgentUpdate::Stream(event));
-                                });
-                                tokio::pin!(turn);
-                                // The turn is polled first, so it queues for the
-                                // session lock (where it resets its cancel
-                                // token) ahead of a cancel arriving with it.
-                                let result = loop {
-                                    tokio::select! {
-                                        biased;
-                                        result = &mut turn => break result,
-                                        Some(()) = cancel_rx.recv() => session.cancel().await,
-                                    }
-                                };
-                                match result {
-                                    Ok(StopReason::Cancelled) => {
-                                        let _ = update_tx
-                                            .send(AgentUpdate::Notice("turn cancelled".to_string()));
-                                    }
-                                    Ok(stop_reason) => {
-                                        if let Some(notice) = stop_reason.notice() {
-                                            let _ = update_tx
-                                                .send(AgentUpdate::Notice(notice.to_string()));
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
-                                    }
-                                }
-                            }
-                            None => break,
-                        }
-                    }
-                    maybe_model = switch_model_rx.recv() => {
-                        match maybe_model {
-                            Some((provider, model)) => {
-                                match session.switch_model(&provider, &model).await {
-                                    Ok((provider, model)) => {
-                                        current_provider = provider.clone();
-                                        current_model = model.clone();
-                                        let _ = update_tx.send(AgentUpdate::ModelChanged { provider, model });
-                                    }
-                                    Err(e) => {
-                                        let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
-                                    }
-                                }
-                            }
-                            None => break,
-                        }
-                    }
-                    maybe_switch = switch_session_rx.recv() => {
-                        match maybe_switch {
-                            Some((session_id, cwd)) => {
-                                // Sent as one batch, so the app repaints once.
-                                match client.resume_session(&session_id, cwd).await {
-                                    Ok((restored, loaded)) => {
-                                        let restored =
-                                            restored.permission_gate(permission_gate.clone());
-                                        let mut history = Vec::new();
-                                        if let Some(warning) = loaded.warning {
-                                            history.push(ChatItem::AssistantMessage(warning));
-                                        }
-                                        for msg in &loaded.messages {
-                                            history.extend(message_to_chat_items(msg));
-                                        }
-                                        history.push(ChatItem::SystemInfo(
-                                            "─── session restored".to_string(),
-                                        ));
-                                        let _ = update_tx.send(AgentUpdate::History(history));
-                                        // The restored session's context size;
-                                        // `None` clears the previous one's.
-                                        if let Ok(usage) = restored.context_usage().await {
-                                            let _ = update_tx.send(AgentUpdate::Usage(usage));
-                                        }
-                                        session = restored;
-                                    }
-                                    Err(e) => {
-                                        let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
-                                    }
-                                }
-                            }
-                            None => break,
-                        }
-                    }
-                    maybe_new = new_session_rx.recv() => {
-                        match maybe_new {
-                            Some(()) => {
-                                match client
-                                    .new_session()
-                                    .skills(session_skills.clone())
-                                    .start()
-                                    .await
-                                {
-                                    Ok(new_session) => {
-                                        let new_session =
-                                            new_session.permission_gate(permission_gate.clone());
-                                        // Keep the active model; if it no longer
-                                        // resolves, tell the UI it's the default.
-                                        match new_session.switch_model(&current_provider, &current_model).await {
-                                            Ok(_) => {}
-                                            Err(_) => {
-                                                current_provider = default_provider.clone();
-                                                current_model = default_model.clone();
-                                                let _ = update_tx.send(AgentUpdate::ModelChanged {
-                                                    provider: default_provider.clone(),
-                                                    model: default_model.clone(),
-                                                });
-                                            }
-                                        }
-                                        session = new_session;
-                                        let _ = update_tx.send(AgentUpdate::NewSession(vec![
-                                            ChatItem::SystemInfo("─── new session".to_string()),
-                                        ]));
-                                    }
-                                    Err(e) => {
-                                        let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
-                                    }
-                                }
-                            }
-                            None => break,
-                        }
-                    }
-                    maybe_list = list_sessions_rx.recv() => {
-                        match maybe_list {
-                            Some(()) => {
-                                match client.list_sessions(None).await {
-                                    Ok(metas) => {
-                                        let _ = update_tx.send(AgentUpdate::SessionList(metas));
-                                    }
-                                    Err(e) => {
-                                        let _ = update_tx.send(AgentUpdate::Error(e.to_string()));
-                                    }
-                                }
-                            }
-                            None => break,
-                        }
-                    }
-                }
-            }
-        })
-    };
+    let agent_handle = tokio::spawn(
+        AgentTask {
+            client: client.clone(),
+            permission_gate,
+            skills: skills.clone(),
+            default_provider: agent_config.provider_name.clone(),
+            default_model: agent_config.model.clone(),
+            updates: update_tx,
+        }
+        .run(session, commands_rx, cancel_rx),
+    );
 
     let mut app = App::new(
         agent_config,
@@ -300,11 +144,7 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
         paths,
         skills,
         AgentChannels {
-            prompt: prompt_tx,
-            switch_model: switch_model_tx,
-            switch_session: switch_session_tx,
-            list_sessions: list_sessions_tx,
-            new_session: new_session_tx,
+            commands: commands_tx,
             cancel: cancel_tx,
         },
     );
@@ -388,6 +228,190 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
     }
 }
 
+/// The TUI's agent side: runs the UI's [`AgentCommand`]s against the
+/// client and reports back as [`AgentUpdate`]s.
+struct AgentTask {
+    client: OpenheimClient,
+    permission_gate: Arc<dyn PermissionGate>,
+    /// For `:new`: the same skills as at startup.
+    skills: Vec<String>,
+    /// The model a new session falls back to when the active one no
+    /// longer resolves.
+    default_provider: String,
+    default_model: String,
+    updates: mpsc::UnboundedSender<AgentUpdate>,
+}
+
+impl AgentTask {
+    /// Handles `commands` one at a time, in the order sent, until the UI
+    /// drops its sender. `cancel` is only read while a turn runs.
+    async fn run(
+        self,
+        mut session: SessionHandle,
+        mut commands: mpsc::UnboundedReceiver<AgentCommand>,
+        mut cancel: mpsc::UnboundedReceiver<()>,
+    ) {
+        // A new session starts on the model the current one is on.
+        let mut current_provider = self.default_provider.clone();
+        let mut current_model = self.default_model.clone();
+        while let Some(command) = commands.recv().await {
+            match command {
+                AgentCommand::Prompt(prompt) => {
+                    self.prompt(&session, prompt, &mut cancel).await;
+                }
+                AgentCommand::SwitchModel { provider, model } => {
+                    match session.switch_model(&provider, &model).await {
+                        Ok((provider, model)) => {
+                            current_provider = provider.clone();
+                            current_model = model.clone();
+                            self.send(AgentUpdate::ModelChanged { provider, model });
+                        }
+                        Err(e) => self.send(AgentUpdate::Error(e.to_string())),
+                    }
+                }
+                AgentCommand::SwitchSession { id, cwd } => {
+                    let resumed = self
+                        .resume(&id, cwd, &mut current_provider, &mut current_model)
+                        .await;
+                    if let Some(restored) = resumed {
+                        session = restored;
+                    }
+                }
+                AgentCommand::NewSession => {
+                    let started = self
+                        .new_session(&mut current_provider, &mut current_model)
+                        .await;
+                    if let Some(new_session) = started {
+                        session = new_session;
+                    }
+                }
+                AgentCommand::ListSessions => match self.client.list_sessions(None).await {
+                    Ok(metas) => self.send(AgentUpdate::SessionList(metas)),
+                    Err(e) => self.send(AgentUpdate::Error(e.to_string())),
+                },
+            }
+        }
+    }
+
+    fn send(&self, update: AgentUpdate) {
+        let _ = self.updates.send(update);
+    }
+
+    /// Runs one turn, cancelling it if `cancel` fires meanwhile.
+    async fn prompt(
+        &self,
+        session: &SessionHandle,
+        prompt: String,
+        cancel: &mut mpsc::UnboundedReceiver<()>,
+    ) {
+        // A cancel sent while no turn was running (e.g. during `:new`, or
+        // just as the last turn ended) isn't meant for this one.
+        while cancel.try_recv().is_ok() {}
+        let updates = self.updates.clone();
+        let turn = session.prompt(prompt, move |event| {
+            let _ = updates.send(AgentUpdate::Stream(event));
+        });
+        tokio::pin!(turn);
+        // The turn is polled first, so it queues for the session lock (where
+        // it resets its cancel token) ahead of a cancel arriving with it.
+        let result = loop {
+            tokio::select! {
+                biased;
+                result = &mut turn => break result,
+                Some(()) = cancel.recv() => session.cancel().await,
+            }
+        };
+        match result {
+            Ok(StopReason::Cancelled) => {
+                self.send(AgentUpdate::Notice("turn cancelled".to_string()));
+            }
+            Ok(stop_reason) => {
+                if let Some(notice) = stop_reason.notice() {
+                    self.send(AgentUpdate::Notice(notice.to_string()));
+                }
+            }
+            Err(e) => self.send(AgentUpdate::Error(e.to_string())),
+        }
+    }
+
+    /// Resumes saved session `id` and sends its history, setting `provider`
+    /// and `model` to the ones it's on, or reports why it couldn't.
+    async fn resume(
+        &self,
+        id: &str,
+        cwd: std::path::PathBuf,
+        provider: &mut String,
+        model: &mut String,
+    ) -> Option<SessionHandle> {
+        let (restored, loaded) = match self.client.resume_session(id, cwd).await {
+            Ok(resumed) => resumed,
+            Err(e) => {
+                self.send(AgentUpdate::Error(e.to_string()));
+                return None;
+            }
+        };
+        let restored = restored.permission_gate(self.permission_gate.clone());
+        // Sent as one batch, so the app repaints once.
+        let mut history = Vec::new();
+        if let Some(warning) = loaded.warning {
+            history.push(ChatItem::AssistantMessage(warning));
+        }
+        for msg in &loaded.messages {
+            history.extend(message_to_chat_items(msg));
+        }
+        history.push(ChatItem::SystemInfo("─── session restored".to_string()));
+        self.send(AgentUpdate::History(history));
+        if loaded.provider != *provider || loaded.model != *model {
+            provider.clone_from(&loaded.provider);
+            model.clone_from(&loaded.model);
+            self.send(AgentUpdate::ModelChanged {
+                provider: loaded.provider,
+                model: loaded.model,
+            });
+        }
+        // The restored session's context size; `None` clears the previous
+        // one's.
+        if let Ok(usage) = restored.context_usage().await {
+            self.send(AgentUpdate::Usage(usage));
+        }
+        Some(restored)
+    }
+
+    /// Starts a new session on the active model (`provider`/`model`), or on
+    /// the default one if that no longer resolves, updating both to match.
+    async fn new_session(
+        &self,
+        provider: &mut String,
+        model: &mut String,
+    ) -> Option<SessionHandle> {
+        let new_session = match self
+            .client
+            .new_session()
+            .skills(self.skills.clone())
+            .start()
+            .await
+        {
+            Ok(new_session) => new_session.permission_gate(self.permission_gate.clone()),
+            Err(e) => {
+                self.send(AgentUpdate::Error(e.to_string()));
+                return None;
+            }
+        };
+        if new_session.switch_model(provider, model).await.is_err() {
+            provider.clone_from(&self.default_provider);
+            model.clone_from(&self.default_model);
+            self.send(AgentUpdate::ModelChanged {
+                provider: self.default_provider.clone(),
+                model: self.default_model.clone(),
+            });
+        }
+        self.send(AgentUpdate::NewSession(vec![ChatItem::SystemInfo(
+            "─── new session".to_string(),
+        )]));
+        Some(new_session)
+    }
+}
+
 /// The `ChatItem`s a live turn would have shown for one saved message.
 /// [`Message::transcript`] decides what is shown; an image becomes a
 /// placeholder line.
@@ -423,7 +447,134 @@ fn message_to_chat_items(msg: &crate::core::models::Message) -> Vec<ChatItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{AppConfig, ProviderConfig};
     use crate::core::models::{ContentBlock, Message, Role};
+
+    // Commands run in the order the UI sent them: a model switch sent right
+    // after a session switch applies to the resumed session, and each
+    // command's updates come before the next command's.
+    #[tokio::test]
+    async fn agent_task_runs_commands_in_the_order_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AppConfig::new("local").with_provider(
+            "local",
+            ProviderConfig::new("http://127.0.0.1:1/v1", "m1").with_models(["m1", "m2"]),
+        );
+        let client = OpenheimClient::builder()
+            .app_config(config)
+            .data_dir(dir.path())
+            .work_dir(dir.path())
+            .build()
+            .await
+            .unwrap();
+        let history = client.state().memory.history.clone();
+        let mut saved = history
+            .create_conversation(Some("m1".into()), Some("local".into()), vec![])
+            .unwrap();
+        saved.messages.push(Message::user("hi"));
+        history.save_conversation(&saved).unwrap();
+        let saved_id = saved.meta.id.to_string();
+
+        let (updates_tx, mut updates) = mpsc::unbounded_channel();
+        let (commands_tx, commands) = mpsc::unbounded_channel();
+        let (_cancel_tx, cancel) = mpsc::unbounded_channel();
+        for command in [
+            AgentCommand::SwitchSession {
+                id: saved_id.clone(),
+                cwd: dir.path().to_path_buf(),
+            },
+            AgentCommand::ListSessions,
+            AgentCommand::SwitchModel {
+                provider: "local".into(),
+                model: "m2".into(),
+            },
+        ] {
+            commands_tx.send(command).unwrap();
+        }
+        drop(commands_tx);
+
+        let task = AgentTask {
+            client: client.clone(),
+            permission_gate: Arc::new(crate::core::permission::AllowAll),
+            skills: vec![],
+            default_provider: "local".into(),
+            default_model: "m1".into(),
+            updates: updates_tx,
+        };
+        let session = client.new_session().start().await.unwrap();
+        task.run(session, commands, cancel).await;
+
+        let mut kinds = Vec::new();
+        while let Ok(update) = updates.try_recv() {
+            kinds.push(match update {
+                AgentUpdate::History(_) => "history",
+                AgentUpdate::Usage(_) => "usage",
+                AgentUpdate::SessionList(_) => "sessions",
+                AgentUpdate::ModelChanged { .. } => "model",
+                other => panic!("unexpected update {other:?}"),
+            });
+        }
+        assert_eq!(kinds, ["history", "usage", "sessions", "model"]);
+
+        // The live session behind `saved_id` is the one on the new model.
+        let (_, loaded) = client
+            .resume_session(&saved_id, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        assert_eq!(loaded.model, "m2");
+    }
+
+    // Resuming a session on another model makes that model the active one.
+    #[tokio::test]
+    async fn resuming_a_session_switches_to_its_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AppConfig::new("local").with_provider(
+            "local",
+            ProviderConfig::new("http://127.0.0.1:1/v1", "m1").with_models(["m1", "m2"]),
+        );
+        let client = OpenheimClient::builder()
+            .app_config(config)
+            .data_dir(dir.path())
+            .work_dir(dir.path())
+            .build()
+            .await
+            .unwrap();
+        let history = client.state().memory.history.clone();
+        let saved = history
+            .create_conversation(Some("m2".into()), Some("local".into()), vec![])
+            .unwrap();
+        history.save_conversation(&saved).unwrap();
+
+        let (updates_tx, mut updates) = mpsc::unbounded_channel();
+        let (commands_tx, commands) = mpsc::unbounded_channel();
+        let (_cancel_tx, cancel) = mpsc::unbounded_channel();
+        commands_tx
+            .send(AgentCommand::SwitchSession {
+                id: saved.meta.id.to_string(),
+                cwd: dir.path().to_path_buf(),
+            })
+            .unwrap();
+        drop(commands_tx);
+
+        let task = AgentTask {
+            client: client.clone(),
+            permission_gate: Arc::new(crate::core::permission::AllowAll),
+            skills: vec![],
+            default_provider: "local".into(),
+            default_model: "m1".into(),
+            updates: updates_tx,
+        };
+        let session = client.new_session().start().await.unwrap();
+        task.run(session, commands, cancel).await;
+
+        let mut models = Vec::new();
+        while let Ok(update) = updates.try_recv() {
+            if let AgentUpdate::ModelChanged { provider, model } = update {
+                models.push((provider, model));
+            }
+        }
+        assert_eq!(models, [("local".to_string(), "m2".to_string())]);
+    }
 
     // Interleaved thinking stores several thinking blocks between text and
     // tool calls; a restored session shows them in that order.

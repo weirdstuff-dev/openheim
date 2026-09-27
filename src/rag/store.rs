@@ -54,6 +54,7 @@ fn register_sqlite_vec() {
 
 /// One remembered note.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct MemoryRecord {
     pub id: i64,
     pub content: String,
@@ -62,6 +63,7 @@ pub struct MemoryRecord {
 
 /// How a hit was found; determines what [`MemoryHit::score`] means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SearchMethod {
     /// Embedding nearest-neighbour; `score` is cosine similarity in `[-1, 1]`.
     Semantic,
@@ -71,6 +73,7 @@ pub enum SearchMethod {
 
 /// One retrieved note.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct MemoryHit {
     pub record: MemoryRecord,
     /// Higher is better; scale depends on `method`.
@@ -80,6 +83,7 @@ pub struct MemoryHit {
 
 /// Store size summary.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StoreStats {
     pub memories: usize,
     /// `None` until an embedder has fixed the vector space.

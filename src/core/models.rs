@@ -21,6 +21,7 @@ pub enum Role {
 /// convert at their own edge.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ContentBlock {
     Text {
         text: String,
@@ -90,6 +91,7 @@ impl<T: Into<String>> From<T> for ContentBlock {
 /// A `ToolUse` block extracted from a [`Message`] for convenient iteration;
 /// see [`Message::tool_calls`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ToolUseBlock {
     pub id: String,
     pub name: String,
@@ -99,6 +101,7 @@ pub struct ToolUseBlock {
 /// The `ToolResult` block on a `Role::Tool` [`Message`]; see
 /// [`Message::tool_result_block`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ToolResultBlock {
     pub tool_call_id: String,
     pub tool_name: String,
@@ -112,12 +115,17 @@ pub struct ToolResultBlock {
 /// describing what it *contains*. A tool-result message is `role: Tool` with
 /// a single `ToolResult` block rather than a distinct role.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
 }
 
 impl Message {
+    pub fn new(role: Role, content: Vec<ContentBlock>) -> Self {
+        Self { role, content }
+    }
+
     pub fn user(text: impl Into<String>) -> Self {
         Self {
             role: Role::User,
@@ -291,6 +299,7 @@ impl<'a> TranscriptEntry<'a> {
 
 /// A tool available to the agent, serialised in the OpenAI function-calling format.
 #[derive(Debug, Serialize, Clone)]
+#[non_exhaustive]
 pub struct Tool {
     #[serde(rename = "type")]
     pub tool_type: String,
@@ -319,6 +328,7 @@ impl Tool {
 
 /// Metadata describing a callable tool function.
 #[derive(Debug, Serialize, Clone)]
+#[non_exhaustive]
 pub struct FunctionDefinition {
     pub name: String,
     pub description: String,
@@ -333,6 +343,7 @@ pub struct FunctionDefinition {
 /// boundary.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum FinishReason {
     /// The model completed its response normally.
     Stop,
@@ -355,6 +366,7 @@ pub enum FinishReason {
 
 /// A single completion choice returned by the provider.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Choice {
     pub message: Message,
     pub finish_reason: Option<FinishReason>,
@@ -364,11 +376,28 @@ pub struct Choice {
     pub usage: Option<Usage>,
 }
 
+impl Choice {
+    /// A choice without usage data; add it with [`Self::with_usage`].
+    pub fn new(message: Message, finish_reason: Option<FinishReason>) -> Self {
+        Self {
+            message,
+            finish_reason,
+            usage: None,
+        }
+    }
+
+    pub fn with_usage(mut self, usage: Usage) -> Self {
+        self.usage = Some(usage);
+        self
+    }
+}
+
 /// Token usage for a single LLM call, normalized across providers'
 /// differing vocabularies (Anthropic's `input_tokens`/`cache_read_input_tokens`,
 /// OpenAI's `prompt_tokens`/`prompt_tokens_details.cached_tokens`, Gemini's
 /// `promptTokenCount`/`cachedContentTokenCount`).
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Usage {
     /// Tokens in the request that were newly processed (not served from cache).
     pub input_tokens: u64,
@@ -383,6 +412,26 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// Usage with no cache tokens; add them with
+    /// [`Self::with_cache_creation_tokens`] / [`Self::with_cache_read_tokens`].
+    pub fn new(input_tokens: u64, output_tokens: u64) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_cache_creation_tokens(mut self, tokens: u64) -> Self {
+        self.cache_creation_tokens = tokens;
+        self
+    }
+
+    pub fn with_cache_read_tokens(mut self, tokens: u64) -> Self {
+        self.cache_read_tokens = tokens;
+        self
+    }
+
     /// Sum of every token type this call accounted for.
     pub fn total(&self) -> u64 {
         self.input_tokens + self.output_tokens + self.cache_creation_tokens + self.cache_read_tokens
@@ -393,6 +442,7 @@ impl Usage {
 /// maps onto at the ACP boundary) so `core` doesn't depend on the `acp` crate.
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum StopReason {
     /// The LLM produced a final text response: [`FinishReason::Stop`], or a
     /// finish reason with no more specific mapping below.
@@ -432,6 +482,7 @@ impl StopReason {
 
 /// Final output of a completed agent run.
 #[derive(Debug, Serialize)]
+#[non_exhaustive]
 pub struct AgentResult {
     pub final_response: String,
     pub iterations_used: usize,
@@ -448,6 +499,7 @@ pub struct AgentResult {
 /// at the ACP edge (`acp::util::stream_event_to_session_update`).
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "event_type")]
+#[non_exhaustive]
 pub enum StreamEvent {
     /// Signals the start of a new reasoning iteration.
     #[serde(rename = "iteration_start")]

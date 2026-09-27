@@ -19,6 +19,7 @@ use crate::{
 ///
 /// Returned by [`crate::OpenheimClient::mcp_servers`].
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct McpServerStatus {
     /// Name of the server as defined in the configuration.
     pub name: String,
@@ -230,13 +231,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn hung_servers_time_out_together() {
-        let hung = || McpServerConfig {
-            command: Some("sleep".into()),
-            args: vec!["3600".into()],
-            env: Default::default(),
-            url: None,
-            headers: Default::default(),
-        };
+        let hung = || McpServerConfig::stdio("sleep", ["3600"]);
         let configs = BTreeMap::from([("a".to_string(), hung()), ("b".to_string(), hung())]);
         let started = tokio::time::Instant::now();
 

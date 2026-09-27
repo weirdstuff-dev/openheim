@@ -15,9 +15,16 @@ use crate::error::Result;
 /// `None` means from the first line, or through the last. The default is
 /// the whole file.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LineRange {
     pub line: Option<u32>,
     pub limit: Option<u32>,
+}
+
+impl LineRange {
+    pub const fn new(line: Option<u32>, limit: Option<u32>) -> Self {
+        Self { line, limit }
+    }
 }
 
 /// Asked before falling back to local filesystem I/O for `read_file` /

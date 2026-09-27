@@ -171,7 +171,7 @@ mod tests {
     use crate::config::ProviderConfig;
 
     fn sample_config() -> AppConfig {
-        let mut config = AppConfig::for_tests("openai");
+        let mut config = AppConfig::new("openai");
         config.max_iterations = 5;
         config.providers.insert(
             "openai".into(),
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn resolve_default_errors_when_provider_missing() {
-        let config = AppConfig::for_tests("nonexistent");
+        let config = AppConfig::new("nonexistent");
         let err = config.resolve(None).unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
     }
