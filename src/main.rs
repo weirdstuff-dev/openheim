@@ -65,8 +65,11 @@ fn die(e: impl std::fmt::Display) -> ! {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    // stderr: stdout carries `openheim acp`'s JSON-RPC stream and `openheim
+    // run`'s answer.
     fmt::Subscriber::builder()
         .with_env_filter(env_filter)
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
