@@ -48,6 +48,7 @@ env_var = "OPENAI_API_KEY"
 # api_key = "sk-..."  # Not recommended - use environment variable instead
 # timeout_secs = 120  # Connect and idle-read timeout in seconds (default: 120)
 # max_tokens = 4096   # Maximum output tokens for LLM responses
+# context_window = 128000  # Context window in tokens; older turns are left out of requests to fit it
 
 # Anthropic Claude
 [providers.anthropic]
@@ -59,8 +60,8 @@ env_var = "ANTHROPIC_API_KEY"
 # Google Gemini
 # [providers.gemini]
 # api_base = "https://generativelanguage.googleapis.com/v1beta"
-# default_model = "gemini-2.0-flash"
-# models = ["gemini-2.0-flash"]
+# default_model = "gemini-3.8-flash"
+# models = ["gemini-3.8-flash"]
 # env_var = "GEMINI_API_KEY"
 
 # Custom/Generic OpenAI-compatible API

@@ -19,13 +19,9 @@ use crate::error::{Error, Result};
 
 const DEFAULT_CONFIG: &str = include_str!("config.toml.default");
 
-/// `(provider name, default api_base, default model)` for openheim's
-/// first-class providers. This is the one place these values are written —
-/// `client::OpenheimBuilder`'s programmatic path (no config file) reads it
-/// directly via [`builtin_provider_defaults`], and `config.toml.default`'s
-/// `[providers.*]` sections are hand-kept in sync with it (enforced by
-/// `config_toml_default_matches_builtin_provider_defaults` below) rather than
-/// each independently guessing at "the current default model".
+/// `(provider name, default api_base, default model)` for the built-in
+/// providers, used by `OpenheimBuilder`'s programmatic mode.
+/// `config.toml.default` must match (a test checks).
 const BUILTIN_PROVIDER_DEFAULTS: &[(&str, &str, &str)] = &[
     ("openai", "https://api.openai.com/v1", "gpt-4o"),
     (
@@ -36,14 +32,12 @@ const BUILTIN_PROVIDER_DEFAULTS: &[(&str, &str, &str)] = &[
     (
         "gemini",
         "https://generativelanguage.googleapis.com/v1beta",
-        "gemini-2.0-flash",
+        "gemini-3.8-flash",
     ),
 ];
 
-/// Looks up `(api_base, default_model)` for a built-in provider name.
-/// Anything not in [`BUILTIN_PROVIDER_DEFAULTS`] (e.g. a fully custom
-/// OpenAI-compatible endpoint) falls back to the `openai` entry, since that's
-/// the wire format `OpenAiCompatibleClient` speaks.
+/// `(api_base, default_model)` for a built-in provider name; any other name
+/// gets the `openai` entry, whose wire format compatible endpoints speak.
 pub(crate) fn builtin_provider_defaults(provider: &str) -> (&'static str, &'static str) {
     BUILTIN_PROVIDER_DEFAULTS
         .iter()
@@ -67,19 +61,13 @@ pub fn config_path() -> Result<PathBuf> {
 
 const DEFAULT_SYSTEM_MD: &str = "You are Openheim, a multipurpose, multiprovider LLM agent.";
 
-/// Initialize the config file at ~/.openheim/config.toml with the default template.
-/// Also writes ~/.openheim/system.md if it does not already exist.
-/// Returns the path of the config file written.
-///
-/// Errors if `config.toml` already exists. `system.md` is written regardless —
-/// so existing users who already have a config can still run `openheim init` to
-/// get their `system.md` created.
+/// Writes the default `~/.openheim/config.toml` and returns its path, and
+/// writes `~/.openheim/system.md` if missing. Fails if `config.toml` already
+/// exists, but still writes `system.md` first.
 pub fn init_config() -> Result<PathBuf> {
     let dir = config_dir()?;
     std::fs::create_dir_all(&dir)?;
 
-    // Always write system.md first so existing users who re-run `init` get it
-    // even though config.toml already exists and will cause an early return below.
     let system_path = dir.join("system.md");
     let system_written = !system_path.exists();
     if system_written {
@@ -107,45 +95,40 @@ pub fn init_config() -> Result<PathBuf> {
 /// Load AppConfig from a specific path
 pub fn load_config_from(path: impl AsRef<std::path::Path>) -> Result<AppConfig> {
     let path = path.as_ref();
-    if !path.exists() {
-        return Err(Error::config(format!(
-            "Config file not found at {}",
+    let contents = std::fs::read_to_string(path).map_err(|e| {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return e.into();
+        }
+        // `openheim init` only writes the default path, so only suggest it
+        // for that one.
+        let hint = if config_path().is_ok_and(|default| default == path) {
+            " Run `openheim init` to create one."
+        } else {
+            ""
+        };
+        Error::config(format!(
+            "Config file not found at {}.{hint}",
             path.display()
-        )));
-    }
-    let contents = std::fs::read_to_string(path)?;
+        ))
+    })?;
     let config: AppConfig = toml::from_str(&contents)?;
     Ok(config)
 }
 
 /// Load AppConfig from ~/.openheim/config.toml
 pub fn load_config() -> Result<AppConfig> {
-    let path = config_path()?;
-    if !path.exists() {
-        return Err(Error::config(format!(
-            "Config file not found at {}. Run `openheim init` to create one.",
-            path.display()
-        )));
-    }
-    let contents = std::fs::read_to_string(&path)?;
-    let config: AppConfig = toml::from_str(&contents)?;
-    Ok(config)
+    load_config_from(config_path()?)
 }
 
-/// Sets or updates the `theme_color` key inside the `[tui]` table in the
-/// config file at `path`, leaving every other line untouched. Deliberately
-/// not a full TOML round-trip (no `toml_edit` dependency pulled in for one
-/// field): it only ever touches a line that already looks like
-/// `theme_color = "..."` within an existing `[tui]` section (bounded by that
-/// section's header and the next `[table]` header or EOF), or — if there is
-/// no `[tui]` section yet — appends a new one at the end of the file, so it
-/// can't corrupt an unrelated `[table]` or key.
+/// Sets `theme_color` in the `[tui]` table of the config file at `path`,
+/// leaving every other line untouched: it replaces the existing
+/// `theme_color` line in `[tui]`, adds one, or appends a `[tui]` section.
 ///
-/// `name` is interpolated into a TOML basic string rather than run through a
-/// full TOML encoder, so quotes, backslashes, and newlines are rejected
-/// outright instead of being escaped — a caller passing one of those through
-/// (this is `pub`, so an embedder could pass anything) can't break out of
-/// the string and inject arbitrary lines into the config file.
+/// Lines alone can't always tell a table header from array or string
+/// content, so the edited file is parsed first and must equal the original
+/// with only `tui.theme_color` set; otherwise nothing is written and an
+/// error is returned. `name` may not contain quotes, backslashes or
+/// newlines, so it can't break out of its TOML string.
 pub fn save_theme_to_config_at(path: &std::path::Path, name: &str) -> Result<()> {
     if name.contains(['"', '\\', '\n', '\r']) {
         return Err(Error::config(format!(
@@ -153,16 +136,27 @@ pub fn save_theme_to_config_at(path: &std::path::Path, name: &str) -> Result<()>
         )));
     }
     let contents = std::fs::read_to_string(path)?;
+    let mut expected: toml::Table = toml::from_str(&contents)?;
+    match expected
+        .entry("tui")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+    {
+        toml::Value::Table(tui) => {
+            tui.insert("theme_color".into(), toml::Value::String(name.into()));
+        }
+        _ => return Err(Error::config("`tui` in the config file is not a table")),
+    }
+
     let new_line = format!("theme_color = \"{name}\"");
     let mut lines: Vec<String> = contents.lines().map(String::from).collect();
 
     let tui_header = lines.iter().position(|l| is_tui_header(l));
     match tui_header {
         Some(header_idx) => {
-            // The section runs until the next `[...]` header or EOF.
+            // The section runs until the next table header or EOF.
             let section_end = lines[header_idx + 1..]
                 .iter()
-                .position(|l| l.trim_start().starts_with('['))
+                .position(|l| table_header(l).is_some())
                 .map(|i| header_idx + 1 + i)
                 .unwrap_or(lines.len());
             let existing_theme =
@@ -181,19 +175,40 @@ pub fn save_theme_to_config_at(path: &std::path::Path, name: &str) -> Result<()>
         }
     }
     let trailing = if contents.ends_with('\n') { "\n" } else { "" };
-    std::fs::write(path, format!("{}{trailing}", lines.join("\n")))?;
+    let edited = format!("{}{trailing}", lines.join("\n"));
+
+    if toml::from_str::<toml::Table>(&edited).ok() != Some(expected) {
+        return Err(Error::config(format!(
+            "couldn't safely set theme_color in {}; set `theme_color = \"{name}\"` under \
+             [tui] by hand",
+            path.display()
+        )));
+    }
+    std::fs::write(path, edited)?;
     Ok(())
 }
 
-/// Whether `line` is a `[tui]` table header, allowing for trailing
-/// whitespace or a `# comment` after the closing bracket (e.g. `[tui] #
-/// theme settings`), so those aren't mistaken for the start of a new,
-/// unrelated table and don't cause a second `[tui]` header to be appended.
-fn is_tui_header(line: &str) -> bool {
-    let Some(rest) = line.trim_start().strip_prefix("[tui]") else {
-        return false;
+/// The name inside `line` if it's a table header: `[name]` or `[[name]]`,
+/// optionally followed by whitespace and a `# comment`. A line that merely
+/// starts with `[` (say, `[1, 2],` inside a multi-line array) isn't one.
+fn table_header(line: &str) -> Option<&str> {
+    let line = line.trim();
+    let (open, close) = if line.starts_with("[[") {
+        ("[[", "]]")
+    } else {
+        ("[", "]")
     };
-    rest.is_empty() || rest.starts_with(char::is_whitespace) || rest.starts_with('#')
+    let rest = line.strip_prefix(open)?;
+    let end = rest.find(close)?;
+    let after = rest[end + close.len()..].trim_start();
+    (after.is_empty() || after.starts_with('#')).then(|| rest[..end].trim())
+}
+
+/// Whether `line` is the `[tui]` table header (not `[[tui]]`), allowing for
+/// spaces inside the brackets and a trailing `# comment`, so such a header
+/// doesn't cause a second `[tui]` to be appended.
+fn is_tui_header(line: &str) -> bool {
+    !line.trim_start().starts_with("[[") && table_header(line) == Some("tui")
 }
 
 /// Whether `line` assigns the `theme_color` key, as opposed to a
@@ -224,7 +239,7 @@ mod tests {
             builtin_provider_defaults("gemini"),
             (
                 "https://generativelanguage.googleapis.com/v1beta",
-                "gemini-2.0-flash"
+                "gemini-3.8-flash"
             )
         );
     }
@@ -384,6 +399,71 @@ mod tests {
             contents,
             "default_provider = \"openai\"\n\n[tui] # theme settings\ntheme_color = \"blue\"\n[providers.openai]\n"
         );
+    }
+
+    #[test]
+    fn save_theme_to_config_at_does_not_end_the_section_at_a_nested_array_line() {
+        // `  [1, 2],` starts with `[` but isn't a table header; ending the
+        // section there would insert the key inside the array.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let before = "[tui]\npalette = [\n  [1, 2],\n  [3, 4],\n]\ntheme_color = \"red\"\n\n[providers.openai]\n";
+        std::fs::write(&path, before).unwrap();
+
+        save_theme_to_config_at(&path, "green").unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, before.replace("\"red\"", "\"green\""));
+    }
+
+    #[test]
+    fn save_theme_to_config_at_leaves_the_file_alone_when_the_edit_would_not_parse() {
+        // `  ["a"]` is also a valid (quoted-key) table header, so the line
+        // edit lands inside the array; the re-parse must catch that.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let before = "[tui]\nnames = [\n  \"x\",\n  [\"a\"]\n]\n";
+        std::fs::write(&path, before).unwrap();
+
+        let err = save_theme_to_config_at(&path, "blue").unwrap_err();
+
+        assert!(err.to_string().contains("by hand"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn save_theme_to_config_at_recognizes_a_spaced_tui_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ tui ]\ntheme_color = \"red\"\n").unwrap();
+
+        save_theme_to_config_at(&path, "blue").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[ tui ]\ntheme_color = \"blue\"\n"
+        );
+    }
+
+    #[test]
+    fn table_header_accepts_only_real_headers() {
+        assert_eq!(table_header("[tui]"), Some("tui"));
+        assert_eq!(table_header("  [[agents]] # list"), Some("agents"));
+        assert_eq!(table_header("[providers.openai]"), Some("providers.openai"));
+        assert_eq!(table_header("[1, 2],"), None);
+        assert_eq!(table_header("key = [1]"), None);
+        assert!(!is_tui_header("[[tui]]"));
+    }
+
+    #[test]
+    fn load_config_from_a_missing_custom_path_does_not_suggest_init() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nope.toml");
+
+        let err = load_config_from(&path).unwrap_err().to_string();
+
+        assert!(err.contains("Config file not found at"), "{err}");
+        assert!(!err.contains("openheim init"), "{err}");
     }
 
     #[test]

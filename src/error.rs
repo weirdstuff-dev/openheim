@@ -11,6 +11,17 @@ pub enum Error {
     #[error("HTTP {status}: {body}")]
     HttpError { status: u16, body: String },
 
+    /// The provider rejected a request as too long for the model's context
+    /// window. The agent loop answers it by leaving out older turns, so a
+    /// caller only sees it once even the current turn alone doesn't fit.
+    #[error("Context window exceeded: {0}")]
+    ContextOverflow(String),
+
+    /// A provider's streamed reply ended before the provider said it was
+    /// finished (typically a dropped connection). Retryable.
+    #[error("Incomplete response: {0}")]
+    IncompleteResponse(String),
+
     #[error("Tool execution error: {0}")]
     ToolExecutionError(String),
 
@@ -30,16 +41,14 @@ pub enum Error {
     ConfigError(String),
 
     /// A requested resource (session, conversation, skill, …) doesn't exist.
-    /// No fixed prefix (unlike the other typed variants) so existing
-    /// call-site messages keep their exact wording — some are echoed
-    /// verbatim in documented API responses (see `docs/api.md`).
+    /// Shown without a prefix: some messages appear verbatim in documented
+    /// API responses (see `docs/api.md`).
     #[error("{0}")]
     NotFound(String),
 
-    /// A session's write lease (see `memory::lease`) is held by another,
-    /// still-live process. Returned from activation-for-writing (creating or
-    /// loading a session for prompting); reading/listing history never hits
-    /// this. The GUI matches on this variant to offer a read-only fallback.
+    /// A turn couldn't start because another live process holds the
+    /// session's write lease (see `memory::lease`). Reading history never
+    /// hits this. The GUI matches on it to offer a read-only fallback.
     #[error("session {session_id} is active in another process (pid {pid} on {host})")]
     SessionLocked {
         session_id: String,
@@ -47,20 +56,15 @@ pub enum Error {
         host: String,
     },
 
-    /// A `session/prompt`/`session/load` arrived while a turn was already in
-    /// flight for this session, in this process (see `SessionState::prompt_lock`).
-    /// Distinct from [`Error::SessionLocked`], which is cross-process; a
-    /// caller can retry once the in-flight turn completes instead of
-    /// treating this as a hard failure.
+    /// A `session/prompt` or `session/load` arrived while a turn was running
+    /// on this session in this process. Retry once the turn completes.
+    /// ([`Error::SessionLocked`] is the cross-process case.)
     #[error("a prompt is already in flight for session {session_id}; retry once it completes")]
     SessionBusy { session_id: String },
 
-    /// `save_conversation` would have rewritten the on-disk message log with
-    /// fewer messages than are already there — another writer (a second
-    /// `openheim` process sharing the same history directory) appended to
-    /// this conversation since it was loaded here. Refused rather than
-    /// silently dropping those messages; the caller should reload the
-    /// conversation and retry.
+    /// `save_conversation` refused to rewrite a message log that another
+    /// process has written to since the conversation was loaded. Reload it
+    /// and retry.
     #[error("conversation {session_id} was modified by another process since it was loaded")]
     HistoryDiverged { session_id: String },
 
@@ -93,11 +97,13 @@ impl Error {
         Error::ConfigError(msg.to_string())
     }
 
-    /// Returns true for transient errors that may succeed on retry (429, 5xx, network errors).
+    /// Returns true for transient errors that may succeed on retry (429, 5xx,
+    /// network errors, a reply cut off mid-stream).
     pub fn is_retryable(&self) -> bool {
         match self {
             Error::HttpError { status, .. } => matches!(status, 429 | 500 | 502 | 503 | 504),
             Error::ReqwestError(e) => e.is_timeout() || e.is_connect(),
+            Error::IncompleteResponse(_) => true,
             _ => false,
         }
     }
@@ -151,6 +157,16 @@ mod tests {
         assert!(!http_err(400).is_retryable());
         assert!(!http_err(401).is_retryable());
         assert!(!http_err(404).is_retryable());
+    }
+
+    #[test]
+    fn is_not_retryable_for_a_context_overflow() {
+        assert!(!Error::ContextOverflow("too long".into()).is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_for_an_incomplete_response() {
+        assert!(Error::IncompleteResponse("cut off".into()).is_retryable());
     }
 
     #[test]

@@ -46,11 +46,8 @@ enum Command {
     Init,
 }
 
-/// Builds the client every subcommand below runs against — the one place
-/// this binary assembles config load, resolve, `MemoryContext::new`, and
-/// `AgentState::new`, so each transport just takes the finished
-/// `OpenheimClient` instead of hand-rolling its own build path. `model`
-/// overrides the config's default model (only `openheim run` uses it).
+/// Builds the client every subcommand runs against; `model` overrides the
+/// config's default model.
 async fn build_client(model: Option<String>) -> openheim::Result<OpenheimClient> {
     let mut builder = OpenheimClient::builder();
     if let Some(model) = model {
@@ -59,9 +56,7 @@ async fn build_client(model: Option<String>) -> openheim::Result<OpenheimClient>
     builder.build().await
 }
 
-/// Prints the error and exits(1) — the uniform failure path every
-/// subcommand below shares, whether the failure is building the client or
-/// running the transport.
+/// Prints the error and exits with status 1.
 fn die(e: impl std::fmt::Display) -> ! {
     eprintln!("Error: {e}");
     std::process::exit(1);

@@ -2,9 +2,8 @@
 //! inside an editor sandbox that owns the filesystem view (unsaved buffers,
 //! virtual filesystems, etc.) rather than the process's own `tokio::fs`.
 //!
-//! Mirrors [`crate::core::permission`]: a protocol-agnostic trait here, with
-//! the ACP-specific implementation (backed by `fs/read_text_file` and
-//! `fs/write_text_file`) living in `crate::acp` (needs the `acp` feature).
+//! The ACP implementation (backed by `fs/read_text_file` and
+//! `fs/write_text_file`) lives in `crate::acp` (feature `acp`).
 
 use std::path::Path;
 
@@ -12,13 +11,24 @@ use async_trait::async_trait;
 
 use crate::error::Result;
 
+/// Which lines of a file to read: `limit` lines from line `line` (1-based).
+/// `None` means from the first line, or through the last. The default is
+/// the whole file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LineRange {
+    pub line: Option<u32>,
+    pub limit: Option<u32>,
+}
+
 /// Asked before falling back to local filesystem I/O for `read_file` /
 /// `write_file`. Returning `None` means "not available, use local I/O" —
 /// either the client doesn't advertise the capability, or there's no live
 /// ACP client connection at all (TUI, library embedding, subagents).
 #[async_trait]
 pub trait ClientIo: Send + Sync {
-    async fn read_file(&self, path: &Path) -> Option<Result<String>>;
+    /// The text of the `lines` of `path`. `read_file` asks for a range when
+    /// the model does; `edit_file` always asks for the whole file.
+    async fn read_file(&self, path: &Path, lines: LineRange) -> Option<Result<String>>;
     async fn write_file(&self, path: &Path, content: &str) -> Option<Result<()>>;
 }
 
@@ -27,7 +37,7 @@ pub struct NoClientIo;
 
 #[async_trait]
 impl ClientIo for NoClientIo {
-    async fn read_file(&self, _path: &Path) -> Option<Result<String>> {
+    async fn read_file(&self, _path: &Path, _lines: LineRange) -> Option<Result<String>> {
         None
     }
 
@@ -42,7 +52,12 @@ mod tests {
 
     #[tokio::test]
     async fn no_client_io_always_defers_to_local() {
-        assert!(NoClientIo.read_file(Path::new("/tmp/x")).await.is_none());
+        assert!(
+            NoClientIo
+                .read_file(Path::new("/tmp/x"), LineRange::default())
+                .await
+                .is_none()
+        );
         assert!(
             NoClientIo
                 .write_file(Path::new("/tmp/x"), "hi")

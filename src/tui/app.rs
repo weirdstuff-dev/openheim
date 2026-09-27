@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
@@ -10,14 +12,31 @@ use crate::{
     memory::{ConversationMeta, SkillsManager},
 };
 
-use super::permission::PermissionRequest;
+use super::permission::PendingPermission;
 use super::render::{self, FooterLabels};
 use super::state::{AgentChannels, InputLine, Overlay, PermissionQueue, Theme, Transcript};
 use super::types::{AgentUpdate, ChatItem, ConfigRow, Screen, Status};
 
-/// Formats a token count for the footer: exact below 1000, `k`-suffixed with
-/// one decimal place above it (`1.2k`, `84.0k`) so the label stays short
-/// enough to sit next to the provider/model name.
+/// What `:help` shows. The welcome screen lists the same commands
+/// (`render::WELCOME_COMMANDS`).
+const HELP_TEXT: &str = ":help              show this\n\
+                         :q / :quit         exit\n\
+                         :new               start a new session\n\
+                         :sessions          browse and restore saved sessions\n\
+                         :config            current config\n\
+                         :models            list available models\n\
+                         :models <name>     switch to model mid-session\n\
+                         :mcp               MCP servers\n\
+                         :skills            available skills\n\
+                         :theme             change accent color\n\
+                         :theme <name>      apply color directly\n\n\
+                         ↑/↓  scroll · PgUp/PgDn  page\n\
+                         Ctrl+C  cancel the running turn · Ctrl+C twice  quit";
+
+/// How long after a Ctrl-C a second one quits.
+const QUIT_CONFIRM_WINDOW: Duration = Duration::from_secs(2);
+
+/// Formats a token count for the footer: exact below 1000, else `1.2k`.
 fn format_token_count(tokens: u64) -> String {
     if tokens < 1000 {
         format!("{tokens} ctx")
@@ -46,6 +65,16 @@ fn move_scroll(scroll: &mut usize, code: KeyCode) {
     }
 }
 
+/// The prompt to send for the input `text`: blank lines before it and
+/// whitespace after it are dropped, but the first line keeps its
+/// indentation, which matters in pasted code.
+fn prompt_text(text: &str) -> &str {
+    let text = text.trim_end();
+    let first_visible = text.find(|c: char| !c.is_whitespace()).unwrap_or(0);
+    let line_start = text[..first_visible].rfind('\n').map_or(0, |i| i + 1);
+    &text[line_start..]
+}
+
 /// The terminal UI's state: a base screen (welcome or chat), at most one
 /// popup over it, and the permission-prompt queue over everything.
 pub(super) struct App {
@@ -54,6 +83,8 @@ pub(super) struct App {
     pub(super) spinner_frame: usize,
     pub(super) status: Status,
     pub(super) should_quit: bool,
+    /// Set by a Ctrl-C: another one before this instant quits.
+    quit_armed_until: Option<Instant>,
     /// The screen under any popup.
     screen: Screen,
     overlay: Option<Overlay>,
@@ -65,11 +96,8 @@ pub(super) struct App {
     skills: Vec<String>,
     theme: Theme,
     channels: AgentChannels,
-    /// Current context size: the most recent LLM call's usage, i.e. how
-    /// full the context window is right now — not a cumulative session
-    /// total. Refreshed after each completed turn and on session switch.
-    /// `None` until a turn has completed (never sent for a brand-new,
-    /// never-prompted session).
+    /// Current context size (the latest LLM call's usage), updated during
+    /// turns and on a session switch. `None` before a session's first turn.
     context_usage: Option<crate::core::models::Usage>,
 }
 
@@ -88,6 +116,7 @@ impl App {
             spinner_frame: 0,
             status: Status::Idle,
             should_quit: false,
+            quit_armed_until: None,
             screen: Screen::Welcome,
             overlay: None,
             permissions: PermissionQueue::default(),
@@ -135,17 +164,13 @@ impl App {
                     });
                 }
             }
-            // Appended, not replacing the transcript — `open_session` already
-            // cleared it and pushed the header/warning synchronously, so this
-            // is just the replayed message history (plus a trailing
-            // "restored" marker) arriving once the load completes.
+            // Appended: `open_session` already cleared the transcript.
             AgentUpdate::History(items) => {
                 for item in items {
                     self.push(item);
                 }
             }
-            // Only now — creation confirmed — is it safe to drop the old
-            // session's transcript; see `start_new_session`.
+            // The new session exists, so the old transcript can go.
             AgentUpdate::NewSession(items) => {
                 self.transcript.clear();
                 self.context_usage = None;
@@ -185,11 +210,13 @@ impl App {
             } => {
                 self.push(ChatItem::ToolResult { result, is_error });
             }
-            // The current context size, refreshed live as each LLM call in
-            // the turn completes rather than once at the end, so the footer
-            // never needs a separate disk read after the turn finishes.
             StreamEvent::Usage { usage } => {
                 self.context_usage = Some(usage);
+            }
+            StreamEvent::ContextTrimmed { dropped } => {
+                self.push(ChatItem::SystemInfo(format!(
+                    "{dropped} earlier messages left out of the request to fit the context window"
+                )));
             }
             StreamEvent::Finished { .. } => {
                 self.status = Status::Idle;
@@ -198,29 +225,49 @@ impl App {
         }
     }
 
-    pub(super) fn handle_permission_request(&mut self, request: PermissionRequest) {
+    /// The first Ctrl-C cancels the running turn, if any; a second one
+    /// within [`QUIT_CONFIRM_WINDOW`] quits. Any other key in between starts
+    /// over.
+    fn handle_ctrl_c(&mut self, now: Instant) {
+        if self.quit_armed(now) {
+            self.should_quit = true;
+            return;
+        }
+        if self.status != Status::Idle {
+            let _ = self.channels.cancel.send(());
+        }
+        self.quit_armed_until = Some(now + QUIT_CONFIRM_WINDOW);
+    }
+
+    /// Whether a Ctrl-C now would quit.
+    fn quit_armed(&self, now: Instant) -> bool {
+        self.quit_armed_until.is_some_and(|until| now < until)
+    }
+
+    pub(super) fn handle_permission_request(&mut self, request: PendingPermission) {
         self.permissions.push(request);
     }
 
     /// Answers the permission prompt on screen and notes the decision in the
     /// transcript.
     fn resolve_permission(&mut self, decision: PermissionDecision) {
-        if let Some(tool_name) = self.permissions.resolve(decision) {
+        if let Some(call) = self.permissions.resolve(decision) {
             let label = match decision {
                 PermissionDecision::AllowOnce => "allowed",
                 PermissionDecision::AllowAlways => "always allowed",
                 PermissionDecision::RejectOnce => "rejected",
                 PermissionDecision::RejectAlways => "always rejected",
             };
-            self.push(ChatItem::SystemInfo(format!("{label} '{tool_name}'")));
+            self.push(ChatItem::SystemInfo(format!("{label} {call}")));
         }
     }
 
     pub(super) fn handle_key(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.should_quit = true;
+            self.handle_ctrl_c(Instant::now());
             return;
         }
+        self.quit_armed_until = None;
         // Topmost layer first: a permission prompt, then a popup, then the
         // input line.
         self.permissions.prune_stale();
@@ -231,6 +278,25 @@ impl App {
         } else {
             self.handle_input_key(key);
         }
+    }
+
+    /// Inserts pasted text at the cursor, newlines and all; only Enter sends
+    /// the prompt. Line endings become `\n`, and control characters other
+    /// than newline and tab are dropped. Ignored while a permission prompt
+    /// or popup has focus.
+    pub(super) fn handle_paste(&mut self, text: &str) {
+        self.quit_armed_until = None;
+        self.permissions.prune_stale();
+        if !self.permissions.is_empty() || self.overlay.is_some() {
+            return;
+        }
+        let normalized: String = text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .chars()
+            .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+            .collect();
+        self.input.insert_str(&normalized);
     }
 
     fn handle_permission_key(&mut self, key: KeyEvent) {
@@ -320,14 +386,16 @@ impl App {
                 if self.status != Status::Idle {
                     return;
                 }
-                let line = self.input.text().trim().to_string();
-                if line.is_empty() {
+                let text = self.input.text();
+                if text.trim().is_empty() {
                     return;
                 }
+                let command = text.trim().strip_prefix(':').map(|c| c.trim().to_string());
+                let line = prompt_text(text).to_string();
                 self.input.clear();
                 self.screen = Screen::Chat;
-                if let Some(rest) = line.strip_prefix(':') {
-                    self.handle_command(rest.trim());
+                if let Some(command) = command {
+                    self.handle_command(&command);
                 } else {
                     self.push(ChatItem::UserMessage(line.clone()));
                     self.status = Status::Thinking;
@@ -368,21 +436,7 @@ impl App {
         let arg = parts.next().unwrap_or("").trim();
         match name {
             "q" | "quit" => self.should_quit = true,
-            "help" => self.push(ChatItem::SystemInfo(
-                ":help              show this\n\
-                 :q / :quit         exit\n\
-                 :new               start a new session\n\
-                 :sessions          browse and restore saved sessions\n\
-                 :config            current config\n\
-                 :models            list available models\n\
-                 :models <name>     switch to model mid-session\n\
-                 :mcp               MCP servers\n\
-                 :skills            available skills\n\
-                 :theme             change accent color\n\
-                 :theme <name>      apply color directly\n\n\
-                 ↑/↓  scroll · PgUp/PgDn  page · Ctrl+C  quit"
-                    .to_string(),
-            )),
+            "help" => self.push(ChatItem::SystemInfo(HELP_TEXT.to_string())),
             "new" => self.start_new_session(),
             "sessions" => {
                 let _ = self.channels.list_sessions.send(());
@@ -551,14 +605,9 @@ impl App {
         rows
     }
 
-    /// Asks the agent task to start a brand-new, unsaved session — the same
-    /// `SessionBuilder::start` path `run()` uses on startup, just triggered
-    /// mid-session instead. Deliberately leaves the current transcript and
-    /// `Status::Idle` check gates prompt submission (see the `KeyCode::Enter`
-    /// handler) until then, keeping the request transactional: if
-    /// `client.new_session().start()` fails, `mod.rs` reports it as a plain
-    /// `AgentUpdate::Error`, `Status` falls back to `Idle`, and the old
-    /// session — still live in the agent task — is exactly where it was.
+    /// Asks the agent task for a new session. The transcript stays until
+    /// `AgentUpdate::NewSession` confirms it, and the busy status blocks
+    /// prompts meanwhile, so if creation fails the old session is untouched.
     fn start_new_session(&mut self) {
         self.status = Status::Thinking;
         if self.channels.new_session.send(()).is_err() {
@@ -569,13 +618,8 @@ impl App {
         }
     }
 
-    /// Clears the transcript and requests the agent task load `meta`'s full
-    /// history via `SessionHandle::resume`, converted straight to `ChatItem`s
-    /// (see `message_to_chat_items`), so thinking blocks and image
-    /// attachments show up instead of being silently dropped. That also
-    /// keeps the history read off the UI task and on the agent task, where
-    /// the rest of I/O lives — the actual message items arrive later as
-    /// `AgentUpdate::History` once the load completes.
+    /// Clears the transcript and asks the agent task to resume `meta`'s
+    /// session; its history arrives as `AgentUpdate::History`.
     fn open_session(&mut self, meta: &ConversationMeta) {
         self.transcript.clear();
         self.status = Status::Idle;
@@ -632,9 +676,10 @@ impl App {
         let frame = SPINNER[self.spinner_frame % SPINNER.len()];
         let labels = FooterLabels {
             left: match &self.status {
+                _ if self.quit_armed(Instant::now()) => Some("Ctrl+C again to quit".to_string()),
                 Status::Idle => None,
-                Status::Thinking => Some(format!("{frame} thinking…")),
-                Status::Streaming => Some(format!("{frame} streaming…")),
+                Status::Thinking => Some(format!("{frame} thinking… · Ctrl+C to cancel")),
+                Status::Streaming => Some(format!("{frame} streaming… · Ctrl+C to cancel")),
             },
             right: match &self.context_usage {
                 Some(usage) => format!(
@@ -679,6 +724,7 @@ impl App {
                 f,
                 area,
                 &request.tool_name,
+                request.subagent.as_deref(),
                 &request.arguments,
                 self.permissions.selected(),
                 theme,
@@ -694,12 +740,28 @@ mod tests {
     use super::*;
 
     fn test_app() -> App {
-        let (prompt, _) = mpsc::unbounded_channel();
+        test_app_with_cancel().0
+    }
+
+    /// A test app plus the receiving end of its cancel channel.
+    fn test_app_with_cancel() -> (App, mpsc::UnboundedReceiver<()>) {
+        let (app, _, cancel_rx) = test_app_with_receivers();
+        (app, cancel_rx)
+    }
+
+    /// A test app plus the receiving ends of its prompt and cancel channels.
+    fn test_app_with_receivers() -> (
+        App,
+        mpsc::UnboundedReceiver<String>,
+        mpsc::UnboundedReceiver<()>,
+    ) {
+        let (prompt, prompt_rx) = mpsc::unbounded_channel();
         let (switch_model, _) = mpsc::unbounded_channel();
         let (switch_session, _) = mpsc::unbounded_channel();
         let (list_sessions, _) = mpsc::unbounded_channel();
         let (new_session, _) = mpsc::unbounded_channel();
-        App::new(
+        let (cancel, cancel_rx) = mpsc::unbounded_channel();
+        let app = App::new(
             AgentConfig::default(),
             AppConfig::for_tests("mock"),
             RuntimePaths {
@@ -713,16 +775,82 @@ mod tests {
                 switch_session,
                 list_sessions,
                 new_session,
+                cancel,
             },
-        )
+        );
+        (app, prompt_rx, cancel_rx)
     }
 
-    fn permission_request() -> (PermissionRequest, oneshot::Receiver<PermissionDecision>) {
+    #[test]
+    fn help_and_welcome_screen_list_the_same_commands() {
+        let mut in_help: Vec<&str> = HELP_TEXT
+            .lines()
+            .filter(|line| line.starts_with(':'))
+            .map(|line| line.split("  ").next().unwrap().trim())
+            .collect();
+        let mut on_welcome: Vec<&str> = render::WELCOME_COMMANDS.iter().map(|(c, _)| *c).collect();
+        in_help.sort_unstable();
+        on_welcome.sort_unstable();
+
+        assert!(in_help.contains(&":new"), "{in_help:?}");
+        assert_eq!(in_help, on_welcome);
+    }
+
+    fn ctrl_c() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_c_during_a_turn_cancels_it_and_a_second_one_quits() {
+        let (mut app, mut cancel_rx) = test_app_with_cancel();
+        app.status = Status::Thinking;
+
+        app.handle_key(ctrl_c());
+        assert!(
+            cancel_rx.try_recv().is_ok(),
+            "first Ctrl-C cancels the turn"
+        );
+        assert!(!app.should_quit);
+
+        app.handle_key(ctrl_c());
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn ctrl_c_when_idle_cancels_nothing_and_still_needs_a_second_press() {
+        let (mut app, mut cancel_rx) = test_app_with_cancel();
+
+        app.handle_key(ctrl_c());
+        assert!(cancel_rx.try_recv().is_err());
+        assert!(!app.should_quit);
+
+        app.handle_key(ctrl_c());
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn another_key_or_the_window_passing_disarms_quit() {
+        let mut app = test_app();
+
+        app.handle_key(ctrl_c());
+        app.handle_key(key(KeyCode::Char('x')));
+        app.handle_key(ctrl_c());
+        assert!(!app.should_quit, "a key in between starts over");
+
+        let now = Instant::now();
+        app.handle_ctrl_c(now + QUIT_CONFIRM_WINDOW);
+        assert!(!app.should_quit, "the window has passed");
+        app.handle_ctrl_c(now + QUIT_CONFIRM_WINDOW + Duration::from_millis(500));
+        assert!(app.should_quit);
+    }
+
+    fn permission_request() -> (PendingPermission, oneshot::Receiver<PermissionDecision>) {
         let (respond_to, rx) = oneshot::channel();
         (
-            PermissionRequest {
+            PendingPermission {
                 tool_name: "read_file".into(),
                 arguments: "{}".into(),
+                subagent: None,
                 respond_to,
             },
             rx,
@@ -731,6 +859,79 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn paste_inserts_at_the_cursor_without_sending() {
+        let (mut app, mut prompt_rx, _) = test_app_with_receivers();
+        for c in "ab".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Left));
+
+        app.handle_paste("one\ntwo\n");
+
+        assert_eq!(app.input.text(), "aone\ntwo\nb");
+        assert_eq!(app.input.cursor(), "aone\ntwo\n".len());
+        assert!(prompt_rx.try_recv().is_err(), "a paste must not send");
+    }
+
+    #[test]
+    fn paste_normalises_line_endings_and_drops_control_characters() {
+        let mut app = test_app();
+        app.handle_paste("a\r\nb\rc\td\x1b[0me\x07");
+        assert_eq!(app.input.text(), "a\nb\nc\td[0me");
+    }
+
+    #[test]
+    fn enter_sends_a_pasted_prompt_with_its_newlines() {
+        let (mut app, mut prompt_rx, _) = test_app_with_receivers();
+        app.handle_paste("line one\nline two");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(prompt_rx.try_recv().unwrap(), "line one\nline two");
+        assert_eq!(app.input.text(), "");
+    }
+
+    #[test]
+    fn a_pasted_prompt_keeps_its_indentation() {
+        let (mut app, mut prompt_rx, _) = test_app_with_receivers();
+        app.handle_paste("\n\n    fn main() {\n        run();\n    }\n\n");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            prompt_rx.try_recv().unwrap(),
+            "    fn main() {\n        run();\n    }"
+        );
+    }
+
+    #[test]
+    fn prompt_text_drops_only_blank_edges() {
+        assert_eq!(prompt_text("  hi  "), "  hi");
+        assert_eq!(prompt_text(" \n\t\n  a\n b \n\n"), "  a\n b");
+        assert_eq!(prompt_text("x"), "x");
+    }
+
+    #[test]
+    fn commands_are_still_trimmed() {
+        let (mut app, mut prompt_rx, _) = test_app_with_receivers();
+        app.handle_paste("  \n  :theme  \n");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(prompt_rx.try_recv().is_err(), "a command is not a prompt");
+        assert!(matches!(app.overlay, Some(Overlay::ThemePicker { .. })));
+    }
+
+    #[test]
+    fn paste_is_ignored_while_a_popup_or_prompt_is_open() {
+        let mut app = test_app();
+        app.overlay = Some(Overlay::ThemePicker { selected: 0 });
+        app.handle_paste("text");
+        assert_eq!(app.input.text(), "");
+        app.overlay = None;
+
+        let (request, _rx) = permission_request();
+        app.handle_permission_request(request);
+        app.handle_paste("text");
+        assert_eq!(app.input.text(), "");
+        assert_eq!(app.permissions.len(), 1);
     }
 
     #[test]
@@ -764,9 +965,9 @@ mod tests {
         assert_eq!(app.input.text(), "y");
     }
 
-    // Regression test (PR #61 review): pruning a stale request *behind* the
-    // prompt on screen reset its highlight to "Allow Once", so after the user
-    // moved to "Reject Once", Enter allowed the call anyway.
+    // Pruning a stale request *behind* the prompt on screen keeps its
+    // highlight; resetting it to "Allow Once" would let Enter allow a call
+    // the user had moved to "Reject Once".
     #[test]
     fn highlight_survives_a_stale_request_behind_the_prompt() {
         let mut app = test_app();
@@ -802,9 +1003,8 @@ mod tests {
         assert_eq!(app.permissions.len(), 1);
     }
 
-    // Regression test: a permission prompt arriving while a popup was open
-    // overwrote the "screen to return to" with that popup, so after
-    // answering, Esc "returned" to the popup and could never close it.
+    // A permission prompt over an open popup doesn't replace what Esc
+    // returns to: after answering it, Esc still closes the popup.
     #[test]
     fn esc_closes_a_popup_after_a_permission_prompt_over_it() {
         let mut app = test_app();

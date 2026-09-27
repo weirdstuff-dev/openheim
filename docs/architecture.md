@@ -13,7 +13,7 @@ Openheim can be used in two ways:
 | **Library** | `OpenheimClient` in `src/client.rs` | Embedded in a Rust application |
 | **Server** | `src/main.rs` subcommands | Standalone process driven by a client over a transport |
 
-Both modes share the same agent logic. Transports speak the ACP wire protocol to `acp::serve`; the library facade calls the same `core::runtime::AgentState` request handlers directly, and the headless `run` mode connects an ACP client to `acp::serve` over an in-memory duplex pipe.
+Both modes share the same agent logic. Transports speak the ACP wire protocol to `acp::serve`; the library facade calls the same `core::runtime::AgentState` request handlers directly, and the headless `run` mode is itself a facade caller.
 
 ---
 
@@ -34,6 +34,7 @@ src/
 │
 ├── core/
 │   ├── agent.rs        Agent loop — LLM ↔ tool call iteration
+│   ├── context.rs      Fits each request into the context window (see below)
 │   ├── permission.rs   PermissionGate trait — embedder hook for tool-call approval
 │   ├── turn.rs         Cross-cutting turn controls (cancellation, …)
 │   ├── client_io.rs    Optional delegation of file I/O to the ACP client
@@ -155,11 +156,14 @@ User / Client
 │                                             │
 │  for iteration in 0..max_iterations:        │
 │    ┌─────────────────────────────────────┐  │
-│    │ 1. PromptBuilder.build(history)     │  │
+│    │ 1. fit history to context_window    │  │
+│    │    (leave out oldest whole turns)   │  │
+│    │ 2. PromptBuilder.build(history)     │  │
 │    │    → prepend system message         │  │
-│    │ 2. llm.send(messages, tools)        │  │
+│    │ 3. llm.send(messages, tools)        │  │
 │    │    → Choice { message, finish }     │  │
-│    │ 3. if tool_calls:                   │  │
+│    │    too long: trim harder, resend    │  │
+│    │ 4. if tool_calls:                   │  │
 │    │      executor.execute(name, args)   │  │
 │    │      append tool result message     │  │
 │    │      emit StreamEvent::ToolCall/    │  │
@@ -199,6 +203,15 @@ User / Client
                       └──────────────────────┘
 ```
 
+### Fitting the context window
+
+The agent loop resends the whole history with every LLM call, so a long session eventually outgrows the model's context window. Before each call, `core::context::ContextFitter` decides how much of the history goes into the request; the stored history is never changed.
+
+- **Proactive**, when the provider has a `context_window`: the request's size is estimated in bytes (history, system prompt and tool definitions) and converted to tokens at 4 bytes per token, or at the ratio the turn's previous call reported in its usage. Over 90% of the window, the oldest turns are left out.
+- **Reactive**, always: a provider error saying the request was too long becomes `Error::ContextOverflow` (matched on status and body in `core::llm::http`; `RetryClient` doesn't retry it). The loop then aims for 75% of the rejected request's size and sends again, at most twice per call.
+
+Cuts happen only just before a user message, so a tool call is never separated from its results, and the turn in progress is always kept whole. The first kept user message opens with a note like `[12 earlier messages omitted to fit the context window]`. If a request is still too long with only the current turn left, the turn fails with `Error::ContextOverflow`, whose message says to start a new session. The loop emits `StreamEvent::ContextTrimmed { dropped }` whenever the number of left-out messages changes; the TUI shows it as a notice, and ACP clients get nothing.
+
 ---
 
 ## Data persistence
@@ -225,7 +238,7 @@ All persistence lives under `~/.openheim/` by default.
 
 `core::runtime::AgentState::new` always opens `memory.db` and registers four tools. `remember(content)` inserts a note into a `memories` table; an FTS5 external-content index (`memories_fts`) tracks it via triggers. `search_memory(query)` runs an FTS5 BM25 query (each word quoted and OR-ed, so user input can't inject query syntax) and returns the best notes with their date. `edit_memory(id, content)` overwrites a note's text in place, keeping its id and creation date. `forget(id)` deletes a note. Nothing is stored or injected automatically: the model calls the tools when the user asks it to remember, recall, correct, or drop something, or when it judges a stored preference relevant.
 
-When `[memory]` names an `embedding_provider` and `embedding_model`, the same store gains a `vec0` virtual table with cosine distance: `remember` and `edit_memory` embed the note (OpenAI-compatible `/embeddings` or Gemini `batchEmbedContents`) and `search_memory` becomes a KNN `MATCH` over embeddings instead of keyword search. Notes written before embeddings were enabled are back-filled on the next call. The store records the embedding model and dimension; if either changes, the vectors are dropped and every note is re-embedded from its stored text, since vectors from different models aren't comparable.
+When `[memory]` names an `embedding_provider` and `embedding_model`, the same store gains a `vec0` virtual table with cosine distance: `remember` and `edit_memory` embed the note (OpenAI-compatible `/embeddings` or Gemini `batchEmbedContents`) and `search_memory` becomes a KNN `MATCH` over embeddings instead of keyword search. Notes written before embeddings were enabled, or saved while the embeddings provider was failing, are back-filled (up to 256 per call, saved a batch at a time); a back-fill failure is logged, never returned, and a note the provider refuses is skipped until restart. Notes still without a vector are searched by FTS5 alongside the KNN query, their matches first. If a note or query can't be embedded, the note is stored without a vector and the whole search runs on FTS5 instead. `LongTermMemory::search_detailed` reports both cases. The store records the embedding model and dimension; if either changes, the vectors are dropped and every note is re-embedded from its stored text, since vectors from different models aren't comparable.
 
 ---
 
@@ -234,9 +247,9 @@ When `[memory]` names an `embedding_provider` and `embedding_model`, the same st
 The `OpenheimClient` facade (`src/client.rs`) wraps the same `core::runtime::AgentState` the transports use, behind a simple Rust API. Internally it:
 
 1. Builds an `AgentState` (LLM client, tool executor, memory context, long-term memory).
-2. Calls its request handlers (`prompt`, `load_session`, `cancel_session`, …) directly — no wire protocol, no background task. Streaming updates reach your callback through the same `SessionUpdate` events a transport would forward.
+2. Calls its request handlers (`prompt`, `load_session`, `cancel_session`, …) directly — no wire protocol, no background task. Your callback gets the agent loop's own `StreamEvent`s; `SessionHandle::acp_updates` (feature `acp`) maps them onto the same `SessionUpdate`s a transport would forward.
 
-The duplex-pipe + ACP-client wiring does exist — in `src/transport/run.rs`, where the headless `openheim run` mode drives `acp::serve` over `tokio::io::duplex`. Either way there is no separate "library mode" agent logic: the facade and every transport share the exact same session and agent-loop code path.
+The headless `openheim run` mode (`src/transport/run.rs`) is itself just a facade caller. There is no separate "library mode" agent logic: the facade and every transport share the exact same session and agent-loop code path.
 
 Every transport (`stdio`, `ws`, `run`) builds its `AgentState` the same way: `OpenheimClient::builder().build().await?` followed by `OpenheimClient::state()` (`pub(crate)`, so only reachable from inside this crate) to get the `Arc<AgentState>` `acp::serve` wants. That's the same load-config → resolve → `MemoryContext::new` → `AgentState::new` sequence the builder already does for library users, so there's exactly one place that canonicalizes `work_dir`, merges builder-registered MCP servers, and registers custom tools — a hand-rolled sequence in a transport would silently skip all of that.
 

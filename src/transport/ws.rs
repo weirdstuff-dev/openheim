@@ -18,16 +18,13 @@
 //! - `{"channel":"agent","data":{…}}` — ACP protocol frames
 //! - `{"channel":"fs","data":{…}}` — filesystem sidecar (watch / list / read / write / mkdir / delete / rename)
 //!
-//! The fs sidecar is rooted at the agent's resolved `work_dir` — the same
-//! sandbox boundary the agent's own tools are held to. Every request path is
-//! validated against it (relative paths resolve within it) and `watch` may
-//! only select directories inside it.
+//! The fs sidecar is confined to the agent's `work_dir`, like the agent's
+//! own tools; relative paths resolve inside it. `delete` and `rename` act on
+//! a symlink rather than its target, and refuse `work_dir` itself.
 //!
-//! `/acp` carries the same ACP protocol frames as `/ws`'s `agent` channel, but
-//! unwrapped: each WebSocket text message is exactly one JSON-RPC object, with
-//! no `channel` tag and no filesystem sidecar. Use this endpoint for generic
-//! ACP clients that only speak the spec and don't know about openheim's `/ws`
-//! envelope or `fs` channel.
+//! `/acp` carries the same ACP frames as `/ws`'s `agent` channel, one
+//! JSON-RPC object per text message with no envelope and no fs sidecar, for
+//! clients that only speak ACP.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -57,8 +54,11 @@ use walkdir::WalkDir;
 use agent_client_protocol::Lines;
 
 use crate::{
-    acp, client::OpenheimClient, core::runtime::AgentState, error::Error as AppError,
-    tools::sandbox::validate_path,
+    acp,
+    client::OpenheimClient,
+    core::runtime::AgentState,
+    error::Error as AppError,
+    tools::sandbox::{validate_entry, validate_path},
 };
 
 #[derive(Deserialize)]
@@ -204,11 +204,8 @@ pub enum FsResponse {
     Error { message: String },
 }
 
-/// Starts the HTTP/WebSocket server for `client` — caller-built, so an
-/// embedder with custom tools or a custom `LlmClient` can use this transport
-/// too.
-///
-/// Blocks until a Ctrl-C signal is received, then shuts down gracefully.
+/// Serves `client` over HTTP and WebSocket until Ctrl-C, then shuts down
+/// gracefully.
 pub async fn serve(client: OpenheimClient, host: String, port: u16) -> crate::error::Result<()> {
     let state = client.state().clone();
 
@@ -270,8 +267,7 @@ async fn mcp_servers_handler(State(state): State<Arc<AgentState>>) -> impl IntoR
 }
 
 async fn sessions_handler(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
-    // History I/O is synchronous file access; run it off the runtime threads
-    // (same as the ACP layer does) instead of blocking a worker.
+    // History I/O is blocking, so it runs off the async workers.
     let history = state.memory.history.clone();
     match tokio::task::spawn_blocking(move || history.list_conversations()).await {
         Ok(Ok(metas)) => Json(metas).into_response(),
@@ -320,11 +316,9 @@ async fn ws_handler(
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 
-/// Starts an ACP server for one WebSocket connection, speaking JSON-RPC as
-/// one line per message over a pair of channels. Returns the sender for
-/// incoming lines (WS → ACP) and the receiver for outgoing ones (ACP → WS);
-/// dropping the sender ends the server. Shared by both socket handlers so the
-/// bridge can't drift between them.
+/// Starts an ACP server for one WebSocket connection, one JSON-RPC message
+/// per line. Returns the sender for incoming lines and the receiver for
+/// outgoing ones; dropping the sender ends the server.
 fn spawn_acp_server(
     state: Arc<AgentState>,
 ) -> (
@@ -475,6 +469,13 @@ impl FsState {
         validate_path(path, &self.work_dir).map_err(|e| fs_error(e.to_string()))
     }
 
+    /// Validates `path` for `delete`/`rename` via the shared
+    /// [`validate_entry`]: a symlink names the link itself, not its target,
+    /// and the work directory itself is refused.
+    fn validate_entry(&self, path: &str) -> Result<PathBuf, FsResponse> {
+        validate_entry(path, &self.work_dir).map_err(|e| fs_error(e.to_string()))
+    }
+
     /// Carries out one request and returns its reply. `events` is where a
     /// `watch` sends its (unsolicited) change events from then on.
     async fn handle(&mut self, req: FsRequest, events: UnboundedSender<WsOutbound>) -> FsResponse {
@@ -528,8 +529,13 @@ impl FsState {
                 FsResponse::MkdirSuccess { path }
             }
             FsRequest::Delete { path } => {
-                let validated = self.validate(&path)?;
-                if validated.is_dir() {
+                let validated = self.validate_entry(&path)?;
+                // The entry's own type: a symlink to a directory is removed
+                // as a link, leaving the directory it points to alone.
+                let metadata = fs::symlink_metadata(&validated)
+                    .await
+                    .map_err(|e| fs_error(format!("Failed to delete: {e}")))?;
+                if metadata.is_dir() {
                     fs::remove_dir_all(&validated)
                         .await
                         .map_err(|e| fs_error(format!("Failed to delete dir: {e}")))?;
@@ -541,7 +547,7 @@ impl FsState {
                 FsResponse::DeleteSuccess { path }
             }
             FsRequest::Rename { from, to } => {
-                let (vf, vt) = (self.validate(&from)?, self.validate(&to)?);
+                let (vf, vt) = (self.validate_entry(&from)?, self.validate_entry(&to)?);
                 fs::rename(&vf, &vt)
                     .await
                     .map_err(|e| fs_error(format!("Failed to rename: {e}")))?;
@@ -743,6 +749,102 @@ mod tests {
         .await;
         assert!(matches!(resp, FsResponse::Error { .. }));
         assert!(victim.exists());
+    }
+
+    #[tokio::test]
+    async fn fs_delete_and_rename_refuse_the_work_dir_itself() {
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir(work.path().join("sub")).unwrap();
+        std::fs::write(work.path().join("keep.txt"), "data").unwrap();
+        let mut state = make_fs_state(work.path());
+
+        let names_for_root = [
+            String::new(),
+            ".".to_string(),
+            "sub/..".to_string(),
+            work.path().to_str().unwrap().to_string(),
+        ];
+
+        for path in names_for_root {
+            let resp = run_request(&mut state, FsRequest::Delete { path: path.clone() }).await;
+            assert!(
+                matches!(&resp, FsResponse::Error { message } if message.contains("work directory itself")),
+                "delete {path:?}: {resp:?}"
+            );
+            let resp = run_request(
+                &mut state,
+                FsRequest::Rename {
+                    from: path.clone(),
+                    to: "moved".into(),
+                },
+            )
+            .await;
+            assert!(
+                matches!(&resp, FsResponse::Error { message } if message.contains("work directory itself")),
+                "rename {path:?}: {resp:?}"
+            );
+        }
+        let resp = run_request(
+            &mut state,
+            FsRequest::Rename {
+                from: "keep.txt".into(),
+                to: ".".into(),
+            },
+        )
+        .await;
+        assert!(matches!(resp, FsResponse::Error { .. }), "{resp:?}");
+        assert!(work.path().join("keep.txt").exists());
+        assert!(!work.path().join("moved").exists());
+
+        // Entries inside the work dir can still be deleted.
+        let resp = run_request(
+            &mut state,
+            FsRequest::Delete {
+                path: "keep.txt".into(),
+            },
+        )
+        .await;
+        assert!(matches!(resp, FsResponse::DeleteSuccess { .. }), "{resp:?}");
+        assert!(!work.path().join("keep.txt").exists());
+    }
+
+    /// Deleting or renaming a symlink acts on the link: a link to `src/`
+    /// must not take `src/`'s contents with it, and a link to the root is
+    /// just an entry, not the root.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_delete_and_rename_act_on_a_symlink_not_its_target() {
+        let work = tempfile::tempdir().unwrap();
+        let src = work.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("main.rs"), "fn main() {}").unwrap();
+        std::os::unix::fs::symlink(&src, work.path().join("src_link")).unwrap();
+        std::os::unix::fs::symlink(work.path(), work.path().join("root_link")).unwrap();
+        let mut state = make_fs_state(work.path());
+
+        for path in ["src_link", "root_link"] {
+            let resp = run_request(&mut state, FsRequest::Delete { path: path.into() }).await;
+            assert!(
+                matches!(resp, FsResponse::DeleteSuccess { .. }),
+                "{path}: {resp:?}"
+            );
+            assert!(work.path().join(path).symlink_metadata().is_err(), "{path}");
+        }
+        assert!(src.join("main.rs").exists());
+
+        std::os::unix::fs::symlink(&src, work.path().join("src_link")).unwrap();
+        let resp = run_request(
+            &mut state,
+            FsRequest::Rename {
+                from: "src_link".into(),
+                to: "renamed_link".into(),
+            },
+        )
+        .await;
+        assert!(matches!(resp, FsResponse::RenameSuccess { .. }), "{resp:?}");
+        let renamed = work.path().join("renamed_link");
+        assert!(renamed.symlink_metadata().unwrap().is_symlink());
+        assert!(src.join("main.rs").exists());
     }
 
     #[tokio::test]

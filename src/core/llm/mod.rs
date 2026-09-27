@@ -12,6 +12,40 @@ use tokio::sync::mpsc;
 use crate::core::models::{Choice, Message, Tool};
 use crate::error::Result;
 
+/// An id for a tool call the provider sent without one. It has to be unique
+/// across the whole session, not just within one reply: ACP clients and
+/// permission prompts tell tool calls apart by id.
+fn new_tool_call_id() -> String {
+    format!("call_{}", uuid::Uuid::new_v4().simple())
+}
+
+/// A stored tool call's arguments as the JSON object Anthropic and Gemini
+/// require, or `{}` if they aren't one (e.g. a call cut off mid-reply):
+/// rejecting them would fail every later request in the conversation.
+fn tool_input(name: &str, arguments: &str) -> serde_json::Value {
+    match serde_json::from_str(arguments) {
+        Ok(value @ serde_json::Value::Object(_)) => value,
+        _ => {
+            if !arguments.trim().is_empty() {
+                tracing::warn!(tool = %name,"sending malformed tool call arguments as {{}}");
+            }
+            serde_json::Value::Object(Default::default())
+        }
+    }
+}
+
+/// `send` for a built-in client: its `send_streaming` with the chunks
+/// discarded as they're sent (the receiver is dropped up front).
+async fn send_discarding_chunks<C: LlmClient + ?Sized>(
+    client: &C,
+    messages: &[Message],
+    tools: &[Tool],
+) -> Result<Choice> {
+    let (chunk_tx, chunk_rx) = mpsc::unbounded_channel();
+    drop(chunk_rx);
+    client.send_streaming(messages, tools, chunk_tx).await
+}
+
 /// A single streaming chunk produced during an LLM call.
 #[derive(Debug)]
 pub enum LlmChunk {

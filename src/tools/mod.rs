@@ -16,8 +16,9 @@
 //! | `search` | Regex search across files, ripgrep-style (built on ripgrep's own crates, `.gitignore`-aware) |
 //! | `web_fetch` | Fetch a public http(s) URL and return its content as text, with an SSRF guard and size/time caps |
 //!
-//! Every filesystem tool validates its path against the turn's work
-//! directory ([`sandbox::validate_path`]) and delegates reads/writes to the
+//! Every filesystem tool resolves its path with
+//! [`TurnContext::resolve_path`] (relative to the turn's `cwd`, confined to
+//! its `work_dir`) and delegates reads/writes to the
 //! turn's [`ClientIo`](crate::core::client_io::ClientIo) when one is
 //! available; there is no separate sandbox wrapper.
 //!
@@ -63,9 +64,10 @@
 //!
 //!     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
 //!         let GreetArgs { name } = parse(args)?;
-//!         // `turn` carries the cancel token, the work directory, and the
-//!         // client I/O hook; see `TurnContext` for what to do with each.
-//!         Ok(format!("Hello, {name}! (from {})", turn.work_dir.display()))
+//!         // `turn` carries the cancel token, the work and working
+//!         // directories, and the client I/O hook; see `TurnContext` for
+//!         // what to do with each.
+//!         Ok(format!("Hello, {name}! (from {})", turn.cwd.display()))
 //!     }
 //! }
 //! ```
@@ -134,8 +136,8 @@ pub trait ToolHandler: Send + Sync {
     /// Executes the tool with the given JSON-encoded arguments.
     ///
     /// `turn` is the calling turn's [`TurnContext`]: race long work against
-    /// `turn.cancel`, confine filesystem access to `turn.work_dir` (via
-    /// [`sandbox::validate_path`]), and prefer `turn.client_io` for file
+    /// `turn.cancel`, resolve every path with [`TurnContext::resolve_path`]
+    /// (which confines it to `turn.work_dir`), and prefer `turn.client_io` for file
     /// reads/writes so an editor-hosted client can serve its own buffers.
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String>;
 
@@ -147,10 +149,8 @@ pub trait ToolHandler: Send + Sync {
     }
 }
 
-/// Routes LLM tool-call requests to the correct [`ToolHandler`].
-///
-/// The production implementation is [`SystemToolExecutor`]. Tests typically use
-/// lightweight mock implementations of this trait.
+/// Routes LLM tool calls to the right [`ToolHandler`]; the built-in
+/// implementation is [`SystemToolExecutor`].
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {
     /// Returns the list of tools available to the LLM.
@@ -171,22 +171,15 @@ pub trait ToolExecutor: Send + Sync {
     }
 }
 
-/// The default tool executor used by the agent runtime.
+/// The default tool executor: a registry of [`ToolHandler`]s keyed by name.
 ///
-/// Maintains a registry of [`ToolHandler`]s keyed by tool name and dispatches
-/// LLM tool calls to the appropriate handler. Built-in tools are registered via
-/// [`register_builtins`](Self::register_builtins); MCP tools are added during
-/// [`build`](Self::build).
-///
-/// Cloning is cheap and yields an independent registry sharing the same
-/// handlers — a snapshot of the tool set as it exists at that moment. The
-/// runtime uses this to hand [`DelegateTool`] a view that predates its own
-/// registration, so subagents can never delegate recursively.
+/// Cloning is cheap and gives an independent registry sharing the same
+/// handlers: a snapshot of the tool set (how [`DelegateTool`] gets one
+/// without itself in it).
 #[derive(Clone)]
 pub struct SystemToolExecutor {
-    /// Ordered so `list_tools` returns the same order in every process: the
-    /// tool list leads each LLM request, so a stable order keeps the
-    /// provider's prompt cache reusable across restarts and resumed sessions.
+    /// Ordered, so the tool list that leads every request is the same in
+    /// every process and the provider's prompt cache stays reusable.
     handlers: BTreeMap<String, Arc<dyn ToolHandler>>,
 }
 
@@ -198,15 +191,9 @@ impl SystemToolExecutor {
         }
     }
 
-    /// Builds a fully-configured executor: registers built-in tools then connects
-    /// to all configured MCP servers and registers their tools.
-    ///
-    /// This is the one place `allow_shell` is enforced: when it's `false` the
-    /// `execute_command` tool is never registered, so the LLM neither sees it
-    /// nor can call it.
-    ///
-    /// Returns the executor alongside [`McpServerStatus`](crate::mcp::McpServerStatus)
-    /// entries for each server so callers can inspect which connections succeeded.
+    /// An executor with the built-in tools and those of every configured MCP
+    /// server, plus each server's
+    /// [`McpServerStatus`](crate::mcp::McpServerStatus).
     pub async fn build(
         mcp_configs: &BTreeMap<String, McpServerConfig>,
         allow_shell: bool,
@@ -221,10 +208,8 @@ impl SystemToolExecutor {
     }
 
     /// Registers the built-in tools: `read_file`, `write_file`, `edit_file`,
-    /// `list_dir`, `search`, `web_fetch`, and — when `allow_shell` is `true`
-    /// — `execute_command`. This is the one place `allow_shell` is enforced:
-    /// when it's `false`, `execute_command` is simply never registered, so
-    /// the LLM neither sees it nor can call it.
+    /// `list_dir`, `search`, `web_fetch`, and `execute_command` only when
+    /// `allow_shell` is set (the one place it's enforced).
     pub fn register_builtins(&mut self, allow_shell: bool) {
         if allow_shell {
             self.register(Box::new(execute_command::ExecuteCommandTool));
@@ -280,24 +265,26 @@ impl ToolExecutor for SystemToolExecutor {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use async_trait::async_trait;
     use tokio_util::sync::CancellationToken;
 
-    use crate::core::client_io::{ClientIo, NoClientIo};
+    use crate::core::client_io::{ClientIo, LineRange, NoClientIo};
     use crate::core::permission::{AllowAll, PermissionGate};
     use crate::core::turn::TurnContext;
     use crate::error::Result;
 
     /// Owns the pieces a test [`TurnContext`] borrows from, so callers can do
     /// `let turn = harness.turn();` without fighting temporary lifetimes.
-    /// The work directory is a fresh temp dir per harness.
+    /// The work directory is a fresh temp dir per harness, and is also the
+    /// working directory unless [`Self::with_cwd`] sets another.
     pub(crate) struct TurnHarness {
         cancel: CancellationToken,
         permission_gate: Arc<dyn PermissionGate>,
         work_dir: tempfile::TempDir,
+        cwd: Option<PathBuf>,
         client_io: Arc<dyn ClientIo>,
     }
 
@@ -307,12 +294,22 @@ pub(crate) mod test_support {
                 cancel: CancellationToken::new(),
                 permission_gate: Arc::new(AllowAll),
                 work_dir: tempfile::tempdir().expect("create temp work dir"),
+                cwd: None,
                 client_io: Arc::new(NoClientIo),
             }
         }
 
         pub(crate) fn with_client_io(mut self, client_io: Arc<dyn ClientIo>) -> Self {
             self.client_io = client_io;
+            self
+        }
+
+        /// Makes `sub` (created inside the work directory) the working
+        /// directory.
+        pub(crate) fn with_cwd(mut self, sub: &str) -> Self {
+            let cwd = self.work_dir.path().join(sub);
+            std::fs::create_dir_all(&cwd).expect("create working directory");
+            self.cwd = Some(cwd);
             self
         }
 
@@ -325,6 +322,7 @@ pub(crate) mod test_support {
                 cancel: &self.cancel,
                 permission_gate: &self.permission_gate,
                 work_dir: self.work_dir.path(),
+                cwd: self.cwd.as_deref().unwrap_or(self.work_dir.path()),
                 client_io: &*self.client_io,
             }
         }
@@ -341,8 +339,35 @@ pub(crate) mod test_support {
 
     #[async_trait]
     impl ClientIo for FixedClientIo {
-        async fn read_file(&self, _path: &Path) -> Option<Result<String>> {
+        async fn read_file(&self, _path: &Path, _lines: LineRange) -> Option<Result<String>> {
             Some(Ok(self.0.to_string()))
+        }
+
+        async fn write_file(&self, _path: &Path, _content: &str) -> Option<Result<()>> {
+            Some(Ok(()))
+        }
+    }
+
+    /// Answers every read with `content` and records the ranges asked for.
+    pub(crate) struct RecordingClientIo {
+        pub(crate) content: String,
+        pub(crate) reads: std::sync::Mutex<Vec<LineRange>>,
+    }
+
+    impl RecordingClientIo {
+        pub(crate) fn new(content: impl Into<String>) -> Self {
+            Self {
+                content: content.into(),
+                reads: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ClientIo for RecordingClientIo {
+        async fn read_file(&self, _path: &Path, lines: LineRange) -> Option<Result<String>> {
+            self.reads.lock().unwrap().push(lines);
+            Some(Ok(self.content.clone()))
         }
 
         async fn write_file(&self, _path: &Path, _content: &str) -> Option<Result<()>> {
@@ -356,7 +381,7 @@ pub(crate) mod test_support {
 
     #[async_trait]
     impl ClientIo for HangingClientIo {
-        async fn read_file(&self, _path: &Path) -> Option<Result<String>> {
+        async fn read_file(&self, _path: &Path, _lines: LineRange) -> Option<Result<String>> {
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             unreachable!("cancellation should abort this wait before the sleep elapses");
         }

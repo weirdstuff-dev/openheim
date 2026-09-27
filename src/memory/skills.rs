@@ -22,10 +22,8 @@ fn validate_skill_name(name: &str) -> Result<()> {
 
 /// Manages Markdown skill files stored in `~/.openheim/skills/`.
 ///
-/// A skill is a named Markdown file (`{name}.md`) containing system-level
-/// instructions. Skills are loaded by [`crate::memory::prompt::PromptBuilder::add_skill`] and injected
-/// into the LLM prompt as a system message, letting users extend the agent's
-/// behaviour without modifying code.
+/// A skill is a Markdown file (`{name}.md`) of instructions added to the
+/// system message (see [`crate::memory::prompt::PromptBuilder::add_skill`]).
 ///
 /// # Example skill file: `~/.openheim/skills/rust.md`
 ///
@@ -41,11 +39,9 @@ pub struct SkillsManager {
 impl SkillsManager {
     /// Loads the content of a single skill by name.
     ///
-    /// Reads `{skills_dir}/{name}.md`. Returns an error if the file does not
-    /// exist or the name is invalid (see `validate_skill_name`). The path is
-    /// canonicalized and checked for containment so a symlink inside the
-    /// skills directory cannot redirect the read outside it; the canonical
-    /// (fully resolved) path is what gets read.
+    /// Reads `{skills_dir}/{name}.md`. Fails if it doesn't exist, the name is
+    /// invalid (see `validate_skill_name`), or a symlink points it outside
+    /// the skills directory.
     pub fn load_skill(&self, name: &str) -> Result<String> {
         validate_skill_name(name)?;
         let path = self.skills_dir.join(format!("{}.md", name));
@@ -56,11 +52,9 @@ impl SkillsManager {
                 path.display()
             )));
         }
-        // Both sides must be canonicalized: the file to resolve symlinks (and
-        // to read the resolved path, closing the check→read swap window), the
-        // directory because the skills dir may itself sit behind a symlink
-        // (e.g. macOS `/var` → `/private/var`) and the comparison would
-        // otherwise fail for every skill.
+        // Both sides are canonicalized: the file to follow symlinks (and
+        // read what was checked), the directory because it may sit behind a
+        // symlink itself (macOS `/var` → `/private/var`).
         let dir_canonical = self.skills_dir.canonicalize().map_err(Error::IoError)?;
         let canonical = path.canonicalize().map_err(Error::IoError)?;
         if !canonical.starts_with(&dir_canonical) {
@@ -87,9 +81,8 @@ impl SkillsManager {
 
     /// Returns the names of all available skills, sorted alphabetically.
     ///
-    /// Only `.md` files whose stem is a valid skill name (see
-    /// [`Self::load_skill`]) are considered; the extension is stripped from
-    /// the returned names so every advertised skill is loadable.
+    /// Only `.md` files whose stem is a valid skill name are listed, so every
+    /// name returned is loadable.
     pub fn list_skills(&self) -> Result<Vec<String>> {
         let mut names = Vec::new();
         for entry in std::fs::read_dir(&self.skills_dir)? {

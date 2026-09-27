@@ -14,15 +14,11 @@ use crate::error::{Error, Result};
 use super::ToolHandler;
 use super::args::parse;
 use super::capabilities::{ToolCapabilities, ToolKindHint};
-use super::sandbox::validate_path;
 
-/// Writes `content` to `path`, asking `turn.client_io` first and falling back
-/// to local `tokio::fs` (creating any missing parent directories) when it
-/// defers. The `client_io` await is raced against `turn.cancel` so an
-/// unresponsive client can't block cancellation.
-///
-/// `path` must already be validated against the work directory; shared by
-/// [`WriteFileTool`] and `edit_file`.
+/// Writes `content` to `path` (already resolved with
+/// `TurnContext::resolve_path`), asking `turn.client_io` first and falling
+/// back to local disk, creating missing parent directories. The client is
+/// raced against `turn.cancel`. Shared by [`WriteFileTool`] and `edit_file`.
 pub(crate) async fn write_text(path: &Path, content: &str, turn: &TurnContext<'_>) -> Result<()> {
     tokio::select! {
         _ = turn.cancel.cancelled() => Err(Error::ToolExecutionError(
@@ -81,7 +77,7 @@ impl ToolHandler for WriteFileTool {
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
         let args: WriteFileArgs = parse(args)?;
-        let validated = validate_path(&args.path, turn.work_dir)?;
+        let validated = turn.resolve_path(&args.path)?;
         write_text(&validated, &args.content, turn).await?;
         Ok(format!("Successfully wrote to {}", validated.display()))
     }

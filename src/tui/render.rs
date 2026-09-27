@@ -213,6 +213,21 @@ fn user_bubble(text: &str, width: u16, theme: Color) -> Vec<Line<'static>> {
     out
 }
 
+/// The commands listed on the welcome screen: every command `:help` lists.
+pub(crate) const WELCOME_COMMANDS: &[(&str, &str)] = &[
+    (":help", "show all commands"),
+    (":new", "start a new session"),
+    (":sessions", "browse and restore saved sessions"),
+    (":config", "current config"),
+    (":models", "list available models"),
+    (":models <name>", "switch model mid-session"),
+    (":skills", "available skills"),
+    (":mcp", "MCP servers"),
+    (":theme", "change accent color"),
+    (":theme <name>", "apply color directly"),
+    (":q / :quit", "exit"),
+];
+
 pub(crate) fn render_welcome(
     f: &mut Frame,
     area: Rect,
@@ -223,19 +238,6 @@ pub(crate) fn render_welcome(
 ) {
     const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-    const COMMANDS: &[(&str, &str)] = &[
-        (":help", "show all commands"),
-        (":config", "current config"),
-        (":models", "list available models"),
-        (":models <name>", "switch model mid-session"),
-        (":sessions", "browse and restore saved sessions"),
-        (":skills", "available skills"),
-        (":mcp", "MCP servers"),
-        (":theme", "change accent color"),
-        (":theme <name>", "apply color directly"),
-        (":q / :quit", "exit"),
-    ];
-
     let subtitle = if skills.is_empty() {
         format!("{model}  ·  {provider}")
     } else {
@@ -244,7 +246,7 @@ pub(crate) fn render_welcome(
     let hint = "type a message to start";
 
     // title + blank + subtitle + blank*2 + hint + blank + commands
-    let content_h = 1 + 1 + 1 + 2 + 1 + 1 + COMMANDS.len();
+    let content_h = 1 + 1 + 1 + 2 + 1 + 1 + WELCOME_COMMANDS.len();
     let top_pad = (area.height as usize).saturating_sub(content_h) / 2;
     let w = area.width as usize;
 
@@ -283,12 +285,12 @@ pub(crate) fn render_welcome(
 
     lines.push(Line::default());
 
-    let cmd_key_w = COMMANDS
+    let cmd_key_w = WELCOME_COMMANDS
         .iter()
         .map(|(k, _)| k.chars().count())
         .max()
         .unwrap_or(0);
-    let cmd_desc_w = COMMANDS
+    let cmd_desc_w = WELCOME_COMMANDS
         .iter()
         .map(|(_, d)| d.chars().count())
         .max()
@@ -296,7 +298,7 @@ pub(crate) fn render_welcome(
     let cmd_block_w = cmd_key_w + 6 + cmd_desc_w;
     let cmd_pad = center(cmd_block_w);
 
-    for &(key, desc) in COMMANDS {
+    for &(key, desc) in WELCOME_COMMANDS {
         let gap = " ".repeat(cmd_key_w - key.chars().count() + 6);
         lines.push(Line::from(vec![
             Span::raw(cmd_pad.clone()),
@@ -341,15 +343,8 @@ pub(crate) fn render_input_bar(
     f.render_widget(block, area);
 
     let prompt_prefix = "  › ";
-    // `Paragraph` doesn't wrap here, so once `input` is wider than `inner`
-    // the tail just renders past the edge of the terminal and disappears —
-    // the cursor then clamps to the last visible column and appears stuck
-    // while the (invisible) text keeps growing behind it. Scroll the
-    // *displayed* slice of `input` instead, keeping the cursor's terminal
-    // column always inside the visible window, the way a normal line editor
-    // does. Done in terminal cells rather than chars/bytes so wide (CJK,
-    // emoji) and combining characters land in the right column instead of
-    // just being counted as one cell each.
+    // A line wider than the box scrolls, like a line editor, so the cursor
+    // stays visible.
     let visible_width = inner.width.saturating_sub(prompt_prefix.width() as u16) as usize;
     let (visible, cursor_col_offset) = scroll_input_line(input, cursor, visible_width);
 
@@ -370,44 +365,45 @@ pub(crate) fn render_input_bar(
     }
 }
 
-/// Picks the scrolled, grapheme-safe slice of `input` that fits within
-/// `visible_width` terminal cells while keeping the cursor (a byte offset
-/// into `input`) visible, plus the cursor's cell column within that slice.
-///
-/// Works in grapheme clusters (never splitting a base character from its
-/// combining marks) and terminal cell widths (so wide characters like CJK or
-/// emoji — which occupy two columns — scroll and place the cursor correctly)
-/// rather than `char`/byte counts, which both undercount wide characters and
-/// can split a cluster mid-character.
-fn scroll_input_line(input: &str, cursor: usize, visible_width: usize) -> (String, usize) {
-    let graphemes: Vec<&str> = input.graphemes(true).collect();
-    // `cursor` is a byte offset that always lands on a grapheme boundary
-    // (see `App`'s cursor-movement code), so counting clusters whose start
-    // byte precedes it gives the cluster index right after the cursor.
-    let cursor_idx = input
-        .grapheme_indices(true)
-        .take_while(|(byte_idx, _)| *byte_idx < cursor)
-        .count();
+/// How a grapheme of the input shows in the one-line input bar: a newline
+/// (from a paste) as `↵`, a tab as a space.
+fn input_display(grapheme: &str) -> &str {
+    match grapheme {
+        "\n" => "↵",
+        "\t" => " ",
+        other => other,
+    }
+}
 
-    // Walk backwards from the cursor, accumulating cell width, to find the
-    // earliest cluster that still fits in `visible_width - 1` cells (the
-    // last column is reserved for the cursor itself) — this both scrolls
-    // the line and gives the cursor's column within the scrolled slice.
+/// The slice of `input` that fits in `visible_width` terminal cells with the
+/// cursor (a byte offset into `input`) visible, plus the cursor's column in
+/// it, as displayed by [`input_display`]. Measured in grapheme clusters and
+/// cell widths, so combining marks aren't split and wide characters (CJK,
+/// emoji) take two columns.
+///
+/// Only the graphemes around the cursor are visited, so a long pasted
+/// prompt costs no more to draw than a short one.
+fn scroll_input_line(input: &str, cursor: usize, visible_width: usize) -> (String, usize) {
+    // Walk backwards from the cursor (always on a grapheme boundary),
+    // accumulating cell width, to find the earliest cluster that still fits
+    // in `visible_width - 1` cells (the last column is reserved for the
+    // cursor itself) — this both scrolls the line and gives the cursor's
+    // column within the scrolled slice.
     let budget = visible_width.saturating_sub(1);
-    let mut start_idx = cursor_idx;
+    let mut start = cursor;
     let mut cursor_col = 0usize;
-    while start_idx > 0 {
-        let w = graphemes[start_idx - 1].width();
+    for (byte_idx, g) in input[..cursor].grapheme_indices(true).rev() {
+        let w = input_display(g).width();
         if cursor_col + w > budget {
             break;
         }
         cursor_col += w;
-        start_idx -= 1;
+        start = byte_idx;
     }
 
     let mut visible = String::new();
     let mut used = 0usize;
-    for g in &graphemes[start_idx..] {
+    for g in input[start..].graphemes(true).map(input_display) {
         let w = g.width();
         if used + w > visible_width.max(1) {
             break;
@@ -848,6 +844,7 @@ pub(crate) fn render_permission_prompt(
     f: &mut Frame,
     area: Rect,
     tool_name: &str,
+    subagent: Option<&str>,
     arguments: &str,
     selected: usize,
     theme: Color,
@@ -867,6 +864,7 @@ pub(crate) fn render_permission_prompt(
     }
 
     let body_h = 1 /* tool name */
+        + subagent.is_some() as u16
         + 1 /* blank */
         + arg_lines.len() as u16
         + 1 /* blank */
@@ -905,6 +903,16 @@ pub(crate) fn render_permission_prompt(
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
+    // A subagent's calls aren't in the transcript; say whose call this is.
+    if let Some(subagent) = subagent {
+        lines.push(Line::from(vec![
+            Span::styled("from  ", Style::default().fg(theme)),
+            Span::styled(
+                format!("subagent '{subagent}'"),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+    }
     lines.push(Line::raw(""));
     for arg_line in arg_lines {
         lines.push(Line::styled(arg_line, Style::default().fg(Color::DarkGray)));
@@ -1021,5 +1029,42 @@ mod input_scroll_tests {
         let (visible, cursor_col) = scroll_input_line(input, cursor, 20);
         assert_eq!(visible, input);
         assert_eq!(cursor_col, 2);
+    }
+
+    #[test]
+    fn newlines_and_tabs_take_one_cell_each() {
+        let input = "a\nb\tc";
+        let (visible, cursor_col) = scroll_input_line(input, input.len(), 20);
+        assert_eq!(visible, "a↵b c");
+        assert_eq!(cursor_col, 5);
+
+        // Scrolling counts them the same way.
+        let (visible, cursor_col) = scroll_input_line(input, "a\nb".len(), 3);
+        assert_eq!(visible, "↵b ");
+        assert_eq!(cursor_col, 2);
+    }
+
+    #[test]
+    fn input_bar_shows_pasted_newlines() {
+        use super::{FooterLabels, render_input_bar};
+        use crate::tui::state::InputLine;
+        use ratatui::{Terminal, backend::TestBackend, style::Color};
+
+        let mut input = InputLine::default();
+        input.insert_str("one\ntwo");
+        let labels = FooterLabels {
+            left: None,
+            right: "model".into(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(30, 3)).unwrap();
+        terminal
+            .draw(|f| render_input_bar(f, f.area(), &input, &labels, true, Color::Gray))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let row: String = (0..30).map(|x| buffer[(x, 1)].symbol()).collect();
+        assert_eq!(row.trim_end(), "  › one↵two");
+        // Right after "two": the 4-cell prefix plus 7 cells of text.
+        assert_eq!(terminal.get_cursor_position().unwrap().x, 11);
     }
 }

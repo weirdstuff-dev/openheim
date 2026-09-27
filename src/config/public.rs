@@ -1,9 +1,7 @@
 //! The configuration view served to clients (`GET /api/config`).
 //!
-//! Built field by field from [`AppConfig`] rather than by serializing it and
-//! stripping known secrets: only what is listed here is ever exposed, so a
-//! field added to `AppConfig` later stays private until someone adds it here
-//! on purpose.
+//! Built field by field from [`AppConfig`] rather than by stripping secrets
+//! from it, so a new `AppConfig` field stays private unless added here.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -53,6 +51,8 @@ pub struct PublicProviderConfig {
     pub timeout_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
 }
 
 /// An MCP server entry. `args` is left out entirely (command lines routinely
@@ -118,6 +118,7 @@ fn public_provider(name: &str, p: &ProviderConfig) -> PublicProviderConfig {
         env_var: p.env_var.clone(),
         timeout_secs: p.timeout_secs,
         max_tokens: p.max_tokens,
+        context_window: p.context_window,
     }
 }
 

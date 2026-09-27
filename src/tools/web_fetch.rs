@@ -20,35 +20,21 @@ use super::capabilities::{ToolCapabilities, ToolKindHint};
 /// Wall-clock limit for the whole request (connect + headers + body).
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Response body cap. Past this the body is truncated with a marker, so a
-/// huge page can't balloon memory or the LLM's context.
+/// Response body cap; past it the body is truncated with a marker.
 const MAX_BODY_BYTES: usize = 256 * 1024;
 
 /// Fetches `url` over HTTP(S) and returns its content as plain text: HTML is
-/// stripped of markup, other text-like content types (plain text, JSON, XML)
-/// are returned verbatim.
+/// stripped of markup, other text-like types (plain text, JSON, XML) are
+/// returned verbatim. The URL is model-chosen, so every fetch is guarded:
 ///
-/// Single source of truth for the `web_fetch` behaviour.
-///
-/// Hardening applied to every fetch, since the URL is LLM-chosen input:
-/// - **Scheme allowlist** — only `http`/`https`; no `file://`, `data:`, etc.
-/// - **SSRF guard** — the host is resolved and every returned address is
-///   checked against loopback/private/link-local/documentation ranges
-///   (including the `169.254.169.254` cloud metadata address) before the
-///   request is made, so the agent can't be steered into the internal
-///   network. The checked address is then pinned for the actual connection
-///   (`ClientBuilder::resolve`), so a second, attacker-influenced DNS lookup
-///   inside the HTTP client (DNS rebinding) can't reach a different address
-///   than the one that was validated.
-/// - **No automatic redirects** — a 3xx response is reported back with its
-///   `Location` header instead of being followed blindly, so a public URL
-///   can't silently redirect the client into the internal network. The
-///   caller can fetch the target URL itself if it wants to follow it.
-/// - **Timeout** — the whole request is bounded by [`FETCH_TIMEOUT`].
-/// - **Body cap** — capped at [`MAX_BODY_BYTES`], with a truncation marker.
-/// - **Content-type allowlist** — only text-like responses are accepted;
-///   binary payloads (images, archives, executables, ...) are rejected
-///   rather than dumped into the model's context as noise.
+/// - **Scheme allowlist** — only `http`/`https`.
+/// - **SSRF guard** — every address the host resolves to is checked against
+///   non-public ranges (cloud metadata included), and the checked address is
+///   pinned for the connection, so DNS rebinding can't swap it.
+/// - **No automatic redirects** — a 3xx is reported with its `Location`
+///   instead of followed.
+/// - **Timeout** ([`FETCH_TIMEOUT`]) and **body cap** ([`MAX_BODY_BYTES`]).
+/// - **Content-type allowlist** — binary responses are rejected.
 pub(crate) async fn fetch_url(url: &str) -> Result<String> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| Error::ToolExecutionError(format!("Invalid URL '{url}': {e}")))?;
@@ -133,8 +119,7 @@ pub(crate) async fn fetch_url(url: &str) -> Result<String> {
 }
 
 /// Reads `response`'s body up to `cap` bytes, returning whether it was
-/// truncated. Streamed rather than buffered whole, so an oversized response
-/// stops as soon as the cap is hit instead of being downloaded in full.
+/// truncated. Stops downloading at the cap.
 async fn read_capped_body(response: reqwest::Response, cap: usize) -> Result<(Vec<u8>, bool)> {
     let mut stream = response.bytes_stream();
     let mut buf = Vec::new();
@@ -151,13 +136,16 @@ async fn read_capped_body(response: reqwest::Response, cap: usize) -> Result<(Ve
     Ok((buf, false))
 }
 
-/// Resolves `host` (if it's a hostname) and checks every candidate address
-/// against [`is_disallowed_ip`], returning the first address so the caller
-/// can pin the connection to exactly what was checked. Returns `None` for a
-/// literal IP host (nothing to pin — there's only the one address, and it's
-/// already been checked).
+/// Resolves `host` (as `Url::host_str` gives it, so an IPv6 literal is in
+/// brackets) and checks every address against [`is_disallowed_ip`],
+/// returning the first to pin the connection to. `None` for a literal IP
+/// (checked, nothing to pin).
 async fn resolve_and_check(host: &str, port: u16) -> Result<Option<SocketAddr>> {
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = literal.parse::<IpAddr>() {
         if is_disallowed_ip(ip) {
             return Err(Error::ToolExecutionError(format!(
                 "Refusing to fetch {host}: address is not publicly routable"
@@ -186,68 +174,77 @@ async fn resolve_and_check(host: &str, port: u16) -> Result<Option<SocketAddr>> 
     Ok(Some(addrs[0]))
 }
 
-/// True for loopback, private, link-local, unspecified, and other
-/// non-publicly-routable addresses — including the `169.254.169.254`
-/// cloud-metadata address (covered by the IPv4 link-local check) and IPv6
-/// unique-local (`fc00::/7`) and link-local (`fe80::/10`) ranges.
+/// True for every address that isn't publicly routable unicast, IPv4 or
+/// IPv6: loopback, private, shared (CGNAT), link-local (which covers the
+/// `169.254.169.254` cloud metadata address), unspecified, documentation,
+/// benchmarking, multicast, reserved, and tunnels that could lead to any of
+/// those. The ranges are written out because `Ipv4Addr::is_global` and
+/// friends are unstable.
 fn is_disallowed_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
+            let [a, b, c, _] = v4.octets();
             v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
                 || v4.is_documentation()
+                || v4.is_multicast() // 224.0.0.0/4
+                || a == 0 // "this network", 0.0.0.0/8
+                || (a == 100 && (b & 0xc0) == 64) // shared address space (CGNAT, Tailscale), 100.64.0.0/10
+                || (a == 192 && b == 0 && c == 0) // IETF protocol assignments, 192.0.0.0/24
+                || (a == 198 && (b & 0xfe) == 18) // benchmarking, 198.18.0.0/15
+                || a >= 240 // reserved and broadcast, 240.0.0.0/4
         }
         IpAddr::V6(v6) => {
-            // IPv4-mapped (`::ffff:a.b.c.d`) and IPv4-compatible
-            // (`::a.b.c.d`) addresses embed an IPv4 address that the native
-            // IPv6 checks below wouldn't catch on their own — a request to
-            // `::ffff:169.254.169.254` would sail straight past them despite
-            // being cloud metadata. Run those embedded addresses back through
-            // the IPv4 checks too. `to_ipv4_mapped()` covers the first form;
-            // `ipv4_compatible` covers the second, deprecated (RFC 4291) one
-            // that `to_ipv4_mapped()` doesn't — between them, `::` and `::1`
-            // are still matched too (as 0.0.0.0 and 0.0.0.1, neither of
-            // which is IPv4-loopback), so this is additive, not a
-            // replacement for the native checks below.
-            let embedded_v4 = v6.to_ipv4_mapped().or_else(|| ipv4_compatible(&v6));
-            let embeds_disallowed_ipv4 =
-                embedded_v4.is_some_and(|v4| is_disallowed_ip(IpAddr::V4(v4)));
-            embeds_disallowed_ipv4
-                || v6.is_loopback()
-                || v6.is_unspecified()
-                || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique local, fc00::/7
-                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local, fe80::/10
+            // `::1` and `::` also look IPv4-compatible (`0.0.0.1`,
+            // `0.0.0.0`); refuse them for what they are, not by that.
+            if v6.is_loopback() || v6.is_unspecified() {
+                return true;
+            }
+            // Addresses that carry an IPv4 address reach it (or are
+            // translated to it), so it gets the IPv4 checks:
+            // `::ffff:169.254.169.254` and `64:ff9b::a9fe:a9fe` are both
+            // cloud metadata.
+            if let Some(v4) = embedded_ipv4(&v6) {
+                return is_disallowed_ip(IpAddr::V4(v4));
+            }
+            let s = v6.segments();
+            v6.is_multicast() // ff00::/8
+                || (s[0] & 0xfe00) == 0xfc00 // unique local, fc00::/7
+                || (s[0] & 0xffc0) == 0xfe80 // link-local, fe80::/10
+                || (s[0] & 0xffc0) == 0xfec0 // site-local (deprecated), fec0::/10
+                || (s[0] == 0x2001 && s[1] == 0x0db8) // documentation, 2001:db8::/32
+                || (s[0] == 0x2001 && s[1] == 0) // Teredo, 2001::/32: tunnels to any IPv4 address
+                || (s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1) // local-use NAT64, 64:ff9b:1::/48
+                || (s[0] == 0x100 && s[1..4] == [0, 0, 0]) // discard-only, 100::/64
         }
     }
 }
 
-/// The deprecated (RFC 4291) "IPv4-compatible" IPv6 form `::a.b.c.d`: the
-/// first 96 bits are zero and the last 32 embed the IPv4 address directly —
-/// distinct from the still-current "IPv4-mapped" form `::ffff:a.b.c.d`
-/// that [`Ipv6Addr::to_ipv4_mapped`] already recognizes.
-fn ipv4_compatible(v6: &Ipv6Addr) -> Option<Ipv4Addr> {
-    let segments = v6.segments();
-    if segments[0..6] == [0, 0, 0, 0, 0, 0] {
-        let octets = v6.octets();
-        Some(Ipv4Addr::new(
-            octets[12], octets[13], octets[14], octets[15],
-        ))
+/// The IPv4 address an IPv6 address carries, if it's one of the forms that
+/// reach it: IPv4-mapped (`::ffff:a.b.c.d`), IPv4-compatible (`::a.b.c.d`,
+/// deprecated, which [`Ipv6Addr::to_ipv4_mapped`] doesn't recognise),
+/// NAT64 (`64:ff9b::a.b.c.d`, RFC 6052), or 6to4 (`2002:AABB:CCDD::`, the
+/// address in bits 16–48).
+fn embedded_ipv4(v6: &Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = v6.segments();
+    let o = v6.octets();
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        Some(v4)
+    } else if s[0..6] == [0, 0, 0, 0, 0, 0] || s[0..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        Some(Ipv4Addr::new(o[12], o[13], o[14], o[15]))
+    } else if s[0] == 0x2002 {
+        Some(Ipv4Addr::new(o[2], o[3], o[4], o[5]))
     } else {
         None
     }
 }
 
 /// Strips markup from an HTML document into roughly readable text:
-/// `<script>`/`<style>` bodies are dropped entirely, block-level tags become
-/// line breaks, remaining tags are removed, a handful of common entities are
-/// decoded, and runs of blank lines are collapsed.
-///
-/// This is not a full HTML parser (no dependency pulled in for it) — it's
-/// good enough to keep the model from paying for raw markup tokens, not for
-/// extracting structured data.
+/// `<script>`/`<style>` bodies are dropped, block-level tags become line
+/// breaks, other tags are removed, common entities are decoded, and blank
+/// runs are collapsed. Not a real HTML parser; enough to spare the model the
+/// markup.
 fn html_to_text(html: &str) -> String {
     let without_scripts = strip_element(html, "script");
     let without_scripts_and_styles = strip_element(&without_scripts, "style");
@@ -336,12 +333,8 @@ fn collapse_blank_lines(text: &str) -> String {
     out.trim_end().to_string()
 }
 
-/// Fetches a URL over HTTP(S) and returns its content as plain text.
-///
-/// HTML responses are stripped of markup; other text-like content types
-/// (plain text, JSON, XML) are returned verbatim. Only public, non-redirect,
-/// text-like responses under 256 KiB are supported — see [`fetch_url`] for
-/// the full list of guards applied.
+/// Fetches a public URL and returns its content as plain text; see
+/// [`fetch_url`] for the guards.
 pub struct WebFetchTool;
 
 #[derive(Deserialize)]
@@ -520,6 +513,101 @@ mod tests {
         // A publicly routable address embedded either way stays allowed.
         assert!(!is_disallowed_ip("::ffff:8.8.8.8".parse().unwrap()));
         assert!(!is_disallowed_ip("::8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_disallowed_ip_flags_every_non_public_ipv4_range() {
+        for (ip, range) in [
+            ("0.0.0.0", "this network"),
+            ("0.1.2.3", "this network"),
+            ("100.64.0.1", "shared / CGNAT"),
+            ("100.100.100.100", "shared / Tailscale"),
+            ("100.127.255.254", "shared / CGNAT"),
+            ("192.0.0.170", "IETF protocol assignments"),
+            ("198.18.0.1", "benchmarking"),
+            ("198.19.255.254", "benchmarking"),
+            ("224.0.0.1", "multicast"),
+            ("239.255.255.250", "multicast"),
+            ("240.0.0.1", "reserved"),
+            ("255.255.255.255", "broadcast"),
+            ("192.0.2.1", "documentation"),
+        ] {
+            assert!(is_disallowed_ip(ip.parse().unwrap()), "{ip} ({range})");
+        }
+        // The public neighbours of those ranges stay allowed.
+        for ip in [
+            "1.0.0.1",
+            "100.63.255.255",
+            "100.128.0.1",
+            "192.0.1.1",
+            "198.17.255.255",
+            "198.20.0.1",
+            "223.255.255.254",
+        ] {
+            assert!(!is_disallowed_ip(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[test]
+    fn is_disallowed_ip_flags_every_non_public_ipv6_range() {
+        for (ip, range) in [
+            ("ff02::1", "multicast"),
+            ("ff0e::1", "multicast"),
+            ("2001:db8::1", "documentation"),
+            ("2001::1", "Teredo"),
+            ("2001:0:4136:e378:8000:63bf:3fff:fdd2", "Teredo"),
+            ("64:ff9b:1::a", "local-use NAT64"),
+            ("fec0::1", "site-local"),
+            ("100::1", "discard-only"),
+        ] {
+            assert!(is_disallowed_ip(ip.parse().unwrap()), "{ip} ({range})");
+        }
+        for ip in [
+            "2606:4700:4700::1111",
+            "2001:4860:4860::8888",
+            "2001:db9::1",
+        ] {
+            assert!(!is_disallowed_ip(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[test]
+    fn is_disallowed_ip_checks_the_ipv4_in_nat64_and_6to4() {
+        for ip in [
+            // 169.254.169.254, cloud metadata.
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b::169.254.169.254",
+            "2002:a9fe:a9fe::",
+            "2002:a9fe:a9fe:1::1",
+            // 127.0.0.1 and 10.0.0.1.
+            "64:ff9b::7f00:1",
+            "2002:a00:1::",
+            // 100.64.0.1, shared.
+            "64:ff9b::6440:1",
+        ] {
+            assert!(is_disallowed_ip(ip.parse().unwrap()), "{ip}");
+        }
+        // 8.8.8.8 behind either stays allowed.
+        assert!(!is_disallowed_ip("64:ff9b::808:808".parse().unwrap()));
+        assert!(!is_disallowed_ip("2002:808:808::".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn bracketed_ipv6_literals_are_checked_as_addresses() {
+        for host in ["[::1]", "[64:ff9b::a9fe:a9fe]", "[2002:a9fe:a9fe::]"] {
+            let err = resolve_and_check(host, 80).await.unwrap_err();
+            assert!(
+                err.to_string().contains("not publicly routable"),
+                "{host}: {err}"
+            );
+        }
+        // A public literal is allowed, with nothing to pin.
+        assert!(
+            resolve_and_check("[2606:4700:4700::1111]", 443)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -8,23 +8,13 @@ use crate::core::llm::{
 };
 use crate::error::Result;
 
-/// Build a reqwest client with the configured timeout applied as a connect
-/// timeout and a per-read idle timeout — deliberately *not* a total request
-/// deadline.
+/// Builds a reqwest client whose timeout bounds the connect and each read,
+/// not the whole request: a long streamed reply keeps going as long as bytes
+/// arrive, while a dead connection is still caught.
 ///
-/// A total timeout (`ClientBuilder::timeout`) spans the entire body read, so
-/// any streaming generation longer than `timeout_secs` (trivial for thinking
-/// models) dies mid-stream, unretryably: chunks already emitted to the caller
-/// can't be replayed. Bounding only the connect phase and the gap between
-/// reads still detects dead connections while letting healthy slow streams
-/// run to completion as long as bytes keep arriving.
-///
-/// Redirects are disabled: reqwest's default policy strips the
-/// `Authorization` header when a redirect changes host, but not when it only
-/// downgrades `https://` to `http://` on the same host, which would send the
-/// provider's API key over an unencrypted connection. None of the supported
-/// providers redirect under normal operation, so refusing to follow one is
-/// safe and turns a silent credential leak into a visible error instead.
+/// Redirects are refused: reqwest keeps the `Authorization` header on a
+/// same-host `https://` → `http://` redirect, which would send the API key
+/// in the clear, and providers don't redirect anyway.
 pub fn build_http_client(timeout_secs: u64) -> Result<ReqwestClient> {
     let timeout = Duration::from_secs(timeout_secs);
     ReqwestClient::builder()
@@ -71,14 +61,9 @@ pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<d
     Arc::new(RetryClient::new(inner))
 }
 
-/// Returns the LLM client to use for `target`, reusing `baseline_llm` when it
-/// already points at the same provider and model, and otherwise building a fresh
-/// client for `target`.
-///
-/// This is the single source of truth for the "reuse the parent client unless
-/// the model/provider changed" pattern needed when a session switches models
-/// (`AgentState::prompt`) or a subagent runs under a different model
-/// (`DelegateTool::resolve_runtime`).
+/// The LLM client for `target`: `baseline_llm` when it has the same provider
+/// and model, otherwise a new one. Used for sessions that switched models
+/// and for subagents.
 pub fn client_for_config(
     target: &AgentConfig,
     baseline: &AgentConfig,

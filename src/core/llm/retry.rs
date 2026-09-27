@@ -47,13 +47,10 @@ impl LlmClient for RetryClient {
         unreachable!("loop always returns via Ok or Err arm")
     }
 
-    /// Retries a failed streaming request **only while it is still safe to do
-    /// so** — i.e. before any chunk has reached the caller. Once the first token
-    /// has been forwarded a mid-stream failure can't be replayed without
-    /// duplicating output, so it is returned as-is.
-    ///
-    /// Each attempt streams through a private channel; a forwarder relays chunks
-    /// to the caller's `chunk_tx` and records whether anything was emitted.
+    /// Retries a failed streaming request only before any chunk has reached
+    /// the caller; after that a retry would duplicate output, so the error is
+    /// returned. Each attempt streams through a forwarder that records
+    /// whether anything was passed on.
     async fn send_streaming(
         &self,
         messages: &[Message],
@@ -211,6 +208,33 @@ mod tests {
             result.unwrap_err(),
             Error::HttpError { status: 400, .. }
         ));
+    }
+
+    struct AlwaysOverflow {
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmClient for AlwaysOverflow {
+        async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> Result<Choice> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Err(Error::ContextOverflow("prompt is too long".into()))
+        }
+    }
+
+    // Resending the same request can't help; the agent loop shortens it.
+    #[tokio::test]
+    async fn context_overflow_is_not_retried() {
+        let inner = Arc::new(AlwaysOverflow {
+            call_count: AtomicUsize::new(0),
+        });
+        let client = RetryClient::new(inner.clone());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let result = client.send_streaming(&[], &[], tx).await;
+
+        assert!(matches!(result, Err(Error::ContextOverflow(_))));
+        assert_eq!(inner.call_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]

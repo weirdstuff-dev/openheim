@@ -82,7 +82,8 @@ Returns the public server configuration: an explicit allow-list of fields, so an
       "models": ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"],
       "env_var": "OPENAI_API_KEY",
       "timeout_secs": 120,
-      "max_tokens": 4096
+      "max_tokens": 4096,
+      "context_window": 128000
     },
     "anthropic": {
       "kind": "anthropic",
@@ -176,13 +177,23 @@ Returns all registered tool definitions (built-in + MCP). Each tool follows the 
     "type": "function",
     "function": {
       "name": "read_file",
-      "description": "Read the contents of a file at the specified path.",
+      "description": "Read a text file. Returns up to 100 KB; a longer file ends with a note giving the offset to call again with. Use offset and limit to read a specific range of lines.",
       "parameters": {
         "type": "object",
         "properties": {
           "path": {
             "type": "string",
             "description": "The path to the file to read"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Line number to start reading from (1-based). Defaults to 1."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum number of lines to read. Defaults to as many as fit in 100 KB."
           }
         },
         "required": ["path"]
@@ -386,7 +397,7 @@ Returns all registered tool definitions (built-in + MCP). Each tool follows the 
 ]
 ```
 
-> `delegate_task` is always registered. `remember`/`search_memory`/`edit_memory`/`forget` are registered with the `rag` feature (on by default for the binary) — see configuration.md for the `[memory]` section. MCP tools are namespaced as `{server_name}__{tool_name}` (double underscore); the server name is sanitized: hyphens and spaces become underscores.
+> `delegate_task` is always registered. `remember`/`search_memory`/`edit_memory`/`forget` are registered with the `rag` feature (on by default for the binary) — see configuration.md for the `[memory]` section. MCP tools are namespaced as `{server_name}__{tool_name}` (double underscore); both parts are sanitized so every provider accepts the name (see configuration.md's `[mcp_servers]` section).
 
 ---
 
@@ -561,16 +572,19 @@ Returns the full conversation for a session, including all messages.
 | `"tool"` | Tool execution result fed back to the LLM |
 | `"system"` | System prompt injected by the agent (skills, context) |
 
-**Content block types** (`content` is always an array, in order — an assistant
-turn commonly holds a leading `thinking` block followed by `text` and/or
-`tool_use` blocks; a `tool` message holds exactly one `tool_result` block):
+**Content block types** (`content` is always an array, in the order the model
+produced it — an assistant turn commonly holds a leading `thinking` block
+followed by `text` and/or `tool_use` blocks, and with interleaved thinking
+more `thinking` blocks can sit between them; a `tool` message holds exactly
+one `tool_result` block):
 
 | `type` | Fields | Description |
 |---|---|---|
 | `"text"` | `text: string` | Plain text (user, assistant, or system content) |
 | `"thinking"` | `thinking: string`, `signature?: string \| null` | Extended-thinking output. `signature` must be replayed unmodified — it's how the provider verifies the block wasn't tampered with. |
+| `"redacted_thinking"` | `data: string` | Thinking the provider returned encrypted (Anthropic). Nothing to display; kept so it can be sent back unchanged. |
 | `"image"` | `data: string` (base64), `mime_type: string` | User-supplied image, e.g. from an ACP client's `image` content block |
-| `"tool_use"` | `id: string`, `name: string`, `arguments: string` (JSON string) | A tool call the assistant requested |
+| `"tool_use"` | `id: string`, `name: string`, `arguments: string` (JSON string), `signature?: string` | A tool call the assistant requested. `signature` is an opaque provider token (Gemini's thought signature), present only when the provider sent one |
 | `"tool_result"` | `tool_call_id: string`, `tool_name: string`, `content: string`, `is_error?: boolean` | Result of executing a tool call. `is_error` omitted from JSON when `false` (absence means success); forwarded to Anthropic as `is_error` in the tool result block so the LLM receives accurate signal. |
 
 **Error `400`** — if `:id` is not a valid UUID:
@@ -799,7 +813,7 @@ Creates a new blank conversation session. Returns a `sessionId` used for all sub
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `cwd` | `string` | No | Working directory for the session |
+| `cwd` | `string` | No | Working directory for the session: tools resolve relative paths and run commands here when it's inside the agent's `work_dir` (otherwise they use `work_dir`). Also stored for `session/list` filtering. |
 | `_meta.model` | `string` | No | Model override (must match a model from a configured provider) |
 | `_meta.skills` | `string[]` | No | Skills to load for this session |
 
@@ -919,7 +933,7 @@ The flow is:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `sessionId` | `string` | Yes | UUID of the session to resume |
-| `cwd` | `string` | Yes | Current working directory (used for any subsequent prompts) |
+| `cwd` | `string` | Yes | Current working directory, used by the session's tools like `session/new`'s `cwd` (unless the session is already live, which keeps its own) |
 | `mcpServers` | `array` | No | MCP server overrides for the loaded session (usually `[]`) |
 
 **History replay notifications (Server → Client, before the response):**
@@ -1434,7 +1448,7 @@ Creates the directory and all parent directories (equivalent to `mkdir -p`).
 
 #### 3.3.6 Delete
 
-Deletes a file or directory (recursively if directory).
+Deletes a file or directory (recursively if directory). A symlink is deleted as a link; what it points to is left alone. The work directory itself can't be deleted: a path that names it (`""`, `.`, `sub/..`, its absolute path) gets an `error` reply. Both rules also apply to `from` and `to` of a rename, so renaming a symlink moves the link.
 
 **Request:**
 
@@ -1579,6 +1593,7 @@ interface ProviderConfig {
   env_var?: string;
   timeout_secs?: number;
   max_tokens?: number;
+  context_window?: number;
   // api_key is NEVER included in responses
 }
 
@@ -1672,8 +1687,9 @@ interface Message {
 type ContentBlock =
   | { type: "text"; text: string }
   | { type: "thinking"; thinking: string; signature?: string | null }
+  | { type: "redacted_thinking"; data: string }
   | { type: "image"; data: string; mime_type: string } // data is base64-encoded
-  | { type: "tool_use"; id: string; name: string; arguments: string } // arguments is a JSON string
+  | { type: "tool_use"; id: string; name: string; arguments: string; signature?: string } // arguments is a JSON string
   | {
       type: "tool_result";
       tool_call_id: string;

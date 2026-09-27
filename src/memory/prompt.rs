@@ -2,13 +2,8 @@ use crate::core::models::{ContentBlock, Message, Role};
 
 /// Builds an LLM message sequence by prepending a structured system message.
 ///
-/// The system message is assembled from an optional identity (from `system.md`)
-/// and any number of named skills, laid out in a consistent template so the
-/// model always understands what it is, what identity it has been given, and
-/// what skills it has been asked to master.
-///
-/// If neither identity nor skills have been registered, no system message is
-/// prepended and `history` is returned unchanged.
+/// The system message combines an optional identity (from `system.md`) and
+/// any number of named skills; see [`Self::build`] for the layout.
 #[derive(Default)]
 pub struct PromptBuilder {
     system_identity: Option<String>,

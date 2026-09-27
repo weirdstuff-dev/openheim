@@ -17,7 +17,7 @@ use crate::{
     },
     core::{
         client_io::{ClientIo, NoClientIo},
-        models::{ContentBlock, StreamEvent},
+        models::{ContentBlock, StopReason, StreamEvent},
         permission::{AllowAll, PermissionGate},
         runtime::{AgentState, LoadedSession},
     },
@@ -49,15 +49,8 @@ impl OpenheimClient {
         }
     }
 
-    /// The shared runtime handle behind this client. `pub(crate)` — for the
-    /// ACP-based transports (`transport::{run,stdio,ws}`), which need the
-    /// raw `AgentState` to hand to `acp::serve`, so every entry point builds
-    /// it the same way (config load, resolve, `MemoryContext::new`, custom
-    /// tools) instead of each hand-rolling that sequence; and for the TUI,
-    /// which reads `config`/`app_config`/`executor` off it directly for
-    /// `:config`/`:models` and the permission gate. `AgentState` itself has
-    /// no `acp` dependency, so this accessor doesn't need the feature either
-    /// — just one of its two callers.
+    /// The runtime behind this client, for the transports (which hand it to
+    /// `acp::serve`) and the TUI, so both build it through the builder.
     #[cfg(any(feature = "acp", feature = "tui"))]
     pub(crate) fn state(&self) -> &Arc<AgentState> {
         &self.state
@@ -75,53 +68,25 @@ impl OpenheimClient {
         }
     }
 
-    /// List persisted sessions — all of them (`None`) or only those whose
-    /// cwd matches (`Some`). Entries are [`ConversationMeta`]s (id, title,
-    /// cwd, timestamps, model/provider, context usage); ACP's `SessionInfo`
-    /// mapping happens at the ACP edge (`acp::serve`), not on the facade.
+    /// Saved sessions: all of them, or only those whose `cwd` matches.
     pub async fn list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<ConversationMeta>> {
         self.state.list_sessions(cwd).await
     }
 
-    /// Load a persisted session into a live `SessionHandle`.
-    ///
-    /// `on_history` is called once for each message in the conversation history
-    /// (as `SessionUpdate::UserMessageChunk` / `AgentMessageChunk`) so callers
-    /// can replay the conversation in their UI.
-    ///
-    /// Delegates to `SessionHandle::restore` (needs the `acp` feature) on a default-configured handle:
-    /// the returned handle starts from the default permission gate
-    /// ([`AllowAll`]) and client I/O ([`NoClientIo`]) — apply
-    /// [`SessionHandle::permission_gate`]/[`SessionHandle::client_io`] to it
-    /// afterwards if needed. Restoring through an *existing* handle instead
-    /// inherits that handle's gate/client_io. Doesn't require the `acp`
-    /// feature — replay is entirely up to the caller, via the returned
-    /// [`LoadedSession`]'s `messages`. The ACP-typed counterpart, built on
-    /// this, is `Self::load_session` (needs the `acp` feature).
+    /// Loads a saved session and returns a live handle for it plus what was
+    /// loaded (see [`LoadedSession`]; `SessionHandle::acp_replay` shows its
+    /// messages as ACP updates). Like a new session, the handle starts with
+    /// [`AllowAll`] and [`NoClientIo`].
     pub async fn resume_session(
         &self,
         session_id: &str,
         cwd: PathBuf,
     ) -> Result<(SessionHandle, LoadedSession)> {
-        SessionHandle::new(String::new(), Arc::clone(&self.state))
-            .resume(session_id, cwd)
-            .await
-    }
-
-    /// [`Self::resume_session`], replaying the loaded history as ACP
-    /// `SessionUpdate`s via `on_history` (one call per message, in the same
-    /// shape and order a live turn would have produced — including thinking
-    /// blocks tagged via `_meta.kind`); pass a no-op callback to skip that.
-    #[cfg(feature = "acp")]
-    pub async fn load_session(
-        &self,
-        session_id: &str,
-        cwd: PathBuf,
-        on_history: impl FnMut(SessionUpdate) + Send,
-    ) -> Result<SessionHandle> {
-        SessionHandle::new(String::new(), Arc::clone(&self.state))
-            .restore(session_id, cwd, on_history)
-            .await
+        let loaded = self.state.load_session(session_id, cwd).await?;
+        Ok((
+            SessionHandle::new(session_id.to_string(), Arc::clone(&self.state)),
+            loaded,
+        ))
     }
 
     /// Fetch the full `Conversation` (messages + metadata) for a session id.
@@ -196,7 +161,11 @@ impl<'a> SessionBuilder<'a> {
         self
     }
 
-    /// Working directory for this session (used for history filtering).
+    /// Working directory for this session: where its tools resolve relative
+    /// paths and run commands when it's inside `work_dir` (otherwise they use
+    /// `work_dir`). Also saved with the conversation for
+    /// [`OpenheimClient::list_sessions`] filtering. Defaults to the process's
+    /// current directory.
     pub fn cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
         self.cwd = cwd.into();
         self
@@ -216,7 +185,7 @@ impl<'a> SessionBuilder<'a> {
 
 /// A live session that can receive prompts.
 pub struct SessionHandle {
-    pub id: String,
+    id: String,
     state: Arc<AgentState>,
     permission_gate: Arc<dyn PermissionGate>,
     client_io: Arc<dyn ClientIo>,
@@ -232,11 +201,8 @@ impl SessionHandle {
         }
     }
 
-    /// Supply a permission gate consulted before every tool call this session
-    /// makes (see [`PermissionGate`]). Defaults to [`AllowAll`] — the caller
-    /// is trusted to have already consented to the run (e.g. `openheim run`,
-    /// a one-shot library embedding). An interactive embedder (like the TUI)
-    /// should set a real gate here instead of relying on the default.
+    /// The [`PermissionGate`] asked before each of this session's tool calls.
+    /// Defaults to [`AllowAll`]; an interactive embedder should set its own.
     pub fn permission_gate(mut self, gate: Arc<dyn PermissionGate>) -> Self {
         self.permission_gate = gate;
         self
@@ -250,81 +216,25 @@ impl SessionHandle {
         self
     }
 
-    /// Send a prompt and stream ACP `SessionUpdate` events to `on_update`.
-    ///
-    /// The callback receives:
-    /// - `SessionUpdate::AgentMessageChunk` — streaming text from the LLM
-    /// - `SessionUpdate::ToolCall` — a tool the agent is about to invoke
-    /// - `SessionUpdate::ToolCallUpdate` — result of the tool call
-    ///
-    /// Kept for compatibility with callers already speaking ACP's wire
-    /// vocabulary; [`Self::prompt_events`] gives the same turn's raw
-    /// [`crate::core::models::StreamEvent`]s instead, including ones with no
-    /// ACP equivalent (context-usage updates, the turn-finished signal).
-    #[cfg(feature = "acp")]
+    /// This session's id, for [`OpenheimClient::resume_session`] later.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Runs one turn on `input` (text, or text with images; see
+    /// [`PromptInput`]) and returns why it stopped. `on_update` gets every
+    /// [`StreamEvent`] of the turn: streamed text and thinking, tool calls
+    /// and results, context usage, and the finish. To get ACP
+    /// `SessionUpdate`s instead, pass `Self::acp_updates` (feature `acp`).
     pub async fn prompt(
         &self,
-        text: &str,
-        on_update: impl FnMut(SessionUpdate) + Send,
-    ) -> Result<()> {
-        self.prompt_with_images(text, Vec::new(), on_update).await
-    }
-
-    /// Send a prompt that mixes text with one or more images.
-    ///
-    /// Each image is `(base64_data, mime_type)` — e.g. the raw base64 payload
-    /// of a `data:` URL and `"image/png"`. The text block (when non-empty)
-    /// leads, followed by the images, matching the order a user composes them.
-    /// Streams the same `SessionUpdate` events as [`Self::prompt`].
-    #[cfg(feature = "acp")]
-    pub async fn prompt_with_images(
-        &self,
-        text: &str,
-        images: Vec<(String, String)>,
-        mut on_update: impl FnMut(SessionUpdate) + Send,
-    ) -> Result<()> {
-        let executor = self.state.executor.clone();
-        self.prompt_events_with_images(text, images, move |event| {
-            if let Some(update) = stream_event_to_session_update(event, executor.as_ref()) {
-                on_update(update);
-            }
-        })
-        .await
-        .map(|_| ())
-    }
-
-    /// Send a prompt and stream the turn's raw [`StreamEvent`]s to `on_update`
-    /// — every event the agent loop produces, not just the ones ACP's
-    /// `SessionUpdate` has room for (also includes `IterationStart`, `Usage`,
-    /// `Finished`, `MessageAppended`). Returns why the turn stopped.
-    pub async fn prompt_events(
-        &self,
-        text: &str,
+        input: impl Into<PromptInput>,
         on_update: impl FnMut(StreamEvent) + Send,
-    ) -> Result<crate::core::models::StopReason> {
-        self.prompt_events_with_images(text, Vec::new(), on_update)
-            .await
-    }
-
-    /// [`Self::prompt_events`] with images — see `Self::prompt_with_images`
-    /// (needs the `acp` feature) for the image argument shape.
-    pub async fn prompt_events_with_images(
-        &self,
-        text: &str,
-        images: Vec<(String, String)>,
-        on_update: impl FnMut(StreamEvent) + Send,
-    ) -> Result<crate::core::models::StopReason> {
-        let mut blocks: Vec<ContentBlock> = Vec::new();
-        if !text.is_empty() {
-            blocks.push(ContentBlock::from(text));
-        }
-        for (data, mime_type) in images {
-            blocks.push(ContentBlock::Image { data, mime_type });
-        }
+    ) -> Result<StopReason> {
         self.state
             .prompt(
                 &self.id,
-                blocks,
+                input.into().blocks,
                 self.permission_gate.clone(),
                 self.client_io.clone(),
                 on_update,
@@ -332,11 +242,38 @@ impl SessionHandle {
             .await
     }
 
-    /// Loads this session's persisted `ConversationMeta` (the source
-    /// [`Self::context_usage`] reads from), off the runtime thread since
-    /// it's synchronous file I/O. `None` if the session hasn't been
-    /// persisted yet — a brand-new session isn't written to disk until its
-    /// first turn completes.
+    /// Adapts an ACP `SessionUpdate` callback into one [`Self::prompt`]
+    /// accepts: `session.prompt("hi", session.acp_updates(|update| …))`.
+    /// Events with no ACP equivalent (`IterationStart`, `Usage`,
+    /// `Finished`, `MessageAppended`) are dropped.
+    #[cfg(feature = "acp")]
+    pub fn acp_updates(
+        &self,
+        mut on_update: impl FnMut(SessionUpdate) + Send,
+    ) -> impl FnMut(StreamEvent) + Send {
+        let executor = self.state.executor.clone();
+        move |event| {
+            if let Some(update) = stream_event_to_session_update(event, executor.as_ref()) {
+                on_update(update);
+            }
+        }
+    }
+
+    /// Replays `messages` (e.g. [`LoadedSession::messages`] from
+    /// [`OpenheimClient::resume_session`]) as the ACP `SessionUpdate`s a live
+    /// turn would have produced, thinking included (tagged via
+    /// `_meta.kind`), so an ACP-speaking UI can show the conversation so far.
+    #[cfg(feature = "acp")]
+    pub fn acp_replay(
+        &self,
+        messages: &[crate::core::models::Message],
+        mut on_update: impl FnMut(SessionUpdate),
+    ) {
+        replay_history_messages(messages, self.state.executor.as_ref(), &mut on_update);
+    }
+
+    /// This session's saved `ConversationMeta`, or `None` before its first
+    /// turn (a new session isn't saved until then).
     async fn conversation_meta(&self) -> Result<Option<crate::memory::ConversationMeta>> {
         let uuid = Uuid::parse_str(&self.id)
             .map_err(|_| crate::error::Error::InvalidArgument("invalid session id".to_string()))?;
@@ -372,63 +309,65 @@ impl SessionHandle {
     pub async fn switch_model(&self, provider: &str, model: &str) -> Result<(String, String)> {
         self.state.switch_model(&self.id, provider, model).await
     }
+}
 
-    /// Restore a persisted session as the active session for this handle.
-    ///
-    /// Registers the conversation in the agent state so subsequent `prompt`
-    /// calls continue from its history. Returns the new handle (inheriting
-    /// this handle's permission gate and client I/O) plus the loaded
-    /// session's mode, message history, and any fallback warning (set when
-    /// the session's saved provider/model no longer resolves) — replaying
-    /// that history is entirely up to the caller. Doesn't require the `acp`
-    /// feature. The load-and-defaults counterpart is
-    /// [`OpenheimClient::resume_session`]; the ACP-typed wrapper around this
-    /// is `Self::restore` (needs the `acp` feature).
-    pub async fn resume(
-        &self,
-        session_id: &str,
-        cwd: std::path::PathBuf,
-    ) -> Result<(SessionHandle, LoadedSession)> {
-        let loaded = self.state.load_session(session_id, cwd).await?;
-        Ok((
-            SessionHandle {
-                id: session_id.to_string(),
-                state: Arc::clone(&self.state),
-                permission_gate: self.permission_gate.clone(),
-                client_io: self.client_io.clone(),
-            },
-            loaded,
-        ))
+// ── PromptInput ───────────────────────────────────────────────────────────────
+
+/// What one [`SessionHandle::prompt`] sends. Plain text converts directly
+/// (`session.prompt("hi", …)`); add images with the builder:
+/// `PromptInput::text("what is this?").image(base64_data, "image/png")`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PromptInput {
+    blocks: Vec<ContentBlock>,
+}
+
+impl PromptInput {
+    /// A prompt with `text` (no block at all if it's empty, so an
+    /// image-only prompt can start from `PromptInput::default()`).
+    pub fn text(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let blocks = if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![ContentBlock::from(text)]
+        };
+        Self { blocks }
     }
 
-    /// [`Self::resume`], replaying the loaded history as ACP `SessionUpdate`s
-    /// via `on_history` (`UserMessageChunk` / `AgentMessageChunk` /
-    /// `ToolCall` / `ToolCallUpdate`, in the same shape and order a live turn
-    /// would have produced — including thinking blocks tagged via
-    /// `_meta.kind`) so callers can replay it in their UI; pass a no-op
-    /// callback to skip that. The load-and-defaults counterpart is
-    /// [`OpenheimClient::load_session`].
-    #[cfg(feature = "acp")]
-    pub async fn restore(
-        &self,
-        session_id: &str,
-        cwd: std::path::PathBuf,
-        mut on_history: impl FnMut(SessionUpdate) + Send,
-    ) -> Result<SessionHandle> {
-        let (handle, loaded) = self.resume(session_id, cwd).await?;
-        if let Some(warning) = loaded.warning {
-            on_history(SessionUpdate::AgentMessageChunk(
-                agent_client_protocol::schema::v1::ContentChunk::new(
-                    agent_client_protocol::schema::v1::ContentBlock::from(warning),
-                ),
-            ));
-        }
-        replay_history_messages(
-            &loaded.messages,
-            self.state.executor.as_ref(),
-            &mut on_history,
-        );
-        Ok(handle)
+    /// Adds an image: `data` is the raw base64 payload (e.g. of a `data:`
+    /// URL), `mime_type` e.g. `"image/png"`. Images follow the text, in the
+    /// order they're added.
+    pub fn image(mut self, data: impl Into<String>, mime_type: impl Into<String>) -> Self {
+        self.blocks.push(ContentBlock::Image {
+            data: data.into(),
+            mime_type: mime_type.into(),
+        });
+        self
+    }
+}
+
+impl From<&str> for PromptInput {
+    fn from(text: &str) -> Self {
+        Self::text(text)
+    }
+}
+
+impl From<String> for PromptInput {
+    fn from(text: String) -> Self {
+        Self::text(text)
+    }
+}
+
+impl From<&String> for PromptInput {
+    fn from(text: &String) -> Self {
+        Self::text(text.as_str())
+    }
+}
+
+/// Any content blocks as-is, for prompts the builder doesn't cover.
+impl From<Vec<ContentBlock>> for PromptInput {
+    fn from(blocks: Vec<ContentBlock>) -> Self {
+        Self { blocks }
     }
 }
 
@@ -442,19 +381,16 @@ impl SessionHandle {
 /// 2. **File-based** — call `OpenheimClient::from_config(path)` or leave
 ///    everything unset to load from `~/.openheim/config.toml`.
 ///
-/// `.model()` works in either mode: in file-based mode it overrides which
-/// configured model gets resolved (same as the config file's model with a
-/// different name picked); in programmatic mode it's the model of the
-/// from-scratch provider.
+/// `.model()` works in either mode: it picks a configured model in
+/// file-based mode, and is the provider's model in programmatic mode.
 ///
 /// MCP servers can be added in either mode with `.mcp_server()`.
 #[derive(Default)]
 pub struct OpenheimBuilder {
     // file-based path (None = ~/.openheim/config.toml)
     config_path: Option<PathBuf>,
-    // programmatic fields — if any of these (besides `model`) are set we
-    // skip the config file entirely; `model` alone is just a resolve()
-    // override on top of file-based config.
+    // Programmatic fields: setting any of these but `model` skips the
+    // config file.
     provider: Option<String>,
     api_key: Option<String>,
     model: Option<String>,
@@ -462,6 +398,7 @@ pub struct OpenheimBuilder {
     max_iterations: Option<usize>,
     timeout_secs: Option<u64>,
     max_tokens: Option<u32>,
+    context_window: Option<u64>,
     mcp_servers: BTreeMap<String, McpServerConfig>,
     default_skills: Vec<String>,
     work_dir: Option<PathBuf>,
@@ -522,6 +459,14 @@ impl OpenheimBuilder {
         self
     }
 
+    /// The model's context window in tokens. Requests estimated at over 90%
+    /// of it leave out the oldest turns; see `context_window` in
+    /// `docs/configuration.md`.
+    pub fn context_window(mut self, tokens: u64) -> Self {
+        self.context_window = Some(tokens);
+        self
+    }
+
     /// Register an MCP server. Tools will be available as `{name}__{tool_name}`.
     pub fn mcp_server(mut self, name: impl Into<String>, config: McpServerConfig) -> Self {
         self.mcp_servers.insert(name.into(), config);
@@ -551,18 +496,14 @@ impl OpenheimBuilder {
 
     /// Directory backing history, skills, `system.md`, subagent profiles,
     /// and (absent an explicit `[memory].db_path`) the memory database.
-    /// Overrides `data_dir` from the config file. Defaults to `~/.openheim`
-    /// when not set — lets two agents share a process with separate state,
-    /// or a sandboxed caller keep everything project-local.
+    /// Overrides `data_dir` from the config file. Defaults to `~/.openheim`.
     pub fn data_dir(mut self, path: impl Into<PathBuf>) -> Self {
         self.data_dir = Some(path.into());
         self
     }
 
-    /// Register a custom tool (see [`crate::tools::ToolHandler`]). Registered
-    /// alongside the built-ins and any MCP-sourced tools, and subject to the
-    /// same `work_dir`/`allow_shell` sandbox boundary. Call multiple times to
-    /// register more than one.
+    /// Registers a custom tool (see [`crate::tools::ToolHandler`]) alongside
+    /// the built-in and MCP tools. Call once per tool.
     pub fn tool(mut self, handler: Box<dyn ToolHandler>) -> Self {
         self.tools.push(handler);
         self
@@ -587,6 +528,9 @@ impl OpenheimBuilder {
                 }
                 if let Some(t) = self.max_tokens {
                     agent_config.max_tokens = Some(t);
+                }
+                if let Some(w) = self.context_window {
+                    agent_config.context_window = Some(w);
                 }
                 (agent_config, app_config)
             };
@@ -677,6 +621,7 @@ impl OpenheimBuilder {
                 api_key: Some(api_key),
                 timeout_secs: Some(timeout),
                 max_tokens: self.max_tokens,
+                context_window: self.context_window,
                 thinking: None,
             },
         );
@@ -694,9 +639,6 @@ impl OpenheimBuilder {
             data_dir: None,
         };
 
-        // Funnels through the same `AppConfig::agent_config` assembly every
-        // file-based `resolve()` path uses, instead of hand-building a second
-        // `AgentConfig` with the same field set alongside it.
         let agent_config = app_config.resolve_provider_default(&provider)?;
         Ok((agent_config, app_config))
     }
@@ -728,9 +670,8 @@ mod tests {
         assert!(dir.path().join("history").is_dir());
     }
 
-    /// `resume_session` (and by extension `SessionHandle::resume`) works
-    /// without the `acp` feature — no `SessionUpdate`, no ACP replay, just
-    /// the persisted `Message`s straight from `HistoryManager`. Writes a
+    /// `resume_session` works without the `acp` feature: it hands back the
+    /// persisted `Message`s straight from `HistoryManager`. Writes a
     /// conversation directly via `client.memory().history` (mock-free, no
     /// LLM call) and resumes it by id.
     #[tokio::test]
@@ -759,8 +700,54 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(handle.id, conv.meta.id.to_string());
+        assert_eq!(handle.id(), conv.meta.id.to_string());
         assert_eq!(loaded.messages, conv.messages);
         assert!(loaded.warning.is_none());
+    }
+
+    #[cfg(feature = "acp")]
+    #[tokio::test]
+    async fn acp_updates_maps_events_and_drops_ones_acp_has_no_room_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = OpenheimClient::builder()
+            .provider("openai")
+            .api_key("test-key")
+            .data_dir(dir.path())
+            .build()
+            .await
+            .unwrap();
+        let session = client.new_session().start().await.unwrap();
+
+        let mut updates = Vec::new();
+        let mut on_event = session.acp_updates(|update| updates.push(update));
+        on_event(StreamEvent::LlmResponse {
+            content: "hi".into(),
+        });
+        on_event(StreamEvent::Usage {
+            usage: Default::default(),
+        });
+        drop(on_event);
+
+        assert_eq!(updates.len(), 1);
+        assert!(matches!(updates[0], SessionUpdate::AgentMessageChunk(_)));
+    }
+
+    #[test]
+    fn prompt_input_puts_text_before_images_and_skips_empty_text() {
+        let image = |data: &str| ContentBlock::Image {
+            data: data.into(),
+            mime_type: "image/png".into(),
+        };
+        assert_eq!(
+            PromptInput::text("look")
+                .image("a", "image/png")
+                .image("b", "image/png"),
+            PromptInput::from(vec![ContentBlock::from("look"), image("a"), image("b")])
+        );
+        assert_eq!(
+            PromptInput::text("").image("a", "image/png"),
+            PromptInput::from(vec![image("a")])
+        );
+        assert_eq!(PromptInput::from("hi"), PromptInput::text("hi"));
     }
 }

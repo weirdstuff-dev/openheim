@@ -1,11 +1,8 @@
 //! Agent memory: persisted conversation history, skill files, the system
 //! identity, and the prompt assembly that stitches them into an LLM request.
 //!
-//! This module is *not* retrieval-augmented generation — nothing here embeds
-//! or searches anything. It is the agent's record of its own sessions plus
-//! the static instructions it is given. Tool-driven long-term memory
-//! (`remember` / `search_memory` / `edit_memory` / `forget`) lives in
-//! `crate::rag` (needs the `rag` feature).
+//! Nothing here embeds or searches; tool-driven long-term memory
+//! (`remember`, `search_memory`, …) is `crate::rag` (feature `rag`).
 //!
 //! | Submodule | Responsibility |
 //! |-----------|----------------|
@@ -81,11 +78,11 @@ impl MemoryContext {
     /// Load or create a conversation and build the prompt context for an agent turn.
     ///
     /// Returns the resolved [`Conversation`] and a [`PromptBuilder`] already populated
-    /// with the system identity and any requested skills.
+    /// with the system identity and the requested skills that load (a missing
+    /// one is logged and left out).
     ///
-    /// For **new** conversations, `default_skills` are merged with `skill_names` (defaults
-    /// first, deduplicated) and persisted on the conversation. For **existing** conversations
-    /// the stored skill list is used as-is, preserving the state from when the session began.
+    /// A new conversation saves `default_skills` followed by `skill_names`
+    /// (deduplicated); an existing one keeps the list it was saved with.
     pub fn prepare(
         &self,
         chat_id: Option<Uuid>,
@@ -93,8 +90,6 @@ impl MemoryContext {
         model: Option<String>,
         provider: Option<String>,
     ) -> Result<(Conversation, PromptBuilder)> {
-        // Always pass merged skills to resolve_conversation. For existing conversations
-        // the parameter is ignored (stored list wins); for new ones it gets persisted.
         let merged_skills = merge_skills(&self.default_skills, skill_names);
 
         let conversation =
@@ -108,13 +103,15 @@ impl MemoryContext {
         tracing::debug!(chars = system_content.len(), "prepare: loaded system.md");
         builder.set_system(system_content);
 
-        // Load skills from the conversation's stored list (already contains merged
-        // defaults for new conversations, or the original set for existing ones).
-        if !conversation.meta.skills.is_empty() {
-            let loaded = self.skills.load_skills(&conversation.meta.skills)?;
-            for (name, content) in &loaded {
-                tracing::debug!(skill = %name, "prepare: loaded skill");
-                builder.add_skill(name, content);
+        // A skill that no longer loads (deleted or renamed since) is left out
+        // rather than failing this and every later turn.
+        for name in &conversation.meta.skills {
+            match self.skills.load_skill(name) {
+                Ok(content) => {
+                    tracing::debug!(skill = %name, "prepare: loaded skill");
+                    builder.add_skill(name, &content);
+                }
+                Err(e) => tracing::warn!(skill = %name, "prepare: skipping skill: {e}"),
             }
         }
 
@@ -163,6 +160,22 @@ mod tests {
         let defaults = vec!["rules".to_string(), "rules".to_string()];
         let merged = merge_skills(&defaults, &[]);
         assert_eq!(merged, vec!["rules"]);
+    }
+
+    // A conversation whose stored skill has since been deleted still gets
+    // its turns, with the skills that remain.
+    #[test]
+    fn prepare_skips_a_skill_that_no_longer_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = MemoryContext::new(vec![], dir.path()).unwrap();
+        std::fs::write(dir.path().join("system.md"), "I am the agent.").unwrap();
+        std::fs::write(dir.path().join("skills/kept.md"), "KEPT SKILL").unwrap();
+        let skills = vec!["gone".to_string(), "kept".to_string()];
+
+        let (_, builder) = ctx.prepare(None, &skills, None, None).unwrap();
+
+        let system = builder.build(&[])[0].text().unwrap();
+        assert!(system.contains("KEPT SKILL"), "{system}");
     }
 
     #[test]

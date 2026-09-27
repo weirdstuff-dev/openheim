@@ -1,9 +1,7 @@
 //! Built-in tool: `search` — regex search across files, ripgrep-style.
 //!
-//! Built on ripgrep's own crates (`grep-searcher`/`grep-regex` for matching,
-//! `ignore` for the directory walk) rather than shelling out to an `rg`
-//! binary, so it works regardless of `allow_shell` and doesn't depend on
-//! anything being installed on the host.
+//! Built on ripgrep's crates rather than an `rg` binary, so it works without
+//! `allow_shell` or anything installed on the host.
 
 use std::path::Path;
 
@@ -22,26 +20,18 @@ use crate::error::{Error, Result};
 use super::ToolHandler;
 use super::args::parse;
 use super::capabilities::{ToolCapabilities, ToolKindHint};
-use super::sandbox::validate_path;
 
-/// Matches beyond this count are omitted, with a marker noting the cut-off,
-/// so a broad pattern over a large tree can't blow out the LLM's context.
+/// Matches beyond this count are omitted, with a marker noting the cut-off.
 const MAX_RESULTS: usize = 200;
 
-/// Files scanned beyond this count abort the walk early (with the same
-/// truncation marker as the match cap) — a backstop for a pattern that
-/// matches nothing over a huge, mostly-non-matching tree, where the match
-/// cap alone would never kick in.
+/// The walk stops after this many files, for a pattern that matches little
+/// in a huge tree.
 const MAX_FILES_SCANNED: usize = 50_000;
 
 /// Searches every file under `root` for `pattern` (a regex) and returns
-/// matches as `path:line: content`, one per line, in walk order.
-///
-/// Directory walking follows `.gitignore`/`.ignore` rules and skips hidden
-/// entries, matching ripgrep's own defaults. Binary files are detected and
-/// skipped rather than searched. The walk and regex matching are both
-/// blocking/CPU-bound, so this runs on a blocking thread pool via
-/// [`tokio::task::spawn_blocking`] rather than the async runtime.
+/// matches as `path:line: content`, in walk order. Follows ripgrep's
+/// defaults (`.gitignore`-aware, hidden and binary files skipped). Runs on
+/// the blocking pool, since the walk and matching are blocking.
 async fn search(pattern: &str, root: &Path, case_insensitive: bool) -> Result<String> {
     let pattern = pattern.to_string();
     let root = root.to_path_buf();
@@ -85,9 +75,7 @@ fn search_blocking(pattern: &str, root: &Path, case_insensitive: bool) -> Result
             relative.display().to_string()
         };
 
-        // Errors here are almost always "not readable as text" (permissions,
-        // a binary file that slipped past detection, ...) — skip the file
-        // rather than failing the whole search over it.
+        // A file that can't be read as text is skipped, not fatal.
         let _ = searcher.search_path(
             &matcher,
             path,
@@ -123,8 +111,8 @@ fn search_blocking(pattern: &str, root: &Path, case_insensitive: bool) -> Result
 ///
 /// Respects `.gitignore`/`.ignore` and skips hidden files and binary files,
 /// matching ripgrep's own defaults. Returns matches as `path:line: content`.
-/// Defaults to searching the work directory if no path is given; the path
-/// must be inside the work directory.
+/// Defaults to searching the turn's working directory (`TurnContext::cwd`)
+/// if no path is given; the path must be inside the work directory.
 pub struct SearchTool;
 
 #[derive(Deserialize)]
@@ -153,7 +141,7 @@ impl ToolHandler for SearchTool {
                     },
                     "path": {
                         "type": "string",
-                        "description": "The file or directory to search. Defaults to the work directory if omitted."
+                        "description": "The file or directory to search. Defaults to the current working directory if omitted."
                     },
                     "case_insensitive": {
                         "type": "boolean",
@@ -167,7 +155,7 @@ impl ToolHandler for SearchTool {
 
     async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
         let args: SearchArgs = parse(args)?;
-        let validated = validate_path(args.path.as_deref().unwrap_or("."), turn.work_dir)?;
+        let validated = turn.resolve_path(args.path.as_deref().unwrap_or("."))?;
         search(
             &args.pattern,
             &validated,

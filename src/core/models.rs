@@ -16,11 +16,9 @@ pub enum Role {
     Tool,
 }
 
-/// A single piece of message content. Close to Anthropic's own content-block
-/// shape (and by extension ACP's), since both this codebase's richest
-/// provider and its host protocol already think in these terms; lossless
-/// providers convert directly, lossy ones (see `core::llm::openai`) flatten
-/// at their own edge instead of forcing the core type to be the lossy one.
+/// A single piece of message content, shaped like Anthropic's (and ACP's)
+/// content blocks. Providers with a flatter format (`core::llm::openai`)
+/// convert at their own edge.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
@@ -28,12 +26,19 @@ pub enum ContentBlock {
         text: String,
     },
     /// Extended-thinking text for an assistant turn. Must be replayed
-    /// verbatim (with `signature`) as the first block of the turn when it also
-    /// contains `ToolUse` blocks, or Anthropic rejects the next request.
+    /// verbatim (with `signature`) in its original position in the turn —
+    /// with interleaved thinking a turn can hold several, between text and
+    /// tool calls — or Anthropic rejects the next request.
     Thinking {
         thinking: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
+    },
+    /// Thinking the provider returned encrypted (Anthropic's
+    /// `redacted_thinking`). Nothing to show, but it has to be replayed
+    /// verbatim in its place in the turn, like `Thinking`.
+    RedactedThinking {
+        data: String,
     },
     Image {
         /// Base64-encoded image data.
@@ -45,6 +50,11 @@ pub enum ContentBlock {
         name: String,
         /// JSON string of the arguments object.
         arguments: String,
+        /// Opaque provider token that has to be sent back with this call on
+        /// the next request (Gemini's `thoughtSignature`). Other providers
+        /// ignore it. Build calls without one via [`ContentBlock::tool_use`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
     },
     ToolResult {
         tool_call_id: String,
@@ -53,6 +63,22 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "is_false")]
         is_error: bool,
     },
+}
+
+impl ContentBlock {
+    /// A `ToolUse` block without a provider signature.
+    pub fn tool_use(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
+        ContentBlock::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            arguments: arguments.into(),
+            signature: None,
+        }
+    }
 }
 
 impl<T: Into<String>> From<T> for ContentBlock {
@@ -149,6 +175,7 @@ impl Message {
                     id,
                     name,
                     arguments,
+                    ..
                 } => Some(ToolUseBlock {
                     id: id.clone(),
                     name: name.clone(),
@@ -175,6 +202,90 @@ impl Message {
             }),
             _ => None,
         })
+    }
+
+    /// What a UI shows for this message when replaying saved history, in
+    /// stored order (with interleaved thinking an assistant turn can go
+    /// thinking → text → thinking → tool call). Skips what a live turn
+    /// never showed: system messages, redacted or empty thinking, empty
+    /// assistant text, and blocks in a role that doesn't display them.
+    pub fn transcript(&self) -> impl Iterator<Item = TranscriptEntry<'_>> {
+        self.content
+            .iter()
+            .filter_map(|block| TranscriptEntry::of(&self.role, block))
+    }
+}
+
+/// One displayable piece of a stored [`Message`]; see [`Message::transcript`].
+/// Front ends map these to their own items, so they agree on what a replayed
+/// session shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TranscriptEntry<'a> {
+    UserText(&'a str),
+    UserImage {
+        /// Base64-encoded image data.
+        data: &'a str,
+        mime_type: &'a str,
+    },
+    Thinking(&'a str),
+    AssistantText(&'a str),
+    ToolCall {
+        id: &'a str,
+        name: &'a str,
+        /// JSON string of the arguments object.
+        arguments: &'a str,
+    },
+    ToolResult {
+        tool_call_id: &'a str,
+        tool_name: &'a str,
+        content: &'a str,
+        is_error: bool,
+    },
+}
+
+impl<'a> TranscriptEntry<'a> {
+    fn of(role: &Role, block: &'a ContentBlock) -> Option<Self> {
+        match (role, block) {
+            (Role::User, ContentBlock::Text { text }) => Some(Self::UserText(text)),
+            (Role::User, ContentBlock::Image { data, mime_type }) => {
+                Some(Self::UserImage { data, mime_type })
+            }
+            (Role::Assistant, ContentBlock::Thinking { thinking, .. }) if !thinking.is_empty() => {
+                Some(Self::Thinking(thinking))
+            }
+            (Role::Assistant, ContentBlock::Text { text }) if !text.is_empty() => {
+                Some(Self::AssistantText(text))
+            }
+            (
+                Role::Assistant,
+                ContentBlock::ToolUse {
+                    id,
+                    name,
+                    arguments,
+                    ..
+                },
+            ) => Some(Self::ToolCall {
+                id,
+                name,
+                arguments,
+            }),
+            (
+                Role::Tool,
+                ContentBlock::ToolResult {
+                    tool_call_id,
+                    tool_name,
+                    content,
+                    is_error,
+                },
+            ) => Some(Self::ToolResult {
+                tool_call_id,
+                tool_name,
+                content,
+                is_error: *is_error,
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -332,11 +443,9 @@ pub struct AgentResult {
     pub context_usage: Option<Usage>,
 }
 
-/// Core streaming event emitted during an agent run — the one in-process
-/// event type produced by `run_agent_streaming_with_history` and passed
-/// through `AgentState::prompt` unmapped; ACP's `SessionUpdate` (the wire
-/// vocabulary transports actually send) is derived from it only at the ACP
-/// edge (`acp::util::stream_event_to_session_update`).
+/// An event from a running agent turn, as `run_agent` and
+/// `AgentState::prompt` report it. ACP's `SessionUpdate` is derived from it
+/// at the ACP edge (`acp::util::stream_event_to_session_update`).
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "event_type")]
 pub enum StreamEvent {
@@ -371,18 +480,20 @@ pub enum StreamEvent {
     /// [`AgentResult::context_usage`]).
     #[serde(rename = "usage")]
     Usage { usage: Usage },
+    /// The next request leaves out the `dropped` oldest history messages to
+    /// fit the model's context window. Sent when that number changes during
+    /// a turn. The stored history keeps them.
+    #[serde(rename = "context_trimmed")]
+    ContextTrimmed { dropped: usize },
     /// The agent has finished; `final_response` is the complete answer.
     #[serde(rename = "finished")]
     Finished {
         final_response: String,
         iterations: usize,
     },
-    /// `message` was just appended to the turn's message history (mirrors
-    /// exactly what `run_agent_loop` pushed onto its `messages` argument).
-    /// Fired for every assistant and tool-result message, not just the final
-    /// response — a caller that wants to persist history incrementally
-    /// (rather than only once the whole turn completes) can checkpoint here
-    /// instead of reconstructing message content from the other event types.
+    /// `message` was just pushed onto the turn's history: every assistant
+    /// and tool-result message, in order. Persist history incrementally from
+    /// here.
     #[serde(rename = "message_appended")]
     MessageAppended { message: Message },
 }
@@ -409,6 +520,80 @@ mod tests {
     }
 
     #[test]
+    fn transcript_keeps_assistant_block_order_and_skips_what_isnt_shown() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "first".into(),
+                    signature: Some("sig".into()),
+                },
+                ContentBlock::from("Let me look."),
+                ContentBlock::RedactedThinking { data: "enc".into() },
+                ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                },
+                ContentBlock::from(""),
+                ContentBlock::tool_use("toolu_1", "read_file", "{}"),
+            ],
+        };
+        assert_eq!(
+            msg.transcript().collect::<Vec<_>>(),
+            [
+                TranscriptEntry::Thinking("first"),
+                TranscriptEntry::AssistantText("Let me look."),
+                TranscriptEntry::ToolCall {
+                    id: "toolu_1",
+                    name: "read_file",
+                    arguments: "{}",
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn transcript_of_user_tool_and_system_messages() {
+        let user = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::from("look at this"),
+                ContentBlock::Image {
+                    data: "aGk=".into(),
+                    mime_type: "image/png".into(),
+                },
+            ],
+        };
+        assert_eq!(
+            user.transcript().collect::<Vec<_>>(),
+            [
+                TranscriptEntry::UserText("look at this"),
+                TranscriptEntry::UserImage {
+                    data: "aGk=",
+                    mime_type: "image/png",
+                },
+            ]
+        );
+
+        let tool = Message::tool_result("call_1", "read_file", "boom", true);
+        assert_eq!(
+            tool.transcript().collect::<Vec<_>>(),
+            [TranscriptEntry::ToolResult {
+                tool_call_id: "call_1",
+                tool_name: "read_file",
+                content: "boom",
+                is_error: true,
+            }]
+        );
+
+        let system = Message {
+            role: Role::System,
+            content: vec![ContentBlock::from("you are x")],
+        };
+        assert_eq!(system.transcript().count(), 0);
+    }
+
+    #[test]
     fn message_tool_result_sets_correct_fields() {
         let msg = Message::tool_result("call_1", "read_file", "content", false);
         assert_eq!(msg.role, Role::Tool);
@@ -428,11 +613,7 @@ mod tests {
                 ContentBlock::Text {
                     text: "hello ".into(),
                 },
-                ContentBlock::ToolUse {
-                    id: "call_1".into(),
-                    name: "read_file".into(),
-                    arguments: "{}".into(),
-                },
+                ContentBlock::tool_use("call_1", "read_file", "{}"),
                 ContentBlock::Text {
                     text: "world".into(),
                 },
@@ -446,14 +627,18 @@ mod tests {
 
     #[test]
     fn content_block_serializes_with_type_tag() {
-        let block = ContentBlock::ToolUse {
-            id: "call_1".into(),
-            name: "read_file".into(),
-            arguments: "{}".into(),
-        };
+        let block = ContentBlock::tool_use("call_1", "read_file", "{}");
         let json: Value = serde_json::to_value(&block).unwrap();
         assert_eq!(json["type"], "tool_use");
         assert_eq!(json["name"], "read_file");
+        // An unset signature is left out, and a block without one reads back
+        // as `None`.
+        assert!(json.get("signature").is_none());
+        let unsigned: ContentBlock = serde_json::from_value(serde_json::json!({
+            "type": "tool_use", "id": "call_1", "name": "read_file", "arguments": "{}"
+        }))
+        .unwrap();
+        assert_eq!(unsigned, block);
 
         let block = ContentBlock::Thinking {
             thinking: "hmm".into(),

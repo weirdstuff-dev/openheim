@@ -7,9 +7,8 @@
 //! ```no_run
 //! use openheim::{OpenheimClient, Result};
 //!
-//! // `current_thread`: the library itself only needs `tokio`'s `rt` feature,
-//! // not `rt-multi-thread` (that's what the `cli` feature adds for the
-//! // `openheim` binary's own `#[tokio::main]`).
+//! // The library runs on a `current_thread` runtime; it doesn't need
+//! // tokio's `rt-multi-thread`.
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<()> {
 //!     let client = OpenheimClient::builder()
@@ -21,7 +20,7 @@
 //!
 //!     let session = client.new_session().start().await?;
 //!     session
-//!         .prompt_events("List the files in the current directory.", |_event| {})
+//!         .prompt("List the files in the current directory.", |_event| {})
 //!         .await?;
 //!
 //!     Ok(())
@@ -34,7 +33,7 @@
 //! |------------|---------------|----------------------|
 //! | OpenAI     | `"openai"`    | `gpt-4o`             |
 //! | Anthropic  | `"anthropic"` | `claude-sonnet-4-6`  |
-//! | Google     | `"gemini"`    | `gemini-2.0-flash`   |
+//! | Google     | `"gemini"`    | `gemini-3.8-flash`   |
 //! | Compatible | any string    | set via `.model()`   |
 //!
 //! ## Configuration file
@@ -53,7 +52,7 @@
 //!
 //! | Feature  | Default    | Enables                                              |
 //! |----------|------------|------------------------------------------------------|
-//! | `cli`    | ✓          | The `openheim` binary (CLI, TUI, `serve`). Implies `tui` + `server` + `acp`. |
+//! | `cli`    | ✓          | The `openheim` binary (CLI, TUI, `serve`). Implies `tui` + `server` + `acp` + `rag`. |
 //! | `tui`    | via `cli`  | The `tui` module (ratatui/crossterm terminal UI). Doesn't need `acp`. |
 //! | `acp`    | via `cli`  | The `acp` and `transport` modules (Agent Client Protocol: `serve`, `stdio`, `run`, `ws`). |
 //! | `server` | via `cli`  | The `transport::ws` WebSocket/REST server (axum). Implies `acp`. |
@@ -63,15 +62,14 @@
 //! and config — is always available. Embedders that don't need ACP, the
 //! terminal UI, or the built-in server should depend on openheim with
 //! `default-features = false` (optionally adding back `"acp"`, `"tui"`, or
-//! `"server"`) to skip the `clap`, `ratatui`, `crossterm`, `axum`,
-//! `tower-http`, `notify`, `walkdir`, `tracing-subscriber`, and
-//! `agent-client-protocol{,-tokio}` dependency trees. `futures` is not
-//! behind any feature — the agent loop uses it directly.
+//! `"server"`, `"rag"`) to skip the `clap`, `ratatui`, `crossterm`, `axum`,
+//! `tower-http`, `notify`, `walkdir`, `tracing-subscriber`,
+//! `agent-client-protocol`, and `rusqlite` dependency trees.
 //!
 //! ## Key types
 //!
 //! - [`OpenheimClient`] / [`OpenheimBuilder`] — main entry point
-//! - [`SessionHandle`] — send prompts and receive streaming events (`StreamEvent`, or ACP's `SessionUpdate` with feature `acp`)
+//! - [`SessionHandle`] — send prompts ([`PromptInput`]: text, optionally with images) and receive streaming `StreamEvent`s (or ACP's `SessionUpdate`s via `acp_updates`, feature `acp`)
 //! - [`LlmClient`] — implement to add a custom provider
 //! - [`MemoryContext`] — conversation history, skills, and system identity
 //! - `rag::LongTermMemory` — tool-driven long-term memory: FTS5 keyword search, optionally sqlite-vec semantic search (feature `rag`)
@@ -108,7 +106,7 @@ pub use models::{
 pub use rag::LongTermMemory;
 
 // Library facade
-pub use client::{OpenheimBuilder, OpenheimClient, SessionBuilder, SessionHandle};
+pub use client::{OpenheimBuilder, OpenheimClient, PromptInput, SessionBuilder, SessionHandle};
 
 // ACP's own vocabulary (`SessionUpdate`, `ContentBlock`, …) is reached via
 // `openheim::acp::schema` (feature `acp`), not re-exported at the crate
