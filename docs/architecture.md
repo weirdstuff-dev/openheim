@@ -34,6 +34,7 @@ src/
 │
 ├── core/
 │   ├── agent.rs        Agent loop — LLM ↔ tool call iteration
+│   ├── context.rs      Fits each request into the context window (see below)
 │   ├── permission.rs   PermissionGate trait — embedder hook for tool-call approval
 │   ├── turn.rs         Cross-cutting turn controls (cancellation, …)
 │   ├── client_io.rs    Optional delegation of file I/O to the ACP client

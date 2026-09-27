@@ -324,6 +324,7 @@ src/
   config/           Config loading, provider/model resolution, defaults
   core/
     agent.rs        Agent loop (streaming variant)
+    context.rs      Fits each request into the model's context window
     models.rs       Message, Tool, Choice, and WebSocket envelope types
     permission.rs   PermissionGate trait — embedder hook for tool-call approval
     turn.rs         Cross-cutting turn controls (cancellation, etc.)
