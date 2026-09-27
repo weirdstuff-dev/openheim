@@ -47,7 +47,7 @@ fn capabilities(&self) -> ToolCapabilities {
 | `turn.work_dir` | `&Path` | The sandbox boundary: nothing your tool touches may lie outside it. |
 | `turn.cwd` | `&Path` | The session's working directory, inside `work_dir`: where relative paths resolve and where a command you spawn should run. |
 | `turn.resolve_path(path)` | method | Resolve any user- or LLM-supplied path before touching the filesystem: relative paths are taken from `cwd`, symlinks are followed, and anything outside `work_dir` is rejected. |
-| `turn.client_io` | `&dyn ClientIo` | Ask the client (e.g. an editor's unsaved buffers) to read/write a file before falling back to local I/O. Returns `None` when there is no client to ask. |
+| `turn.client_io` | `&dyn ClientIo` | Ask the client (e.g. an editor's unsaved buffers) to read/write a file before falling back to local I/O. Returns `None` when there is no client to ask. `read_file` takes a `LineRange` (`openheim::core::client_io::LineRange`): `line` (1-based) and `limit`, both optional; the default is the whole file. |
 | `turn.permission_gate` | `&Arc<dyn PermissionGate>` | Already consulted by the agent loop before your tool runs; only relevant if your tool spawns nested agent turns. |
 
 Ignore the fields you don't need — a tool that calls an HTTP API only cares about `turn.cancel`, if that.
@@ -155,7 +155,8 @@ A tool that touches the filesystem should validate its path first, and prefer th
 async fn execute(&self, args: &str, turn: &TurnContext<'_>) -> Result<String> {
     let v = parse_args(args)?;
     let path = turn.resolve_path(require_str(&v, "path")?)?;
-    let content = match turn.client_io.read_file(&path).await {
+    // `LineRange::default()` is the whole file; set `line`/`limit` for a range.
+    let content = match turn.client_io.read_file(&path, LineRange::default()).await {
         Some(result) => result?,               // the client answered
         None => tokio::fs::read_to_string(&path).await?, // no client: local disk
     };
