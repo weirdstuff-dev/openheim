@@ -51,7 +51,7 @@ Openheim is built in Rust from the ground up:
 - **Conversation memory** — conversations (including full tool call history) persist to disk and resume across sessions
 - **Long-term memory** — ask the agent to remember something and it saves a note via the `remember` tool; later sessions recall it with `search_memory`, `edit_memory` updates a note in place, and `forget` drops a note by id. Nothing is stored or injected automatically. Works out of the box with keyword search (SQLite FTS5, no network); add an embedding provider under `[memory]` (any OpenAI-compatible endpoint or Gemini) and search becomes semantic via [sqlite-vec](https://github.com/asg017/sqlite-vec).
 - **Context-size tracking** — each session's current context size (the last LLM call's token usage) is tracked, persisted, and shown live in the TUI footer; embedders can read it via `SessionHandle::context_usage()` or `GET /api/sessions/{id}`
-- **System identity** — edit `~/.openheim/system.md` to define how the agent presents itself. Required when preparing a session (created by `openheim init`).
+- **System identity** — edit `~/.openheim/system.md` to define how the agent presents itself (created by `openheim init`; without it a default identity is used).
 - **Skills** — drop a markdown file into `~/.openheim/skills/` and it's injected into the system prompt. Set `default_skills` in config to auto-load skills every session; pass `--skills` for per-session additions. ACP clients can also pass skills per-session via `_meta`.
 - **ACP transport** — implements the [Agent Client Protocol](https://github.com/block/agent-client-protocol) over stdio (for editor integrations) and WebSocket (for remote clients), with real-time streaming of message chunks and tool calls
 - **Unified WebSocket** — single multiplexed `WS /ws` connection carries both ACP agent traffic (sessions, streaming, tool calls) and filesystem operations (file CRUD, live watching) via channel envelopes; filesystem operations are sandboxed to the configured `work_dir`
@@ -190,7 +190,7 @@ Conversations are saved to `~/.openheim/history/` as JSON after every run.
 
 ### `~/.openheim/system.md`
 
-This file defines the agent's base identity. It is loaded when preparing each session (via `prepare()` / session setup) and is required — run `openheim init` to create it, then edit it freely.
+This file defines the agent's base identity. It is loaded for every turn. `openheim init` creates it; edit it freely. Without it, openheim uses the same default identity `openheim init` writes.
 
 ```markdown
 You are a senior software engineer who writes clean, idiomatic code.

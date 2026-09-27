@@ -9,7 +9,7 @@
 //! | `history` | `HistoryManager` — conversation persistence (`~/.openheim/history/`) |
 //! | `lease`   | Advisory cross-process write lease per conversation |
 //! | `skills`  | `SkillsManager` — Markdown skill files (`~/.openheim/skills/`) |
-//! | `system`  | `SystemLoader` — the `~/.openheim/system.md` identity |
+//! | `system`  | `SystemLoader` — the `~/.openheim/system.md` identity (a default one if it's missing) |
 //! | `prompt`  | [`PromptBuilder`] — assembles the structured system message |
 //!
 //! Only the data types ([`Conversation`], [`ConversationMeta`]) and
@@ -26,7 +26,7 @@ pub(crate) use history::HistoryManager;
 pub use history::{Conversation, ConversationMeta};
 pub use prompt::PromptBuilder;
 pub(crate) use skills::SkillsManager;
-pub(crate) use system::SystemLoader;
+pub(crate) use system::{DEFAULT_SYSTEM_MD, SystemLoader};
 
 use crate::error::Result;
 use std::path::Path;
@@ -184,10 +184,22 @@ mod tests {
     #[test]
     fn new_with_data_dir_creates_history_and_skills_subdirs() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = MemoryContext::new(vec![], dir.path()).unwrap();
+        MemoryContext::new(vec![], dir.path()).unwrap();
         assert!(dir.path().join("history").is_dir());
         assert!(dir.path().join("skills").is_dir());
-        assert!(ctx.system.load().is_err(), "no system.md written yet");
+    }
+
+    // A data directory `openheim init` never touched (a library embedder's,
+    // a CI temp dir) still prepares turns, with the default identity.
+    #[test]
+    fn prepare_without_system_md_uses_the_default_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = MemoryContext::new(vec![], dir.path()).unwrap();
+
+        let (_, builder) = ctx.prepare(None, &[], None, None).unwrap();
+
+        let system = builder.build(&[])[0].text().unwrap();
+        assert!(system.contains(system::DEFAULT_SYSTEM_MD), "{system}");
     }
 
     #[test]

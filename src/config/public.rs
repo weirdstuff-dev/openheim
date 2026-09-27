@@ -70,6 +70,8 @@ pub struct PublicMcpServerConfig {
     pub url: Option<String>,
     pub env: BTreeMap<String, String>,
     pub headers: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_timeout_secs: Option<u64>,
 }
 
 /// The `[memory]` section without `db_path` (a local filesystem path).
@@ -138,6 +140,7 @@ fn public_mcp_server(s: &McpServerConfig) -> PublicMcpServerConfig {
         url: s.url.as_deref().map(scrub_url),
         env: keys_only(&s.env),
         headers: keys_only(&s.headers),
+        tool_timeout_secs: s.tool_timeout_secs,
     }
 }
 

@@ -60,8 +60,6 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.toml"))
 }
 
-const DEFAULT_SYSTEM_MD: &str = "You are Openheim, a multipurpose, multiprovider LLM agent.";
-
 /// Writes the default `~/.openheim/config.toml` and returns its path, and
 /// writes `~/.openheim/system.md` if missing. Fails if `config.toml` already
 /// exists, but still writes `system.md` first.
@@ -72,7 +70,7 @@ pub fn init_config() -> Result<PathBuf> {
     let system_path = dir.join("system.md");
     let system_written = !system_path.exists();
     if system_written {
-        std::fs::write(&system_path, DEFAULT_SYSTEM_MD)?;
+        std::fs::write(&system_path, crate::memory::DEFAULT_SYSTEM_MD)?;
     }
 
     let config_path = dir.join("config.toml");

@@ -221,7 +221,7 @@ All persistence lives under `~/.openheim/` by default.
 ```
 ~/.openheim/
 ├── config.toml              Agent configuration (providers, MCP servers, default_skills, …)
-├── system.md                Agent identity — loaded on every session (required)
+├── system.md                Agent identity — loaded on every turn (optional)
 ├── history/
 │   ├── {uuid}.json          Conversation metadata (rewritten wholesale)
 │   ├── {uuid}.jsonl         Conversation messages (appended one per line)
@@ -232,7 +232,7 @@ All persistence lives under `~/.openheim/` by default.
 └── memory.db                Long-term memory notes, FTS5 index, and (optionally) sqlite-vec vectors
 ```
 
-`SystemLoader` reads `system.md` on every `prepare()` call — missing file is a hard error (run `openheim init` to create it). `HistoryManager` reads and writes each conversation's metadata (`.json`) and message log (`.jsonl`) — see `src/memory/history.rs`'s doc comment for why they're split. `SkillsManager` reads `.md` files from the skills directory. Both history and skills paths are configurable at construction time, which is how the test suite uses temporary directories.
+`SystemLoader` reads `system.md` on every `prepare()` call; a missing file means the default identity, the same text `openheim init` writes. `HistoryManager` reads and writes each conversation's metadata (`.json`) and message log (`.jsonl`) — see `src/memory/history.rs`'s doc comment for why they're split. `SkillsManager` reads `.md` files from the skills directory. Both history and skills paths are configurable at construction time, which is how the test suite uses temporary directories.
 
 ### Long-term memory
 

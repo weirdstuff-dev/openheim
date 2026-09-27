@@ -126,6 +126,7 @@ use crate::error::{Error, Result};
 
 pub use capabilities::{ApprovalScope, ToolCapabilities, ToolKindHint};
 pub(crate) use delegate::DelegateTool;
+pub use execute_command::kill_running_commands;
 pub(crate) use overlay_executor::OverlayExecutor;
 pub(crate) use scoped_executor::ScopedExecutor;
 

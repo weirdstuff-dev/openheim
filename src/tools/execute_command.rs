@@ -30,6 +30,94 @@ pub(crate) const MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
 /// up on reaping it (the `kill_on_drop` backstop remains either way).
 const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Process groups of the commands running in this process, for
+/// [`kill_running_commands`].
+#[cfg(target_family = "unix")]
+static RUNNING_GROUPS: std::sync::Mutex<std::collections::BTreeSet<i32>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Kills every shell command `execute_command` is running in this process,
+/// each with its whole process group. Unix only; a no-op elsewhere.
+///
+/// For a binary's signal handler: each command runs in a process group of
+/// its own, so a terminal's Ctrl-C doesn't reach it, and a process killed
+/// by a signal runs no destructors, so without this the commands outlive it.
+pub fn kill_running_commands() {
+    #[cfg(target_family = "unix")]
+    {
+        let groups = RUNNING_GROUPS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for &pgid in groups.iter() {
+            kill_group(pgid);
+        }
+    }
+}
+
+/// Sends SIGKILL to process group `pgid`.
+#[cfg(target_family = "unix")]
+fn kill_group(pgid: i32) {
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+    if let Err(e) = killpg(Pid::from_raw(pgid), Signal::SIGKILL) {
+        tracing::debug!("killpg({pgid}) failed: {e}");
+    }
+}
+
+/// A spawned command's process group, listed in [`RUNNING_GROUPS`] while
+/// this lives. Dropped before [`Self::reaped`] (the turn was dropped
+/// mid-command, or the runtime shut down), it kills the whole group, not
+/// just the child `kill_on_drop` reaches.
+struct RunningGroup {
+    #[cfg(target_family = "unix")]
+    pgid: Option<i32>,
+}
+
+impl RunningGroup {
+    /// Lists the group led by the child with process id `pid`. Pid 0 would
+    /// name our own group, so it's never listed.
+    fn register(pid: Option<u32>) -> Self {
+        #[cfg(target_family = "unix")]
+        {
+            let pgid = pid.map(|pid| pid as i32).filter(|&pgid| pgid > 0);
+            if let Some(pgid) = pgid {
+                RUNNING_GROUPS
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(pgid);
+            }
+            Self { pgid }
+        }
+        #[cfg(not(target_family = "unix"))]
+        {
+            let _ = pid;
+            Self {}
+        }
+    }
+
+    /// The child has been reaped: its pid may be reused from now on, so the
+    /// group is unlisted without being signalled again.
+    fn reaped(&mut self) {
+        #[cfg(target_family = "unix")]
+        if let Some(pgid) = self.pgid.take() {
+            RUNNING_GROUPS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&pgid);
+        }
+    }
+}
+
+impl Drop for RunningGroup {
+    fn drop(&mut self) {
+        #[cfg(target_family = "unix")]
+        if let Some(pgid) = self.pgid {
+            kill_group(pgid);
+            self.reaped();
+        }
+    }
+}
+
 /// Knobs for [`run_command`].
 pub(crate) struct RunCommandOptions<'a> {
     pub cwd: Option<&'a Path>,
@@ -95,6 +183,7 @@ pub(crate) async fn run_command(command: &str, opts: &RunCommandOptions<'_>) -> 
     let mut child = cmd
         .spawn()
         .map_err(|e| Error::ToolExecutionError(format!("Failed to execute command: {}", e)))?;
+    let mut group = RunningGroup::register(child.id());
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
@@ -135,6 +224,7 @@ pub(crate) async fn run_command(command: &str, opts: &RunCommandOptions<'_>) -> 
 
     match outcome {
         Termination::Completed(Ok(status)) => {
+            group.reaped();
             let stdout_s = render_stream(&out_buf, out_truncated, opts.max_output_bytes);
             let stderr_s = render_stream(&err_buf, err_truncated, opts.max_output_bytes);
             if status.success() {
@@ -151,7 +241,7 @@ pub(crate) async fn run_command(command: &str, opts: &RunCommandOptions<'_>) -> 
             e
         ))),
         Termination::TimedOut => {
-            kill_and_reap(&mut child).await;
+            kill_and_reap(&mut child, &mut group).await;
             // The `*_truncated` flags are only set once both reads finish,
             // which the timeout may have cut short; a buffer at the cap was
             // clipped either way.
@@ -165,7 +255,7 @@ pub(crate) async fn run_command(command: &str, opts: &RunCommandOptions<'_>) -> 
             )))
         }
         Termination::Cancelled => {
-            kill_and_reap(&mut child).await;
+            kill_and_reap(&mut child, &mut group).await;
             Err(Error::ToolExecutionError("Command cancelled.".to_string()))
         }
     }
@@ -218,26 +308,19 @@ async fn wait_for_cancel(cancel: Option<&CancellationToken>) {
 
 /// Kills the child's whole process group (Unix) or just the child (Windows)
 /// and reaps it, giving up after [`REAP_TIMEOUT`] rather than hang the turn.
-async fn kill_and_reap(child: &mut tokio::process::Child) {
+/// `group` is the child's; it's unlisted once the child is reaped.
+async fn kill_and_reap(child: &mut tokio::process::Child, group: &mut RunningGroup) {
+    // The child leads its own group, so its pid is the pgid. Pid 0 would
+    // signal our own group, hence the `> 0`.
     #[cfg(target_family = "unix")]
-    {
-        use nix::sys::signal::{Signal, killpg};
-        use nix::unistd::Pid;
-        // The child leads its own group, so its pid is the pgid. Pid 0 would
-        // signal our own group, hence the `> 0`.
-        if let Some(pgid) = child.id().map(|pid| pid as i32).filter(|&pgid| pgid > 0)
-            && let Err(e) = killpg(Pid::from_raw(pgid), Signal::SIGKILL)
-        {
-            tracing::debug!("killpg({pgid}) failed: {e}");
-        }
+    if let Some(pgid) = child.id().map(|pid| pid as i32).filter(|&pgid| pgid > 0) {
+        kill_group(pgid);
     }
     // Fallback (and the Windows path): direct SIGKILL to the child itself.
     let _ = child.start_kill();
-    if tokio::time::timeout(REAP_TIMEOUT, child.wait())
-        .await
-        .is_err()
-    {
-        tracing::error!("command child did not exit after SIGKILL; abandoning reap");
+    match tokio::time::timeout(REAP_TIMEOUT, child.wait()).await {
+        Ok(Ok(_)) => group.reaped(),
+        _ => tracing::error!("command child did not exit after SIGKILL; abandoning reap"),
     }
 }
 
@@ -507,28 +590,91 @@ mod tests {
         let result = run_command("sleep 30 & echo $! > grandchild.pid; wait", &opts).await;
         assert!(result.is_err());
 
-        let pid: i32 = std::fs::read_to_string(dir.path().join("grandchild.pid"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        let mut gone = false;
+        let pid = read_pid(&dir.path().join("grandchild.pid")).await;
+        assert!(
+            exits_soon(pid).await,
+            "grandchild `sleep 30` (pid {pid}) survived the group kill"
+        );
+    }
+
+    // A turn dropped mid-command (or a runtime shutting down) takes the
+    // command's whole group with it, not just the `sh` that `kill_on_drop`
+    // reaches.
+    #[cfg(target_family = "unix")]
+    #[tokio::test]
+    async fn dropping_a_running_command_kills_its_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let task = tokio::spawn(async move {
+            let opts = RunCommandOptions {
+                cwd: Some(&cwd),
+                timeout: Duration::from_secs(60),
+                ..Default::default()
+            };
+            run_command(
+                "echo $$ > sh.pid; sleep 30 & echo $! > grandchild.pid; wait",
+                &opts,
+            )
+            .await
+        });
+        let sh = read_pid(&dir.path().join("sh.pid")).await;
+        let grandchild = read_pid(&dir.path().join("grandchild.pid")).await;
+        assert!(
+            running_groups().contains(&sh),
+            "the group is listed while it runs"
+        );
+
+        task.abort();
+        let _ = task.await;
+
+        assert!(
+            exits_soon(grandchild).await,
+            "grandchild `sleep 30` (pid {grandchild}) outlived the dropped command"
+        );
+        assert!(
+            !running_groups().contains(&sh),
+            "the group is unlisted once dropped"
+        );
+    }
+
+    #[cfg(target_family = "unix")]
+    fn running_groups() -> std::collections::BTreeSet<i32> {
+        RUNNING_GROUPS.lock().unwrap().clone()
+    }
+
+    /// The pid a command wrote to `path`, waiting up to 5s for it.
+    #[cfg(target_family = "unix")]
+    async fn read_pid(path: &Path) -> i32 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(path)
+                && let Ok(pid) = text.trim().parse()
+            {
+                return pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no pid in {}",
+                path.display()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Whether process `pid` is gone within 5s.
+    #[cfg(target_family = "unix")]
+    async fn exits_soon(pid: i32) -> bool {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
-            let exists = !matches!(
+            if matches!(
                 nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
                 Err(nix::errno::Errno::ESRCH)
-            );
-            if !exists {
-                gone = true;
-                break;
+            ) {
+                return true;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(
-            gone,
-            "grandchild `sleep 30` (pid {pid}) survived the group kill"
-        );
+        false
     }
 
     #[test]

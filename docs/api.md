@@ -1615,6 +1615,7 @@ interface McpServerConfig {
   url?: string; // credentials, query string and fragment removed
   env: Record<string, "<redacted>">;     // keys only
   headers: Record<string, "<redacted>">; // keys only
+  tool_timeout_secs?: number;
   // args is NEVER included in responses
 }
 

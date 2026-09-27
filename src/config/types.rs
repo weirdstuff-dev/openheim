@@ -247,6 +247,10 @@ pub struct McpServerConfig {
     /// `headers = { Authorization = "Bearer <token>" }`.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// Longest one tool call may take, in seconds, before it fails with a
+    /// timeout error (default: 600).
+    #[serde(default)]
+    pub tool_timeout_secs: Option<u64>,
 }
 
 impl McpServerConfig {
@@ -262,6 +266,7 @@ impl McpServerConfig {
             env: HashMap::new(),
             url: None,
             headers: HashMap::new(),
+            tool_timeout_secs: None,
         }
     }
 
@@ -273,6 +278,7 @@ impl McpServerConfig {
             env: HashMap::new(),
             url: Some(url.into()),
             headers: HashMap::new(),
+            tool_timeout_secs: None,
         }
     }
 
@@ -285,6 +291,11 @@ impl McpServerConfig {
     /// Adds an HTTP header sent with every request (HTTP).
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.insert(name.into(), value.into());
+        self
+    }
+
+    pub fn with_tool_timeout_secs(mut self, secs: u64) -> Self {
+        self.tool_timeout_secs = Some(secs);
         self
     }
 }
@@ -304,6 +315,7 @@ impl std::fmt::Debug for McpServerConfig {
             .field("env", &keys(&self.env))
             .field("url", &self.url.as_deref().map(super::public::scrub_url))
             .field("headers", &keys(&self.headers))
+            .field("tool_timeout_secs", &self.tool_timeout_secs)
             .finish()
     }
 }

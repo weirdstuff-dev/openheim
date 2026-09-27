@@ -1,10 +1,12 @@
-use crate::error::{Error, Result};
+use crate::error::Result;
 use std::path::PathBuf;
 
+/// The identity used when there is no `system.md`, and the one
+/// `openheim init` writes into a new one.
+pub(crate) const DEFAULT_SYSTEM_MD: &str =
+    "You are Openheim, a multipurpose, multiprovider LLM agent.";
+
 /// Loads the system identity from `~/.openheim/system.md`.
-///
-/// The file must exist — run `openheim init` to create it. Returns an error
-/// if the file is absent, mirroring the behaviour of a missing `config.toml`.
 #[derive(Clone)]
 pub struct SystemLoader {
     path: PathBuf,
@@ -19,16 +21,13 @@ impl SystemLoader {
         }
     }
 
-    /// Returns the contents of `system.md`.
-    ///
-    /// Returns an error if the file does not exist.
+    /// Returns the contents of `system.md`, or [`DEFAULT_SYSTEM_MD`] if the
+    /// file doesn't exist. Fails only if it exists but can't be read.
     pub fn load(&self) -> Result<String> {
-        if !self.path.exists() {
-            return Err(Error::config(format!(
-                "system.md not found at {}. Run `openheim init` to create one.",
-                self.path.display()
-            )));
+        match std::fs::read_to_string(&self.path) {
+            Ok(content) => Ok(content),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(DEFAULT_SYSTEM_MD.to_string()),
+            Err(e) => Err(e.into()),
         }
-        Ok(std::fs::read_to_string(&self.path)?)
     }
 }

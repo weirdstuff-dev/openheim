@@ -58,6 +58,34 @@ async fn build_client(model: Option<String>) -> openheim::Result<OpenheimClient>
     builder.build().await
 }
 
+/// On SIGTERM and SIGHUP, and on SIGINT when `sigint` is set, kills the
+/// shell commands the agent is running and exits: dying of the signal
+/// would leave them running (see `tools::kill_running_commands`). `serve`
+/// passes `false`, since it shuts down gracefully on Ctrl-C by itself.
+#[cfg(unix)]
+fn exit_on_signal(sigint: bool) {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut kinds = vec![SignalKind::terminate(), SignalKind::hangup()];
+    if sigint {
+        kinds.push(SignalKind::interrupt());
+    }
+    for kind in kinds {
+        let Ok(mut signals) = signal(kind) else {
+            continue;
+        };
+        tokio::spawn(async move {
+            if signals.recv().await.is_some() {
+                openheim::tools::kill_running_commands();
+                std::process::exit(128 + kind.as_raw_value());
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn exit_on_signal(_sigint: bool) {}
+
 /// Prints the error and exits with status 1.
 fn die(e: impl std::fmt::Display) -> ! {
     eprintln!("Error: {e}");
@@ -93,6 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cli = Cli::parse();
+    exit_on_signal(!matches!(cli.command, Some(Command::Serve { .. })));
 
     match cli.command {
         None => {
