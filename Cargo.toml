@@ -62,6 +62,7 @@ unicode-segmentation = { version = "1", optional = true }
 notify = { version = "8.2", optional = true }
 walkdir = { version = "2.5", optional = true }
 toml = "1.1"
+serde_ignored = "0.1"
 dirs = "7.0"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

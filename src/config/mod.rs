@@ -93,7 +93,9 @@ pub fn init_config() -> Result<PathBuf> {
     Ok(config_path)
 }
 
-/// Load AppConfig from a specific path
+/// Load AppConfig from a specific path. Keys openheim doesn't know (a typo
+/// like `allow-shell`, or a setting from a newer version) are ignored, each
+/// with a warning in the log.
 pub fn load_config_from(path: impl AsRef<std::path::Path>) -> Result<AppConfig> {
     let path = path.as_ref();
     let contents = std::fs::read_to_string(path).map_err(|e| {
@@ -112,8 +114,44 @@ pub fn load_config_from(path: impl AsRef<std::path::Path>) -> Result<AppConfig> 
             path.display()
         ))
     })?;
-    let config: AppConfig = toml::from_str(&contents)?;
+    let (config, unknown) = parse_config(&contents)?;
+    for key in unknown {
+        tracing::warn!(
+            file = %path.display(),
+            "ignoring unknown config key `{key}` (a typo, or a setting this version doesn't have)"
+        );
+    }
     Ok(config)
+}
+
+/// Parses a config file's contents, returning the config and the dotted
+/// path of every key it ignored as unknown (e.g. `providers.openai.api-key`).
+/// Unknown keys aren't an error, so a config written for a newer version
+/// still loads.
+fn parse_config(contents: &str) -> Result<(AppConfig, Vec<String>)> {
+    let mut unknown = Vec::new();
+    let config = serde_ignored::deserialize(toml::Deserializer::parse(contents)?, |path| {
+        unknown.push(key_path(&path))
+    })?;
+    Ok((config, unknown))
+}
+
+/// `path` as the user wrote it in the file: `memory.top-k`, not
+/// `serde_ignored`'s `memory.?.top-k` (the `?` marks an `Option`).
+fn key_path(path: &serde_ignored::Path) -> String {
+    use serde_ignored::Path;
+    let join = |parent: &Path, segment: &str| match key_path(parent) {
+        parent if parent.is_empty() => segment.to_string(),
+        parent => format!("{parent}.{segment}"),
+    };
+    match path {
+        Path::Root => String::new(),
+        Path::Map { parent, key } => join(parent, key),
+        Path::Seq { parent, index } => join(parent, &index.to_string()),
+        Path::Some { parent }
+        | Path::NewtypeStruct { parent }
+        | Path::NewtypeVariant { parent } => key_path(parent),
+    }
 }
 
 /// Load AppConfig from ~/.openheim/config.toml
@@ -226,6 +264,74 @@ fn is_theme_color_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Typos anywhere in the file are reported by their dotted path, and
+    // the rest of the file still loads.
+    #[test]
+    fn parse_config_reports_unknown_keys() {
+        let (config, unknown) = parse_config(
+            r#"
+default_provider = "openai"
+allow-shell = true
+
+[tui]
+theme = "blue"
+
+[memory]
+top_k = 3
+embeding_model = "text-embedding-3-small"
+
+[providers.openai]
+api_base = "https://api.openai.com/v1"
+default_model = "gpt-4o"
+models = ["gpt-4o"]
+api-key = "sk-test"
+
+[mcp_servers.fs]
+command = "npx"
+enviroment = { TOKEN = "t" }
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            unknown,
+            [
+                "allow-shell",
+                "mcp_servers.fs.enviroment",
+                "memory.embeding_model",
+                "providers.openai.api-key",
+                "tui.theme",
+            ]
+        );
+        assert!(!config.allow_shell);
+        assert_eq!(config.memory.unwrap().top_k, 3);
+        assert!(config.providers["openai"].api_key.is_none());
+    }
+
+    // Map entries are data, not settings: an MCP server's env vars and
+    // headers can have any names.
+    #[test]
+    fn parse_config_accepts_any_env_and_header_names() {
+        let (_, unknown) = parse_config(
+            r#"
+default_provider = "openai"
+
+[mcp_servers.api]
+url = "https://example.com/mcp"
+headers = { X-Anything = "1" }
+env = { WHATEVER_NAME = "2" }
+"#,
+        )
+        .unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+    }
+
+    #[test]
+    fn the_default_config_has_no_unknown_keys() {
+        let (_, unknown) = parse_config(DEFAULT_CONFIG).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+    }
 
     #[test]
     fn builtin_provider_defaults_known_providers() {
