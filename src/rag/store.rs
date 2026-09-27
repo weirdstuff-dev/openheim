@@ -223,22 +223,28 @@ impl VectorStore {
     /// configured, after a model switch, or if a crash landed between the
     /// two inserts. Empty when everything is embedded.
     pub fn unembedded(&self) -> Result<Vec<MemoryRecord>> {
-        let conn = self.lock()?;
-        if !Self::has_vec_table(&conn)? {
-            return Self::all_records(&conn);
-        }
-        let mut stmt = conn.prepare(
-            "SELECT m.id, m.content, m.created_at FROM memories m
-             WHERE NOT EXISTS (SELECT 1 FROM vec_memories v WHERE v.memory_id = m.id)
-             ORDER BY m.id",
-        )?;
-        let rows = stmt.query_map([], row_to_record)?;
-        rows.map(|r| r.map_err(Error::from)).collect()
+        self.unembedded_limited(None)
     }
 
-    fn all_records(conn: &Connection) -> Result<Vec<MemoryRecord>> {
-        let mut stmt = conn.prepare("SELECT id, content, created_at FROM memories ORDER BY id")?;
-        let rows = stmt.query_map([], row_to_record)?;
+    /// The first `limit` notes [`Self::unembedded`] would return, oldest
+    /// first.
+    pub fn unembedded_up_to(&self, limit: usize) -> Result<Vec<MemoryRecord>> {
+        self.unembedded_limited(Some(limit))
+    }
+
+    fn unembedded_limited(&self, limit: Option<usize>) -> Result<Vec<MemoryRecord>> {
+        let conn = self.lock()?;
+        // SQLite reads a negative LIMIT as "no limit".
+        let limit = limit.map_or(-1, |l| i64::try_from(l).unwrap_or(i64::MAX));
+        let sql = if Self::has_vec_table(&conn)? {
+            "SELECT m.id, m.content, m.created_at FROM memories m
+             WHERE NOT EXISTS (SELECT 1 FROM vec_memories v WHERE v.memory_id = m.id)
+             ORDER BY m.id LIMIT ?1"
+        } else {
+            "SELECT id, content, created_at FROM memories ORDER BY id LIMIT ?1"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([limit], row_to_record)?;
         rows.map(|r| r.map_err(Error::from)).collect()
     }
 
@@ -567,6 +573,29 @@ mod tests {
         assert!(!store.ensure_embedding_space("m", 3).unwrap());
         assert!(!store.ensure_embedding_space("m", 3).unwrap());
         assert_eq!(store.stats().unwrap().dimensions, Some(3));
+    }
+
+    #[test]
+    fn unembedded_up_to_returns_the_oldest_first() {
+        let store = VectorStore::open_in_memory().unwrap();
+        let ids: Vec<i64> = (0..5)
+            .map(|i| store.insert(&format!("note {i}"), None).unwrap().id)
+            .collect();
+        let first_two = |store: &VectorStore| -> Vec<i64> {
+            store
+                .unembedded_up_to(2)
+                .unwrap()
+                .iter()
+                .map(|r| r.id)
+                .collect()
+        };
+        assert_eq!(first_two(&store), ids[..2]);
+
+        // Same once the vector table exists and some notes have vectors.
+        store.ensure_embedding_space("m", 2).unwrap();
+        store.set_embedding(ids[0], &unit(0, 2)).unwrap();
+        assert_eq!(first_two(&store), ids[1..3]);
+        assert_eq!(store.unembedded().unwrap().len(), 4);
     }
 
     #[test]

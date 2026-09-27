@@ -172,6 +172,11 @@ impl ToolHandler for SearchMemoryTool {
         }
 
         let mut out = format!("Found {} memory/memories:\n", hits.len());
+        if self.memory.is_semantic() && hits.iter().any(|h| h.method == SearchMethod::Keyword) {
+            out.push_str(
+                "(Semantic search is unavailable right now; these are keyword matches.)\n",
+            );
+        }
         for hit in &hits {
             let score = match hit.method {
                 SearchMethod::Semantic => format!("similarity {:.3}", hit.score),
@@ -322,6 +327,35 @@ mod tests {
             None,
             3,
         ))
+    }
+
+    #[tokio::test]
+    async fn tools_keep_working_while_embeddings_are_down() {
+        let m = Arc::new(LongTermMemory::new(
+            VectorStore::open_in_memory().unwrap(),
+            Some(Arc::new(
+                crate::rag::embedding::test_support::FlakyEmbedder::down(401),
+            )),
+            3,
+        ));
+        let harness = TurnHarness::new();
+        let turn = harness.turn();
+
+        let saved = RememberTool::new(m.clone())
+            .execute(
+                r#"{"content": "The staging cluster is in eu-west-1."}"#,
+                &turn,
+            )
+            .await
+            .unwrap();
+        assert!(saved.starts_with("Remembered as memory #"), "{saved}");
+
+        let found = SearchMemoryTool::new(m.clone())
+            .execute(r#"{"query": "staging cluster"}"#, &turn)
+            .await
+            .unwrap();
+        assert!(found.contains("eu-west-1"), "{found}");
+        assert!(found.contains("keyword matches"), "{found}");
     }
 
     #[test]

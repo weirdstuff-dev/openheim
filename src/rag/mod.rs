@@ -12,7 +12,9 @@
 //! `embedding_model` to the `[memory]` config section upgrades
 //! `search_memory` to nearest-neighbour search over embeddings stored with
 //! the [sqlite-vec](https://github.com/asg017/sqlite-vec) extension; notes
-//! saved before that are back-filled on the next call.
+//! saved before that are back-filled over the next calls. When the
+//! embeddings provider fails, notes are saved without a vector and searches
+//! fall back to keywords, so memory keeps working through an outage.
 //!
 //! | Submodule | Responsibility |
 //! |-----------|----------------|
@@ -51,6 +53,11 @@ pub use tool::{
 
 /// Default result count when the `[memory]` section doesn't set `top_k`.
 pub const DEFAULT_TOP_K: usize = 5;
+
+/// Most notes one memory call back-fills, so the first call after enabling
+/// embeddings on a large store doesn't stall the turn. The rest follow on
+/// later calls.
+const MAX_BACKFILL: usize = 4 * embedding::MAX_BATCH;
 
 /// A store plus an optional embedder.
 ///
@@ -109,10 +116,11 @@ impl LongTermMemory {
     }
 
     /// Embeds one text with `embedder`, makes sure the store's vector space
-    /// matches it, and back-fills any note that has no vector yet (written
-    /// before embeddings were enabled, or orphaned by a model change).
+    /// matches it, and back-fills some of the notes that have no vector yet
+    /// (see [`Self::backfill`]). Fails only if `text` itself couldn't be
+    /// embedded.
     async fn embed_ready(&self, embedder: &dyn EmbeddingClient, text: &str) -> Result<Vec<f32>> {
-        let mut vectors = embedder.embed(&[text.to_string()]).await?;
+        let mut vectors = embedding::embed_batched(embedder, &[text.to_string()]).await?;
         let vector = vectors.pop().ok_or_else(|| {
             crate::error::Error::ApiError("embeddings provider returned no vector".into())
         })?;
@@ -120,13 +128,24 @@ impl LongTermMemory {
         let model = embedder.model().to_string();
         let dims = vector.len();
         tokio::task::spawn_blocking(move || store.ensure_embedding_space(&model, dims)).await??;
-        self.embed_pending(embedder).await?;
+        self.backfill(embedder).await;
         Ok(vector)
     }
 
-    async fn embed_pending(&self, embedder: &dyn EmbeddingClient) -> Result<()> {
+    /// Embeds up to [`MAX_BACKFILL`] notes that have no vector yet: written
+    /// before embeddings were enabled, orphaned by a model change, or saved
+    /// while the embeddings provider was failing. A failure is logged, not
+    /// returned; the notes stay keyword-searchable and a later call retries.
+    async fn backfill(&self, embedder: &dyn EmbeddingClient) {
+        if let Err(e) = self.try_backfill(embedder).await {
+            tracing::warn!(error = %e, "back-filling memory embeddings failed; a later call retries");
+        }
+    }
+
+    async fn try_backfill(&self, embedder: &dyn EmbeddingClient) -> Result<()> {
         let store = Arc::clone(&self.store);
-        let pending = tokio::task::spawn_blocking(move || store.unembedded()).await??;
+        let pending =
+            tokio::task::spawn_blocking(move || store.unembedded_up_to(MAX_BACKFILL)).await??;
         if pending.is_empty() {
             return Ok(());
         }
@@ -143,13 +162,25 @@ impl LongTermMemory {
         .await?
     }
 
-    /// Stores `content` (embedding it first when an embedder is configured)
-    /// and returns the new record.
+    /// The vector for `text` to store with it, or `None` without an embedder
+    /// or when embedding fails. A note stored without one is embedded by a
+    /// later back-fill.
+    async fn vector_to_store(&self, text: &str) -> Option<Vec<f32>> {
+        let embedder = self.embedder.as_ref()?;
+        match self.embed_ready(embedder.as_ref(), text).await {
+            Ok(vector) => Some(vector),
+            Err(e) => {
+                tracing::warn!(error = %e, "embedding a memory failed; storing it without a vector for now");
+                None
+            }
+        }
+    }
+
+    /// Stores `content` and returns the new record. With an embedder, the
+    /// note is embedded first; if that fails, it's stored without a vector
+    /// (keyword-searchable at once, embedded by a later back-fill).
     pub async fn remember(&self, content: &str) -> Result<MemoryRecord> {
-        let vector = match &self.embedder {
-            Some(e) => Some(self.embed_ready(e.as_ref(), content).await?),
-            None => None,
-        };
+        let vector = self.vector_to_store(content).await;
         let store = Arc::clone(&self.store);
         let content = content.to_string();
         tokio::task::spawn_blocking(move || store.insert(&content, vector.as_deref())).await?
@@ -157,23 +188,28 @@ impl LongTermMemory {
 
     /// Returns the notes best matching `query`, best first — by embedding
     /// similarity when an embedder is configured, otherwise by FTS5 keyword
-    /// rank. `top_k` defaults to the configured value.
+    /// rank. If the query can't be embedded, falls back to keyword search;
+    /// [`MemoryHit::method`] says which was used. `top_k` defaults to the
+    /// configured value.
     pub async fn search(&self, query: &str, top_k: Option<usize>) -> Result<Vec<MemoryHit>> {
         let k = top_k.unwrap_or(self.top_k);
         if k == 0 || query.trim().is_empty() {
             return Ok(vec![]);
         }
         let store = Arc::clone(&self.store);
-        match &self.embedder {
-            Some(e) => {
-                let vector = self.embed_ready(e.as_ref(), query).await?;
-                tokio::task::spawn_blocking(move || store.search_semantic(&vector, k)).await?
-            }
-            None => {
-                let query = query.to_string();
-                tokio::task::spawn_blocking(move || store.search_keyword(&query, k)).await?
+        if let Some(embedder) = &self.embedder {
+            match self.embed_ready(embedder.as_ref(), query).await {
+                Ok(vector) => {
+                    return tokio::task::spawn_blocking(move || store.search_semantic(&vector, k))
+                        .await?;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "embedding a memory query failed; searching by keyword");
+                }
             }
         }
+        let query = query.to_string();
+        tokio::task::spawn_blocking(move || store.search_keyword(&query, k)).await?
     }
 
     /// Deletes a note by id. Returns whether it existed.
@@ -182,14 +218,12 @@ impl LongTermMemory {
         tokio::task::spawn_blocking(move || store.delete(id)).await?
     }
 
-    /// Replaces a note's content (re-embedding it first when an embedder is
-    /// configured), keeping its id and creation date. Returns `None` if `id`
-    /// doesn't exist.
+    /// Replaces a note's content, keeping its id and creation date. With an
+    /// embedder, the new content is embedded first; if that fails, the old
+    /// vector is dropped and a later back-fill embeds the new text. Returns
+    /// `None` if `id` doesn't exist.
     pub async fn edit(&self, id: i64, content: &str) -> Result<Option<MemoryRecord>> {
-        let vector = match &self.embedder {
-            Some(e) => Some(self.embed_ready(e.as_ref(), content).await?),
-            None => None,
-        };
+        let vector = self.vector_to_store(content).await;
         let store = Arc::clone(&self.store);
         let content = content.to_string();
         tokio::task::spawn_blocking(move || store.update(id, &content, vector.as_deref())).await?
@@ -204,7 +238,7 @@ impl LongTermMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use embedding::test_support::HashEmbedder;
+    use embedding::test_support::{FlakyEmbedder, HashEmbedder};
 
     fn semantic(embedder: HashEmbedder) -> LongTermMemory {
         LongTermMemory::new(
@@ -306,6 +340,111 @@ mod tests {
         assert_eq!(hits[0].record.content, "gamma delta");
         assert_eq!(second.stats().await.unwrap().dimensions, Some(24));
         assert_eq!(second.stats().await.unwrap().memories, 2);
+    }
+
+    fn flaky(embedder: &Arc<FlakyEmbedder>) -> LongTermMemory {
+        LongTermMemory::new(
+            VectorStore::open_in_memory().unwrap(),
+            Some(Arc::clone(embedder) as Arc<dyn EmbeddingClient>),
+            5,
+        )
+    }
+
+    #[tokio::test]
+    async fn remember_and_search_work_while_embeddings_are_down() {
+        let embedder = Arc::new(FlakyEmbedder::down(401));
+        let m = flaky(&embedder);
+
+        let saved = m
+            .remember("The staging cluster is in eu-west-1.")
+            .await
+            .unwrap();
+        m.remember("Deploys happen on Tuesdays.").await.unwrap();
+        assert_eq!(m.stats().await.unwrap().memories, 2);
+
+        let hits = m.search("staging cluster", None).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].record.id, saved.id);
+        assert_eq!(hits[0].method, SearchMethod::Keyword);
+    }
+
+    #[tokio::test]
+    async fn edit_works_while_embeddings_are_down_and_drops_the_stale_vector() {
+        let embedder = Arc::new(FlakyEmbedder::failing(401, 0));
+        let m = flaky(&embedder);
+        let note = m.remember("Deploys happen on Tuesdays.").await.unwrap();
+        assert!(m.store.unembedded().unwrap().is_empty());
+
+        embedder
+            .failures
+            .store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
+        let edited = m
+            .edit(note.id, "Deploys happen on Thursdays.")
+            .await
+            .unwrap();
+        assert_eq!(edited.unwrap().content, "Deploys happen on Thursdays.");
+        // The old vector described the old text, so it's gone until a
+        // back-fill embeds the new one.
+        assert_eq!(m.store.unembedded().unwrap()[0].id, note.id);
+    }
+
+    #[tokio::test]
+    async fn notes_saved_during_an_outage_are_embedded_once_it_ends() {
+        let embedder = Arc::new(FlakyEmbedder::down(401));
+        let m = flaky(&embedder);
+        m.remember("alpha beta").await.unwrap();
+        m.remember("gamma delta").await.unwrap();
+
+        embedder
+            .failures
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        let hits = m.search("gamma", Some(1)).await.unwrap();
+        assert_eq!(hits[0].method, SearchMethod::Semantic);
+        assert_eq!(hits[0].record.content, "gamma delta");
+        assert!(m.store.unembedded().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failing_backfill_does_not_fail_the_call() {
+        let store = VectorStore::open_in_memory().unwrap();
+        store.insert("poison note", None).unwrap();
+        let embedder = Arc::new(FlakyEmbedder::poisoned("poison"));
+        let m = LongTermMemory::new(
+            store,
+            Some(Arc::clone(&embedder) as Arc<dyn EmbeddingClient>),
+            5,
+        );
+
+        // The back-fill of "poison note" fails on every call; the calls
+        // themselves still embed and succeed.
+        let saved = m.remember("healthy note").await.unwrap();
+        let hits = m.search("healthy", Some(1)).await.unwrap();
+        assert_eq!(hits[0].record.id, saved.id);
+        assert_eq!(hits[0].method, SearchMethod::Semantic);
+        assert_eq!(m.store.unembedded().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn one_call_backfills_at_most_max_backfill_notes() {
+        let store = VectorStore::open_in_memory().unwrap();
+        let total = MAX_BACKFILL + 10;
+        for i in 0..total {
+            store.insert(&format!("note {i}"), None).unwrap();
+        }
+        let embedder = Arc::new(FlakyEmbedder::failing(503, 0));
+        let m = LongTermMemory::new(
+            store,
+            Some(Arc::clone(&embedder) as Arc<dyn EmbeddingClient>),
+            5,
+        );
+
+        m.search("note", None).await.unwrap();
+        // The query itself, plus the capped back-fill.
+        assert_eq!(embedder.embedded(), 1 + MAX_BACKFILL);
+        assert_eq!(m.store.unembedded().unwrap().len(), 10);
+
+        m.search("note", None).await.unwrap();
+        assert!(m.store.unembedded().unwrap().is_empty());
     }
 
     #[test]
