@@ -232,6 +232,19 @@ impl VectorStore {
         self.unembedded_limited(Some(limit))
     }
 
+    /// How many notes [`Self::unembedded`] would return.
+    pub fn unembedded_count(&self) -> Result<usize> {
+        let conn = self.lock()?;
+        let sql = if Self::has_vec_table(&conn)? {
+            "SELECT count(*) FROM memories m
+             WHERE NOT EXISTS (SELECT 1 FROM vec_memories v WHERE v.memory_id = m.id)"
+        } else {
+            "SELECT count(*) FROM memories"
+        };
+        let count: i64 = conn.query_row(sql, [], |r| r.get(0))?;
+        Ok(count as usize)
+    }
+
     fn unembedded_limited(&self, limit: Option<usize>) -> Result<Vec<MemoryRecord>> {
         let conn = self.lock()?;
         // SQLite reads a negative LIMIT as "no limit".
@@ -385,6 +398,16 @@ impl VectorStore {
     /// word matching counts (OR semantics), so a partially matching note is
     /// still found; ranking prefers notes matching more, rarer words.
     pub fn search_keyword(&self, query: &str, k: usize) -> Result<Vec<MemoryHit>> {
+        self.keyword(query, k, false)
+    }
+
+    /// [`Self::search_keyword`] over only the notes [`Self::unembedded`]
+    /// reports, which semantic search can't find.
+    pub fn search_keyword_unembedded(&self, query: &str, k: usize) -> Result<Vec<MemoryHit>> {
+        self.keyword(query, k, true)
+    }
+
+    fn keyword(&self, query: &str, k: usize, only_unembedded: bool) -> Result<Vec<MemoryHit>> {
         let Some(match_expr) = fts_query(query) else {
             return Ok(vec![]);
         };
@@ -392,14 +415,19 @@ impl VectorStore {
             return Ok(vec![]);
         }
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let filter = if only_unembedded && Self::has_vec_table(&conn)? {
+            "AND NOT EXISTS (SELECT 1 FROM vec_memories v WHERE v.memory_id = m.id)"
+        } else {
+            ""
+        };
+        let mut stmt = conn.prepare(&format!(
             "SELECT m.id, m.content, m.created_at, bm25(memories_fts) AS rank
              FROM memories_fts
              JOIN memories m ON m.id = memories_fts.rowid
-             WHERE memories_fts MATCH ?1
+             WHERE memories_fts MATCH ?1 {filter}
              ORDER BY rank
-             LIMIT ?2",
-        )?;
+             LIMIT ?2"
+        ))?;
         let rows = stmt.query_map(params![match_expr, k as i64], |r| {
             Ok(MemoryHit {
                 record: row_to_record(r)?,
@@ -573,6 +601,27 @@ mod tests {
         assert!(!store.ensure_embedding_space("m", 3).unwrap());
         assert!(!store.ensure_embedding_space("m", 3).unwrap());
         assert_eq!(store.stats().unwrap().dimensions, Some(3));
+    }
+
+    #[test]
+    fn keyword_search_over_unembedded_notes_skips_embedded_ones() {
+        let store = VectorStore::open_in_memory().unwrap();
+        let embedded = store.insert("zebra crossing", None).unwrap();
+        let pending = store.insert("zebra stripes", None).unwrap();
+        // Before the vector table exists, every note counts as unembedded.
+        assert_eq!(store.unembedded_count().unwrap(), 2);
+        assert_eq!(
+            store.search_keyword_unembedded("zebra", 5).unwrap().len(),
+            2
+        );
+
+        store.ensure_embedding_space("m", 2).unwrap();
+        store.set_embedding(embedded.id, &unit(0, 2)).unwrap();
+        assert_eq!(store.unembedded_count().unwrap(), 1);
+        let hits = store.search_keyword_unembedded("zebra", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].record.id, pending.id);
+        assert_eq!(store.search_keyword("zebra", 5).unwrap().len(), 2);
     }
 
     #[test]
