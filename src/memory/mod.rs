@@ -6,23 +6,27 @@
 //!
 //! | Submodule | Responsibility |
 //! |-----------|----------------|
-//! | [`history`] | `HistoryManager` — conversation persistence (`~/.openheim/history/`) |
-//! | `lease`     | Advisory cross-process write lease per conversation |
-//! | [`skills`]  | `SkillsManager` — Markdown skill files (`~/.openheim/skills/`) |
-//! | [`system`]  | `SystemLoader` — the `~/.openheim/system.md` identity |
-//! | [`prompt`]  | `PromptBuilder` — assembles the structured system message |
+//! | `history` | `HistoryManager` — conversation persistence (`~/.openheim/history/`) |
+//! | `lease`   | Advisory cross-process write lease per conversation |
+//! | `skills`  | `SkillsManager` — Markdown skill files (`~/.openheim/skills/`) |
+//! | `system`  | `SystemLoader` — the `~/.openheim/system.md` identity |
+//! | `prompt`  | [`PromptBuilder`] — assembles the structured system message |
+//!
+//! Only the data types ([`Conversation`], [`ConversationMeta`]) and
+//! [`PromptBuilder`] are public; the rest is reached through
+//! [`crate::OpenheimClient`].
 
-pub mod history;
+mod history;
 mod lease;
-pub mod prompt;
-pub mod skills;
-pub mod system;
+mod prompt;
+mod skills;
+mod system;
 
-pub use history::{Conversation, ConversationMeta, HistoryManager};
-pub use lease::SessionLease;
+pub(crate) use history::HistoryManager;
+pub use history::{Conversation, ConversationMeta};
 pub use prompt::PromptBuilder;
-pub use skills::SkillsManager;
-pub use system::SystemLoader;
+pub(crate) use skills::SkillsManager;
+pub(crate) use system::SystemLoader;
 
 use crate::error::Result;
 use std::path::Path;
@@ -30,7 +34,7 @@ use uuid::Uuid;
 
 /// Holds the conversation history store and skill definitions used to build agent prompts.
 #[derive(Clone)]
-pub struct MemoryContext {
+pub(crate) struct MemoryContext {
     /// Persisted conversation history.
     pub history: HistoryManager,
     /// Named skill files loaded from `~/.openheim/skills/`.
@@ -58,9 +62,8 @@ impl MemoryContext {
         ))
     }
 
-    /// Assembles a `MemoryContext` from already-built parts, e.g. when an
-    /// embedder wants managers pointed at directories that don't share a
-    /// common parent.
+    /// Assembles a `MemoryContext` from already-built parts, which may point
+    /// at directories that don't share a common parent.
     pub fn from_parts(
         history: HistoryManager,
         skills: SkillsManager,

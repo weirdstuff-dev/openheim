@@ -3,15 +3,16 @@ mod public;
 mod resolve;
 mod types;
 
-pub use client::{build_http_client, client_for_config, create_client};
+pub(crate) use client::client_for_config;
+pub use client::{build_http_client, create_client};
 pub use public::{
     PublicConfig, PublicMcpServerConfig, PublicMemoryConfig, PublicProviderConfig, PublicTuiConfig,
 };
-pub(crate) use types::default_timeout_secs;
 pub use types::{
     AgentConfig, AppConfig, EmbeddingConfig, McpServerConfig, MemoryConfig, ModelsInfo,
-    ProviderConfig, ProviderKind, ProviderModels, RuntimePaths, TuiConfig,
+    ProviderConfig, ProviderKind, ProviderModels, ThinkingMode, TuiConfig,
 };
+pub(crate) use types::{RuntimePaths, default_timeout_secs};
 
 use std::path::PathBuf;
 
@@ -129,7 +130,8 @@ pub fn load_config() -> Result<AppConfig> {
 /// with only `tui.theme_color` set; otherwise nothing is written and an
 /// error is returned. `name` may not contain quotes, backslashes or
 /// newlines, so it can't break out of its TOML string.
-pub fn save_theme_to_config_at(path: &std::path::Path, name: &str) -> Result<()> {
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+pub(crate) fn save_theme_to_config_at(path: &std::path::Path, name: &str) -> Result<()> {
     if name.contains(['"', '\\', '\n', '\r']) {
         return Err(Error::config(format!(
             "invalid theme name {name:?}: quotes, backslashes, and newlines are not allowed"

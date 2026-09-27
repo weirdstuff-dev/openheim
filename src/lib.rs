@@ -71,7 +71,6 @@
 //! - [`OpenheimClient`] / [`OpenheimBuilder`] — main entry point
 //! - [`SessionHandle`] — send prompts ([`PromptInput`]: text, optionally with images) and receive streaming `StreamEvent`s (or ACP's `SessionUpdate`s via `acp_updates`, feature `acp`)
 //! - [`LlmClient`] — implement to add a custom provider
-//! - [`MemoryContext`] — conversation history, skills, and system identity
 //! - `rag::LongTermMemory` — tool-driven long-term memory: FTS5 keyword search, optionally sqlite-vec semantic search (feature `rag`)
 //! - [`Error`] / [`Result`] — unified error type
 
@@ -94,10 +93,11 @@ pub mod tui;
 
 // Core types
 pub use config::{AgentConfig, AppConfig, McpServerConfig, ModelsInfo};
+pub use core::runtime::{AgentMode, LoadedSession};
 pub use core::{agent, llm, models};
 pub use error::{Error, Result};
 pub use llm::{AnthropicClient, GeminiClient, LlmClient, OpenAiClient, OpenAiCompatibleClient};
-pub use memory::{Conversation, ConversationMeta, HistoryManager, MemoryContext, PromptBuilder};
+pub use memory::{Conversation, ConversationMeta, PromptBuilder};
 pub use models::{
     AgentResult, Choice, ContentBlock, FinishReason, FunctionDefinition, Message, Role, StopReason,
     StreamEvent, Tool, ToolResultBlock, ToolUseBlock,

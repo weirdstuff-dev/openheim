@@ -17,7 +17,7 @@ use crate::error::Result;
 /// Everything a prompt turn carries down to the tools it runs, passed to
 /// every [`crate::tools::ToolHandler::execute`].
 ///
-/// A tool that runs nested turns ([`crate::tools::DelegateTool`]) passes it
+/// A tool that runs nested turns (`delegate_task`) passes it
 /// straight through, so a subagent is cancelled with its parent and asks the
 /// same permission gate (wrapped so each request names the subagent).
 #[non_exhaustive]
@@ -63,8 +63,8 @@ impl<'a> TurnContext<'a> {
     }
 
     /// `requested` resolved against [`Self::cwd`] and checked to lie inside
-    /// [`Self::work_dir`]; what every filesystem tool opens. See
-    /// [`crate::tools::sandbox::validate_path_from`].
+    /// [`Self::work_dir`] (symlinks followed); what every filesystem tool
+    /// opens.
     pub fn resolve_path(&self, requested: &str) -> Result<PathBuf> {
         crate::tools::sandbox::validate_path_from(requested, self.cwd, self.work_dir)
     }

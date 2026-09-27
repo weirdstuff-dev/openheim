@@ -3,19 +3,42 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 /// Public model info for a single provider (no credentials).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ProviderModels {
     pub default_model: String,
     pub models: Vec<String>,
 }
 
-/// JSON-safe summary of all configured providers and their models.
-#[derive(Debug, Clone, Serialize)]
+impl ProviderModels {
+    pub fn new(default_model: impl Into<String>, models: Vec<String>) -> Self {
+        Self {
+            default_model: default_model.into(),
+            models,
+        }
+    }
+}
+
+/// JSON-safe summary of all configured providers and their models. Also
+/// what `openheim serve`'s `GET /api/models` returns, so a remote client can
+/// deserialize the response straight into it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ModelsInfo {
     pub default_provider: String,
     pub providers: BTreeMap<String, ProviderModels>,
+}
+
+impl ModelsInfo {
+    pub fn new(
+        default_provider: impl Into<String>,
+        providers: BTreeMap<String, ProviderModels>,
+    ) -> Self {
+        Self {
+            default_provider: default_provider.into(),
+            providers,
+        }
+    }
 }
 
 /// Top-level configuration loaded from ~/.openheim/config.toml
@@ -56,7 +79,7 @@ pub struct AppConfig {
     /// Overrides where history, skills, `system.md`, subagent profiles, and
     /// (absent an explicit `memory.db_path`) the memory database live.
     /// `None` means "default to `~/.openheim`". This is only the setting as
-    /// written; the directory actually in use is [`RuntimePaths::data_dir`].
+    /// written; a builder's `data_dir` overrides it.
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
 }
@@ -68,7 +91,6 @@ fn default_allow_shell() -> bool {
 /// Paths resolved once, at `OpenheimBuilder::build`, and used as-is from
 /// then on (see `AgentState::paths`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct RuntimePaths {
     /// Where history, skills, `system.md`, subagent profiles and (by default)
     /// the memory database live: the builder's or config's `data_dir`, else
@@ -78,15 +100,6 @@ pub struct RuntimePaths {
     /// programmatic config, so config writers like the TUI's `:theme` target
     /// the file actually in use.
     pub config_path: PathBuf,
-}
-
-impl RuntimePaths {
-    pub fn new(data_dir: PathBuf, config_path: PathBuf) -> Self {
-        Self {
-            data_dir,
-            config_path,
-        }
-    }
 }
 
 /// The `[tui]` section: terminal UI display preferences. Every field is

@@ -84,7 +84,7 @@ pub trait PermissionGate: Send + Sync {
 /// [`ApprovalScope::ExactArguments`] adds the arguments, normalized (keys
 /// sorted, whitespace dropped), so approving `git status` doesn't cover
 /// `git status && rm -rf ~`. Arguments that aren't JSON are keyed raw.
-pub fn approval_key(scope: ApprovalScope, tool_name: &str, arguments: &str) -> String {
+pub(crate) fn approval_key(scope: ApprovalScope, tool_name: &str, arguments: &str) -> String {
     match scope {
         ApprovalScope::ToolName => tool_name.to_string(),
         ApprovalScope::ExactArguments => {
@@ -123,7 +123,7 @@ fn sorted_keys(value: serde_json::Value) -> serde_json::Value {
 /// [`approval_key`]. Cheap to clone: clones share the same map, so the copy a
 /// turn's `RememberingGate` holds writes straight into the session's.
 #[derive(Debug, Clone, Default)]
-pub struct Approvals(Arc<Mutex<HashMap<String, PermissionDecision>>>);
+pub(crate) struct Approvals(Arc<Mutex<HashMap<String, PermissionDecision>>>);
 
 impl Approvals {
     /// The remembered decision for `key`, if any.

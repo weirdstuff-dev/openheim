@@ -1,4 +1,4 @@
-//! Agent Client Protocol (ACP) adapter over [`crate::core::runtime::AgentState`].
+//! Agent Client Protocol (ACP) adapter over an [`OpenheimClient`](crate::OpenheimClient).
 //!
 //! - `permission`, `client_io`: ACP's `session/request_permission` and
 //!   `fs/*` as `core`'s `PermissionGate` and `ClientIo`.
@@ -16,6 +16,8 @@ mod permission;
 mod serve;
 
 pub use serve::serve;
+#[cfg(feature = "server")]
+pub(crate) use serve::serve_state;
 
 // ACP's own wire vocabulary, for library users of the ACP adapters
 // (`SessionHandle::acp_updates`, `SessionHandle::acp_replay`) without a

@@ -65,6 +65,7 @@ pub struct AgentState {
     /// Resolved work directory used as the sandbox boundary for every session.
     pub work_dir: PathBuf,
     /// Resolved data directory and config file (read via [`Self::paths`]).
+    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
     paths: RuntimePaths,
     sessions: Sessions,
     /// The `delegate_task` registered in `executor`, bound to the startup
@@ -77,12 +78,15 @@ impl AgentState {
     /// `custom_tools` are registered alongside the built-in and MCP tools.
     /// `paths` says where subagent profiles and (by default) the memory
     /// database live; `memory` should already be rooted at `paths.data_dir`.
+    /// `long_term_memory` backs the memory tools; `None` builds it from
+    /// `app_config`.
     pub async fn new(
         config: AgentConfig,
         app_config: AppConfig,
         paths: RuntimePaths,
         memory: MemoryContext,
         custom_tools: Vec<Box<dyn ToolHandler>>,
+        #[cfg(feature = "rag")] long_term_memory: Option<crate::rag::LongTermMemory>,
     ) -> Result<Self> {
         let http_client = build_http_client(config.timeout_secs)?;
         let llm = create_client(&config, &http_client);
@@ -101,10 +105,10 @@ impl AgentState {
             sys_executor.register(tool);
         }
         #[cfg(feature = "rag")]
-        let long_term_memory = Arc::new(crate::rag::LongTermMemory::from_config(
-            &app_config,
-            &paths.data_dir,
-        )?);
+        let long_term_memory = Arc::new(match long_term_memory {
+            Some(memory) => memory,
+            None => crate::rag::LongTermMemory::from_config(&app_config, &paths.data_dir)?,
+        });
         #[cfg(feature = "rag")]
         {
             let m = &long_term_memory;
@@ -146,11 +150,13 @@ impl AgentState {
     }
 
     /// The default model/provider new sessions start on.
+    #[cfg_attr(not(any(feature = "acp", feature = "tui")), allow(dead_code))]
     pub fn config(&self) -> &AgentConfig {
         &self.config
     }
 
     /// The data directory and config file this client resolved at build time.
+    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
     pub fn paths(&self) -> &RuntimePaths {
         &self.paths
     }
@@ -244,6 +250,7 @@ impl AgentState {
         self.apply_session_config(session_id, new_config).await
     }
 
+    #[cfg_attr(not(feature = "acp"), allow(dead_code))]
     pub async fn set_session_model(
         &self,
         session_id: &str,
@@ -253,6 +260,7 @@ impl AgentState {
         self.apply_session_config(session_id, new_config).await
     }
 
+    #[cfg_attr(not(feature = "acp"), allow(dead_code))]
     pub async fn set_session_mode(&self, session_id: &str, mode_id: &str) -> Result<()> {
         let mode = AgentMode::parse(mode_id)?;
         let mut sessions = self.sessions.write().await;
@@ -589,7 +597,8 @@ fn tool_cwd(cwd: &Path, work_dir: &Path) -> PathBuf {
     }
 }
 
-/// The result of [`AgentState::load_session`].
+/// What [`OpenheimClient::resume_session`](crate::OpenheimClient::resume_session)
+/// loaded.
 #[non_exhaustive]
 pub struct LoadedSession {
     /// The mode the session is live under.
@@ -609,7 +618,7 @@ pub struct LoadedSession {
 mod prompt_lease_ordering_tests {
     use tempfile::tempdir;
 
-    use crate::memory::history::HistoryManager;
+    use crate::memory::HistoryManager;
 
     use super::*;
 
@@ -702,9 +711,17 @@ mod new_session_tests {
             5,
         );
         let memory = MemoryContext::new(vec![], dir).unwrap();
-        AgentState::new(agent_config, app_config, paths, memory, vec![])
-            .await
-            .unwrap()
+        AgentState::new(
+            agent_config,
+            app_config,
+            paths,
+            memory,
+            vec![],
+            #[cfg(feature = "rag")]
+            None,
+        )
+        .await
+        .unwrap()
     }
 
     // `new_session` with an unknown `model` fails with the config error
@@ -967,7 +984,7 @@ mod new_session_tests {
                 role: Role::Assistant,
                 content: vec![ContentBlock::tool_use(
                     "call_1",
-                    crate::tools::DELEGATE_TOOL_NAME,
+                    crate::tools::delegate::DELEGATE_TOOL_NAME,
                     r#"{"system_prompt":"You are a helper.","task":"say hi"}"#,
                 )],
             },

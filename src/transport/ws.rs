@@ -83,8 +83,7 @@ enum WsOutbound {
 /// reply so a client with several requests in flight can tell which reply
 /// (or error) belongs to which: `{"action": "read", "path": "a.txt", "id": 7}`.
 #[derive(Debug, Deserialize)]
-#[non_exhaustive]
-pub struct FsRequestEnvelope {
+pub(crate) struct FsRequestEnvelope {
     #[serde(default)]
     pub id: Option<Value>,
     #[serde(flatten)]
@@ -95,8 +94,7 @@ pub struct FsRequestEnvelope {
 /// for unsolicited messages (the connection greeting, watcher events, an
 /// unparseable payload).
 #[derive(Debug, Serialize)]
-#[non_exhaustive]
-pub struct FsReply {
+pub(crate) struct FsReply {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Value>,
     #[serde(flatten)]
@@ -111,8 +109,7 @@ impl FsReply {
 
 /// Entry in the file tree
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[non_exhaustive]
-pub struct FileEntry {
+pub(crate) struct FileEntry {
     pub path: String,
     pub name: String,
     pub is_dir: bool,
@@ -125,8 +122,7 @@ pub struct FileEntry {
 /// Requests from the frontend to the filesystem WebSocket
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action")]
-#[non_exhaustive]
-pub enum FsRequest {
+pub(crate) enum FsRequest {
     /// Initialize watching on a workspace directory
     #[serde(rename = "watch")]
     Watch { path: String },
@@ -166,8 +162,7 @@ pub enum FsRequest {
 /// Responses/events from the filesystem WebSocket to the frontend
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "type")]
-#[non_exhaustive]
-pub enum FsResponse {
+pub(crate) enum FsResponse {
     #[serde(rename = "connected")]
     Connected { message: String },
 
@@ -334,7 +329,7 @@ fn spawn_acp_server(
     let (in_tx, in_rx) = mpsc::unbounded::<std::io::Result<String>>();
     let sink =
         out_tx.sink_map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()));
-    tokio::spawn(acp::serve(Lines::new(sink, in_rx), state));
+    tokio::spawn(acp::serve_state(Lines::new(sink, in_rx), state));
     (in_tx, out_rx)
 }
 

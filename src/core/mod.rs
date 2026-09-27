@@ -4,5 +4,5 @@ mod context;
 pub mod llm;
 pub mod models;
 pub mod permission;
-pub mod runtime;
+pub(crate) mod runtime;
 pub mod turn;

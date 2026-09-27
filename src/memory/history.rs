@@ -8,7 +8,7 @@ use crate::memory::lease::{self, SessionLease};
 use std::path::PathBuf;
 
 /// Persistent metadata for a conversation, stored in its `.json` file (see
-/// [`HistoryManager`] for the on-disk layout).
+/// `HistoryManager` for the on-disk layout).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ConversationMeta {
