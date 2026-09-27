@@ -101,7 +101,7 @@
 //! builder.
 
 pub mod args;
-pub mod capabilities;
+mod capabilities;
 pub(crate) mod delegate;
 mod edit_file;
 mod execute_command;

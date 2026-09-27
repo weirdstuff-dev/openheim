@@ -93,15 +93,16 @@ pub mod tui;
 
 // Core types
 pub use config::{AgentConfig, AppConfig, McpServerConfig, ModelsInfo};
-pub use core::runtime::{AgentMode, LoadedSession};
-pub use core::{agent, llm, models};
-pub use error::{Error, Result};
-pub use llm::{AnthropicClient, GeminiClient, LlmClient, OpenAiClient, OpenAiCompatibleClient};
-pub use memory::{Conversation, ConversationMeta, PromptBuilder};
-pub use models::{
+pub use core::llm::{
+    AnthropicClient, GeminiClient, LlmClient, OpenAiClient, OpenAiCompatibleClient,
+};
+pub use core::models::{
     AgentResult, Choice, ContentBlock, FinishReason, FunctionDefinition, Message, Role, StopReason,
     StreamEvent, Tool, ToolResultBlock, ToolUseBlock,
 };
+pub use core::runtime::{AgentMode, LoadedSession};
+pub use error::{Error, Result};
+pub use memory::{Conversation, ConversationMeta, PromptBuilder};
 #[cfg(feature = "rag")]
 pub use rag::LongTermMemory;
 
