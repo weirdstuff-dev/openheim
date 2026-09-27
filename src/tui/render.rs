@@ -365,12 +365,23 @@ pub(crate) fn render_input_bar(
     }
 }
 
+/// How a grapheme of the input shows in the one-line input bar: a newline
+/// (from a paste) as `↵`, a tab as a space.
+fn input_display(grapheme: &str) -> &str {
+    match grapheme {
+        "\n" => "↵",
+        "\t" => " ",
+        other => other,
+    }
+}
+
 /// The slice of `input` that fits in `visible_width` terminal cells with the
 /// cursor (a byte offset into `input`) visible, plus the cursor's column in
-/// it. Measured in grapheme clusters and cell widths, so combining marks
-/// aren't split and wide characters (CJK, emoji) take two columns.
+/// it, as displayed by [`input_display`]. Measured in grapheme clusters and
+/// cell widths, so combining marks aren't split and wide characters (CJK,
+/// emoji) take two columns.
 fn scroll_input_line(input: &str, cursor: usize, visible_width: usize) -> (String, usize) {
-    let graphemes: Vec<&str> = input.graphemes(true).collect();
+    let graphemes: Vec<&str> = input.graphemes(true).map(input_display).collect();
     // `cursor` is a byte offset that always lands on a grapheme boundary
     // (see `App`'s cursor-movement code), so counting clusters whose start
     // byte precedes it gives the cluster index right after the cursor.
@@ -1023,5 +1034,42 @@ mod input_scroll_tests {
         let (visible, cursor_col) = scroll_input_line(input, cursor, 20);
         assert_eq!(visible, input);
         assert_eq!(cursor_col, 2);
+    }
+
+    #[test]
+    fn newlines_and_tabs_take_one_cell_each() {
+        let input = "a\nb\tc";
+        let (visible, cursor_col) = scroll_input_line(input, input.len(), 20);
+        assert_eq!(visible, "a↵b c");
+        assert_eq!(cursor_col, 5);
+
+        // Scrolling counts them the same way.
+        let (visible, cursor_col) = scroll_input_line(input, "a\nb".len(), 3);
+        assert_eq!(visible, "↵b ");
+        assert_eq!(cursor_col, 2);
+    }
+
+    #[test]
+    fn input_bar_shows_pasted_newlines() {
+        use super::{FooterLabels, render_input_bar};
+        use crate::tui::state::InputLine;
+        use ratatui::{Terminal, backend::TestBackend, style::Color};
+
+        let mut input = InputLine::default();
+        input.insert_str("one\ntwo");
+        let labels = FooterLabels {
+            left: None,
+            right: "model".into(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(30, 3)).unwrap();
+        terminal
+            .draw(|f| render_input_bar(f, f.area(), &input, &labels, true, Color::Gray))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let row: String = (0..30).map(|x| buffer[(x, 1)].symbol()).collect();
+        assert_eq!(row.trim_end(), "  › one↵two");
+        // Right after "two": the 4-cell prefix plus 7 cells of text.
+        assert_eq!(terminal.get_cursor_position().unwrap().x, 11);
     }
 }

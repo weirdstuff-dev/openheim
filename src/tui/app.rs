@@ -270,6 +270,25 @@ impl App {
         }
     }
 
+    /// Inserts pasted text at the cursor, newlines and all; only Enter sends
+    /// the prompt. Line endings become `\n`, and control characters other
+    /// than newline and tab are dropped. Ignored while a permission prompt
+    /// or popup has focus.
+    pub(super) fn handle_paste(&mut self, text: &str) {
+        self.quit_armed_until = None;
+        self.permissions.prune_stale();
+        if !self.permissions.is_empty() || self.overlay.is_some() {
+            return;
+        }
+        let normalized: String = text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .chars()
+            .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+            .collect();
+        self.input.insert_str(&normalized);
+    }
+
     fn handle_permission_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up => self.permissions.select_previous(),
@@ -714,7 +733,17 @@ mod tests {
 
     /// A test app plus the receiving end of its cancel channel.
     fn test_app_with_cancel() -> (App, mpsc::UnboundedReceiver<()>) {
-        let (prompt, _) = mpsc::unbounded_channel();
+        let (app, _, cancel_rx) = test_app_with_receivers();
+        (app, cancel_rx)
+    }
+
+    /// A test app plus the receiving ends of its prompt and cancel channels.
+    fn test_app_with_receivers() -> (
+        App,
+        mpsc::UnboundedReceiver<String>,
+        mpsc::UnboundedReceiver<()>,
+    ) {
+        let (prompt, prompt_rx) = mpsc::unbounded_channel();
         let (switch_model, _) = mpsc::unbounded_channel();
         let (switch_session, _) = mpsc::unbounded_channel();
         let (list_sessions, _) = mpsc::unbounded_channel();
@@ -737,7 +766,7 @@ mod tests {
                 cancel,
             },
         );
-        (app, cancel_rx)
+        (app, prompt_rx, cancel_rx)
     }
 
     #[test]
@@ -818,6 +847,52 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn paste_inserts_at_the_cursor_without_sending() {
+        let (mut app, mut prompt_rx, _) = test_app_with_receivers();
+        for c in "ab".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Left));
+
+        app.handle_paste("one\ntwo\n");
+
+        assert_eq!(app.input.text(), "aone\ntwo\nb");
+        assert_eq!(app.input.cursor(), "aone\ntwo\n".len());
+        assert!(prompt_rx.try_recv().is_err(), "a paste must not send");
+    }
+
+    #[test]
+    fn paste_normalises_line_endings_and_drops_control_characters() {
+        let mut app = test_app();
+        app.handle_paste("a\r\nb\rc\td\x1b[0me\x07");
+        assert_eq!(app.input.text(), "a\nb\nc\td[0me");
+    }
+
+    #[test]
+    fn enter_sends_a_pasted_prompt_with_its_newlines() {
+        let (mut app, mut prompt_rx, _) = test_app_with_receivers();
+        app.handle_paste("line one\nline two");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(prompt_rx.try_recv().unwrap(), "line one\nline two");
+        assert_eq!(app.input.text(), "");
+    }
+
+    #[test]
+    fn paste_is_ignored_while_a_popup_or_prompt_is_open() {
+        let mut app = test_app();
+        app.overlay = Some(Overlay::ThemePicker { selected: 0 });
+        app.handle_paste("text");
+        assert_eq!(app.input.text(), "");
+        app.overlay = None;
+
+        let (request, _rx) = permission_request();
+        app.handle_permission_request(request);
+        app.handle_paste("text");
+        assert_eq!(app.input.text(), "");
+        assert_eq!(app.permissions.len(), 1);
     }
 
     #[test]

@@ -12,8 +12,8 @@ use std::time::Duration;
 use crossterm::{
     cursor::Show,
     event::{
-        Event, EventStream, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyEventKind,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -50,6 +50,7 @@ impl TerminalRestore {
         if self.kbd_enhanced {
             let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
         }
+        let _ = execute!(io::stdout(), DisableBracketedPaste);
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), Show);
@@ -311,6 +312,9 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    // A paste then arrives as one `Event::Paste` instead of keystrokes, so
+    // its newlines don't press Enter. Terminals without it type the paste.
+    execute!(stdout, EnableBracketedPaste).ok();
 
     // Enable keyboard enhancement on supporting terminals so that arrow-key
     // escape sequences (\x1b[B etc.) are never split into a spurious Esc
@@ -358,6 +362,7 @@ pub async fn run(client: OpenheimClient, skills: Vec<String>) -> crate::error::R
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         app.handle_key(key);
                     }
+                    Some(Ok(Event::Paste(text))) => app.handle_paste(&text),
                     Some(Ok(Event::Resize(_, _))) => app.transcript.invalidate(),
                     Some(Err(_)) | None => break,
                     _ => {}
