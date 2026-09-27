@@ -81,8 +81,11 @@ pub struct Usage {
 
 and constructors for building your own:
 
+- `Message::new(role, content)` — any role and block list
 - `Message::user(text)`, `Message::assistant(text)` — single-`Text`-block message
 - `Message::tool_result(tool_call_id, tool_name, content, is_error)` — single-`ToolResult`-block message
+
+These types are all `#[non_exhaustive]`: later releases may add fields or variants without breaking you, but you can't build the structs with a struct literal, and a `match` on `ContentBlock` or `FinishReason` needs a `_` arm. Build them with `Message::new`, `Choice::new(message, finish_reason)` (plus `.with_usage(usage)`), `Usage::new(input_tokens, output_tokens)` (plus `.with_cache_creation_tokens(n)` / `.with_cache_read_tokens(n)`), and `Tool::function(name, description, parameters)`.
 
 If `message.tool_calls()` is non-empty, the loop executes them and continues. Otherwise the finish reason decides how the turn ends: `MaxTokens` → `StopReason::MaxTokens`, `Refusal` → `StopReason::Refusal`, `Paused` → the loop calls the model again with the history unchanged. Anything else (`Stop`, `Other`, or `None`) → `StopReason::EndTurn` if the reply has text, or `StopReason::NoContent` if it has none. Map your provider's truncation and content-filter values onto `MaxTokens`/`Refusal` so front-ends can tell the user why a reply stopped.
 
@@ -240,17 +243,14 @@ impl LlmClient for MyCustomProvider {
             other => FinishReason::Other(other.to_string()),
         });
 
-        Ok(Choice {
-            message: Message {
-                role: Role::Assistant,
-                content,
-            },
+        // This example's `ApiResponse` doesn't model a `usage` field — add
+        // one (following `core/llm/openai.rs`'s `OpenAiUsage`) and chain
+        // `.with_usage(Usage::new(input, output))` if your API reports token
+        // counts.
+        Ok(Choice::new(
+            Message::new(Role::Assistant, content),
             finish_reason,
-            // This example's `ApiResponse` doesn't model a `usage` field —
-            // add one (following `core/llm/openai.rs`'s `OpenAiUsage`) and
-            // map it here if your API reports token counts.
-            usage: None,
-        })
+        ))
     }
 }
 ```
@@ -276,7 +276,7 @@ let llm: Arc<dyn LlmClient> = Arc::new(RetryClient::new(Arc::new(base_provider))
 
 ### 5. Use with the agent loop
 
-Pass the custom client directly to `run_agent`. It also needs a `TurnContext` (cancellation token + permission gate) — use `permission::AllowAll` and a fresh `CancellationToken` for a one-shot, non-interactive run. The last argument receives each `StreamEvent` of the turn; pass `|_| {}` to ignore them:
+Pass the custom client directly to `run_agent`. It also needs a `TurnContext` (cancellation token, permission gate, sandbox root, client I/O), built with `TurnContext::new` — use `permission::AllowAll` and a fresh `CancellationToken` for a one-shot, non-interactive run. The last argument receives each `StreamEvent` of the turn; pass `|_| {}` to ignore them:
 
 ```rust
 use openheim::core::agent::run_agent;
@@ -306,13 +306,14 @@ async fn main() -> openheim::Result<()> {
     let mut messages = vec![Message::user("Hello!")];
 
     let work_dir = std::env::current_dir()?;
-    let turn = TurnContext {
-        cancel: &CancellationToken::new(),
-        permission_gate: &(Arc::new(AllowAll) as Arc<dyn PermissionGate>),
-        work_dir: &work_dir,
-        cwd: &work_dir,
-        client_io: &openheim::core::client_io::NoClientIo,
-    };
+    let cancel = CancellationToken::new();
+    let gate: Arc<dyn PermissionGate> = Arc::new(AllowAll);
+    let turn = TurnContext::new(
+        &cancel,
+        &gate,
+        &work_dir,
+        &openheim::core::client_io::NoClientIo,
+    );
 
     let result = run_agent(
         &llm,
@@ -365,7 +366,7 @@ impl LlmClient for MockLlm {
 }
 ```
 
-Build a tool-call response for a mock with `Message { role: Role::Assistant, content: vec![ContentBlock::tool_use("call_1", "read_file", "{}")] }` — see `core::models::ContentBlock` for the other block types.
+Build a tool-call response for a mock with `Choice::new(Message::new(Role::Assistant, vec![ContentBlock::tool_use("call_1", "read_file", "{}")]), Some(FinishReason::ToolCalls))` — see `core::models::ContentBlock` for the other block types.
 
 ---
 

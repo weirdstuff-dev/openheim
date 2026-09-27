@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **Public enums and data structs are `#[non_exhaustive]`, so later releases can add variants and fields without breaking you.** Until now, every new `StreamEvent` or `Error` variant broke each downstream `match`, and every new config field broke each struct literal. In exchange, this release breaks them once:
+  - A `match` on one of these enums needs a `_ =>` arm: `ApprovalScope`, `AgentMode`, `ContentBlock`, `Error`, `FinishReason`, `LlmChunk`, `PermissionDecision`, `ProviderKind`, `SearchMethod`, `StopReason`, `StreamEvent`, `ThinkingMode`, `ToolKindHint`, and `transport::ws::{FsRequest, FsResponse}`. Building their variants still works. `Role` stays exhaustive.
+  - These structs can no longer be built with a struct literal (not even with `..Default::default()`), and patterns that destructure them need `..`. Fields stay public, so reading and assigning them still works:
+    - Built by embedders, now with constructors and `with_*` setters: `AppConfig::new(default_provider)` plus `with_provider`, `with_mcp_server`, `with_memory`, `with_work_dir`, `with_allow_shell`, … ; `ProviderConfig::new(api_base, default_model)` plus `with_api_key`, `with_models`, `with_kind`, `with_context_window`, … ; `McpServerConfig::stdio(command, args)` / `McpServerConfig::http(url)` plus `with_env` / `with_header`; `MemoryConfig::default()` plus `with_embedding(provider, model)`, `with_db_path`, `with_top_k`; `TuiConfig::default().with_theme_color(..)`; `AgentConfig::new(..)` plus `with_kind`, `with_timeout_secs`, `with_max_tokens`, `with_context_window`, `with_thinking` (`with_max_iterations` now takes `self` by value, so call it on an owned config or a `clone()`); `Message::new(role, content)`; `Choice::new(message, finish_reason).with_usage(..)`; `Usage::new(input_tokens, output_tokens)` plus `with_cache_creation_tokens` / `with_cache_read_tokens`; `ToolCapabilities::default().with_read_only(..).with_kind(..).with_approval_scope(..)`; `TurnContext::new(cancel, permission_gate, work_dir, client_io)` plus `with_cwd`; `LineRange::new(line, limit)`; `RuntimePaths::new(data_dir, config_path)`. `Tool` and `FunctionDefinition` are built with the existing `Tool::function`.
+    - Returned by openheim, for reading only: `AgentProfile`, `AgentResult`, `Conversation`, `ConversationMeta` (or `ConversationMeta::new`), `EmbeddingConfig`, `LoadedSession`, `McpServerStatus`, `MemoryHit`, `MemoryRecord`, `ModelsInfo`, `ProviderModels`, `PublicConfig` and its `Public*Config` sections, `StoreStats`, `ToolResultBlock`, `ToolUseBlock`, and `transport::ws::{FileEntry, FsReply, FsRequestEnvelope}`.
+
 ## [0.14.0] - 2026-09-27
 
 ### Added

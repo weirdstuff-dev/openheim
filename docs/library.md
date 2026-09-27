@@ -154,36 +154,29 @@ MCP servers can be added in either mode. Their tools become available to the age
 
 ```rust
 use openheim::{McpServerConfig, OpenheimClient};
-use std::collections::HashMap;
 
 let client = OpenheimClient::builder()
     .provider("openai")
     .api_key(std::env::var("OPENAI_API_KEY").unwrap())
     // stdio MCP server
-    .mcp_server("filesystem", McpServerConfig {
-        command: Some("npx".into()),
-        args: vec![
-            "-y".into(),
-            "@modelcontextprotocol/server-filesystem".into(),
-            "/workspace".into(),
-        ],
-        env: HashMap::new(),
-        url: None,
-        headers: HashMap::new(),
-    })
+    .mcp_server(
+        "filesystem",
+        McpServerConfig::stdio(
+            "npx",
+            ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
+        ),
+    )
     // Streamable HTTP MCP server, with an auth header
-    .mcp_server("my-tools", McpServerConfig {
-        command: None,
-        args: vec![],
-        env: HashMap::new(),
-        url: Some("https://my-tools.example.com/mcp".into()),
-        headers: HashMap::from([("Authorization".into(), "Bearer my-key".into())]),
-    })
+    .mcp_server(
+        "my-tools",
+        McpServerConfig::http("https://my-tools.example.com/mcp")
+            .with_header("Authorization", "Bearer my-key"),
+    )
     .build()
     .await?;
 ```
 
-MCP servers defined in a config file are always loaded; builder `.mcp_server()` calls are merged in on top.
+MCP servers defined in a config file are always loaded; builder `.mcp_server()` calls are merged in on top. `McpServerConfig` is `#[non_exhaustive]`, so build it with `stdio`/`http` and the `with_env`/`with_header` setters rather than a struct literal.
 
 ### With custom tools
 
@@ -538,7 +531,6 @@ for (provider, info) in &models.providers {
 
 ```rust
 use openheim::{McpServerConfig, OpenheimClient, StreamEvent};
-use std::collections::HashMap;
 
 #[tokio::main]
 async fn main() -> openheim::Result<()> {
@@ -547,17 +539,13 @@ async fn main() -> openheim::Result<()> {
         .api_key(std::env::var("ANTHROPIC_API_KEY").unwrap())
         .model("claude-opus-4-7")
         .max_iterations(20)
-        .mcp_server("fs", McpServerConfig {
-            command: Some("npx".into()),
-            args: vec![
-                "-y".into(),
-                "@modelcontextprotocol/server-filesystem".into(),
-                "/workspace".into(),
-            ],
-            env: HashMap::new(),
-            url: None,
-            headers: HashMap::new(),
-        })
+        .mcp_server(
+            "fs",
+            McpServerConfig::stdio(
+                "npx",
+                ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
+            ),
+        )
         .build()
         .await?;
 
