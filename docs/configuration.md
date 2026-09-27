@@ -116,9 +116,9 @@ Use either `command` (stdio transport) or `url` (Streamable HTTP transport), not
 | `env` | table | No | Extra environment variables for the spawned process |
 | `url` | string | HTTP only | Base URL for Streamable HTTP transport |
 | `headers` | table | No | Extra HTTP headers sent with every request, e.g. auth (HTTP only) |
-| `tool_timeout_secs` | integer | No | Longest one tool call may take before it fails with a timeout error. Default: 600 |
+| `tool_timeout_secs` | integer | No | Longest one tool call may take, including any wait for a reconnect, before it fails with a timeout error. At least 1. Default: 600 |
 
-If a server's connection closes (a stdio server exits, an HTTP server drops it), the next call to one of its tools reconnects. A call that was in flight when it closed fails and isn't retried, since the tool may already have run.
+If a server's connection closes (a stdio server exits, an HTTP server drops it), the next call to one of its tools reconnects. A call that was in flight when it closed fails and isn't retried, since the tool may already have run. If reconnecting fails, calls to that server fail with the same error for 30 seconds before the next attempt.
 
 `env` and `headers` are inline tables, so a server with credentials still fits on one `[mcp_servers.<name>]` block — no separate `[mcp_servers.<name>.env]` section needed:
 
