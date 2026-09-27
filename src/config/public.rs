@@ -51,6 +51,8 @@ pub struct PublicProviderConfig {
     pub timeout_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
 }
 
 /// An MCP server entry. `args` is left out entirely (command lines routinely
@@ -116,6 +118,7 @@ fn public_provider(name: &str, p: &ProviderConfig) -> PublicProviderConfig {
         env_var: p.env_var.clone(),
         timeout_secs: p.timeout_secs,
         max_tokens: p.max_tokens,
+        context_window: p.context_window,
     }
 }
 

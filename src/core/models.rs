@@ -480,6 +480,11 @@ pub enum StreamEvent {
     /// [`AgentResult::context_usage`]).
     #[serde(rename = "usage")]
     Usage { usage: Usage },
+    /// The next request leaves out the `dropped` oldest history messages to
+    /// fit the model's context window. Sent when that number changes during
+    /// a turn. The stored history keeps them.
+    #[serde(rename = "context_trimmed")]
+    ContextTrimmed { dropped: usize },
     /// The agent has finished; `final_response` is the complete answer.
     #[serde(rename = "finished")]
     Finished {

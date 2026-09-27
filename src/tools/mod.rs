@@ -271,7 +271,7 @@ pub(crate) mod test_support {
     use async_trait::async_trait;
     use tokio_util::sync::CancellationToken;
 
-    use crate::core::client_io::{ClientIo, NoClientIo};
+    use crate::core::client_io::{ClientIo, LineRange, NoClientIo};
     use crate::core::permission::{AllowAll, PermissionGate};
     use crate::core::turn::TurnContext;
     use crate::error::Result;
@@ -339,8 +339,35 @@ pub(crate) mod test_support {
 
     #[async_trait]
     impl ClientIo for FixedClientIo {
-        async fn read_file(&self, _path: &Path) -> Option<Result<String>> {
+        async fn read_file(&self, _path: &Path, _lines: LineRange) -> Option<Result<String>> {
             Some(Ok(self.0.to_string()))
+        }
+
+        async fn write_file(&self, _path: &Path, _content: &str) -> Option<Result<()>> {
+            Some(Ok(()))
+        }
+    }
+
+    /// Answers every read with `content` and records the ranges asked for.
+    pub(crate) struct RecordingClientIo {
+        pub(crate) content: String,
+        pub(crate) reads: std::sync::Mutex<Vec<LineRange>>,
+    }
+
+    impl RecordingClientIo {
+        pub(crate) fn new(content: impl Into<String>) -> Self {
+            Self {
+                content: content.into(),
+                reads: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ClientIo for RecordingClientIo {
+        async fn read_file(&self, _path: &Path, lines: LineRange) -> Option<Result<String>> {
+            self.reads.lock().unwrap().push(lines);
+            Some(Ok(self.content.clone()))
         }
 
         async fn write_file(&self, _path: &Path, _content: &str) -> Option<Result<()>> {
@@ -354,7 +381,7 @@ pub(crate) mod test_support {
 
     #[async_trait]
     impl ClientIo for HangingClientIo {
-        async fn read_file(&self, _path: &Path) -> Option<Result<String>> {
+        async fn read_file(&self, _path: &Path, _lines: LineRange) -> Option<Result<String>> {
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             unreachable!("cancellation should abort this wait before the sleep elapses");
         }

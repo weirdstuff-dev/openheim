@@ -230,10 +230,12 @@ pub(super) fn raw_input(
 }
 
 /// Maps one core [`StreamEvent`] from a live turn onto the [`SessionUpdate`]
-/// it corresponds to, if any. `IterationStart`, `Usage`, `Finished`, and
-/// `MessageAppended` have no ACP wire equivalent — they're `AgentState`-
-/// internal or ACP-client-facing-nothing signals (history persistence,
-/// context-size bookkeeping, turn-done) — and map to `None`.
+/// it corresponds to, if any. `IterationStart`, `Usage`, `ContextTrimmed`,
+/// `Finished`, and `MessageAppended` have no ACP wire equivalent — they're
+/// `AgentState`-internal or ACP-client-facing-nothing signals (history
+/// persistence, context-size bookkeeping, turn-done) — and map to `None`.
+/// `ContextTrimmed` isn't sent as agent text either: the client would keep
+/// it as part of the model's reply.
 pub(crate) fn stream_event_to_session_update(
     event: StreamEvent,
     executor: &dyn ToolExecutor,
@@ -281,6 +283,7 @@ pub(crate) fn stream_event_to_session_update(
         }
         StreamEvent::IterationStart { .. }
         | StreamEvent::Usage { .. }
+        | StreamEvent::ContextTrimmed { .. }
         | StreamEvent::Finished { .. }
         | StreamEvent::MessageAppended { .. } => None,
     }
@@ -564,6 +567,10 @@ mod stream_event_tests {
                 &e
             )
             .is_none()
+        );
+        assert!(
+            stream_event_to_session_update(StreamEvent::ContextTrimmed { dropped: 4 }, &e)
+                .is_none()
         );
         assert!(
             stream_event_to_session_update(

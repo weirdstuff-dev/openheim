@@ -17,6 +17,10 @@ use super::capabilities::{ToolCapabilities, ToolKindHint};
 use super::read_file::read_text;
 use super::write_file::write_text;
 
+/// Largest file `edit_file` works on. An edit reads, changes and writes
+/// back the whole file in memory.
+const MAX_EDIT_BYTES: u64 = 10 * 1024 * 1024;
+
 /// Applies a find-and-replace edit to `content`, returning the edited text
 /// and how many occurrences were replaced.
 ///
@@ -118,7 +122,7 @@ impl ToolHandler for EditFileTool {
         let args: EditFileArgs = parse(args)?;
         let validated = turn.resolve_path(&args.path)?;
 
-        let content = read_text(&validated, turn).await?;
+        let content = read_text(&validated, MAX_EDIT_BYTES, turn).await?;
         let (edited, count) = apply_edit(
             &content,
             &args.old_string,
@@ -301,6 +305,30 @@ mod tests {
             "unexpected error: {err}"
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
+    }
+
+    #[tokio::test]
+    async fn edit_file_refuses_files_over_the_size_limit() {
+        let harness = TurnHarness::new();
+        let path = harness.work_dir().join("big.txt");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_EDIT_BYTES + 1).unwrap();
+
+        let args = serde_json::json!({
+            "path": "big.txt",
+            "old_string": "a",
+            "new_string": "b",
+        })
+        .to_string();
+        let err = EditFileTool
+            .execute(&args, &harness.turn())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("{} bytes", MAX_EDIT_BYTES + 1)),
+            "{err}"
+        );
     }
 
     #[test]

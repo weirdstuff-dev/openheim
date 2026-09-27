@@ -82,7 +82,8 @@ Returns the public server configuration: an explicit allow-list of fields, so an
       "models": ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"],
       "env_var": "OPENAI_API_KEY",
       "timeout_secs": 120,
-      "max_tokens": 4096
+      "max_tokens": 4096,
+      "context_window": 128000
     },
     "anthropic": {
       "kind": "anthropic",
@@ -176,13 +177,23 @@ Returns all registered tool definitions (built-in + MCP). Each tool follows the 
     "type": "function",
     "function": {
       "name": "read_file",
-      "description": "Read the contents of a file at the specified path.",
+      "description": "Read a text file. Returns up to 100 KB; a longer file ends with a note giving the offset to call again with. Use offset and limit to read a specific range of lines.",
       "parameters": {
         "type": "object",
         "properties": {
           "path": {
             "type": "string",
             "description": "The path to the file to read"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Line number to start reading from (1-based). Defaults to 1."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum number of lines to read. Defaults to as many as fit in 100 KB."
           }
         },
         "required": ["path"]
@@ -1582,6 +1593,7 @@ interface ProviderConfig {
   env_var?: string;
   timeout_secs?: number;
   max_tokens?: number;
+  context_window?: number;
   // api_key is NEVER included in responses
 }
 

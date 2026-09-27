@@ -65,6 +65,16 @@ fn move_scroll(scroll: &mut usize, code: KeyCode) {
     }
 }
 
+/// The prompt to send for the input `text`: blank lines before it and
+/// whitespace after it are dropped, but the first line keeps its
+/// indentation, which matters in pasted code.
+fn prompt_text(text: &str) -> &str {
+    let text = text.trim_end();
+    let first_visible = text.find(|c: char| !c.is_whitespace()).unwrap_or(0);
+    let line_start = text[..first_visible].rfind('\n').map_or(0, |i| i + 1);
+    &text[line_start..]
+}
+
 /// The terminal UI's state: a base screen (welcome or chat), at most one
 /// popup over it, and the permission-prompt queue over everything.
 pub(super) struct App {
@@ -203,6 +213,11 @@ impl App {
             StreamEvent::Usage { usage } => {
                 self.context_usage = Some(usage);
             }
+            StreamEvent::ContextTrimmed { dropped } => {
+                self.push(ChatItem::SystemInfo(format!(
+                    "{dropped} earlier messages left out of the request to fit the context window"
+                )));
+            }
             StreamEvent::Finished { .. } => {
                 self.status = Status::Idle;
             }
@@ -263,6 +278,25 @@ impl App {
         } else {
             self.handle_input_key(key);
         }
+    }
+
+    /// Inserts pasted text at the cursor, newlines and all; only Enter sends
+    /// the prompt. Line endings become `\n`, and control characters other
+    /// than newline and tab are dropped. Ignored while a permission prompt
+    /// or popup has focus.
+    pub(super) fn handle_paste(&mut self, text: &str) {
+        self.quit_armed_until = None;
+        self.permissions.prune_stale();
+        if !self.permissions.is_empty() || self.overlay.is_some() {
+            return;
+        }
+        let normalized: String = text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .chars()
+            .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+            .collect();
+        self.input.insert_str(&normalized);
     }
 
     fn handle_permission_key(&mut self, key: KeyEvent) {
@@ -352,14 +386,16 @@ impl App {
                 if self.status != Status::Idle {
                     return;
                 }
-                let line = self.input.text().trim().to_string();
-                if line.is_empty() {
+                let text = self.input.text();
+                if text.trim().is_empty() {
                     return;
                 }
+                let command = text.trim().strip_prefix(':').map(|c| c.trim().to_string());
+                let line = prompt_text(text).to_string();
                 self.input.clear();
                 self.screen = Screen::Chat;
-                if let Some(rest) = line.strip_prefix(':') {
-                    self.handle_command(rest.trim());
+                if let Some(command) = command {
+                    self.handle_command(&command);
                 } else {
                     self.push(ChatItem::UserMessage(line.clone()));
                     self.status = Status::Thinking;
@@ -709,7 +745,17 @@ mod tests {
 
     /// A test app plus the receiving end of its cancel channel.
     fn test_app_with_cancel() -> (App, mpsc::UnboundedReceiver<()>) {
-        let (prompt, _) = mpsc::unbounded_channel();
+        let (app, _, cancel_rx) = test_app_with_receivers();
+        (app, cancel_rx)
+    }
+
+    /// A test app plus the receiving ends of its prompt and cancel channels.
+    fn test_app_with_receivers() -> (
+        App,
+        mpsc::UnboundedReceiver<String>,
+        mpsc::UnboundedReceiver<()>,
+    ) {
+        let (prompt, prompt_rx) = mpsc::unbounded_channel();
         let (switch_model, _) = mpsc::unbounded_channel();
         let (switch_session, _) = mpsc::unbounded_channel();
         let (list_sessions, _) = mpsc::unbounded_channel();
@@ -732,7 +778,7 @@ mod tests {
                 cancel,
             },
         );
-        (app, cancel_rx)
+        (app, prompt_rx, cancel_rx)
     }
 
     #[test]
@@ -813,6 +859,79 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn paste_inserts_at_the_cursor_without_sending() {
+        let (mut app, mut prompt_rx, _) = test_app_with_receivers();
+        for c in "ab".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Left));
+
+        app.handle_paste("one\ntwo\n");
+
+        assert_eq!(app.input.text(), "aone\ntwo\nb");
+        assert_eq!(app.input.cursor(), "aone\ntwo\n".len());
+        assert!(prompt_rx.try_recv().is_err(), "a paste must not send");
+    }
+
+    #[test]
+    fn paste_normalises_line_endings_and_drops_control_characters() {
+        let mut app = test_app();
+        app.handle_paste("a\r\nb\rc\td\x1b[0me\x07");
+        assert_eq!(app.input.text(), "a\nb\nc\td[0me");
+    }
+
+    #[test]
+    fn enter_sends_a_pasted_prompt_with_its_newlines() {
+        let (mut app, mut prompt_rx, _) = test_app_with_receivers();
+        app.handle_paste("line one\nline two");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(prompt_rx.try_recv().unwrap(), "line one\nline two");
+        assert_eq!(app.input.text(), "");
+    }
+
+    #[test]
+    fn a_pasted_prompt_keeps_its_indentation() {
+        let (mut app, mut prompt_rx, _) = test_app_with_receivers();
+        app.handle_paste("\n\n    fn main() {\n        run();\n    }\n\n");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            prompt_rx.try_recv().unwrap(),
+            "    fn main() {\n        run();\n    }"
+        );
+    }
+
+    #[test]
+    fn prompt_text_drops_only_blank_edges() {
+        assert_eq!(prompt_text("  hi  "), "  hi");
+        assert_eq!(prompt_text(" \n\t\n  a\n b \n\n"), "  a\n b");
+        assert_eq!(prompt_text("x"), "x");
+    }
+
+    #[test]
+    fn commands_are_still_trimmed() {
+        let (mut app, mut prompt_rx, _) = test_app_with_receivers();
+        app.handle_paste("  \n  :theme  \n");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(prompt_rx.try_recv().is_err(), "a command is not a prompt");
+        assert!(matches!(app.overlay, Some(Overlay::ThemePicker { .. })));
+    }
+
+    #[test]
+    fn paste_is_ignored_while_a_popup_or_prompt_is_open() {
+        let mut app = test_app();
+        app.overlay = Some(Overlay::ThemePicker { selected: 0 });
+        app.handle_paste("text");
+        assert_eq!(app.input.text(), "");
+        app.overlay = None;
+
+        let (request, _rx) = permission_request();
+        app.handle_permission_request(request);
+        app.handle_paste("text");
+        assert_eq!(app.input.text(), "");
+        assert_eq!(app.permissions.len(), 1);
     }
 
     #[test]

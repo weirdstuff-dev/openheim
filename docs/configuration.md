@@ -42,7 +42,7 @@ work_dir = "/home/user/projects/myproject"
 
 Every tool result, built-in, MCP or custom, is cut to 128 KiB (with a note saying how much was left out) before it goes into the conversation, since the history is resent with every request.
 
-`web_fetch` is not subject to `work_dir` — it fetches remote URLs, not local files. It's bounded instead by an SSRF guard (rejects loopback/private/link-local addresses, including cloud metadata endpoints), a 20-second timeout, a 256 KiB response cap, and no automatic redirect following.
+`web_fetch` is not subject to `work_dir` — it fetches remote URLs, not local files. It's bounded instead by an SSRF guard (rejects every address that isn't publicly routable unicast: loopback, private, shared/CGNAT, link-local including cloud metadata endpoints, multicast, reserved and documentation ranges, and NAT64/6to4/Teredo addresses that lead to them), a 20-second timeout, a 256 KiB response cap, and no automatic redirect following.
 
 **`allow_shell`** gates whether `execute_command` appears in the tool list sent to the LLM. It defaults to `false` — the LLM never sees the tool and cannot request it. Set it to `true` to expose the tool (bounded as described above).
 
@@ -62,6 +62,7 @@ Each key under `[providers]` defines a provider. The key name is the provider id
 | `api_key` | string | No | Inline API key — `env_var` takes precedence if both are set |
 | `timeout_secs` | integer | `120` | Connect and idle-read timeout in seconds — bounds the connect phase and the maximum gap between body reads, not total request duration, so long streaming responses are not cut off mid-stream |
 | `max_tokens` | integer | No | Maximum output tokens per response (provider default if omitted). An `openai`-kind provider sends it as `max_completion_tokens` (OpenAI's reasoning models reject `max_tokens`); an `openai_compatible` one sends `max_tokens`, which most compatible backends still expect. |
+| `context_window` | integer | No | The models' context window in tokens (e.g. `200000`). A request estimated at over 90% of it leaves out the oldest whole turns before it's sent. Without it, older turns are left out only after the provider rejects a request as too long, which costs one failed request per turn once a session gets that long. Either way the saved history keeps everything; see [Fitting the context window](architecture.md#fitting-the-context-window). Applies to every model under this entry, so use the smallest window among them. |
 | `thinking` | `"adaptive"` \| `"off"` | `"adaptive"` for an Anthropic-kind provider, `"off"` otherwise | Extended thinking. Only the Anthropic client reads this — other providers ignore it. Applies to every model under this entry, so set it to `"off"` if `default_model`/`models` includes one that doesn't support adaptive thinking (e.g. `claude-haiku-4-5`, `claude-3-7-sonnet`) — use a second `[providers.<other-name>]` entry with `kind = "anthropic"` for that model if you need both. |
 
 Key resolution order: `env_var` (if set and non-empty) → `api_key` → empty string (for keyless providers like Ollama).
@@ -76,6 +77,7 @@ models = ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
 env_var = "OPENAI_API_KEY"
 timeout_secs = 120
 max_tokens = 4096
+context_window = 128000
 
 [providers.anthropic]
 api_base = "https://api.anthropic.com/v1"
@@ -164,7 +166,11 @@ embedding_provider = "openai"
 embedding_model = "text-embedding-3-small"
 ```
 
-Notes are capped at 4000 characters each. Enabling embeddings later back-fills vectors for existing notes, and changing `embedding_model` (or a model returning a different vector size) re-embeds every note on the next tool call, so switching is safe. In `architect` mode only `search_memory` is available; `remember`, `edit_memory`, and `forget` are treated as writes.
+Notes are capped at 4000 characters each. Enabling embeddings later back-fills vectors for existing notes, and changing `embedding_model` (or a model returning a different vector size) re-embeds every note, so switching is safe. The back-fill embeds up to 256 notes per memory tool call, so a large store catches up over several calls. Until a note has a vector, `search_memory` finds it by keyword: those matches are listed first, and the result says how many notes aren't indexed yet.
+
+Memory keeps working when the embeddings provider doesn't. Rate limits (429), server errors (500, 502, 503, 504), timeouts and failed connections are retried twice with a short backoff. If embedding still fails, `remember` and `edit_memory` save the note without a vector (it's keyword-searchable at once and embedded by a later back-fill), and `search_memory` falls back to keyword search and says so in its result, even when nothing matched. A failing back-fill is logged and retried on a later call. A note the provider refuses outright (not a transient error) is skipped by the back-fill until openheim restarts, so it can't hold up the others; it stays keyword-searchable.
+
+In `architect` mode only `search_memory` is available; `remember`, `edit_memory`, and `forget` are treated as writes.
 
 ---
 

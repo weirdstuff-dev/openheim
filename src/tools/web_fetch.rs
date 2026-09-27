@@ -136,11 +136,16 @@ async fn read_capped_body(response: reqwest::Response, cap: usize) -> Result<(Ve
     Ok((buf, false))
 }
 
-/// Resolves `host` and checks every address against [`is_disallowed_ip`],
+/// Resolves `host` (as `Url::host_str` gives it, so an IPv6 literal is in
+/// brackets) and checks every address against [`is_disallowed_ip`],
 /// returning the first to pin the connection to. `None` for a literal IP
 /// (checked, nothing to pin).
 async fn resolve_and_check(host: &str, port: u16) -> Result<Option<SocketAddr>> {
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = literal.parse::<IpAddr>() {
         if is_disallowed_ip(ip) {
             return Err(Error::ToolExecutionError(format!(
                 "Refusing to fetch {host}: address is not publicly routable"
@@ -169,46 +174,67 @@ async fn resolve_and_check(host: &str, port: u16) -> Result<Option<SocketAddr>> 
     Ok(Some(addrs[0]))
 }
 
-/// True for loopback, private, link-local (which covers the
-/// `169.254.169.254` cloud metadata address), unspecified, and other
-/// non-public addresses, IPv4 or IPv6.
+/// True for every address that isn't publicly routable unicast, IPv4 or
+/// IPv6: loopback, private, shared (CGNAT), link-local (which covers the
+/// `169.254.169.254` cloud metadata address), unspecified, documentation,
+/// benchmarking, multicast, reserved, and tunnels that could lead to any of
+/// those. The ranges are written out because `Ipv4Addr::is_global` and
+/// friends are unstable.
 fn is_disallowed_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
+            let [a, b, c, _] = v4.octets();
             v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
                 || v4.is_documentation()
+                || v4.is_multicast() // 224.0.0.0/4
+                || a == 0 // "this network", 0.0.0.0/8
+                || (a == 100 && (b & 0xc0) == 64) // shared address space (CGNAT, Tailscale), 100.64.0.0/10
+                || (a == 192 && b == 0 && c == 0) // IETF protocol assignments, 192.0.0.0/24
+                || (a == 198 && (b & 0xfe) == 18) // benchmarking, 198.18.0.0/15
+                || a >= 240 // reserved and broadcast, 240.0.0.0/4
         }
         IpAddr::V6(v6) => {
-            // IPv4-mapped (`::ffff:a.b.c.d`) and IPv4-compatible
-            // (`::a.b.c.d`) addresses embed an IPv4 address the IPv6 checks
-            // miss (`::ffff:169.254.169.254` is cloud metadata), so the
-            // embedded address gets the IPv4 checks as well.
-            let embedded_v4 = v6.to_ipv4_mapped().or_else(|| ipv4_compatible(&v6));
-            let embeds_disallowed_ipv4 =
-                embedded_v4.is_some_and(|v4| is_disallowed_ip(IpAddr::V4(v4)));
-            embeds_disallowed_ipv4
-                || v6.is_loopback()
-                || v6.is_unspecified()
-                || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique local, fc00::/7
-                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local, fe80::/10
+            // `::1` and `::` also look IPv4-compatible (`0.0.0.1`,
+            // `0.0.0.0`); refuse them for what they are, not by that.
+            if v6.is_loopback() || v6.is_unspecified() {
+                return true;
+            }
+            // Addresses that carry an IPv4 address reach it (or are
+            // translated to it), so it gets the IPv4 checks:
+            // `::ffff:169.254.169.254` and `64:ff9b::a9fe:a9fe` are both
+            // cloud metadata.
+            if let Some(v4) = embedded_ipv4(&v6) {
+                return is_disallowed_ip(IpAddr::V4(v4));
+            }
+            let s = v6.segments();
+            v6.is_multicast() // ff00::/8
+                || (s[0] & 0xfe00) == 0xfc00 // unique local, fc00::/7
+                || (s[0] & 0xffc0) == 0xfe80 // link-local, fe80::/10
+                || (s[0] & 0xffc0) == 0xfec0 // site-local (deprecated), fec0::/10
+                || (s[0] == 0x2001 && s[1] == 0x0db8) // documentation, 2001:db8::/32
+                || (s[0] == 0x2001 && s[1] == 0) // Teredo, 2001::/32: tunnels to any IPv4 address
+                || (s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1) // local-use NAT64, 64:ff9b:1::/48
+                || (s[0] == 0x100 && s[1..4] == [0, 0, 0]) // discard-only, 100::/64
         }
     }
 }
 
-/// The IPv4 address in a deprecated "IPv4-compatible" IPv6 address
-/// (`::a.b.c.d`, RFC 4291), which [`Ipv6Addr::to_ipv4_mapped`] doesn't
-/// recognize.
-fn ipv4_compatible(v6: &Ipv6Addr) -> Option<Ipv4Addr> {
-    let segments = v6.segments();
-    if segments[0..6] == [0, 0, 0, 0, 0, 0] {
-        let octets = v6.octets();
-        Some(Ipv4Addr::new(
-            octets[12], octets[13], octets[14], octets[15],
-        ))
+/// The IPv4 address an IPv6 address carries, if it's one of the forms that
+/// reach it: IPv4-mapped (`::ffff:a.b.c.d`), IPv4-compatible (`::a.b.c.d`,
+/// deprecated, which [`Ipv6Addr::to_ipv4_mapped`] doesn't recognise),
+/// NAT64 (`64:ff9b::a.b.c.d`, RFC 6052), or 6to4 (`2002:AABB:CCDD::`, the
+/// address in bits 16–48).
+fn embedded_ipv4(v6: &Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = v6.segments();
+    let o = v6.octets();
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        Some(v4)
+    } else if s[0..6] == [0, 0, 0, 0, 0, 0] || s[0..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        Some(Ipv4Addr::new(o[12], o[13], o[14], o[15]))
+    } else if s[0] == 0x2002 {
+        Some(Ipv4Addr::new(o[2], o[3], o[4], o[5]))
     } else {
         None
     }
@@ -487,6 +513,101 @@ mod tests {
         // A publicly routable address embedded either way stays allowed.
         assert!(!is_disallowed_ip("::ffff:8.8.8.8".parse().unwrap()));
         assert!(!is_disallowed_ip("::8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_disallowed_ip_flags_every_non_public_ipv4_range() {
+        for (ip, range) in [
+            ("0.0.0.0", "this network"),
+            ("0.1.2.3", "this network"),
+            ("100.64.0.1", "shared / CGNAT"),
+            ("100.100.100.100", "shared / Tailscale"),
+            ("100.127.255.254", "shared / CGNAT"),
+            ("192.0.0.170", "IETF protocol assignments"),
+            ("198.18.0.1", "benchmarking"),
+            ("198.19.255.254", "benchmarking"),
+            ("224.0.0.1", "multicast"),
+            ("239.255.255.250", "multicast"),
+            ("240.0.0.1", "reserved"),
+            ("255.255.255.255", "broadcast"),
+            ("192.0.2.1", "documentation"),
+        ] {
+            assert!(is_disallowed_ip(ip.parse().unwrap()), "{ip} ({range})");
+        }
+        // The public neighbours of those ranges stay allowed.
+        for ip in [
+            "1.0.0.1",
+            "100.63.255.255",
+            "100.128.0.1",
+            "192.0.1.1",
+            "198.17.255.255",
+            "198.20.0.1",
+            "223.255.255.254",
+        ] {
+            assert!(!is_disallowed_ip(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[test]
+    fn is_disallowed_ip_flags_every_non_public_ipv6_range() {
+        for (ip, range) in [
+            ("ff02::1", "multicast"),
+            ("ff0e::1", "multicast"),
+            ("2001:db8::1", "documentation"),
+            ("2001::1", "Teredo"),
+            ("2001:0:4136:e378:8000:63bf:3fff:fdd2", "Teredo"),
+            ("64:ff9b:1::a", "local-use NAT64"),
+            ("fec0::1", "site-local"),
+            ("100::1", "discard-only"),
+        ] {
+            assert!(is_disallowed_ip(ip.parse().unwrap()), "{ip} ({range})");
+        }
+        for ip in [
+            "2606:4700:4700::1111",
+            "2001:4860:4860::8888",
+            "2001:db9::1",
+        ] {
+            assert!(!is_disallowed_ip(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[test]
+    fn is_disallowed_ip_checks_the_ipv4_in_nat64_and_6to4() {
+        for ip in [
+            // 169.254.169.254, cloud metadata.
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b::169.254.169.254",
+            "2002:a9fe:a9fe::",
+            "2002:a9fe:a9fe:1::1",
+            // 127.0.0.1 and 10.0.0.1.
+            "64:ff9b::7f00:1",
+            "2002:a00:1::",
+            // 100.64.0.1, shared.
+            "64:ff9b::6440:1",
+        ] {
+            assert!(is_disallowed_ip(ip.parse().unwrap()), "{ip}");
+        }
+        // 8.8.8.8 behind either stays allowed.
+        assert!(!is_disallowed_ip("64:ff9b::808:808".parse().unwrap()));
+        assert!(!is_disallowed_ip("2002:808:808::".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn bracketed_ipv6_literals_are_checked_as_addresses() {
+        for host in ["[::1]", "[64:ff9b::a9fe:a9fe]", "[2002:a9fe:a9fe::]"] {
+            let err = resolve_and_check(host, 80).await.unwrap_err();
+            assert!(
+                err.to_string().contains("not publicly routable"),
+                "{host}: {err}"
+            );
+        }
+        // A public literal is allowed, with nothing to pin.
+        assert!(
+            resolve_and_check("[2606:4700:4700::1111]", 443)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

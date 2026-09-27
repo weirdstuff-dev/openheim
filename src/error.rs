@@ -11,6 +11,12 @@ pub enum Error {
     #[error("HTTP {status}: {body}")]
     HttpError { status: u16, body: String },
 
+    /// The provider rejected a request as too long for the model's context
+    /// window. The agent loop answers it by leaving out older turns, so a
+    /// caller only sees it once even the current turn alone doesn't fit.
+    #[error("Context window exceeded: {0}")]
+    ContextOverflow(String),
+
     /// A provider's streamed reply ended before the provider said it was
     /// finished (typically a dropped connection). Retryable.
     #[error("Incomplete response: {0}")]
@@ -151,6 +157,11 @@ mod tests {
         assert!(!http_err(400).is_retryable());
         assert!(!http_err(401).is_retryable());
         assert!(!http_err(404).is_retryable());
+    }
+
+    #[test]
+    fn is_not_retryable_for_a_context_overflow() {
+        assert!(!Error::ContextOverflow("too long".into()).is_retryable());
     }
 
     #[test]

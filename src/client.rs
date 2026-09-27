@@ -398,6 +398,7 @@ pub struct OpenheimBuilder {
     max_iterations: Option<usize>,
     timeout_secs: Option<u64>,
     max_tokens: Option<u32>,
+    context_window: Option<u64>,
     mcp_servers: BTreeMap<String, McpServerConfig>,
     default_skills: Vec<String>,
     work_dir: Option<PathBuf>,
@@ -455,6 +456,14 @@ impl OpenheimBuilder {
     /// Maximum output tokens for LLM responses.
     pub fn max_tokens(mut self, tokens: u32) -> Self {
         self.max_tokens = Some(tokens);
+        self
+    }
+
+    /// The model's context window in tokens. Requests estimated at over 90%
+    /// of it leave out the oldest turns; see `context_window` in
+    /// `docs/configuration.md`.
+    pub fn context_window(mut self, tokens: u64) -> Self {
+        self.context_window = Some(tokens);
         self
     }
 
@@ -519,6 +528,9 @@ impl OpenheimBuilder {
                 }
                 if let Some(t) = self.max_tokens {
                     agent_config.max_tokens = Some(t);
+                }
+                if let Some(w) = self.context_window {
+                    agent_config.context_window = Some(w);
                 }
                 (agent_config, app_config)
             };
@@ -609,6 +621,7 @@ impl OpenheimBuilder {
                 api_key: Some(api_key),
                 timeout_secs: Some(timeout),
                 max_tokens: self.max_tokens,
+                context_window: self.context_window,
                 thinking: None,
             },
         );

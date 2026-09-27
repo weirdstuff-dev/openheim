@@ -168,6 +168,12 @@ impl InputLine {
         self.cursor += c.len_utf8();
     }
 
+    /// Inserts `s` at the cursor and moves the cursor past it.
+    pub(super) fn insert_str(&mut self, s: &str) {
+        self.text.insert_str(self.cursor, s);
+        self.cursor += s.len();
+    }
+
     pub(super) fn backspace(&mut self) {
         if self.cursor > 0 {
             let prev = self.text.floor_char_boundary(self.cursor - 1);

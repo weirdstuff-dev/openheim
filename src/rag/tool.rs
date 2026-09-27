@@ -162,16 +162,38 @@ impl ToolHandler for SearchMemoryTool {
         let args: SearchMemoryArgs = parse(args)?;
         let top_k = args.top_k.map(|k| k.clamp(1, MAX_TOP_K));
 
-        let hits = self.memory.search(&args.query, top_k).await?;
+        let found = self.memory.search_detailed(&args.query, top_k).await?;
+        // How the search fell short of a full semantic search, if it did.
+        let caveat = if found.semantic_failed {
+            Some(
+                "Semantic search is unavailable right now, so this was a keyword search; \
+                 a note worded differently may not show up."
+                    .to_string(),
+            )
+        } else if found.unindexed > 0 {
+            Some(format!(
+                "{} note(s) aren't in the semantic index yet and were searched by keyword only.",
+                found.unindexed
+            ))
+        } else {
+            None
+        };
+        let hits = found.hits;
         if hits.is_empty() {
             let stats = self.memory.stats().await?;
             if stats.memories == 0 {
                 return Ok("Long-term memory is empty; nothing has been remembered yet.".into());
             }
-            return Ok("No relevant memories found.".to_string());
+            return Ok(match caveat {
+                Some(caveat) => format!("No relevant memories found. ({caveat})"),
+                None => "No relevant memories found.".to_string(),
+            });
         }
 
         let mut out = format!("Found {} memory/memories:\n", hits.len());
+        if let Some(caveat) = caveat {
+            out.push_str(&format!("({caveat})\n"));
+        }
         for hit in &hits {
             let score = match hit.method {
                 SearchMethod::Semantic => format!("similarity {:.3}", hit.score),
@@ -322,6 +344,49 @@ mod tests {
             None,
             3,
         ))
+    }
+
+    #[tokio::test]
+    async fn tools_keep_working_while_embeddings_are_down() {
+        let m = Arc::new(LongTermMemory::new(
+            VectorStore::open_in_memory().unwrap(),
+            Some(Arc::new(
+                crate::rag::embedding::test_support::FlakyEmbedder::down(401),
+            )),
+            3,
+        ));
+        let harness = TurnHarness::new();
+        let turn = harness.turn();
+
+        let saved = RememberTool::new(m.clone())
+            .execute(
+                r#"{"content": "The staging cluster is in eu-west-1."}"#,
+                &turn,
+            )
+            .await
+            .unwrap();
+        assert!(saved.starts_with("Remembered as memory #"), "{saved}");
+
+        let found = SearchMemoryTool::new(m.clone())
+            .execute(r#"{"query": "staging cluster"}"#, &turn)
+            .await
+            .unwrap();
+        assert!(found.contains("eu-west-1"), "{found}");
+        assert!(found.contains("Semantic search is unavailable"), "{found}");
+
+        // A keyword miss says the search was degraded too.
+        let missed = SearchMemoryTool::new(m.clone())
+            .execute(r#"{"query": "where do we deploy"}"#, &turn)
+            .await
+            .unwrap();
+        assert!(
+            missed.starts_with("No relevant memories found."),
+            "{missed}"
+        );
+        assert!(
+            missed.contains("Semantic search is unavailable"),
+            "{missed}"
+        );
     }
 
     #[test]

@@ -292,6 +292,12 @@ pub struct ProviderConfig {
     pub timeout_secs: Option<u64>,
     /// Maximum output tokens for LLM responses
     pub max_tokens: Option<u32>,
+    /// The models' context window in tokens. When set, requests estimated
+    /// at over 90% of it leave out the oldest turns before they're sent.
+    /// Unset, older turns are left out only after the provider rejects a
+    /// request as too long.
+    #[serde(default)]
+    pub context_window: Option<u64>,
     /// Extended thinking (`"adaptive"` or `"off"`); see
     /// [`Self::resolve_thinking`] for the default. Applies to every model of
     /// the entry, so set `"off"` if one of them lacks adaptive thinking.
@@ -310,6 +316,7 @@ impl std::fmt::Debug for ProviderConfig {
             .field("api_key", &self.api_key.as_deref().map(redacted_if_set))
             .field("timeout_secs", &self.timeout_secs)
             .field("max_tokens", &self.max_tokens)
+            .field("context_window", &self.context_window)
             .field("thinking", &self.thinking)
             .finish()
     }
@@ -369,6 +376,9 @@ pub struct AgentConfig {
     pub timeout_secs: u64,
     /// Maximum output tokens for LLM responses (provider-specific defaults if not set)
     pub max_tokens: Option<u32>,
+    /// The model's context window in tokens; see
+    /// [`ProviderConfig::context_window`].
+    pub context_window: Option<u64>,
     /// Whether to request extended thinking (`AnthropicClient` only); see
     /// [`ProviderConfig::resolve_thinking`].
     pub thinking: bool,
@@ -389,6 +399,8 @@ struct AgentConfigWire {
     timeout_secs: u64,
     max_tokens: Option<u32>,
     #[serde(default)]
+    context_window: Option<u64>,
+    #[serde(default)]
     thinking: bool,
 }
 
@@ -405,6 +417,7 @@ impl From<AgentConfigWire> for AgentConfig {
             max_iterations: wire.max_iterations,
             timeout_secs: wire.timeout_secs,
             max_tokens: wire.max_tokens,
+            context_window: wire.context_window,
             thinking: wire.thinking,
         }
     }
@@ -421,6 +434,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("max_iterations", &self.max_iterations)
             .field("timeout_secs", &self.timeout_secs)
             .field("max_tokens", &self.max_tokens)
+            .field("context_window", &self.context_window)
             .field("thinking", &self.thinking)
             .finish()
     }
@@ -453,6 +467,7 @@ impl AgentConfig {
             max_iterations,
             timeout_secs: default_timeout_secs(),
             max_tokens: None,
+            context_window: None,
         }
     }
 
@@ -475,6 +490,7 @@ impl Default for AgentConfig {
             max_iterations: 10,
             timeout_secs: default_timeout_secs(),
             max_tokens: None,
+            context_window: None,
             thinking: false,
         }
     }
@@ -516,6 +532,7 @@ impl ProviderConfig {
             api_key: Some("key".to_string()),
             timeout_secs: None,
             max_tokens: None,
+            context_window: None,
             thinking: None,
         }
     }
