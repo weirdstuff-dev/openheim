@@ -3,21 +3,50 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 /// Public model info for a single provider (no credentials).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ProviderModels {
     pub default_model: String,
     pub models: Vec<String>,
 }
 
-/// JSON-safe summary of all configured providers and their models.
-#[derive(Debug, Clone, Serialize)]
+impl ProviderModels {
+    pub fn new(default_model: impl Into<String>, models: Vec<String>) -> Self {
+        Self {
+            default_model: default_model.into(),
+            models,
+        }
+    }
+}
+
+/// JSON-safe summary of all configured providers and their models. Also
+/// what `openheim serve`'s `GET /api/models` returns, so a remote client can
+/// deserialize the response straight into it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ModelsInfo {
     pub default_provider: String,
     pub providers: BTreeMap<String, ProviderModels>,
 }
 
+impl ModelsInfo {
+    pub fn new(
+        default_provider: impl Into<String>,
+        providers: BTreeMap<String, ProviderModels>,
+    ) -> Self {
+        Self {
+            default_provider: default_provider.into(),
+            providers,
+        }
+    }
+}
+
 /// Top-level configuration loaded from ~/.openheim/config.toml
+///
+/// To build one in code, start from [`Self::new`] and chain the `with_*`
+/// setters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AppConfig {
     pub default_provider: String,
     #[serde(default = "default_max_iterations")]
@@ -50,7 +79,7 @@ pub struct AppConfig {
     /// Overrides where history, skills, `system.md`, subagent profiles, and
     /// (absent an explicit `memory.db_path`) the memory database live.
     /// `None` means "default to `~/.openheim`". This is only the setting as
-    /// written; the directory actually in use is [`RuntimePaths::data_dir`].
+    /// written; a builder's `data_dir` overrides it.
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
 }
@@ -76,6 +105,7 @@ pub struct RuntimePaths {
 /// The `[tui]` section: terminal UI display preferences. Every field is
 /// optional; so is the section.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 pub struct TuiConfig {
     /// Named color theme (see `tui::render::theme_color` for the accepted
     /// names). Set via `:theme` in the running TUI, which persists it here.
@@ -83,10 +113,21 @@ pub struct TuiConfig {
     pub theme_color: Option<String>,
 }
 
+impl TuiConfig {
+    pub fn with_theme_color(mut self, theme_color: impl Into<String>) -> Self {
+        self.theme_color = Some(theme_color.into());
+        self
+    }
+}
+
 /// The `[memory]` section: where long-term memory lives, how many notes a
 /// search returns, and (optionally) which embeddings endpoint makes search
 /// semantic. Every field is optional; so is the section.
+///
+/// To build one in code, start from the default and chain the `with_*`
+/// setters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MemoryConfig {
     /// Name of a `[providers.<name>]` entry whose `api_base` / API key serve
     /// the embeddings endpoint. A Gemini-kind provider speaks Gemini's
@@ -125,9 +166,30 @@ impl Default for MemoryConfig {
     }
 }
 
+impl MemoryConfig {
+    /// Makes search semantic: embeddings from `model`, served by the
+    /// `[providers.<provider>]` entry.
+    pub fn with_embedding(mut self, provider: impl Into<String>, model: impl Into<String>) -> Self {
+        self.embedding_provider = Some(provider.into());
+        self.embedding_model = Some(model.into());
+        self
+    }
+
+    pub fn with_db_path(mut self, db_path: impl Into<PathBuf>) -> Self {
+        self.db_path = Some(db_path.into());
+        self
+    }
+
+    pub fn with_top_k(mut self, top_k: usize) -> Self {
+        self.top_k = top_k;
+        self
+    }
+}
+
 /// Resolved embeddings endpoint, assembled from a [`MemoryConfig`] plus the
 /// provider entry it names (see `AppConfig::resolve_embedding`).
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct EmbeddingConfig {
     pub provider_name: String,
     /// Wire protocol, i.e. which embeddings client gets built. Never
@@ -165,7 +227,11 @@ impl std::fmt::Debug for EmbeddingConfig {
 
 /// Configuration for a single MCP server connection.
 /// The map key in `[mcp_servers.<name>]` is used as the server name and tool-name prefix.
+///
+/// To build one in code, start from [`Self::stdio`] or [`Self::http`] and
+/// chain [`Self::with_env`] / [`Self::with_header`].
 #[derive(Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct McpServerConfig {
     /// Binary to spawn for stdio transport (e.g. `"npx"`, `"uvx"`).
     pub command: Option<String>,
@@ -181,6 +247,46 @@ pub struct McpServerConfig {
     /// `headers = { Authorization = "Bearer <token>" }`.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+}
+
+impl McpServerConfig {
+    /// A server spawned as `command args…`, spoken to over stdio.
+    pub fn stdio<I, S>(command: impl Into<String>, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            command: Some(command.into()),
+            args: args.into_iter().map(Into::into).collect(),
+            env: HashMap::new(),
+            url: None,
+            headers: HashMap::new(),
+        }
+    }
+
+    /// A server reached over Streamable HTTP at `url`.
+    pub fn http(url: impl Into<String>) -> Self {
+        Self {
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            url: Some(url.into()),
+            headers: HashMap::new(),
+        }
+    }
+
+    /// Adds an environment variable for the spawned process (stdio).
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.insert(key.into(), value.into());
+        self
+    }
+
+    /// Adds an HTTP header sent with every request (HTTP).
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(name.into(), value.into());
+        self
+    }
 }
 
 /// `args` often carry tokens (`--api-key …`), and `env`/`headers` values
@@ -207,6 +313,75 @@ fn default_max_iterations() -> usize {
 }
 
 impl AppConfig {
+    /// A config with no providers, MCP servers or skills, and every optional
+    /// setting at its default, as for an empty config file. Add the
+    /// `default_provider` entry with [`Self::with_provider`].
+    pub fn new(default_provider: impl Into<String>) -> Self {
+        Self {
+            default_provider: default_provider.into(),
+            max_iterations: default_max_iterations(),
+            tui: TuiConfig::default(),
+            providers: BTreeMap::new(),
+            mcp_servers: BTreeMap::new(),
+            default_skills: vec![],
+            work_dir: None,
+            allow_shell: default_allow_shell(),
+            memory: None,
+            data_dir: None,
+        }
+    }
+
+    pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
+        self.max_iterations = max_iterations;
+        self
+    }
+
+    pub fn with_tui(mut self, tui: TuiConfig) -> Self {
+        self.tui = tui;
+        self
+    }
+
+    /// Adds (or replaces) the `[providers.<name>]` entry.
+    pub fn with_provider(mut self, name: impl Into<String>, provider: ProviderConfig) -> Self {
+        self.providers.insert(name.into(), provider);
+        self
+    }
+
+    /// Adds (or replaces) the `[mcp_servers.<name>]` entry.
+    pub fn with_mcp_server(mut self, name: impl Into<String>, server: McpServerConfig) -> Self {
+        self.mcp_servers.insert(name.into(), server);
+        self
+    }
+
+    pub fn with_default_skills<I, S>(mut self, skills: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.default_skills = skills.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn with_work_dir(mut self, work_dir: impl Into<PathBuf>) -> Self {
+        self.work_dir = Some(work_dir.into());
+        self
+    }
+
+    pub fn with_allow_shell(mut self, allow_shell: bool) -> Self {
+        self.allow_shell = allow_shell;
+        self
+    }
+
+    pub fn with_memory(mut self, memory: MemoryConfig) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    pub fn with_data_dir(mut self, data_dir: impl Into<PathBuf>) -> Self {
+        self.data_dir = Some(data_dir.into());
+        self
+    }
+
     pub fn models_info(&self) -> ModelsInfo {
         ModelsInfo {
             default_provider: self.default_provider.clone(),
@@ -231,6 +406,7 @@ impl AppConfig {
 /// consults this today; other providers ignore it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ThinkingMode {
     /// Request Anthropic's adaptive extended thinking.
     Adaptive,
@@ -242,6 +418,7 @@ pub enum ThinkingMode {
 /// Set per provider with `kind = "…"`; when omitted it is inferred from the
 /// provider's name (see [`Self::infer_from_name`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ProviderKind {
     /// OpenAI's Chat Completions API.
     #[serde(rename = "openai")]
@@ -273,7 +450,11 @@ impl ProviderKind {
 }
 
 /// Per-provider configuration
+///
+/// To build one in code, start from [`Self::new`] and chain the `with_*`
+/// setters.
 #[derive(Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ProviderConfig {
     /// Wire protocol for this provider. Optional: inferred from the
     /// provider's name when unset (see [`ProviderKind::infer_from_name`]),
@@ -323,6 +504,69 @@ impl std::fmt::Debug for ProviderConfig {
 }
 
 impl ProviderConfig {
+    /// An entry serving only `default_model`, with no API key and every
+    /// optional setting unset.
+    pub fn new(api_base: impl Into<String>, default_model: impl Into<String>) -> Self {
+        let default_model = default_model.into();
+        Self {
+            kind: None,
+            api_base: api_base.into(),
+            models: vec![default_model.clone()],
+            default_model,
+            env_var: None,
+            api_key: None,
+            timeout_secs: None,
+            max_tokens: None,
+            context_window: None,
+            thinking: None,
+        }
+    }
+
+    pub fn with_kind(mut self, kind: ProviderKind) -> Self {
+        self.kind = Some(kind);
+        self
+    }
+
+    /// Replaces the list of models offered for this provider.
+    pub fn with_models<I, S>(mut self, models: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.models = models.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn with_env_var(mut self, env_var: impl Into<String>) -> Self {
+        self.env_var = Some(env_var.into());
+        self
+    }
+
+    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.api_key = Some(api_key.into());
+        self
+    }
+
+    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.timeout_secs = Some(timeout_secs);
+        self
+    }
+
+    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    pub fn with_context_window(mut self, tokens: u64) -> Self {
+        self.context_window = Some(tokens);
+        self
+    }
+
+    pub fn with_thinking(mut self, thinking: ThinkingMode) -> Self {
+        self.thinking = Some(thinking);
+        self
+    }
+
     /// Request timeout for this provider, falling back to the crate-wide
     /// default when `timeout_secs` is not set.
     pub fn resolve_timeout_secs(&self) -> u64 {
@@ -360,8 +604,12 @@ impl ProviderConfig {
 }
 
 /// Runtime configuration passed to agent/LLM code
+///
+/// To build one in code, start from [`Self::new`] and chain the `with_*`
+/// setters.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(from = "AgentConfigWire")]
+#[non_exhaustive]
 pub struct AgentConfig {
     /// The `[providers.<name>]` key this config was resolved from; used for
     /// display, persistence, and model-switch lookups — never to pick a
@@ -447,8 +695,8 @@ pub(crate) fn default_timeout_secs() -> u64 {
 
 impl AgentConfig {
     /// `kind` is inferred from `provider_name` (see
-    /// [`ProviderKind::infer_from_name`]); set the field afterwards to
-    /// override it.
+    /// [`ProviderKind::infer_from_name`]); override it with
+    /// [`Self::with_kind`]. `thinking` is on for an Anthropic `kind`.
     pub fn new(
         provider_name: String,
         api_base: String,
@@ -471,11 +719,35 @@ impl AgentConfig {
         }
     }
 
-    pub fn with_max_iterations(&self, max_iterations: usize) -> Self {
-        Self {
-            max_iterations,
-            ..self.clone()
-        }
+    /// Sets the wire protocol. Leaves `thinking` as it was.
+    pub fn with_kind(mut self, kind: ProviderKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
+        self.max_iterations = max_iterations;
+        self
+    }
+
+    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.timeout_secs = timeout_secs;
+        self
+    }
+
+    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    pub fn with_context_window(mut self, tokens: u64) -> Self {
+        self.context_window = Some(tokens);
+        self
+    }
+
+    pub fn with_thinking(mut self, thinking: bool) -> Self {
+        self.thinking = thinking;
+        self
     }
 }
 
@@ -496,45 +768,14 @@ impl Default for AgentConfig {
     }
 }
 
-/// Shared test fixtures, so a new field on these structs is added here once
-/// instead of in every test module that builds one by hand.
-#[cfg(test)]
-impl AppConfig {
-    /// A config with no providers, MCP servers or skills, and every optional
-    /// setting unset. Set fields on the result for what a test needs.
-    pub(crate) fn for_tests(default_provider: &str) -> Self {
-        Self {
-            default_provider: default_provider.to_string(),
-            max_iterations: default_max_iterations(),
-            tui: TuiConfig::default(),
-            providers: BTreeMap::new(),
-            mcp_servers: BTreeMap::new(),
-            default_skills: vec![],
-            work_dir: None,
-            allow_shell: false,
-            memory: None,
-            data_dir: None,
-        }
-    }
-}
-
 #[cfg(test)]
 impl ProviderConfig {
     /// A provider entry serving `models` (the first is the default) with an
     /// inline API key and everything else unset.
     pub(crate) fn for_tests(api_base: &str, models: &[&str]) -> Self {
-        Self {
-            kind: None,
-            api_base: api_base.to_string(),
-            default_model: models[0].to_string(),
-            models: models.iter().map(|m| m.to_string()).collect(),
-            env_var: None,
-            api_key: Some("key".to_string()),
-            timeout_secs: None,
-            max_tokens: None,
-            context_window: None,
-            thinking: None,
-        }
+        Self::new(api_base, models[0])
+            .with_models(models.iter().copied())
+            .with_api_key("key")
     }
 }
 
@@ -618,11 +859,66 @@ mod tests {
     }
 
     #[test]
-    fn with_max_iterations_clones_with_new_value() {
+    fn with_max_iterations_keeps_other_fields() {
         let cfg = AgentConfig::new("p".into(), "b".into(), "k".into(), "m".into(), 5);
         let updated = cfg.with_max_iterations(20);
         assert_eq!(updated.max_iterations, 20);
         assert_eq!(updated.provider_name, "p");
+    }
+
+    /// `AppConfig::new` gives what a config file with only
+    /// `default_provider` parses to.
+    #[test]
+    fn app_config_new_matches_minimal_file() {
+        let parsed: AppConfig = toml::from_str(r#"default_provider = "openai""#).unwrap();
+        let built = AppConfig::new("openai");
+        assert_eq!(
+            serde_json::to_value(&built).unwrap(),
+            serde_json::to_value(&parsed).unwrap()
+        );
+    }
+
+    #[test]
+    fn app_config_setters_fill_sections() {
+        let cfg = AppConfig::new("local")
+            .with_provider(
+                "local",
+                ProviderConfig::new("http://localhost:11434/v1", "llama3")
+                    .with_models(["llama3", "qwen3"])
+                    .with_kind(ProviderKind::OpenAiCompatible)
+                    .with_context_window(8192),
+            )
+            .with_mcp_server("fs", McpServerConfig::stdio("npx", ["-y", "server-fs"]))
+            .with_memory(MemoryConfig::default().with_top_k(3))
+            .with_allow_shell(true);
+        let local = &cfg.providers["local"];
+        assert_eq!(local.default_model, "llama3");
+        assert_eq!(local.models, ["llama3", "qwen3"]);
+        assert_eq!(local.context_window, Some(8192));
+        assert_eq!(cfg.mcp_servers["fs"].args, ["-y", "server-fs"]);
+        assert_eq!(cfg.memory.as_ref().unwrap().top_k, 3);
+        assert!(cfg.allow_shell);
+    }
+
+    #[test]
+    fn provider_config_new_offers_its_default_model() {
+        let p = ProviderConfig::new("https://api.example.com", "m1");
+        assert_eq!(p.models, ["m1"]);
+        assert!(p.api_key.is_none() && p.kind.is_none());
+    }
+
+    #[test]
+    fn mcp_server_config_constructors_pick_the_transport() {
+        let stdio = McpServerConfig::stdio("uvx", ["tool"]).with_env("TOKEN", "t");
+        assert_eq!(stdio.command.as_deref(), Some("uvx"));
+        assert!(stdio.url.is_none());
+        assert_eq!(stdio.env["TOKEN"], "t");
+
+        let http =
+            McpServerConfig::http("https://x.example/mcp").with_header("Authorization", "Bearer k");
+        assert!(http.command.is_none() && http.args.is_empty());
+        assert_eq!(http.url.as_deref(), Some("https://x.example/mcp"));
+        assert_eq!(http.headers["Authorization"], "Bearer k");
     }
 
     #[test]

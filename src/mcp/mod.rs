@@ -19,6 +19,7 @@ use crate::{
 ///
 /// Returned by [`crate::OpenheimClient::mcp_servers`].
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct McpServerStatus {
     /// Name of the server as defined in the configuration.
     pub name: String,

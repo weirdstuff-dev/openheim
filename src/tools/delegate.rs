@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::config::{AgentConfig, AppConfig, client_for_config};
+use crate::config::{AgentConfig, AppConfig, HttpClients, client_for_config};
 use crate::core::agent::run_agent;
 use crate::core::llm::LlmClient;
 use crate::core::models::{Message, StopReason, Tool};
@@ -63,6 +63,9 @@ pub struct DelegateTool {
     llm: Arc<dyn LlmClient>,
     app_config: AppConfig,
     base_config: AgentConfig,
+    /// Where clients for profiles with their own model get their
+    /// `reqwest::Client`.
+    http: Arc<HttpClients>,
 }
 
 impl DelegateTool {
@@ -72,6 +75,7 @@ impl DelegateTool {
         llm: Arc<dyn LlmClient>,
         app_config: AppConfig,
         base_config: AgentConfig,
+        http: Arc<HttpClients>,
     ) -> Self {
         Self {
             base_executor,
@@ -79,6 +83,7 @@ impl DelegateTool {
             llm,
             app_config,
             base_config,
+            http,
         }
     }
 
@@ -91,6 +96,7 @@ impl DelegateTool {
             llm,
             app_config: self.app_config.clone(),
             base_config: config,
+            http: self.http.clone(),
         }
     }
 
@@ -114,7 +120,7 @@ impl DelegateTool {
             None => config,
         };
 
-        let llm = client_for_config(&config, &self.base_config, &self.llm)?;
+        let llm = client_for_config(&config, &self.base_config, &self.llm, &self.http)?;
 
         Ok((config, llm))
     }
@@ -363,7 +369,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn sample_app_config() -> AppConfig {
-        AppConfig::for_tests("mock")
+        AppConfig::new("mock")
     }
 
     fn sample_agent_config() -> AgentConfig {
@@ -458,6 +464,7 @@ mod tests {
             llm,
             sample_app_config(),
             sample_agent_config(),
+            Arc::default(),
         )
     }
 
@@ -637,6 +644,7 @@ mod tests {
             llm,
             sample_app_config(),
             sample_agent_config(),
+            Arc::default(),
         );
         executor.register(Box::new(tool));
 
@@ -806,6 +814,7 @@ mod tests {
             llm,
             sample_app_config(),
             sample_agent_config(),
+            Arc::default(),
         )));
 
         let harness = TurnHarness::new();

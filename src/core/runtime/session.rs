@@ -7,14 +7,18 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::config::AgentConfig;
+use crate::core::llm::LlmClient;
 use crate::core::permission::Approvals;
 use crate::core::runtime::AgentMode;
 use crate::error::{Error, Result};
 
-#[derive(Debug)]
 pub struct SessionState {
     pub chat_id: Uuid,
     pub config: AgentConfig,
+    /// The client for `config` when it names another model than the
+    /// runtime's default; `None` means the default's client. Set together
+    /// with `config`, and built before the sessions lock is taken.
+    pub llm: Option<Arc<dyn LlmClient>>,
     /// The client's working directory, as sent; saved with the conversation
     /// and used to filter `list_sessions`.
     pub cwd: PathBuf,
@@ -145,6 +149,7 @@ mod tests {
                 "mock-model".into(),
                 5,
             ),
+            llm: None,
             cwd: PathBuf::from("/tmp"),
             tool_cwd: PathBuf::from("/tmp"),
             skills: vec![],

@@ -3,8 +3,7 @@
 //! configured.
 //!
 //! Nothing is stored or retrieved automatically. The agent gets four tools —
-//! `remember`, `search_memory`, `edit_memory`, and `forget` ([`RememberTool`],
-//! [`SearchMemoryTool`], [`EditMemoryTool`], [`ForgetTool`]) — and uses them
+//! `remember`, `search_memory`, `edit_memory`, and `forget` — and uses them
 //! when the user asks it to keep, recall, correct, or drop something. Notes
 //! live in a SQLite file
 //! (`~/.openheim/memory.db`) with an FTS5 index, so memory works with zero
@@ -20,7 +19,7 @@
 //! |-----------|----------------|
 //! | [`embedding`] | `EmbeddingClient` trait + OpenAI-compatible and Gemini implementations |
 //! | [`store`]     | `VectorStore` — SQLite schema, FTS5 index, sqlite-vec table, both queries |
-//! | [`tool`]      | The `remember` / `search_memory` / `edit_memory` / `forget` [`crate::tools::ToolHandler`]s |
+//! | `tool`        | The `remember` / `search_memory` / `edit_memory` / `forget` [`crate::tools::ToolHandler`]s |
 //!
 //! ```text
 //! remember(content)          ──▶ [embed] ──▶ memories (+ memories_fts, + vec_memories)
@@ -36,7 +35,7 @@
 
 pub mod embedding;
 pub mod store;
-pub mod tool;
+mod tool;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -46,10 +45,7 @@ use crate::error::Result;
 
 pub use embedding::{EmbeddingClient, GeminiEmbeddingClient, OpenAiEmbeddingClient};
 pub use store::{MemoryHit, MemoryRecord, SearchMethod, StoreStats, VectorStore};
-pub use tool::{
-    EDIT_MEMORY_TOOL_NAME, EditMemoryTool, FORGET_TOOL_NAME, ForgetTool, REMEMBER_TOOL_NAME,
-    RememberTool, SEARCH_MEMORY_TOOL_NAME, SearchMemoryTool,
-};
+pub(crate) use tool::{EditMemoryTool, ForgetTool, RememberTool, SearchMemoryTool};
 
 /// Default result count when the `[memory]` section doesn't set `top_k`.
 pub const DEFAULT_TOP_K: usize = 5;
@@ -113,8 +109,8 @@ impl LongTermMemory {
     }
 
     /// Builds the memory described by `config.memory` (all of it optional):
-    /// opens `db_path`, or `memory.db` under `data_dir` (the resolved
-    /// [`RuntimePaths::data_dir`](crate::config::RuntimePaths::data_dir)),
+    /// opens `db_path`, or `memory.db` under `data_dir` (the data directory
+    /// in use, `~/.openheim` by default),
     /// and attaches an embedder when `embedding_provider` / `embedding_model`
     /// are set. Does not touch the network.
     pub fn from_config(config: &AppConfig, data_dir: &Path) -> Result<Self> {

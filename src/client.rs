@@ -29,8 +29,9 @@ use crate::{
 
 /// The main entry point for embedding openheim in your application.
 ///
-/// Wraps an `AgentState` and exposes all agent capabilities:
-/// sessions, history, RAG, MCP servers, tools, and models.
+/// Exposes all agent capabilities: sessions, history, RAG, MCP servers,
+/// tools, and models. Cheap to clone; clones share one runtime.
+#[derive(Clone)]
 pub struct OpenheimClient {
     state: Arc<AgentState>,
 }
@@ -105,11 +106,23 @@ impl OpenheimClient {
         tokio::task::spawn_blocking(move || history.delete_conversation(&uuid)).await?
     }
 
+    /// Switch a live session to another model mid-conversation; the same as
+    /// [`SessionHandle::switch_model`], for callers that hold only the id.
+    /// Returns `(provider_name, model_name)`.
+    pub async fn switch_model(
+        &self,
+        session_id: &str,
+        provider: &str,
+        model: &str,
+    ) -> Result<(String, String)> {
+        self.state.switch_model(session_id, provider, model).await
+    }
+
     // ── Memory ────────────────────────────────────────────────────────────────
 
-    /// Direct access to the agent memory (history + skills managers).
-    pub fn memory(&self) -> &MemoryContext {
-        &self.state.memory
+    /// Names of the skills in the data directory's `skills/`, sorted.
+    pub fn skills(&self) -> Result<Vec<String>> {
+        self.state.memory.skills.list_skills()
     }
 
     /// The long-term memory behind the `remember` / `search_memory` /
@@ -375,20 +388,26 @@ impl From<Vec<ContentBlock>> for PromptInput {
 
 /// Builder for `OpenheimClient`.
 ///
-/// Supports two modes:
+/// Supports three modes:
 /// 1. **Programmatic** — set `.provider()`, `.api_key()`, or `.api_base()`
 ///    directly, building the whole config from scratch.
 /// 2. **File-based** — call `OpenheimClient::from_config(path)` or leave
 ///    everything unset to load from `~/.openheim/config.toml`.
+/// 3. **Given config** — pass a whole [`AppConfig`] with `.app_config()`,
+///    e.g. one loaded with `load_config_from` and then adjusted. No file is
+///    read.
 ///
-/// `.model()` works in either mode: it picks a configured model in
-/// file-based mode, and is the provider's model in programmatic mode.
+/// `.model()` works in every mode: it picks a configured model in the
+/// file-based and given-config modes, and is the provider's model in
+/// programmatic mode.
 ///
-/// MCP servers can be added in either mode with `.mcp_server()`.
+/// MCP servers can be added in any mode with `.mcp_server()`.
 #[derive(Default)]
 pub struct OpenheimBuilder {
     // file-based path (None = ~/.openheim/config.toml)
     config_path: Option<PathBuf>,
+    // Given-config mode: used instead of reading `config_path`.
+    app_config: Option<AppConfig>,
     // Programmatic fields: setting any of these but `model` skips the
     // config file.
     provider: Option<String>,
@@ -405,12 +424,23 @@ pub struct OpenheimBuilder {
     allow_shell: Option<bool>,
     data_dir: Option<PathBuf>,
     tools: Vec<Box<dyn ToolHandler>>,
+    #[cfg(feature = "rag")]
+    long_term_memory: Option<crate::rag::LongTermMemory>,
 }
 
 impl OpenheimBuilder {
     /// Path to a config file (overrides `~/.openheim/config.toml`).
     pub fn config_path(mut self, path: impl AsRef<Path>) -> Self {
         self.config_path = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// Use `config` as the whole configuration instead of reading a file.
+    /// `config_path` still names the file that config writers (the TUI's
+    /// `:theme`) update. Can't be combined with `.provider()`, `.api_key()`
+    /// or `.api_base()`; set those on the config's provider entry instead.
+    pub fn app_config(mut self, config: AppConfig) -> Self {
+        self.app_config = Some(config);
         self
     }
 
@@ -509,31 +539,51 @@ impl OpenheimBuilder {
         self
     }
 
+    /// The long-term memory behind the `remember` / `search_memory` /
+    /// `edit_memory` / `forget` tools, instead of the one the config's
+    /// `[memory]` section describes. Use it for a custom
+    /// [`EmbeddingClient`](crate::rag::EmbeddingClient):
+    /// `LongTermMemory::new(VectorStore::open(path)?, Some(embedder), top_k)`.
+    #[cfg(feature = "rag")]
+    pub fn long_term_memory(mut self, memory: crate::rag::LongTermMemory) -> Self {
+        self.long_term_memory = Some(memory);
+        self
+    }
+
     /// Build the client, connecting to MCP servers and initialising the agent state.
-    pub async fn build(self) -> Result<OpenheimClient> {
-        let (agent_config, mut app_config) =
-            if self.provider.is_some() || self.api_key.is_some() || self.api_base.is_some() {
-                self.programmatic_config()?
-            } else {
-                let app_config = match self.config_path {
-                    Some(ref path) => load_config_from(path)?,
-                    None => load_config()?,
-                };
-                let mut agent_config = app_config.resolve(self.model.as_deref())?;
-                if let Some(n) = self.max_iterations {
-                    agent_config.max_iterations = n;
-                }
-                if let Some(s) = self.timeout_secs {
-                    agent_config.timeout_secs = s;
-                }
-                if let Some(t) = self.max_tokens {
-                    agent_config.max_tokens = Some(t);
-                }
-                if let Some(w) = self.context_window {
-                    agent_config.context_window = Some(w);
-                }
-                (agent_config, app_config)
+    pub async fn build(mut self) -> Result<OpenheimClient> {
+        let programmatic =
+            self.provider.is_some() || self.api_key.is_some() || self.api_base.is_some();
+        if programmatic && self.app_config.is_some() {
+            return Err(crate::error::Error::ConfigError(
+                "app_config can't be combined with provider, api_key or api_base; \
+                 set them on the config's provider entry"
+                    .to_string(),
+            ));
+        }
+        let (agent_config, mut app_config) = if programmatic {
+            self.programmatic_config()?
+        } else {
+            let app_config = match (self.app_config.take(), &self.config_path) {
+                (Some(config), _) => config,
+                (None, Some(path)) => load_config_from(path)?,
+                (None, None) => load_config()?,
             };
+            let mut agent_config = app_config.resolve(self.model.as_deref())?;
+            if let Some(n) = self.max_iterations {
+                agent_config.max_iterations = n;
+            }
+            if let Some(s) = self.timeout_secs {
+                agent_config.timeout_secs = s;
+            }
+            if let Some(t) = self.max_tokens {
+                agent_config.max_tokens = Some(t);
+            }
+            if let Some(w) = self.context_window {
+                agent_config.context_window = Some(w);
+            }
+            (agent_config, app_config)
+        };
 
         // Merge any extra MCP servers from the builder
         for (name, cfg) in self.mcp_servers {
@@ -545,25 +595,11 @@ impl OpenheimBuilder {
             app_config.default_skills = self.default_skills;
         }
 
-        if let Some(wd) = self.work_dir {
-            let abs = if wd.is_absolute() {
-                wd.clone()
-            } else {
-                std::env::current_dir()
-                    .map_err(|e| {
-                        crate::error::Error::ConfigError(format!(
-                            "cannot resolve relative work_dir: {e}"
-                        ))
-                    })?
-                    .join(&wd)
-            };
-            let canonical = abs.canonicalize().map_err(|e| {
-                crate::error::Error::ConfigError(format!(
-                    "work_dir '{}' is inaccessible: {e}",
-                    wd.display()
-                ))
-            })?;
-            app_config.work_dir = Some(canonical);
+        // The builder's `work_dir` wins over the config's. Either is resolved
+        // once, here, so a bad one fails the build instead of the first tool
+        // call.
+        if let Some(wd) = self.work_dir.or_else(|| app_config.work_dir.take()) {
+            app_config.work_dir = Some(resolve_work_dir(&wd)?);
         }
         if let Some(shell) = self.allow_shell {
             app_config.allow_shell = shell;
@@ -581,9 +617,19 @@ impl OpenheimBuilder {
         };
 
         let memory = MemoryContext::new(app_config.default_skills.clone(), &paths.data_dir)?;
-        let state =
-            Arc::new(AgentState::new(agent_config, app_config, paths, memory, self.tools).await?);
-        Ok(OpenheimClient { state })
+        let state = AgentState::new(
+            agent_config,
+            app_config,
+            paths,
+            memory,
+            self.tools,
+            #[cfg(feature = "rag")]
+            self.long_term_memory,
+        )
+        .await?;
+        Ok(OpenheimClient {
+            state: Arc::new(state),
+        })
     }
 
     /// The config for programmatic mode (no config file): a single provider
@@ -644,6 +690,33 @@ impl OpenheimBuilder {
     }
 }
 
+/// `work_dir` as the sandbox root: absolute (a relative path is taken from
+/// the process's current directory), symlinks resolved, and an existing
+/// directory, or a `ConfigError` saying why not.
+fn resolve_work_dir(work_dir: &Path) -> Result<PathBuf> {
+    let config_error = |why: String| {
+        crate::error::Error::ConfigError(format!("work_dir '{}' {why}", work_dir.display()))
+    };
+    let absolute = if work_dir.is_absolute() {
+        work_dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| {
+                config_error(format!(
+                    "is relative, and the current directory is unknown: {e}"
+                ))
+            })?
+            .join(work_dir)
+    };
+    let canonical = absolute
+        .canonicalize()
+        .map_err(|e| config_error(format!("is inaccessible: {e}")))?;
+    if !canonical.is_dir() {
+        return Err(config_error("is not a directory".to_string()));
+    }
+    Ok(canonical)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,8 +745,8 @@ mod tests {
 
     /// `resume_session` works without the `acp` feature: it hands back the
     /// persisted `Message`s straight from `HistoryManager`. Writes a
-    /// conversation directly via `client.memory().history` (mock-free, no
-    /// LLM call) and resumes it by id.
+    /// conversation directly via the client's `HistoryManager` (mock-free,
+    /// no LLM call) and resumes it by id.
     #[tokio::test]
     async fn resume_session_loads_a_conversation_written_via_history_manager() {
         let dir = tempfile::tempdir().unwrap();
@@ -686,7 +759,7 @@ mod tests {
             .await
             .unwrap();
 
-        let history = client.memory().history.clone();
+        let history = client.state.memory.history.clone();
         let mut conv = history
             .create_conversation(Some("gpt-4o".into()), Some("openai".into()), vec![])
             .unwrap();
@@ -703,6 +776,237 @@ mod tests {
         assert_eq!(handle.id(), conv.meta.id.to_string());
         assert_eq!(loaded.messages, conv.messages);
         assert!(loaded.warning.is_none());
+    }
+
+    fn local_config() -> AppConfig {
+        AppConfig::new("local").with_provider(
+            "local",
+            ProviderConfig::new("http://127.0.0.1:1/v1", "m1").with_models(["m1", "m2"]),
+        )
+    }
+
+    /// A given `AppConfig` is used as-is: no file is read (the config path
+    /// doesn't exist), and `.model()` picks from its providers.
+    #[tokio::test]
+    async fn build_uses_a_given_app_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = OpenheimClient::builder()
+            .app_config(local_config())
+            .config_path(dir.path().join("missing.toml"))
+            .model("m2")
+            .data_dir(dir.path())
+            .work_dir(dir.path())
+            .build()
+            .await
+            .unwrap();
+
+        let models = client.models();
+        assert_eq!(models.default_provider, "local");
+        assert_eq!(models.providers["local"].models, ["m1", "m2"]);
+        assert_eq!(client.state.config().model, "m2");
+    }
+
+    async fn build_with_config_work_dir(
+        work_dir: &Path,
+        data_dir: &Path,
+    ) -> Result<OpenheimClient> {
+        OpenheimClient::builder()
+            .app_config(local_config().with_work_dir(work_dir))
+            .data_dir(data_dir)
+            .build()
+            .await
+    }
+
+    // A relative config `work_dir` is taken from the current directory and
+    // stored absolute, so the sandbox doesn't move if the cwd does.
+    #[tokio::test]
+    async fn a_relative_config_work_dir_is_resolved_at_build() {
+        let data = tempfile::tempdir().unwrap();
+        let here = std::env::current_dir().unwrap();
+        let work = tempfile::tempdir_in(&here).unwrap();
+        let relative = work.path().strip_prefix(&here).unwrap();
+        assert!(relative.is_relative());
+
+        let client = build_with_config_work_dir(relative, data.path())
+            .await
+            .unwrap();
+
+        assert_eq!(client.state.work_dir, work.path().canonicalize().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_missing_config_work_dir_fails_the_build() {
+        let data = tempfile::tempdir().unwrap();
+        let missing = data.path().join("no-such-dir");
+
+        let err = build_with_config_work_dir(&missing, data.path())
+            .await
+            .err()
+            .unwrap();
+
+        assert!(matches!(err, crate::error::Error::ConfigError(_)), "{err}");
+        assert!(err.to_string().contains("no-such-dir"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_config_work_dir_that_is_a_file_fails_the_build() {
+        let data = tempfile::tempdir().unwrap();
+        let file = data.path().join("file.txt");
+        std::fs::write(&file, "").unwrap();
+
+        let err = build_with_config_work_dir(&file, data.path())
+            .await
+            .err()
+            .unwrap();
+
+        assert!(err.to_string().contains("not a directory"), "{err}");
+    }
+
+    // A symlinked config `work_dir` becomes its target, which is what the
+    // file tools compare paths against.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_config_work_dir_is_resolved_to_its_target() {
+        let data = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let link = data.path().join("link");
+        std::os::unix::fs::symlink(target.path(), &link).unwrap();
+
+        let client = build_with_config_work_dir(&link, data.path())
+            .await
+            .unwrap();
+
+        assert_eq!(client.state.work_dir, target.path().canonicalize().unwrap());
+        let public = client.state.app_config.to_public(&client.state.work_dir);
+        assert_eq!(
+            public.work_dir,
+            target.path().canonicalize().unwrap().display().to_string()
+        );
+    }
+
+    // Same check for a `work_dir` read from a config file.
+    #[tokio::test]
+    async fn a_bad_work_dir_in_the_config_file_fails_the_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            r#"
+default_provider = "local"
+work_dir = "/no/such/openheim/work/dir"
+
+[providers.local]
+api_base = "http://127.0.0.1:1/v1"
+default_model = "m1"
+models = ["m1"]
+"#,
+        )
+        .unwrap();
+
+        let err = OpenheimClient::from_config(&config)
+            .data_dir(dir.path())
+            .build()
+            .await
+            .err()
+            .unwrap();
+
+        assert!(
+            err.to_string().contains("/no/such/openheim/work/dir"),
+            "{err}"
+        );
+    }
+
+    // The builder's `work_dir` replaces the config's, even a bad one.
+    #[tokio::test]
+    async fn the_builder_work_dir_overrides_the_configs() {
+        let data = tempfile::tempdir().unwrap();
+        let client = OpenheimClient::builder()
+            .app_config(local_config().with_work_dir("/no/such/openheim/work/dir"))
+            .work_dir(data.path())
+            .data_dir(data.path())
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(client.state.work_dir, data.path().canonicalize().unwrap());
+    }
+
+    #[tokio::test]
+    async fn app_config_with_programmatic_fields_is_rejected() {
+        let result = OpenheimClient::builder()
+            .app_config(local_config())
+            .api_key("k")
+            .build()
+            .await;
+        assert!(matches!(result, Err(crate::error::Error::ConfigError(_))));
+    }
+
+    #[tokio::test]
+    async fn skills_lists_the_skill_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = OpenheimClient::builder()
+            .app_config(local_config())
+            .data_dir(dir.path())
+            .work_dir(dir.path())
+            .build()
+            .await
+            .unwrap();
+        std::fs::write(dir.path().join("skills/rust.md"), "# Rust").unwrap();
+        std::fs::write(dir.path().join("skills/go.md"), "# Go").unwrap();
+
+        assert_eq!(client.skills().unwrap(), ["go", "rust"]);
+    }
+
+    /// A long-term memory given to the builder is the one the client (and
+    /// its memory tools) use, not a fresh one under `data_dir`.
+    #[cfg(feature = "rag")]
+    #[tokio::test]
+    async fn build_uses_a_given_long_term_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let store = crate::rag::VectorStore::open(&elsewhere.path().join("m.db")).unwrap();
+        let memory = crate::rag::LongTermMemory::new(store, None, 5);
+        memory.remember("seeded before build").await.unwrap();
+
+        let client = OpenheimClient::builder()
+            .app_config(local_config())
+            .data_dir(dir.path())
+            .work_dir(dir.path())
+            .long_term_memory(memory)
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(client.long_term_memory().stats().await.unwrap().memories, 1);
+        assert!(!dir.path().join("memory.db").exists());
+    }
+
+    /// `OpenheimClient::switch_model` reaches the same live session as the
+    /// handle, from a clone of the client too.
+    #[tokio::test]
+    async fn client_switch_model_switches_a_live_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = OpenheimClient::builder()
+            .app_config(local_config())
+            .data_dir(dir.path())
+            .work_dir(dir.path())
+            .build()
+            .await
+            .unwrap();
+        let session = client.new_session().start().await.unwrap();
+
+        let switched = client
+            .clone()
+            .switch_model(session.id(), "local", "m2")
+            .await
+            .unwrap();
+        assert_eq!(switched, ("local".to_string(), "m2".to_string()));
+
+        let err = client
+            .switch_model("not-a-session", "local", "m2")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::error::Error::NotFound(_)), "{err}");
     }
 
     #[cfg(feature = "acp")]

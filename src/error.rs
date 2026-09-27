@@ -2,6 +2,7 @@ use std::fmt;
 
 /// All errors that openheim can produce.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Non-HTTP error returned by an LLM provider (e.g. auth rejection in the response body).
     #[error("API error: {0}")]

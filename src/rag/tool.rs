@@ -12,7 +12,7 @@ use crate::core::turn::TurnContext;
 use crate::error::{Error, Result};
 use crate::tools::ToolHandler;
 use crate::tools::args::{NonEmptyString, parse};
-use crate::tools::capabilities::{ToolCapabilities, ToolKindHint};
+use crate::tools::{ToolCapabilities, ToolKindHint};
 
 use super::LongTermMemory;
 use super::store::SearchMethod;

@@ -45,15 +45,54 @@ struct LeaseInfo {
 static IDENTITY: LazyLock<(String, DateTime<Utc>)> =
     LazyLock::new(|| (current_hostname(), Utc::now()));
 
+/// The name leases record as their holder's host: the system hostname, or,
+/// on a system without one, [`fallback_host_id`] in the temp directory.
 fn current_hostname() -> String {
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown-host".to_string())
+    system_hostname().unwrap_or_else(|| fallback_host_id(&std::env::temp_dir()))
+}
+
+#[cfg(unix)]
+fn system_hostname() -> Option<String> {
+    let name = nix::unistd::gethostname().ok()?.into_string().ok()?;
+    non_empty(name)
+}
+
+#[cfg(windows)]
+fn system_hostname() -> Option<String> {
+    non_empty(std::env::var("COMPUTERNAME").ok()?)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn system_hostname() -> Option<String> {
+    None
+}
+
+fn non_empty(name: String) -> Option<String> {
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// A random host id kept in `dir`, created by the first process to need
+/// it. `dir` is the temp directory, which belongs to one machine or
+/// container: unlike the data directory, containers that share a data
+/// volume don't share it, so they don't take each other for one host.
+///
+/// If the file can't be read or created, the id is this process's alone.
+/// Other processes then treat its leases as another host's, taken over only
+/// once stale, never as their own.
+fn fallback_host_id(dir: &Path) -> String {
+    let path = dir.join("openheim-host-id");
+    let read = || std::fs::read_to_string(&path).ok().and_then(non_empty);
+    if let Some(id) = read() {
+        return id;
+    }
+    let id = format!("host-{}", Uuid::new_v4());
+    match create_exclusively(&path, &id) {
+        Ok(()) => id,
+        // Another process created it first: use its id.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read().unwrap_or(id),
+        Err(_) => id,
+    }
 }
 
 /// Whether `pid` is currently alive on this host. `None` if this platform
@@ -87,7 +126,7 @@ fn lock_path(dir: &Path, id: &Uuid) -> PathBuf {
 
 /// Writes `contents` to `path` via a temp file and rename, so readers never
 /// see a partial write. Only for refreshing or taking over an existing
-/// lockfile; a first claim uses [`create_lease_exclusively`], so two
+/// lockfile; a first claim uses [`create_exclusively`], so two
 /// processes can't both win it.
 fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     // A unique temp name per call, so two writers to the same lockfile can't
@@ -102,8 +141,9 @@ fn write_atomic(path: &Path, contents: &str) -> Result<()> {
 
 /// Creates `path` with `contents`, failing with
 /// [`std::io::ErrorKind::AlreadyExists`] if it's already there, so of two
-/// processes claiming a lease at once exactly one wins.
-fn create_lease_exclusively(path: &Path, contents: &str) -> std::io::Result<()> {
+/// processes claiming a lease (or creating the host id) at once exactly one
+/// wins.
+fn create_exclusively(path: &Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write;
     std::fs::OpenOptions::new()
         .write(true)
@@ -158,7 +198,7 @@ pub fn acquire(dir: &Path, id: &Uuid) -> Result<SessionLease> {
 
     let Some(existing) = existing else {
         // No readable lease: the file is absent, or isn't a lease.
-        return match create_lease_exclusively(&path, &contents) {
+        return match create_exclusively(&path, &contents) {
             Ok(()) => Ok(SessionLease { path }),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 let holder = std::fs::read_to_string(&path)
@@ -236,16 +276,56 @@ mod tests {
     }
 
     #[test]
-    fn create_lease_exclusively_fails_if_the_path_already_exists() {
+    fn create_exclusively_fails_if_the_path_already_exists() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("some.lock");
-        create_lease_exclusively(&path, "first").unwrap();
+        create_exclusively(&path, "first").unwrap();
 
-        let err = create_lease_exclusively(&path, "second").unwrap_err();
+        let err = create_exclusively(&path, "second").unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
         // The loser's write must not have clobbered the winner's content.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn system_hostname_is_found_without_a_hostname_binary() {
+        let name = system_hostname().expect("the test machine has a hostname");
+        assert!(!name.is_empty() && name.trim() == name);
+    }
+
+    // Processes on one machine agree on the fallback id: the first creates
+    // it, later ones read it.
+    #[test]
+    fn fallback_host_id_is_created_once_and_then_reused() {
+        let dir = tempdir().unwrap();
+        let first = fallback_host_id(dir.path());
+        assert!(first.starts_with("host-"), "{first}");
+        assert_eq!(fallback_host_id(dir.path()), first);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("openheim-host-id")).unwrap(),
+            first
+        );
+    }
+
+    // Two machines (or containers) with their own temp directories get
+    // different ids.
+    #[test]
+    fn fallback_host_ids_differ_between_machines() {
+        let (a, b) = (tempdir().unwrap(), tempdir().unwrap());
+        assert_ne!(fallback_host_id(a.path()), fallback_host_id(b.path()));
+    }
+
+    // Without a writable place for the id, each call (each process, since
+    // it's computed once) gets its own, never a shared constant.
+    #[test]
+    fn fallback_host_id_without_a_usable_dir_is_unique() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("no-such-dir");
+        let (a, b) = (fallback_host_id(&missing), fallback_host_id(&missing));
+        assert!(a.starts_with("host-") && b.starts_with("host-"));
+        assert_ne!(a, b);
     }
 
     /// Writes `contents` to `id`'s lockfile, last modified `age` ago.

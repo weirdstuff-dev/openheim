@@ -83,7 +83,7 @@ enum WsOutbound {
 /// reply so a client with several requests in flight can tell which reply
 /// (or error) belongs to which: `{"action": "read", "path": "a.txt", "id": 7}`.
 #[derive(Debug, Deserialize)]
-pub struct FsRequestEnvelope {
+pub(crate) struct FsRequestEnvelope {
     #[serde(default)]
     pub id: Option<Value>,
     #[serde(flatten)]
@@ -94,7 +94,7 @@ pub struct FsRequestEnvelope {
 /// for unsolicited messages (the connection greeting, watcher events, an
 /// unparseable payload).
 #[derive(Debug, Serialize)]
-pub struct FsReply {
+pub(crate) struct FsReply {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Value>,
     #[serde(flatten)]
@@ -109,7 +109,7 @@ impl FsReply {
 
 /// Entry in the file tree
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct FileEntry {
+pub(crate) struct FileEntry {
     pub path: String,
     pub name: String,
     pub is_dir: bool,
@@ -122,7 +122,7 @@ pub struct FileEntry {
 /// Requests from the frontend to the filesystem WebSocket
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action")]
-pub enum FsRequest {
+pub(crate) enum FsRequest {
     /// Initialize watching on a workspace directory
     #[serde(rename = "watch")]
     Watch { path: String },
@@ -162,7 +162,7 @@ pub enum FsRequest {
 /// Responses/events from the filesystem WebSocket to the frontend
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "type")]
-pub enum FsResponse {
+pub(crate) enum FsResponse {
     #[serde(rename = "connected")]
     Connected { message: String },
 
@@ -329,12 +329,44 @@ fn spawn_acp_server(
     let (in_tx, in_rx) = mpsc::unbounded::<std::io::Result<String>>();
     let sink =
         out_tx.sink_map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()));
-    tokio::spawn(acp::serve(Lines::new(sink, in_rx), state));
+    tokio::spawn(acp::serve_state(Lines::new(sink, in_rx), state));
     (in_tx, out_rx)
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<AgentState>) {
-    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (ws_tx, ws_rx) = socket.split();
+    relay(ws_tx, ws_rx, state).await;
+}
+
+/// Starts the fs sidecar for one connection: requests sent to the returned
+/// sender are carried out one at a time, in order, and each reply goes to
+/// `out`. A task of its own, so a slow request (a large recursive `list`, a
+/// read from a slow mount) doesn't hold up the connection's ACP frames.
+fn spawn_fs_worker(
+    work_dir: PathBuf,
+    out: UnboundedSender<WsOutbound>,
+) -> (
+    UnboundedSender<FsRequestEnvelope>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (requests_tx, mut requests) = mpsc::unbounded::<FsRequestEnvelope>();
+    let worker = tokio::spawn(async move {
+        let mut fs_state = FsState::new(work_dir);
+        while let Some(FsRequestEnvelope { id, request }) = requests.next().await {
+            let response = fs_state.handle(request, out.clone()).await;
+            let _ = out.unbounded_send(WsOutbound::Fs(FsReply { id, response }));
+        }
+    });
+    (requests_tx, worker)
+}
+
+/// Serves one `/ws` connection: `agent` frames go to and from its ACP
+/// server, `fs` frames to its fs worker, until the client closes.
+async fn relay<Tx, Rx, E>(mut ws_tx: Tx, mut ws_rx: Rx, state: Arc<AgentState>)
+where
+    Tx: futures::Sink<Message> + Unpin + Send + 'static,
+    Rx: futures::Stream<Item = Result<Message, E>> + Unpin,
+{
     let work_dir = state.work_dir.clone();
     let (acp_in_tx, mut acp_out_rx) = spawn_acp_server(state);
 
@@ -376,8 +408,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AgentState>) {
         }
     });
 
-    // Inbound: dispatch WS frames to ACP server or FS handler
-    let mut fs_state = FsState::new(work_dir);
+    // Inbound: dispatch WS frames to the ACP server or the fs worker. Neither
+    // is awaited here, so one can't hold up the other.
+    let (fs_requests, fs_worker) = spawn_fs_worker(work_dir, fs_tx.clone());
     while let Some(Ok(msg)) = ws_rx.next().await {
         match msg {
             Message::Text(text) => match serde_json::from_str::<WsInbound>(&text) {
@@ -385,9 +418,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AgentState>) {
                     let line = serde_json::to_string(&val).unwrap_or_default();
                     let _ = acp_in_tx.unbounded_send(Ok(line));
                 }
-                Ok(WsInbound::Fs(FsRequestEnvelope { id, request })) => {
-                    let response = fs_state.handle(request, fs_tx.clone()).await;
-                    let _ = fs_tx.unbounded_send(WsOutbound::Fs(FsReply { id, response }));
+                Ok(WsInbound::Fs(envelope)) => {
+                    let _ = fs_requests.unbounded_send(envelope);
                 }
                 Err(e) => {
                     tracing::warn!("invalid WS payload: {e}");
@@ -401,6 +433,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AgentState>) {
         }
     }
 
+    // Also drops the worker's `watch`, if any.
+    fs_worker.abort();
     outbound.abort();
 }
 
@@ -661,6 +695,82 @@ mod tests {
     async fn run_request(state: &mut FsState, req: FsRequest) -> FsResponse {
         let (events, _) = mpsc::unbounded::<WsOutbound>();
         state.handle(req, events).await
+    }
+
+    /// The next frame from the relay on `channel` (`agent` or `fs`) that
+    /// `wanted` accepts, skipping others; `None` after 5s without one.
+    async fn next_frame(
+        out: &mut mpsc::UnboundedReceiver<Message>,
+        channel: &str,
+        wanted: impl Fn(&Value) -> bool,
+    ) -> Option<Value> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(Message::Text(text)) = out.next().await {
+                let frame: Value = serde_json::from_str(&text).unwrap();
+                if frame["channel"] == channel && wanted(&frame["data"]) {
+                    return Some(frame["data"].clone());
+                }
+            }
+            None
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    // An fs request that blocks (a read of a FIFO nobody writes to) doesn't
+    // hold up the connection's ACP frames; its reply comes once it's done.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_slow_fs_request_does_not_hold_up_agent_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let client = crate::OpenheimClient::builder()
+            .provider("openai")
+            .api_key("test-key")
+            .data_dir(dir.path())
+            .work_dir(dir.path())
+            .build()
+            .await
+            .unwrap();
+        let (to_relay, from_client) =
+            mpsc::unbounded::<Result<Message, std::convert::Infallible>>();
+        let (to_client, mut out) = mpsc::unbounded::<Message>();
+        tokio::spawn(relay(to_client, from_client, client.state().clone()));
+        let send = |frame: &str| {
+            to_relay
+                .unbounded_send(Ok(Message::Text(frame.to_string().into())))
+                .unwrap()
+        };
+
+        send(r#"{"channel":"fs","data":{"action":"read","path":"pipe","id":1}}"#);
+        send(
+            r#"{"channel":"agent","data":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}}"#,
+        );
+
+        let reply = next_frame(&mut out, "agent", |data| data["id"] == 1).await;
+
+        // Unblock the read before asserting, so a failure can't leave the
+        // runtime's shutdown waiting on it. Its reply still arrives, with its
+        // id.
+        let writer = fifo.clone();
+        tokio::task::spawn_blocking(move || std::fs::write(writer, "done"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(reply.is_some(), "the ACP reply was held up by the fs read");
+        let read = next_frame(&mut out, "fs", |data| data["id"] == 1)
+            .await
+            .expect("no fs reply");
+        assert_eq!(read["type"], "file_content", "{read}");
+        assert_eq!(read["content"], "done", "{read}");
     }
 
     // Both socket handlers talk to ACP only through `spawn_acp_server`, so a

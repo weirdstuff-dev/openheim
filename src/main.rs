@@ -1,9 +1,11 @@
+use std::{fs::File, io::Write, sync::OnceLock};
+
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{EnvFilter, fmt};
 
 use openheim::{
     OpenheimClient,
-    config::init_config,
+    config::{config_dir, init_config},
     transport::{run, stdio, ws},
     tui,
 };
@@ -62,11 +64,32 @@ fn die(e: impl std::fmt::Display) -> ! {
     std::process::exit(1);
 }
 
+/// Set once the TUI owns the terminal: logs then go to this file (or
+/// nowhere, if it couldn't be opened) instead of stderr.
+static TUI_LOG: OnceLock<Option<File>> = OnceLock::new();
+
+/// Where each log line goes: stderr, since stdout carries `openheim acp`'s
+/// JSON-RPC stream and `openheim run`'s answer, until the TUI takes over.
+fn log_writer() -> Box<dyn Write> {
+    match TUI_LOG.get() {
+        None => Box::new(std::io::stderr()),
+        Some(Some(file)) => Box::new(file),
+        Some(None) => Box::new(std::io::sink()),
+    }
+}
+
+/// Opens `~/.openheim/openheim.log` for appending.
+fn open_tui_log() -> Option<File> {
+    let path = config_dir().ok()?.join("openheim.log");
+    File::options().create(true).append(true).open(path).ok()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
     fmt::Subscriber::builder()
         .with_env_filter(env_filter)
+        .with_writer(log_writer)
         .init();
 
     let cli = Cli::parse();
@@ -74,6 +97,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         None => {
             let client = build_client(None).await.unwrap_or_else(|e| die(e));
+            // Written to the TUI's screen, a log line would garble it.
+            let _ = TUI_LOG.set(open_tui_log());
             if let Err(e) = tui::run(client, cli.skills).await {
                 die(e);
             }

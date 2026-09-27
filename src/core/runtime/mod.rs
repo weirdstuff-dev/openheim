@@ -16,6 +16,7 @@ pub use state::{AgentState, LoadedSession};
 /// [`Self::as_str`] gives the wire-level mode id; [`Self::parse`] is the
 /// inverse, for the boundary where that id arrives as a `&str`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum AgentMode {
     /// Full tool access; tool calls go through the permission gate as normal.
     #[default]

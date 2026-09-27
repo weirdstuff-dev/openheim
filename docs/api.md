@@ -1242,6 +1242,8 @@ No `watch` call is required before file operations — every request is validate
 
 Messages that aren't a reply to a request (the `connected` greeting, `fs_event` from a watch, and the error for an unparseable payload) never carry an `id`. Requests without an `id` get replies without one, as before.
 
+**Ordering.** A connection's `fs` requests are carried out one at a time, in the order sent, so their replies come in that order too (a `write` followed by a `read` of the same file reads what was written). They run apart from the `agent` channel: a slow `fs` request, such as a large recursive `list`, doesn't delay ACP messages, and an `fs` reply can arrive before or after `agent` frames sent at the same time.
+
 #### 3.3.1 Watch / Unwatch
 
 Start watching a directory for live file change events. The directory must be within `work_dir`. Watching does **not** affect path validation for other operations.

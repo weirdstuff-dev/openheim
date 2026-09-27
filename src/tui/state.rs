@@ -334,15 +334,22 @@ impl Theme {
     }
 }
 
-/// Requests from the UI to the agent task (see `tui::run`).
+/// A request from the UI to the agent task (see `tui::run`). The task
+/// handles them one at a time, in the order they were sent, so a prompt
+/// sent right after `:new` or a session switch runs in the new session.
+#[derive(Debug, PartialEq)]
+pub(super) enum AgentCommand {
+    Prompt(String),
+    SwitchModel { provider: String, model: String },
+    SwitchSession { id: String, cwd: std::path::PathBuf },
+    ListSessions,
+    NewSession,
+}
+
+/// The UI's ends of the channels to the agent task.
 pub(super) struct AgentChannels {
-    pub(super) prompt: mpsc::UnboundedSender<String>,
-    /// `(provider, model)`.
-    pub(super) switch_model: mpsc::UnboundedSender<(String, String)>,
-    /// `(session id, cwd)`.
-    pub(super) switch_session: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
-    pub(super) list_sessions: mpsc::UnboundedSender<()>,
-    pub(super) new_session: mpsc::UnboundedSender<()>,
-    /// Cancels the running turn, if any.
+    pub(super) commands: mpsc::UnboundedSender<AgentCommand>,
+    /// Cancels the running turn, if any. Kept apart from `commands`, which
+    /// wait until the turn ends: a cancel has to get through during it.
     pub(super) cancel: mpsc::UnboundedSender<()>,
 }

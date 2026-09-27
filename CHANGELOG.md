@@ -6,6 +6,62 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Unknown config keys are reported.** A typo such as `allow-shell` or `[providers.openai] api-key` was silently ignored, so the setting just didn't take effect. `load_config_from` (and so every way of starting openheim from a config file) now logs a warning naming each unknown key by its path, e.g. `providers.openai.api-key`. Unknown keys are still not an error, so a config written for a newer version keeps loading.
+
+### Changed
+
+- **Public enums and data structs are `#[non_exhaustive]`, so later releases can add variants and fields without breaking you.** Until now, every new `StreamEvent` or `Error` variant broke each downstream `match`, and every new config field broke each struct literal. In exchange, this release breaks them once:
+  - A `match` on one of these enums needs a `_ =>` arm: `ApprovalScope`, `AgentMode`, `ContentBlock`, `Error`, `FinishReason`, `LlmChunk`, `PermissionDecision`, `ProviderKind`, `SearchMethod`, `StopReason`, `StreamEvent`, `ThinkingMode` and `ToolKindHint`. Building their variants still works. `Role` stays exhaustive.
+  - These structs can no longer be built with a struct literal (not even with `..Default::default()`), and patterns that destructure them need `..`. Fields stay public, so reading and assigning them still works:
+    - Built by embedders, now with constructors and `with_*` setters: `AppConfig::new(default_provider)` plus `with_provider`, `with_mcp_server`, `with_memory`, `with_work_dir`, `with_allow_shell`, … ; `ProviderConfig::new(api_base, default_model)` plus `with_api_key`, `with_models`, `with_kind`, `with_context_window`, … ; `McpServerConfig::stdio(command, args)` / `McpServerConfig::http(url)` plus `with_env` / `with_header`; `MemoryConfig::default()` plus `with_embedding(provider, model)`, `with_db_path`, `with_top_k`; `TuiConfig::default().with_theme_color(..)`; `AgentConfig::new(..)` plus `with_kind`, `with_timeout_secs`, `with_max_tokens`, `with_context_window`, `with_thinking` (`with_max_iterations` now takes `self` by value, so call it on an owned config or a `clone()`); `Message::new(role, content)`; `Choice::new(message, finish_reason).with_usage(..)`; `Usage::new(input_tokens, output_tokens)` plus `with_cache_creation_tokens` / `with_cache_read_tokens`; `ToolCapabilities::default().with_read_only(..).with_kind(..).with_approval_scope(..)`; `TurnContext::new(cancel, permission_gate, work_dir, client_io)` plus `with_cwd`; `LineRange::new(line, limit)`; `ModelsInfo::new(default_provider, providers)` and `ProviderModels::new(default_model, models)` (both now also `Deserialize`, so a remote client can parse `GET /api/models` into them). `Tool` and `FunctionDefinition` are built with the existing `Tool::function`.
+    - Returned by openheim, for reading only: `AgentProfile`, `AgentResult`, `Conversation`, `ConversationMeta` (or `ConversationMeta::new`), `EmbeddingConfig`, `LoadedSession`, `McpServerStatus`, `MemoryHit`, `MemoryRecord`, `PublicConfig` and its `Public*Config` sections, `StoreStats`, `ToolResultBlock` and `ToolUseBlock`.
+- **The public API is now only what embedders are meant to use.** Every `pub` item was a promise not to break it, and much of the runtime's internal machinery was `pub`. Everything that stays public is listed in the crate docs; what was hidden, and what to use instead:
+
+  | Hidden | Use instead |
+  |---|---|
+  | `core::runtime::AgentState` and `AgentState::new` (building the runtime by hand) | `OpenheimClient::builder()`. To adjust a loaded config first, `load_config_from(path)`, change it, then `.app_config(config)` (new). `.config_path(path)` still names the file config writers update |
+  | `AgentState` fields: `.memory.history` (list/load/delete conversations) | `client.list_sessions(None)`, `client.get_session(id)`, `client.delete_session(id)` |
+  | `.memory.skills.list_skills()` | `client.skills()` (new) |
+  | `.app_config.models_info()`, `.executor.list_tools()`, `.mcp_statuses` | `client.models()`, `client.tools()`, `client.mcp_servers()` |
+  | `AgentState::switch_model(session_id, provider, model)` | `client.switch_model(session_id, provider, model)` (new) or `SessionHandle::switch_model` |
+  | `acp::serve(transport, Arc<AgentState>)` | `acp::serve(transport, client)`. `OpenheimClient` is now `Clone` (clones share one runtime), so keep a clone for the calls above |
+  | `core::runtime::{AgentMode, LoadedSession}` | `openheim::{AgentMode, LoadedSession}` |
+  | `client.memory()`, `MemoryContext`, `HistoryManager`, `SkillsManager`, `SystemLoader`, `SessionLease` | the client methods above; skill files are `skills/<name>.md` in the data directory |
+  | `config::RuntimePaths` | `.data_dir()` / `.config_path()` on the builder |
+  | `rag::{RememberTool, SearchMemoryTool, EditMemoryTool, ForgetTool}` and their `*_TOOL_NAME` constants (to wire in a custom `LongTermMemory`) | `OpenheimBuilder::long_term_memory(memory)` (new, feature `rag`). Registering the tools by hand never worked: the built-in memory tools replaced them |
+  | `tools::sandbox::{validate_path, validate_path_from, validate_entry}` | `TurnContext::resolve_path` in a custom tool |
+  | `tools::{DelegateTool, DELEGATE_TOOL_NAME, ScopedExecutor}`, `tools::delegate` | none; `delegate_task` is always registered |
+  | `config::client_for_config`, `config::save_theme_to_config_at` | `config::create_client` |
+  | `core::permission::{Approvals, approval_key}` | none; the runtime remembers `AllowAlways`/`RejectAlways` decisions for any `PermissionGate` |
+  | `transport::ws::{FsRequest, FsResponse, FsRequestEnvelope, FsReply, FileEntry}` | the JSON shapes in `docs/api.md` |
+
+  `config::ThinkingMode`, the type of `ProviderConfig::thinking`, was never exported; it is now.
+- **Each public item has one path.** The crate root no longer re-exports the `agent`, `llm` and `models` modules, and `tools::capabilities` is private. Use `openheim::core::{agent, llm, models}::…` (the most used types, like `Message`, `StreamEvent` and `LlmClient`, are still at the crate root too) and `openheim::tools::{ToolCapabilities, ToolKindHint, ApprovalScope}`.
+- **The `acp` feature follows `agent-client-protocol`'s major version.** Its API is built on that crate's types (`acp::serve` takes its transports, `acp::schema` is its wire vocabulary), so a new major version of it will be a breaking openheim release. If you also depend on `agent-client-protocol` directly, ask for the same major version (2.x today) so one copy resolves.
+
+### Fixed
+
+- **In the TUI, a prompt sent right after switching sessions, starting a new one, or changing models now goes where it should.** Each kind of request reached the TUI's agent side on its own channel, and when several were waiting, which one ran first was random. So a prompt typed just after picking a session in `:sessions` (or after `:new`, or `:models <name>`) could run in the previous session or on the previous model. Requests now run in the order they're made.
+- **On `/ws`, a slow filesystem request no longer holds up the agent.** `fs` requests were carried out inside the connection's read loop, so while one ran (a large recursive `list`, a read from a slow mount) no `agent` frame on that connection got through, not even a `session/cancel`. They now run on a task of their own, still one at a time and in order, and replies still carry the request's `id`.
+- **`openheim acp` no longer writes log lines into its protocol stream.** The `openheim` binary logged to stdout, which carries `openheim acp`'s JSON-RPC messages (and `openheim run`'s answer), so any warning, such as an MCP server failing to connect, broke the client's connection. Logs now go to stderr, and in the TUI, where they'd garble the screen, to `~/.openheim/openheim.log`.
+- **In the TUI, resuming a session puts you on that session's model.** The status bar kept showing the model you were on before, and `:new` started the next session on that model instead of the resumed one. `LoadedSession` has a new `provider` field alongside `model`.
+- **A bad `work_dir` in `config.toml` now stops openheim at startup.** Only the builder's `work_dir` was checked and resolved; one from the config file was used as written, so a missing path, or one that isn't a directory, only failed at the first file tool call, and a relative one moved with the process's current directory. Now either is resolved when the client is built (a relative path from the current directory, symlinks followed), and `build()` (or `openheim` itself) fails with a `ConfigError` naming the path if it isn't an existing directory. `GET /api/config` shows the resolved path.
+- **Containers sharing a data volume no longer take over each other's session leases.** The host recorded in a session lease came from running the `hostname` program, and was `unknown-host` wherever that's missing, as in slim container images. Two such containers sharing `~/.openheim` looked like one host, so each checked the other's process ids against its own and could take over a lease for a turn still running. The hostname now comes from the operating system directly. On a system with none, it's a random id kept in the temp directory, which containers don't share.
+- **A session on a non-default model no longer slows down every other session.** Each turn of a session that had switched models (or started on another one) built a new HTTP client, with its own connection pool and TLS handshake, while holding the lock every session's requests go through. Now the client is built once, when the session switches (or starts or resumes) on that model, outside the lock, and reused for every turn. All LLM clients with the same timeout share one HTTP client and its connections, including those `delegate_task` builds for subagent profiles that name their own model.
+
+### Breaking changes (library)
+
+What to change when upgrading an embedding from 0.14; the entries above have the details. After this release, adding a field or an enum variant is no longer a breaking change.
+
+- **`match` on openheim's enums needs a `_ =>` arm** (`Error`, `StreamEvent`, `ContentBlock`, `StopReason`, `FinishReason`, `PermissionDecision`, …; `Role` excepted).
+- **Struct literals of openheim's types no longer compile.** Use the constructors and `with_*` setters instead: `McpServerConfig::stdio`/`http`, `AppConfig::new`, `ProviderConfig::new`, `Message::new`, `Choice::new`, `Usage::new`, `TurnContext::new`, `ToolCapabilities::default().with_*`, `LineRange::new`, `ModelsInfo::new`/`ProviderModels::new`. Patterns that destructure these structs need `..`.
+- **`AgentConfig::with_max_iterations` takes `self` by value.**
+- **Runtime internals are hidden.** Build through `OpenheimClient::builder()` (`.app_config(cfg)` for a config you loaded and adjusted) instead of `AgentState::new`, and use the client's methods instead of `AgentState`'s fields. `acp::serve` takes an `OpenheimClient`, `client.memory()` is gone (use `client.skills()` and the session methods), and custom embeddings go through `OpenheimBuilder::long_term_memory`. See the table under Changed.
+- **Import paths:** `openheim::{agent, llm, models}::…` becomes `openheim::core::{agent, llm, models}::…`, `openheim::tools::capabilities::…` becomes `openheim::tools::…`, and `core::runtime::{AgentMode, LoadedSession}` becomes `openheim::{AgentMode, LoadedSession}`.
+- **A bad `work_dir` now fails `build()`**, including one from the config file, and so does one that isn't a directory.
+
 ## [0.14.0] - 2026-09-27
 
 ### Added
