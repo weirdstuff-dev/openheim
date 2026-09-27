@@ -82,7 +82,8 @@ Returns the public server configuration: an explicit allow-list of fields, so an
       "models": ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"],
       "env_var": "OPENAI_API_KEY",
       "timeout_secs": 120,
-      "max_tokens": 4096
+      "max_tokens": 4096,
+      "context_window": 128000
     },
     "anthropic": {
       "kind": "anthropic",
@@ -1582,6 +1583,7 @@ interface ProviderConfig {
   env_var?: string;
   timeout_secs?: number;
   max_tokens?: number;
+  context_window?: number;
   // api_key is NEVER included in responses
 }
 
