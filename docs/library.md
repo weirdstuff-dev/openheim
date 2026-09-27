@@ -85,6 +85,32 @@ let client = OpenheimClient::from_config("/etc/myapp/openheim.toml")
     .await?;
 ```
 
+### From a config you built or adjusted
+
+`.app_config(config)` hands the builder a whole `AppConfig`, and no file is read. Load one with `load_config_from` and change what you need, or build one with `AppConfig::new` and its `with_*` setters. `.config_path()` still names the file that config writers (the TUI's `:theme`) update. It can't be combined with `.provider()`, `.api_key()` or `.api_base()`; put those on the config's provider entry.
+
+```rust
+use openheim::config::{AppConfig, ProviderConfig, load_config_from};
+
+// Load, then drop the MCP servers that spawn a process (e.g. on mobile).
+let mut config = load_config_from("/path/to/config.toml")?;
+config.mcp_servers.retain(|_, server| server.command.is_none());
+config.allow_shell = false;
+
+let client = OpenheimClient::builder()
+    .app_config(config)
+    .config_path("/path/to/config.toml")
+    .build()
+    .await?;
+
+// Or entirely in code:
+let config = AppConfig::new("local").with_provider(
+    "local",
+    ProviderConfig::new("http://localhost:11434/v1", "llama3").with_models(["llama3", "qwen3"]),
+);
+let client = OpenheimClient::builder().app_config(config).build().await?;
+```
+
 ### Overriding just the model
 
 `.model()` alone (with no `.provider()`/`.api_key()`/`.api_base()`) doesn't switch to programmatic config — it still loads the config file, but resolves this model instead of the default one, the same as passing `--model` to `openheim run`:
@@ -283,6 +309,15 @@ session.prompt("My name is Alice", |_| {}).await?;
 session.prompt("What's my name?", |event| { /* prints "Alice" */ }).await?;
 ```
 
+### Switch model
+
+A live session can move to any model listed in the config; the history carries over. Use the handle, or the client when you only have the session id:
+
+```rust
+let (provider, model) = session.switch_model("anthropic", "claude-opus-4-7").await?;
+client.switch_model(session.id(), "openai", "gpt-4o").await?;
+```
+
 ### Context usage
 
 `session.context_usage().await?` returns the token usage of the most recent LLM call — how full the context window is *right now*, not a running total across the session. `None` until a provider has reported usage.
@@ -439,30 +474,16 @@ client.delete_session("550e8400-e29b-41d4-a716-446655440000").await?;
 
 ---
 
-## Memory — direct history and skills access
+## Skills
 
-`client.memory()` returns a `&MemoryContext` with direct access to the underlying `HistoryManager` and `SkillsManager`. This is useful for advanced use cases like building custom UIs, searching conversations, or managing skills programmatically.
+`client.skills()` lists the skills in the data directory's `skills/`, sorted. Each is a Markdown file, `skills/<name>.md`, so read or edit its content there directly.
 
 ```rust
-let memory = client.memory();
-
-// List all conversation metadata
-let metas = memory.history.list_conversations()?;
-
-// Load a full conversation
-let conv = memory.history.load_conversation(&uuid)?;
-
-// Save a conversation (e.g. after external edits)
-memory.history.save_conversation(&conv)?;
-
-// List available skills
-let skills = memory.skills.list_skills()?;
+let skills = client.skills()?;
 // → ["debugging", "rust", "tdd"]
-
-// Load skill content
-let content = memory.skills.load_skill("rust")?;
-println!("{content}");
 ```
+
+History is reached through the session methods above (`list_sessions`, `get_session`, `resume_session`, `delete_session`).
 
 ---
 
@@ -483,7 +504,17 @@ memory.edit(note.id, "The user's staging cluster is eu-west-2.").await?;
 memory.forget(note.id).await?;
 ```
 
-To use a custom embeddings backend, implement `openheim::rag::EmbeddingClient` and build `LongTermMemory::new(VectorStore::open(path)?, Some(Arc::new(my_embedder)), top_k)` yourself; wrap it in `RememberTool` / `SearchMemoryTool` / `EditMemoryTool` / `ForgetTool` and register them via `OpenheimBuilder::tool` if the agent should be able to call them.
+To use a custom embeddings backend, implement `openheim::rag::EmbeddingClient`, build the memory yourself and hand it to the builder. The agent's memory tools then use it instead of the one the config's `[memory]` section describes:
+
+```rust
+use openheim::rag::{LongTermMemory, VectorStore};
+
+let memory = LongTermMemory::new(VectorStore::open(&db_path)?, Some(Arc::new(my_embedder)), 5);
+let client = OpenheimClient::builder()
+    .long_term_memory(memory)
+    .build()
+    .await?;
+```
 
 ---
 
