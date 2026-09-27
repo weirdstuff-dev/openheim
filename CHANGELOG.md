@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-27
+
 ### Added
 
 - **The TUI can cancel a running turn.** Press `Ctrl+C` while the agent is working to stop it. What had streamed so far stays on screen, followed by "turn cancelled". A pending permission prompt closes too. To quit, press `Ctrl+C` twice within two seconds (the footer shows "Ctrl+C again to quit" after the first press). `:q` still quits at once.
