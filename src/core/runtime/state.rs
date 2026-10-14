@@ -3,7 +3,7 @@
 //! other transports dispatch into.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -75,6 +75,8 @@ pub struct AgentState {
     /// model. `prompt` rebinds a copy to the session's live model each turn
     /// (see [`DelegateTool::for_session`]).
     delegate: DelegateTool,
+    /// `app_config.always_allowed_tools`, handed to every turn's `RememberingGate`.
+    always_allowed_tools: Arc<HashSet<String>>,
 }
 
 impl AgentState {
@@ -136,6 +138,8 @@ impl AgentState {
         );
         sys_executor.register(Box::new(delegate.clone()));
         let executor = Arc::new(sys_executor) as Arc<dyn ToolExecutor>;
+        let always_allowed_tools =
+            Arc::new(app_config.always_allowed_tools.iter().cloned().collect());
 
         Ok(Self {
             llm,
@@ -151,6 +155,7 @@ impl AgentState {
             paths,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             delegate,
+            always_allowed_tools,
         })
     }
 
@@ -394,11 +399,13 @@ impl AgentState {
                 prompt_guard,
             )
         };
-        // The caller's gate only asks; remembering `*Always` answers for the
-        // rest of the session happens here, the same for every front-end.
+        // The caller's gate only asks; `always_allowed_tools` and remembering
+        // `*Always` answers for the rest of the session happen here, the same
+        // for every front-end.
         let permission_gate: Arc<dyn PermissionGate> = Arc::new(RememberingGate::new(
             permission_gate,
             approvals,
+            self.always_allowed_tools.clone(),
             executor.clone(),
         ));
 

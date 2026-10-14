@@ -23,6 +23,7 @@ pub struct PublicConfig {
     /// The resolved sandbox root, not the raw (often unset) config value.
     pub work_dir: String,
     pub allow_shell: bool,
+    pub always_allowed_tools: Vec<String>,
     pub tui: PublicTuiConfig,
     pub providers: BTreeMap<String, PublicProviderConfig>,
     pub mcp_servers: BTreeMap<String, PublicMcpServerConfig>,
@@ -94,6 +95,7 @@ impl AppConfig {
             max_iterations: self.max_iterations,
             work_dir: work_dir.display().to_string(),
             allow_shell: self.allow_shell,
+            always_allowed_tools: self.always_allowed_tools.clone(),
             tui: PublicTuiConfig {
                 theme_color: self.tui.theme_color.clone(),
             },
@@ -170,6 +172,7 @@ mod tests {
             default_provider = "openai"
             data_dir = "/Users/alice/.openheim"
             allow_shell = true
+            always_allowed_tools = ["read_file"]
             [tui]
             theme_color = "green"
 
@@ -227,6 +230,10 @@ mod tests {
 
         assert_eq!(val["work_dir"], "/work/dir");
         assert_eq!(val["allow_shell"], true);
+        assert_eq!(
+            val["always_allowed_tools"],
+            serde_json::json!(["read_file"])
+        );
         assert_eq!(val["tui"]["theme_color"], "green");
 
         let openai = &val["providers"]["openai"];
