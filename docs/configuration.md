@@ -19,6 +19,7 @@ A key openheim doesn't know, such as a typo like `allow-shell` for `allow_shell`
 | `default_skills` | string[] | `[]` | Skills loaded automatically in every new session. Merged with per-session `--skills`; defaults appear first, duplicates removed. |
 | `work_dir` | path | cwd at invocation | Root directory the agent is allowed to read and write. The agent cannot access files outside this tree. When unset, defaults to the directory from which openheim was invoked. A relative path is taken from that directory too (no `~` expansion). It's resolved at startup, symlinks followed, and must be an existing directory, or openheim refuses to start. |
 | `allow_shell` | boolean | `false` | Whether to expose the `execute_command` shell tool to the LLM. Disabled by default — set to `true` to expose the tool. When `false`, the LLM never sees it in its tool list. |
+| `always_allowed_tools` | string[] | `[]` | Tools that run without asking for approval, by the name the LLM sees (`{server}__{tool}` for MCP tools). See [Tool approval](#tool-approval). |
 | `data_dir` | path | `~/.openheim` | Root directory for openheim's own data: conversation history (`history/`), skills (`skills/`), `system.md`, subagent profiles (`agents/`), and the long-term memory database (`memory.db`, unless `[memory].db_path` overrides it). The config file itself is still read from `~/.openheim/config.toml`. Lets two agents in one process keep separate state, or a sandboxed run stay out of the real home directory. |
 
 ```toml
@@ -34,6 +35,9 @@ work_dir = "/home/user/projects/myproject"
 # Enable shell command execution (disabled by default)
 # allow_shell = true
 
+# Run these tools without asking for approval
+# always_allowed_tools = ["read_file", "list_dir", "search"]
+
 # Keep openheim's own data (history, skills, memory) out of $HOME
 # data_dir = "/var/lib/openheim"
 ```
@@ -47,6 +51,10 @@ Every tool result, built-in, MCP or custom, is cut to 128 KiB (with a note sayin
 `web_fetch` is not subject to `work_dir` — it fetches remote URLs, not local files. It's bounded instead by an SSRF guard (rejects every address that isn't publicly routable unicast: loopback, private, shared/CGNAT, link-local including cloud metadata endpoints, multicast, reserved and documentation ranges, and NAT64/6to4/Teredo addresses that lead to them), a 20-second timeout, a 256 KiB response cap, and no automatic redirect following.
 
 **`allow_shell`** gates whether `execute_command` appears in the tool list sent to the LLM. It defaults to `false` — the LLM never sees the tool and cannot request it. Set it to `true` to expose the tool (bounded as described above).
+
+### Tool approval
+
+The TUI and ACP clients (over stdio or `/ws`) ask before every tool call; `openheim run` and the library facade (unless given a permission gate) allow every call without asking. A tool named in **`always_allowed_tools`** runs without asking, in every session and for subagents too. The match is on the exact tool name, and it covers every call to that tool whatever its arguments: listing `execute_command` allows every shell command, where "Allow Always" in a prompt only covers that exact command. A name that matches no tool does nothing.
 
 ---
 
