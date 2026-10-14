@@ -422,6 +422,7 @@ pub struct OpenheimBuilder {
     default_skills: Vec<String>,
     work_dir: Option<PathBuf>,
     allow_shell: Option<bool>,
+    always_allowed_tools: Option<Vec<String>>,
     data_dir: Option<PathBuf>,
     tools: Vec<Box<dyn ToolHandler>>,
     #[cfg(feature = "rag")]
@@ -524,6 +525,17 @@ impl OpenheimBuilder {
         self
     }
 
+    /// Tools that run without asking the session's permission gate.
+    /// Overrides `always_allowed_tools` from the config file. Defaults to none.
+    pub fn always_allowed_tools<I, S>(mut self, tools: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.always_allowed_tools = Some(tools.into_iter().map(Into::into).collect());
+        self
+    }
+
     /// Directory backing history, skills, `system.md`, subagent profiles,
     /// and (absent an explicit `[memory].db_path`) the memory database.
     /// Overrides `data_dir` from the config file. Defaults to `~/.openheim`.
@@ -604,6 +616,9 @@ impl OpenheimBuilder {
         if let Some(shell) = self.allow_shell {
             app_config.allow_shell = shell;
         }
+        if let Some(tools) = self.always_allowed_tools {
+            app_config.always_allowed_tools = tools;
+        }
         // Resolved once here; everything downstream reads `RuntimePaths`.
         let paths = RuntimePaths {
             data_dir: match self.data_dir.or_else(|| app_config.data_dir.clone()) {
@@ -681,6 +696,7 @@ impl OpenheimBuilder {
             default_skills: self.default_skills.clone(),
             work_dir: None,
             allow_shell: false,
+            always_allowed_tools: vec![],
             memory: None,
             data_dir: None,
         };

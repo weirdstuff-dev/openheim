@@ -73,6 +73,7 @@ Returns the public server configuration: an explicit allow-list of fields, so an
   "max_iterations": 10,
   "work_dir": "/home/user/project",
   "allow_shell": false,
+  "always_allowed_tools": ["read_file", "search"],
   "tui": { "theme_color": "green" },
   "providers": {
     "openai": {
@@ -1604,6 +1605,7 @@ interface AppConfig {
   max_iterations: number;
   work_dir: string;
   allow_shell: boolean;
+  always_allowed_tools: string[]; // tools that run without a permission request
   tui: { theme_color?: string };
   providers: Record<string, ProviderConfig>;
   mcp_servers: Record<string, McpServerConfig>;

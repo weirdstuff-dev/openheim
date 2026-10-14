@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **`always_allowed_tools` config key.** Tools listed in it run without a permission prompt, in the TUI, over ACP (stdio and `/ws`), and for subagents. It matches the exact tool name (`{server}__{tool}` for MCP tools) and covers every call whatever its arguments, so listing `execute_command` allows every shell command. Also `AppConfig::with_always_allowed_tools` and `OpenheimBuilder::always_allowed_tools`, and `GET /api/config` now includes the list.
+
 ## [0.15.0] - 2026-09-28
 
 ### Added

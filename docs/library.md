@@ -161,6 +161,8 @@ let client = OpenheimClient::builder()
 
 **`.allow_shell(bool)`** — controls whether the `execute_command` tool is exposed to the LLM. When `false` the tool is removed from the tool list entirely; the LLM never sees it and cannot request it. Defaults to `false`.
 
+**`.always_allowed_tools(tools)`** — tools that run without asking the session's permission gate (see `SessionBuilder::permission_gate`), matched by exact tool name and covering every call whatever its arguments. Overrides `always_allowed_tools` from the config file. Only matters with a gate that asks: the default gate already allows everything.
+
 ### Data directory
 
 **`.data_dir(path)`** — repoints openheim's own state at a directory of your choosing: conversation history, skills, `system.md`, subagent profiles, and — unless `[memory].db_path` says otherwise — the long-term memory database. Defaults to `~/.openheim` (and overrides the `data_dir` config-file field when set). The config file itself is still loaded from `~/.openheim/config.toml`. Two agents in one process can hold separate `data_dir`s; a sandboxed CI run can point at a temp directory and never touch the real home directory:
