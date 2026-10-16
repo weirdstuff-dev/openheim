@@ -50,6 +50,12 @@ impl OpenheimClient {
         }
     }
 
+    /// The directory holding history, skills, `system.md`, subagent profiles
+    /// and (by default) the memory database, as resolved by `build()`.
+    pub fn data_dir(&self) -> &Path {
+        &self.state.paths().data_dir
+    }
+
     /// The runtime behind this client, for the transports (which hand it to
     /// `acp::serve`) and the TUI, so both build it through the builder.
     #[cfg(any(feature = "acp", feature = "tui"))]
@@ -422,6 +428,7 @@ pub struct OpenheimBuilder {
     default_skills: Vec<String>,
     work_dir: Option<PathBuf>,
     allow_shell: Option<bool>,
+    always_allowed_tools: Option<Vec<String>>,
     data_dir: Option<PathBuf>,
     tools: Vec<Box<dyn ToolHandler>>,
     #[cfg(feature = "rag")]
@@ -429,7 +436,8 @@ pub struct OpenheimBuilder {
 }
 
 impl OpenheimBuilder {
-    /// Path to a config file (overrides `~/.openheim/config.toml`).
+    /// Path to a config file (overrides `~/.openheim/config.toml`). Unless a
+    /// `data_dir` is set, the data lives in this file's directory too.
     pub fn config_path(mut self, path: impl AsRef<Path>) -> Self {
         self.config_path = Some(path.as_ref().to_path_buf());
         self
@@ -524,9 +532,21 @@ impl OpenheimBuilder {
         self
     }
 
+    /// Tools that run without asking the session's permission gate.
+    /// Overrides `always_allowed_tools` from the config file. Defaults to none.
+    pub fn always_allowed_tools<I, S>(mut self, tools: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.always_allowed_tools = Some(tools.into_iter().map(Into::into).collect());
+        self
+    }
+
     /// Directory backing history, skills, `system.md`, subagent profiles,
     /// and (absent an explicit `[memory].db_path`) the memory database.
-    /// Overrides `data_dir` from the config file. Defaults to `~/.openheim`.
+    /// Overrides `data_dir` from the config file. Defaults to the config
+    /// file's directory (`~/.openheim` unless `.config_path()` says otherwise).
     pub fn data_dir(mut self, path: impl Into<PathBuf>) -> Self {
         self.data_dir = Some(path.into());
         self
@@ -604,16 +624,25 @@ impl OpenheimBuilder {
         if let Some(shell) = self.allow_shell {
             app_config.allow_shell = shell;
         }
+        if let Some(tools) = self.always_allowed_tools {
+            app_config.always_allowed_tools = tools;
+        }
         // Resolved once here; everything downstream reads `RuntimePaths`.
-        let paths = RuntimePaths {
-            data_dir: match self.data_dir.or_else(|| app_config.data_dir.clone()) {
-                Some(dir) => dir,
+        let config_path = match self.config_path {
+            Some(path) => std::path::absolute(path)?,
+            None => config_path()?,
+        };
+        // Without a `data_dir`, the data lives next to the config file.
+        let data_dir = match self.data_dir.or_else(|| app_config.data_dir.clone()) {
+            Some(dir) => dir,
+            None => match config_path.parent() {
+                Some(dir) => dir.to_path_buf(),
                 None => config_dir()?,
             },
-            config_path: match self.config_path {
-                Some(path) => path,
-                None => config_path()?,
-            },
+        };
+        let paths = RuntimePaths {
+            data_dir,
+            config_path,
         };
 
         let memory = MemoryContext::new(app_config.default_skills.clone(), &paths.data_dir)?;
@@ -681,6 +710,7 @@ impl OpenheimBuilder {
             default_skills: self.default_skills.clone(),
             work_dir: None,
             allow_shell: false,
+            always_allowed_tools: vec![],
             memory: None,
             data_dir: None,
         };
@@ -804,6 +834,44 @@ mod tests {
         assert_eq!(models.default_provider, "local");
         assert_eq!(models.providers["local"].models, ["m1", "m2"]);
         assert_eq!(client.state.config().model, "m2");
+    }
+
+    /// Without a `data_dir`, the data lives in the config file's directory;
+    /// the config's `data_dir` beats that, and the builder's beats both.
+    #[tokio::test]
+    async fn data_dir_defaults_to_the_config_files_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("agent");
+        let config_path = config_dir.join("config.toml");
+        let build = |config: AppConfig, data_dir: Option<PathBuf>| {
+            let mut builder = OpenheimClient::builder()
+                .app_config(config)
+                .config_path(&config_path)
+                .work_dir(dir.path());
+            if let Some(data_dir) = data_dir {
+                builder = builder.data_dir(data_dir);
+            }
+            builder.build()
+        };
+
+        let client = build(local_config(), None).await.unwrap();
+        assert_eq!(client.data_dir(), config_dir);
+        assert!(config_dir.join("history").is_dir());
+
+        let key_dir = dir.path().join("from-key");
+        let client = build(local_config().with_data_dir(&key_dir), None)
+            .await
+            .unwrap();
+        assert_eq!(client.data_dir(), key_dir);
+
+        let builder_dir = dir.path().join("from-builder");
+        let client = build(
+            local_config().with_data_dir(&key_dir),
+            Some(builder_dir.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(client.data_dir(), builder_dir);
     }
 
     async fn build_with_config_work_dir(

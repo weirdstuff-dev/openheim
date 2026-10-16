@@ -69,6 +69,12 @@ pub struct AppConfig {
     /// Defaults to `false`. Set to `true` to explicitly opt in to shell access.
     #[serde(default = "default_allow_shell")]
     pub allow_shell: bool,
+    /// Tools that run without asking for approval, by the name the LLM sees
+    /// (`{server}__{tool}` for MCP tools). Covers every call to a listed
+    /// tool whatever its arguments, so listing `execute_command` allows every
+    /// shell command. Empty by default.
+    #[serde(default)]
+    pub always_allowed_tools: Vec<String>,
     /// Long-term memory (`remember` / `search_memory` / `edit_memory` /
     /// `forget` tools).
     /// Optional: without it memory still works, keyword-only, in
@@ -78,8 +84,8 @@ pub struct AppConfig {
     pub memory: Option<MemoryConfig>,
     /// Overrides where history, skills, `system.md`, subagent profiles, and
     /// (absent an explicit `memory.db_path`) the memory database live.
-    /// `None` means "default to `~/.openheim`". This is only the setting as
-    /// written; a builder's `data_dir` overrides it.
+    /// `None` means "the config file's directory". This is only the setting
+    /// as written; a builder's `data_dir` overrides it.
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
 }
@@ -94,7 +100,7 @@ fn default_allow_shell() -> bool {
 pub struct RuntimePaths {
     /// Where history, skills, `system.md`, subagent profiles and (by default)
     /// the memory database live: the builder's or config's `data_dir`, else
-    /// `~/.openheim`.
+    /// `config_path`'s directory.
     pub data_dir: PathBuf,
     /// The config file this client was loaded from, or would write to for a
     /// programmatic config, so config writers like the TUI's `:theme` target
@@ -338,6 +344,7 @@ impl AppConfig {
             default_skills: vec![],
             work_dir: None,
             allow_shell: default_allow_shell(),
+            always_allowed_tools: vec![],
             memory: None,
             data_dir: None,
         }
@@ -381,6 +388,15 @@ impl AppConfig {
 
     pub fn with_allow_shell(mut self, allow_shell: bool) -> Self {
         self.allow_shell = allow_shell;
+        self
+    }
+
+    pub fn with_always_allowed_tools<I, S>(mut self, tools: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.always_allowed_tools = tools.into_iter().map(Into::into).collect();
         self
     }
 

@@ -14,6 +14,8 @@ Openheim ships as a single binary with four subcommands. This guide covers runni
 | `openheim serve` | WebSocket + REST server |
 | `openheim init` | Create a default `~/.openheim/config.toml` |
 
+`~/.openheim` is `.openheim` in the home directory of the user running openheim (`$HOME`; the user profile folder on Windows). Every subcommand takes `--config <FILE>` to use another config file; see [Config and data locations](#config-and-data-locations).
+
 Server mode is the primary deployment target for hosted and enterprise use.
 
 ---
@@ -40,7 +42,7 @@ Running `openheim` with no subcommand opens the interactive terminal UI. Type a 
 
 **Theme colors:** `white`, `gray`, `blue`, `cyan`, `magenta`, `green`, `yellow`, `red`, `pink`
 
-The selected theme is persisted to `~/.openheim/config.toml` as `theme_color` under `[tui]`.
+The selected theme is persisted to the config file in use (`~/.openheim/config.toml`, or the `--config` file) as `theme_color` under `[tui]`.
 
 ---
 
@@ -62,9 +64,67 @@ The filesystem sidecar is sandboxed to the configured `work_dir` (see [configura
 
 ---
 
+## Config and data locations
+
+An openheim process uses two locations:
+
+- **The config file**, `~/.openheim/config.toml` by default. `--config <FILE>` names another one.
+- **The data directory**, which holds everything openheim writes:
+
+  | Path | Contents |
+  |---|---|
+  | `system.md` | The agent's identity |
+  | `skills/` | Skills |
+  | `agents/` | Subagent profiles |
+  | `history/` | Saved conversations |
+  | `memory.db` | Long-term memory, unless `[memory].db_path` is set |
+  | `openheim.log` | The TUI's log |
+
+  It's the directory the config file's [`data_dir`](./configuration.md#top-level-fields) key names, or, without that key, the config file's own directory: `~/.openheim` by default, or wherever the `--config` file is.
+
+`--config` works with every subcommand, before or after it (`openheim --config FILE run "…"` and `openheim run --config FILE "…"` are the same). A relative path is taken from the directory openheim is started in. openheim doesn't expand `~` itself; write `--config ~/agents/coder.toml` with a space so your shell expands it, or use an absolute path.
+
+`openheim init` writes the default config file and a `system.md` next to it, creating the directory if needed. Every other subcommand fails if the config file is missing; with `--config`, the error names the `init` command to run. If you then set `data_dir`, move `system.md` there, since that's where it's read from. `:theme` in the TUI saves to the config file in use.
+
+### Running several agents
+
+Give each agent its own config file. Without a `data_dir` key, each agent's data lives next to its config, so agents in separate directories share nothing:
+
+```bash
+openheim --config ~/agents/coder/config.toml init
+openheim --config ~/agents/research/config.toml init
+# edit both config files
+
+# Run both at once
+openheim --config ~/agents/coder/config.toml
+openheim --config ~/agents/research/config.toml serve --port 1218
+```
+
+To keep an agent's data apart from its config, for example a read-only config in `/etc` and data under `/var/lib`, set `data_dir` in the config:
+
+```toml
+# /etc/openheim/coder.toml
+data_dir = "/var/lib/openheim/coder"
+```
+
+```bash
+openheim --config /etc/openheim/coder.toml serve
+```
+
+Some settings are not tied to the config or data location, so check them when two agents run side by side:
+
+- **Ports.** `openheim serve` binds port 1217 by default. Give each server its own `--port`.
+- **`[memory].db_path`.** An absolute path puts the memory database there instead of the data directory. Two configs with the same `db_path` share one memory. Leave it unset to keep each agent's memory separate.
+- **`work_dir`.** It's the directory the agent's tools may read and write, not where its data lives, and it defaults to the directory openheim was started in. Two agents started in the same directory work on the same files, and nothing coordinates their edits. Set `work_dir` in each config to keep them apart.
+- **Environment variables.** Provider keys read from the environment (`ANTHROPIC_API_KEY`, `env_var = "…"`) and `RUST_LOG` come from each process's own environment, so set them per process to give agents different keys.
+
+Give each agent its own data directory too. Two agents whose config files sit in the same directory (and set no `data_dir`), or whose configs set the same `data_dir`, share one data directory.
+
+---
+
 ## Configuration
 
-Openheim reads `~/.openheim/config.toml` at startup. In server deployments, place the config at the path the process user can read. See [configuration.md](./configuration.md) for the full reference.
+Openheim reads `~/.openheim/config.toml` at startup, or the file `--config` names. In server deployments, place the config at the path the process user can read. See [configuration.md](./configuration.md) for the full reference.
 
 ### API keys via environment variables
 
@@ -95,7 +155,7 @@ RUST_LOG=info openheim serve
 RUST_LOG=openheim=debug openheim serve   # debug only openheim internals
 ```
 
-Logs go to stderr, except in the TUI: once it's on screen, they're appended to `~/.openheim/openheim.log` instead.
+Logs go to stderr, except in the TUI: once it's on screen, they're appended to `openheim.log` in the data directory (`~/.openheim` by default; see [Config and data locations](#config-and-data-locations)) instead.
 
 ---
 
@@ -232,6 +292,8 @@ systemctl start openheim
 systemctl status openheim
 ```
 
+The service runs as the `openheim` user, so `~/.openheim` is that user's `/home/openheim/.openheim`, not root's or yours. To keep the config in `/etc` and the data in `/var/lib` instead, set `data_dir = "/var/lib/openheim"` in `/etc/openheim/config.toml`, add `--config /etc/openheim/config.toml` to `ExecStart`, and set `ReadWritePaths=/var/lib/openheim`.
+
 ---
 
 ## Reverse proxy
@@ -304,4 +366,4 @@ Openheim is designed as a single-user or small-team server. For multi-tenant dep
 
 ### Data residency
 
-Conversation history is written to `~/.openheim/history/` as a pair of files per conversation: `{uuid}.json` (metadata, rewritten wholesale on each change) and `{uuid}.jsonl` (messages, appended one per line as the conversation grows). Back up the whole directory, not just `*.json` — the message content lives in the `.jsonl` files. For enterprises with strict data residency requirements, use a provider endpoint that runs in your region (Anthropic Bedrock, Azure OpenAI, self-hosted Ollama, etc.) and point openheim at it via an `openai_compatible` provider entry.
+Conversation history is written to `history/` in the data directory (`~/.openheim/history/` by default; see [Config and data locations](#config-and-data-locations)) as a pair of files per conversation: `{uuid}.json` (metadata, rewritten wholesale on each change) and `{uuid}.jsonl` (messages, appended one per line as the conversation grows). Back up the whole directory, not just `*.json` — the message content lives in the `.jsonl` files. For enterprises with strict data residency requirements, use a provider endpoint that runs in your region (Anthropic Bedrock, Azure OpenAI, self-hosted Ollama, etc.) and point openheim at it via an `openai_compatible` provider entry.

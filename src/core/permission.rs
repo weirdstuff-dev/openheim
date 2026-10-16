@@ -4,7 +4,7 @@
 //! The ACP implementation (backed by `session/request_permission`) lives in
 //! `crate::acp` (feature `acp`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -149,12 +149,16 @@ impl Approvals {
     }
 }
 
-/// Wraps the gate a session was given with the session's [`Approvals`]: a
-/// remembered decision is returned without asking, and a new sticky one is
-/// recorded. Front-ends only implement the asking.
+/// Wraps the gate a session was given with the config's
+/// `always_allowed_tools` list and the session's [`Approvals`]: a listed tool
+/// or a remembered decision is answered without asking, and a new sticky
+/// decision is recorded. Front-ends only implement the asking.
 pub(crate) struct RememberingGate {
     inner: Arc<dyn PermissionGate>,
     approvals: Approvals,
+    /// Tool names allowed without asking, whatever their arguments
+    /// (`AppConfig::always_allowed_tools`).
+    always_allowed_tools: Arc<HashSet<String>>,
     /// Supplies each tool's [`ApprovalScope`] (how its approvals are keyed).
     executor: Arc<dyn ToolExecutor>,
 }
@@ -163,11 +167,13 @@ impl RememberingGate {
     pub(crate) fn new(
         inner: Arc<dyn PermissionGate>,
         approvals: Approvals,
+        always_allowed_tools: Arc<HashSet<String>>,
         executor: Arc<dyn ToolExecutor>,
     ) -> Self {
         Self {
             inner,
             approvals,
+            always_allowed_tools,
             executor,
         }
     }
@@ -176,6 +182,9 @@ impl RememberingGate {
 #[async_trait]
 impl PermissionGate for RememberingGate {
     async fn check(&self, request: &PermissionRequest<'_>) -> PermissionDecision {
+        if self.always_allowed_tools.contains(request.tool_name) {
+            return PermissionDecision::AllowOnce;
+        }
         let scope = self.executor.capabilities(request.tool_name).approval_scope;
         let key = approval_key(scope, request.tool_name, request.arguments);
         if let Some(remembered) = self.approvals.get(&key) {
@@ -234,9 +243,18 @@ mod tests {
     }
 
     fn remembering(inner: Arc<ScriptedGate>, approvals: Approvals) -> RememberingGate {
+        remembering_with(inner, approvals, &[])
+    }
+
+    fn remembering_with(
+        inner: Arc<ScriptedGate>,
+        approvals: Approvals,
+        always_allowed_tools: &[&str],
+    ) -> RememberingGate {
         let mut executor = crate::tools::SystemToolExecutor::new();
         executor.register_builtins(true);
-        RememberingGate::new(inner, approvals, Arc::new(executor))
+        let tools = always_allowed_tools.iter().map(|s| s.to_string()).collect();
+        RememberingGate::new(inner, approvals, Arc::new(tools), Arc::new(executor))
     }
 
     fn request<'a>(id: &'a str, tool: &'a str, arguments: &'a str) -> PermissionRequest<'a> {
@@ -340,6 +358,43 @@ mod tests {
             .await;
         let decision = gate.check(&request("call_2", "read_file", "{}")).await;
         assert_eq!(decision, PermissionDecision::AllowAlways);
+        assert_eq!(inner.asked(), vec!["call_1"]);
+    }
+
+    #[tokio::test]
+    async fn always_allowed_tools_skip_the_gate_and_leave_no_approval() {
+        let approvals = Approvals::default();
+        let inner = ScriptedGate::new(vec![]);
+        let gate = remembering_with(inner.clone(), approvals.clone(), &["read_file"]);
+
+        let decision = gate
+            .check(&request("call_1", "read_file", r#"{"path": "a.txt"}"#))
+            .await;
+        assert_eq!(decision, PermissionDecision::AllowOnce);
+        assert!(inner.asked().is_empty());
+        assert_eq!(approvals.get("read_file"), None);
+    }
+
+    #[tokio::test]
+    async fn always_allowed_tools_cover_every_command_of_an_exact_arguments_tool() {
+        let inner = ScriptedGate::new(vec![]);
+        let gate = remembering_with(inner.clone(), Approvals::default(), &["execute_command"]);
+
+        for (id, command) in [("call_1", "git status"), ("call_2", "cargo test")] {
+            let args = format!(r#"{{"command": "{command}"}}"#);
+            let decision = gate.check(&request(id, "execute_command", &args)).await;
+            assert_eq!(decision, PermissionDecision::AllowOnce);
+        }
+        assert!(inner.asked().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tools_not_always_allowed_are_still_asked_about() {
+        let inner = ScriptedGate::new(vec![PermissionDecision::RejectOnce]);
+        let gate = remembering_with(inner.clone(), Approvals::default(), &["read_file"]);
+
+        let decision = gate.check(&request("call_1", "write_file", "{}")).await;
+        assert_eq!(decision, PermissionDecision::RejectOnce);
         assert_eq!(inner.asked(), vec!["call_1"]);
     }
 

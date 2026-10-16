@@ -24,6 +24,10 @@ max_iterations = 10
 # Disabled by default; set to true to expose the tool to the LLM.
 # allow_shell = true
 
+# Tools that run without asking for approval (MCP tools as "{server_name}__{tool_name}").
+# Covers every call to a listed tool: listing execute_command allows every shell command.
+# always_allowed_tools =["read_file", "list_dir", "search"]
+
 # --- Provider Configuration ---
 #
 # `kind` selects which API client is used:

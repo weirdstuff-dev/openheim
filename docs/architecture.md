@@ -216,7 +216,7 @@ Cuts happen only just before a user message, so a tool call is never separated f
 
 ## Data persistence
 
-All persistence lives under `~/.openheim/` by default.
+All persistence lives under `~/.openheim/` by default, where `~` is the home directory of the user running the process. `OpenheimBuilder::build` resolves both locations once into `RuntimePaths`: `config_path` (the builder's `.config_path()`, else `~/.openheim/config.toml`) and `data_dir` (the builder's `.data_dir()`, else the config's `data_dir` key, else `config_path`'s directory). Everything below except `config.toml` lives in `data_dir`. The CLI's `--config` sets the builder's `config_path`.
 
 ```
 ~/.openheim/

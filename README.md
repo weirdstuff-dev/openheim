@@ -165,7 +165,16 @@ openheim serve --host 0.0.0.0 --port 1217
 
 # Initialize config
 openheim init
+
+# Use another config file instead of ~/.openheim/config.toml (works with
+# every subcommand). History, skills and memory live next to it, or in
+# the config's data_dir, so several agents with different configs can
+# run at once.
+openheim --config ./my-agent/config.toml init
+openheim --config ./my-agent/config.toml
 ```
+
+`~/.openheim` throughout these docs is `.openheim` in the home directory of the user running openheim. See [Config and data locations](docs/deployment.md#config-and-data-locations).
 
 ---
 

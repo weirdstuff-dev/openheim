@@ -50,12 +50,15 @@ pub(crate) fn builtin_provider_defaults(provider: &str) -> (&'static str, &'stat
         })
 }
 
+/// `~/.openheim`: `.openheim` in the home directory of the user running the
+/// process (`$HOME` on Unix, the user profile folder on Windows).
 pub fn config_dir() -> Result<PathBuf> {
     let home =
         dirs::home_dir().ok_or_else(|| Error::config("Could not determine home directory"))?;
     Ok(home.join(".openheim"))
 }
 
+/// `~/.openheim/config.toml`, the config file used when none is given.
 pub fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.toml"))
 }
@@ -64,8 +67,23 @@ pub fn config_path() -> Result<PathBuf> {
 /// writes `~/.openheim/system.md` if missing. Fails if `config.toml` already
 /// exists, but still writes `system.md` first.
 pub fn init_config() -> Result<PathBuf> {
-    let dir = config_dir()?;
-    std::fs::create_dir_all(&dir)?;
+    init_config_at(config_path()?)
+}
+
+/// [`init_config`] with the config file at `config_path` and `system.md` in
+/// the same directory, creating it if needed.
+pub fn init_config_at(config_path: impl AsRef<std::path::Path>) -> Result<PathBuf> {
+    let config_path = config_path.as_ref();
+    let dir = match config_path.parent() {
+        Some(dir) => dir,
+        None => {
+            return Err(Error::config(format!(
+                "{} is not a file path",
+                config_path.display()
+            )));
+        }
+    };
+    std::fs::create_dir_all(dir)?;
 
     let system_path = dir.join("system.md");
     let system_written = !system_path.exists();
@@ -73,7 +91,6 @@ pub fn init_config() -> Result<PathBuf> {
         std::fs::write(&system_path, crate::memory::DEFAULT_SYSTEM_MD)?;
     }
 
-    let config_path = dir.join("config.toml");
     if config_path.exists() {
         let system_note = if system_written {
             format!("system.md has been created at {}.", system_path.display())
@@ -86,9 +103,9 @@ pub fn init_config() -> Result<PathBuf> {
             system_note
         )));
     }
-    std::fs::write(&config_path, DEFAULT_CONFIG)?;
+    std::fs::write(config_path, DEFAULT_CONFIG)?;
 
-    Ok(config_path)
+    Ok(config_path.to_path_buf())
 }
 
 /// Load AppConfig from a specific path. Keys openheim doesn't know (a typo

@@ -38,9 +38,12 @@
 //!
 //! ## Configuration file
 //!
-//! By default openheim loads `~/.openheim/config.toml`. Use
+//! By default openheim loads `~/.openheim/config.toml`, where `~` is the
+//! home directory of the user running the process. Use
 //! [`OpenheimClient::from_config`] to load from a custom path, or set
 //! individual fields via the builder for fully programmatic configuration.
+//! History, skills and the other data live in the config file's directory
+//! unless `data_dir` (builder or config key) puts them elsewhere.
 //!
 //! ## MCP servers
 //!
