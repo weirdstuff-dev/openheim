@@ -9,6 +9,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - **`always_allowed_tools` config key.** Tools listed in it run without a permission prompt, in the TUI, over ACP (stdio and `/ws`), and for subagents. It matches the exact tool name (`{server}__{tool}` for MCP tools) and covers every call whatever its arguments, so listing `execute_command` allows every shell command. Also `AppConfig::with_always_allowed_tools` and `OpenheimBuilder::always_allowed_tools`, and `GET /api/config` now includes the list.
+- **`--config <FILE>` CLI flag, for running several agents with different configs at once.** Every `openheim` subcommand takes it to load another config file instead of `~/.openheim/config.toml`. History, skills, `system.md`, subagent profiles, the memory database and the TUI log live in the config's `data_dir`, or next to the file if it sets none. `openheim --config FILE init` creates the file and a `system.md` beside it. See "Config and data locations" in `docs/deployment.md`, including what isn't kept separate between agents (ports, `[memory].db_path`, `work_dir`).
+- **`OpenheimClient::data_dir()`** returns the data directory the client resolved.
+- **`config::init_config_at(config_path)`**: `init_config` for a given config file, with `system.md` written next to it.
+
+### Changed
+
+- **The data directory defaults to the config file's directory.** With `.config_path(path)` or `OpenheimClient::from_config(path)` and no `data_dir` (builder or config key), history, skills, `system.md`, subagent profiles and `memory.db` now live next to `path` instead of in `~/.openheim`. Embedders who relied on the old default should add `.data_dir(openheim::config::config_dir()?)`. Without a custom config path nothing changes: the default config is `~/.openheim/config.toml`, so the data stays in `~/.openheim`.
 
 ## [0.15.0] - 2026-09-28
 

@@ -1,10 +1,12 @@
 # Configuration Reference
 
-Openheim loads its configuration from `~/.openheim/config.toml`. Generate a default file with:
+Openheim loads its configuration from `~/.openheim/config.toml`, where `~` is the home directory of the user running openheim (`$HOME`; the user profile folder on Windows). Generate a default file with:
 
 ```bash
 openheim init
 ```
+
+`--config <FILE>` loads another file instead, and `openheim --config FILE init` creates it. Openheim's data (history, skills, `system.md`, subagent profiles, memory) lives in the config file's directory unless the [`data_dir`](#top-level-fields) key says otherwise. Giving each agent its own config file lets several run at once. See [Config and data locations](./deployment.md#config-and-data-locations).
 
 A key openheim doesn't know, such as a typo like `allow-shell` for `allow_shell`, is ignored with a warning on stderr naming it (``ignoring unknown config key `allow-shell` ``). It isn't an error, so a config written for a newer version still loads. Set `RUST_LOG=error` to silence the warnings.
 
@@ -20,7 +22,7 @@ A key openheim doesn't know, such as a typo like `allow-shell` for `allow_shell`
 | `work_dir` | path | cwd at invocation | Root directory the agent is allowed to read and write. The agent cannot access files outside this tree. When unset, defaults to the directory from which openheim was invoked. A relative path is taken from that directory too (no `~` expansion). It's resolved at startup, symlinks followed, and must be an existing directory, or openheim refuses to start. |
 | `allow_shell` | boolean | `false` | Whether to expose the `execute_command` shell tool to the LLM. Disabled by default — set to `true` to expose the tool. When `false`, the LLM never sees it in its tool list. |
 | `always_allowed_tools` | string[] | `[]` | Tools that run without asking for approval, by the name the LLM sees (`{server}__{tool}` for MCP tools). See [Tool approval](#tool-approval). |
-| `data_dir` | path | `~/.openheim` | Root directory for openheim's own data: conversation history (`history/`), skills (`skills/`), `system.md`, subagent profiles (`agents/`), and the long-term memory database (`memory.db`, unless `[memory].db_path` overrides it). The config file itself is still read from `~/.openheim/config.toml`. Lets two agents in one process keep separate state, or a sandboxed run stay out of the real home directory. |
+| `data_dir` | path | the config file's directory | Root directory for openheim's own data: conversation history (`history/`), skills (`skills/`), `system.md`, subagent profiles (`agents/`), the TUI's `openheim.log`, and the long-term memory database (`memory.db`, unless `[memory].db_path` overrides it). Set it to keep the data apart from the config file, e.g. a config in `/etc/openheim/` with data in `/var/lib/openheim`. A relative path is taken from the directory openheim is started in (no `~` expansion). For library users, the builder's `.data_dir()` overrides this key. |
 
 ```toml
 default_provider = "anthropic"
@@ -38,7 +40,8 @@ work_dir = "/home/user/projects/myproject"
 # Run these tools without asking for approval
 # always_allowed_tools = ["read_file", "list_dir", "search"]
 
-# Keep openheim's own data (history, skills, memory) out of $HOME
+# Keep openheim's own data (history, skills, memory) somewhere other than
+# this file's directory
 # data_dir = "/var/lib/openheim"
 ```
 
@@ -170,7 +173,7 @@ Optional, as is every field in it. The agent always has the `remember`, `search_
 |---|---|---|---|
 | `embedding_provider` | string | unset | A `[providers.<name>]` entry whose `api_base` and API key serve the embeddings endpoint. A Gemini-kind provider speaks Gemini's `batchEmbedContents`; any other kind is OpenAI-compatible `/embeddings` (OpenAI, Ollama, Together, …). Anthropic-kind providers are rejected, since Anthropic has no embeddings API. Unset means keyword search. |
 | `embedding_model` | string | unset | Embedding model, e.g. `text-embedding-3-small`, `gemini-embedding-001`, `nomic-embed-text`. Required when `embedding_provider` is set. |
-| `db_path` | path | `~/.openheim/memory.db` | SQLite file holding notes, the FTS5 index, and vectors. Absolute path; `~` is not expanded. |
+| `db_path` | path | `memory.db` in the data directory (see `data_dir`) | SQLite file holding notes, the FTS5 index, and vectors. Absolute path; `~` is not expanded. Agents whose configs set the same `db_path` share one memory. |
 | `top_k` | integer | `5` | Default number of notes a `search_memory` call returns (the model may ask for up to 20) |
 
 ```toml

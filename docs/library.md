@@ -81,9 +81,12 @@ let client = OpenheimClient::builder().build().await?;
 
 ```rust
 let client = OpenheimClient::from_config("/etc/myapp/openheim.toml")
+    .data_dir("/var/lib/myapp/openheim")
     .build()
     .await?;
 ```
+
+History, skills and the rest of openheim's data live next to the config file unless `.data_dir()` or the file's `data_dir` key puts them elsewhere (see [Data directory](#data-directory)). Without `.data_dir()` here they'd go in `/etc/myapp/`, which a non-root process usually can't write, and `build()` would fail.
 
 ### From a config you built or adjusted
 
@@ -165,7 +168,13 @@ let client = OpenheimClient::builder()
 
 ### Data directory
 
-**`.data_dir(path)`** — repoints openheim's own state at a directory of your choosing: conversation history, skills, `system.md`, subagent profiles, and — unless `[memory].db_path` says otherwise — the long-term memory database. Defaults to `~/.openheim` (and overrides the `data_dir` config-file field when set). The config file itself is still loaded from `~/.openheim/config.toml`. Two agents in one process can hold separate `data_dir`s; a sandboxed CI run can point at a temp directory and never touch the real home directory:
+**`.data_dir(path)`** — repoints openheim's own state at a directory of your choosing: conversation history, skills, `system.md`, subagent profiles, and — unless `[memory].db_path` says otherwise — the long-term memory database. It doesn't move the config file, so it separates the config from the state. The data directory is the first of these that is set:
+
+1. `.data_dir(path)`
+2. the `data_dir` key in the config
+3. the directory of the config file: the `.config_path()` / `from_config` file, else `~/.openheim/config.toml`. With neither set, that's `~/.openheim`, where `~` is the home directory of the user running the process.
+
+Two agents in one process can hold separate `data_dir`s; a sandboxed CI run can point at a temp directory and never touch the real home directory:
 
 ```rust
 let client = OpenheimClient::builder()
