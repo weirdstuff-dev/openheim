@@ -81,11 +81,12 @@ let client = OpenheimClient::builder().build().await?;
 
 ```rust
 let client = OpenheimClient::from_config("/etc/myapp/openheim.toml")
+    .data_dir("/var/lib/myapp/openheim")
     .build()
     .await?;
 ```
 
-History, skills and the rest of openheim's data then live next to the file, in `/etc/myapp/`, unless `.data_dir()` or the file's `data_dir` key puts them elsewhere (see [Data directory](#data-directory)).
+History, skills and the rest of openheim's data live next to the config file unless `.data_dir()` or the file's `data_dir` key puts them elsewhere (see [Data directory](#data-directory)). Without `.data_dir()` here they'd go in `/etc/myapp/`, which a non-root process usually can't write, and `build()` would fail.
 
 ### From a config you built or adjusted
 
