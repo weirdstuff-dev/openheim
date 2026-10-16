@@ -84,8 +84,8 @@ pub struct AppConfig {
     pub memory: Option<MemoryConfig>,
     /// Overrides where history, skills, `system.md`, subagent profiles, and
     /// (absent an explicit `memory.db_path`) the memory database live.
-    /// `None` means "default to `~/.openheim`". This is only the setting as
-    /// written; a builder's `data_dir` overrides it.
+    /// `None` means "the config file's directory". This is only the setting
+    /// as written; a builder's `data_dir` overrides it.
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
 }
@@ -100,7 +100,7 @@ fn default_allow_shell() -> bool {
 pub struct RuntimePaths {
     /// Where history, skills, `system.md`, subagent profiles and (by default)
     /// the memory database live: the builder's or config's `data_dir`, else
-    /// `~/.openheim`.
+    /// `config_path`'s directory.
     pub data_dir: PathBuf,
     /// The config file this client was loaded from, or would write to for a
     /// programmatic config, so config writers like the TUI's `:theme` target

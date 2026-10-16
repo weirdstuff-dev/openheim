@@ -1,11 +1,16 @@
-use std::{fs::File, io::Write, sync::OnceLock};
+use std::{
+    fs::File,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{EnvFilter, fmt};
 
 use openheim::{
     OpenheimClient,
-    config::{config_dir, init_config},
+    config::{init_config, init_config_at},
     transport::{run, stdio, ws},
     tui,
 };
@@ -15,6 +20,11 @@ use openheim::{
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+    /// Config file to use instead of ~/.openheim/config.toml. History,
+    /// skills, system.md and the log live in its directory too, unless the
+    /// config sets data_dir
+    #[arg(long = "config", value_name = "FILE", global = true)]
+    config: Option<PathBuf>,
     /// Comma-separated skills to activate for this session (e.g. --skills rust,nodejs)
     #[arg(
         long = "skills",
@@ -44,14 +54,28 @@ enum Command {
         #[arg(long, default_value = "1217")]
         port: u16,
     },
-    /// Initialize config file at ~/.openheim/config.toml
+    /// Create the config file (~/.openheim/config.toml, or --config FILE) and
+    /// system.md next to it
     Init,
 }
 
-/// Builds the client every subcommand runs against; `model` overrides the
-/// config's default model.
-async fn build_client(model: Option<String>) -> openheim::Result<OpenheimClient> {
+/// Builds the client every subcommand runs against. `config` is the
+/// `--config` file, made absolute; `model` overrides the config's default
+/// model.
+async fn build_client(
+    config: Option<&Path>,
+    model: Option<String>,
+) -> openheim::Result<OpenheimClient> {
     let mut builder = OpenheimClient::builder();
+    if let Some(path) = config {
+        if !path.exists() {
+            return Err(openheim::Error::ConfigError(format!(
+                "Config file not found at {path}. Run `openheim --config {path} init` to create one.",
+                path = path.display()
+            )));
+        }
+        builder = builder.config_path(path);
+    }
     if let Some(model) = model {
         builder = builder.model(model);
     }
@@ -106,10 +130,13 @@ fn log_writer() -> Box<dyn Write> {
     }
 }
 
-/// Opens `~/.openheim/openheim.log` for appending.
-fn open_tui_log() -> Option<File> {
-    let path = config_dir().ok()?.join("openheim.log");
-    File::options().create(true).append(true).open(path).ok()
+/// Opens `openheim.log` in `data_dir` for appending.
+fn open_tui_log(data_dir: &Path) -> Option<File> {
+    File::options()
+        .create(true)
+        .append(true)
+        .open(data_dir.join("openheim.log"))
+        .ok()
 }
 
 #[tokio::main]
@@ -123,34 +150,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     exit_on_signal(!matches!(cli.command, Some(Command::Serve { .. })));
 
+    let config = cli
+        .config
+        .map(std::path::absolute)
+        .transpose()
+        .unwrap_or_else(|e| die(e));
+    let config = config.as_deref();
+
     match cli.command {
         None => {
-            let client = build_client(None).await.unwrap_or_else(|e| die(e));
+            let client = build_client(config, None).await.unwrap_or_else(|e| die(e));
             // Written to the TUI's screen, a log line would garble it.
-            let _ = TUI_LOG.set(open_tui_log());
+            let _ = TUI_LOG.set(open_tui_log(client.data_dir()));
             if let Err(e) = tui::run(client, cli.skills).await {
                 die(e);
             }
         }
         Some(Command::Acp) => {
-            let client = build_client(None).await.unwrap_or_else(|e| die(e));
+            let client = build_client(config, None).await.unwrap_or_else(|e| die(e));
             if let Err(e) = stdio::run(client).await {
                 die(e);
             }
         }
         Some(Command::Run { prompt, model }) => {
-            let client = build_client(model).await.unwrap_or_else(|e| die(e));
+            let client = build_client(config, model).await.unwrap_or_else(|e| die(e));
             if let Err(e) = run::run_headless(client, prompt).await {
                 die(e);
             }
         }
         Some(Command::Serve { host, port }) => {
-            let client = build_client(None).await.unwrap_or_else(|e| die(e));
+            let client = build_client(config, None).await.unwrap_or_else(|e| die(e));
             if let Err(e) = ws::serve(client, host, port).await {
                 die(e);
             }
         }
-        Some(Command::Init) => match init_config() {
+        Some(Command::Init) => match config.map_or_else(init_config, init_config_at) {
             Ok(path) => {
                 println!("Config file created at {}", path.display());
                 println!("Edit it to configure your LLM providers.");
