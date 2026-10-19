@@ -237,6 +237,37 @@ mod tests {
         assert_eq!(inner.call_count.load(Ordering::SeqCst), 1);
     }
 
+    struct AlwaysRateLimited {
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmClient for AlwaysRateLimited {
+        async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> Result<Choice> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            let body = r#"{"error":{"type":"openheim_limit","code":"rate_limited","message":"Slow down."}}"#;
+            Err(crate::error::ProviderRejection::from_body(429, body)
+                .unwrap()
+                .into())
+        }
+    }
+
+    // Even `rate_limited`: the user sees the limit at once instead of
+    // after the backoff.
+    #[tokio::test]
+    async fn provider_rejection_is_not_retried() {
+        let inner = Arc::new(AlwaysRateLimited {
+            call_count: AtomicUsize::new(0),
+        });
+        let client = RetryClient::new(inner.clone());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let result = client.send_streaming(&[], &[], tx).await;
+
+        assert!(matches!(result, Err(Error::ProviderRejection(_))));
+        assert_eq!(inner.call_count.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn success_after_transient_failure() {
         let inner = Arc::new(FailThenSucceed {

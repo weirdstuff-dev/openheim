@@ -3,7 +3,7 @@
 use reqwest::{Client as ReqwestClient, Response};
 use serde::Serialize;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, ProviderRejection, Result};
 
 /// Lowercased phrases in a 400 body that mean the request was too long for
 /// the model's context window:
@@ -39,9 +39,21 @@ fn is_context_overflow(status: u16, body: &str) -> bool {
     OVERFLOW_MARKERS.iter().any(|marker| body.contains(marker))
 }
 
+/// The error for a non-2xx response: `Error::ContextOverflow` when it says
+/// the request was too long, `Error::ProviderRejection` when it's a plan or
+/// account rejection, and `Error::HttpError { status, body }` otherwise.
+fn response_error(status: u16, body: String) -> Error {
+    if is_context_overflow(status, &body) {
+        return Error::ContextOverflow(body);
+    }
+    if let Some(rejection) = ProviderRejection::from_body(status, &body) {
+        return rejection.into();
+    }
+    Error::HttpError { status, body }
+}
+
 /// POSTs `body` as JSON to `url` with `headers`, turning a non-2xx response
-/// into `Error::ContextOverflow` when it says the request was too long, and
-/// `Error::HttpError { status, body }` otherwise.
+/// into an error (see [`response_error`]).
 pub(super) async fn post_json(
     client: &ReqwestClient,
     url: &str,
@@ -61,10 +73,7 @@ pub(super) async fn post_json(
             .text()
             .await
             .unwrap_or_else(|_| "<failed to read error body>".into());
-        if is_context_overflow(status, &body) {
-            return Err(Error::ContextOverflow(body));
-        }
-        return Err(Error::HttpError { status, body });
+        return Err(response_error(status, body));
     }
 
     Ok(response)
@@ -117,5 +126,35 @@ mod tests {
         assert!(!is_context_overflow(401, "prompt is too long"));
         assert!(!is_context_overflow(429, "rate limited"));
         assert!(!is_context_overflow(500, "maximum context length"));
+    }
+
+    #[test]
+    fn a_plan_limit_body_is_a_provider_rejection() {
+        let body = r#"{"error":{"type":"openheim_limit","code":"window_budget_exceeded","message":"You've used this 5-hour Lite allowance.","plan":"lite","action":"wait"}}"#;
+        match response_error(429, body.into()) {
+            Error::ProviderRejection(rejection) => {
+                assert_eq!(rejection.status, 429);
+                assert_eq!(rejection.code, "window_budget_exceeded");
+            }
+            other => panic!("expected a provider rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_overflow_is_still_an_overflow() {
+        let body = r#"{"error":{"message":"This model's maximum context length is 128000 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}"#;
+        assert!(matches!(
+            response_error(400, body.into()),
+            Error::ContextOverflow(_)
+        ));
+    }
+
+    #[test]
+    fn any_other_body_stays_an_http_error() {
+        let body = r#"{"error":{"type":"account_syncing","message":"try again"}}"#;
+        assert!(matches!(
+            response_error(503, body.into()),
+            Error::HttpError { status: 503, body: b } if b == body
+        ));
     }
 }

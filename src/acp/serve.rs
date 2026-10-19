@@ -362,9 +362,12 @@ pub(crate) async fn serve_state(
 ///   so it's internal.)
 /// - `SessionLocked` / `SessionBusy` → `internal_error` with their fields as
 ///   structured `data`, so a client can offer "busy, retry".
+/// - `ProviderRejection` → `internal_error` whose `data` is the backend's
+///   `error` object plus `"kind": "provider_rejection"` and `status`, so a
+///   client can show the limit and how to lift it.
 /// - Anything else → `internal_error` (-32603).
 ///
-/// Every case but the structured two puts `e.to_string()` in `data`.
+/// Every case but the structured three puts `e.to_string()` in `data`.
 fn to_acp_error(e: &Error) -> agent_client_protocol::Error {
     match e {
         Error::NotFound(_) => {
@@ -388,6 +391,12 @@ fn to_acp_error(e: &Error) -> agent_client_protocol::Error {
                 "kind": "session_busy",
                 "session_id": session_id,
             }))
+        }
+        Error::ProviderRejection(rejection) => {
+            let mut data = rejection.details.clone();
+            data.insert("kind".into(), "provider_rejection".into());
+            data.insert("status".into(), rejection.status.into());
+            agent_client_protocol::Error::internal_error().data(serde_json::Value::Object(data))
         }
         _ => internal_error(e.to_string()),
     }
@@ -424,6 +433,31 @@ mod to_acp_error_tests {
                 "session_id": "abc",
                 "pid": 42,
                 "host": "host1",
+            }))
+        );
+    }
+
+    #[test]
+    fn provider_rejection_carries_structured_data() {
+        let body = r#"{"error":{"type":"openheim_limit","code":"window_budget_exceeded","message":"You've used this 5-hour Lite allowance.","plan":"lite","limit":{"window":"5h","resets_at":"2026-10-18T16:00:00Z"},"upgrade":{"plan":"pro","helps":true},"action":"upgrade"}}"#;
+        let rejection = crate::error::ProviderRejection::from_body(429, body).unwrap();
+        let acp_error = to_acp_error(&rejection.into());
+        assert_eq!(
+            acp_error.code,
+            agent_client_protocol::Error::internal_error().code
+        );
+        assert_eq!(
+            acp_error.data,
+            Some(serde_json::json!({
+                "kind": "provider_rejection",
+                "status": 429,
+                "type": "openheim_limit",
+                "code": "window_budget_exceeded",
+                "message": "You've used this 5-hour Lite allowance.",
+                "plan": "lite",
+                "limit": { "window": "5h", "resets_at": "2026-10-18T16:00:00Z" },
+                "upgrade": { "plan": "pro", "helps": true },
+                "action": "upgrade",
             }))
         );
     }

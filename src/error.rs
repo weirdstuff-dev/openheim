@@ -18,6 +18,12 @@ pub enum Error {
     #[error("Context window exceeded: {0}")]
     ContextOverflow(String),
 
+    /// A backend rejected the request because of the user's plan or account
+    /// (a usage limit, an invalid token). Never retried: waiting a few
+    /// seconds doesn't lift it.
+    #[error("{}", .0.message)]
+    ProviderRejection(Box<ProviderRejection>),
+
     /// A provider's streamed reply ended before the provider said it was
     /// finished (typically a dropped connection). Retryable.
     #[error("Incomplete response: {0}")]
@@ -110,6 +116,90 @@ impl Error {
     }
 }
 
+/// What a [`ProviderRejection`] is about, from the error body's `type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RejectionKind {
+    /// `openheim_limit`: the plan doesn't cover the request, or one of its
+    /// allowances is used up.
+    Limit,
+    /// `openheim_auth`: the token is invalid, expired or revoked.
+    Auth,
+}
+
+impl RejectionKind {
+    /// The `type` tag this kind has in an error body.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RejectionKind::Limit => "openheim_limit",
+            RejectionKind::Auth => "openheim_auth",
+        }
+    }
+
+    fn from_type(tag: &str) -> Option<Self> {
+        match tag {
+            "openheim_limit" => Some(RejectionKind::Limit),
+            "openheim_auth" => Some(RejectionKind::Auth),
+            _ => None,
+        }
+    }
+}
+
+/// A plan or account rejection, parsed from an error body of the form
+/// `{"error": {"type": "openheim_limit" | "openheim_auth", "code": ..., "message": ..., ...}}`.
+///
+/// `code` is kept as sent, so codes this version doesn't know still parse.
+/// The fields that depend on the code (`plan`, `limit`, `upgrade`, `action`,
+/// …) are in `details`, which holds the whole `error` object unchanged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderRejection {
+    /// HTTP status of the response.
+    pub status: u16,
+    pub kind: RejectionKind,
+    /// E.g. `window_budget_exceeded` or `token_expired`; empty if the body
+    /// had none.
+    pub code: String,
+    /// The backend's English message, or `code` if it sent none.
+    pub message: String,
+    /// The body's `error` object, every field included.
+    pub details: serde_json::Map<String, serde_json::Value>,
+}
+
+impl ProviderRejection {
+    /// The rejection a non-2xx response `body` describes, or `None` if it
+    /// isn't one (any other JSON, or not JSON at all).
+    pub fn from_body(status: u16, body: &str) -> Option<Self> {
+        let serde_json::Value::Object(mut root) = serde_json::from_str(body).ok()? else {
+            return None;
+        };
+        let serde_json::Value::Object(details) = root.remove("error")? else {
+            return None;
+        };
+        let kind = RejectionKind::from_type(details.get("type")?.as_str()?)?;
+        let field = |name: &str| {
+            details
+                .get(name)
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        };
+        let code = field("code").unwrap_or_default();
+        let message = field("message").unwrap_or_else(|| code.clone());
+        Some(Self {
+            status,
+            kind,
+            code,
+            message,
+            details,
+        })
+    }
+}
+
+impl From<ProviderRejection> for Error {
+    fn from(rejection: ProviderRejection) -> Self {
+        Error::ProviderRejection(Box::new(rejection))
+    }
+}
+
 #[cfg(feature = "rag")]
 impl From<rusqlite::Error> for Error {
     fn from(e: rusqlite::Error) -> Self {
@@ -163,6 +253,100 @@ mod tests {
     #[test]
     fn is_not_retryable_for_a_context_overflow() {
         assert!(!Error::ContextOverflow("too long".into()).is_retryable());
+    }
+
+    fn limit_body(code: &str) -> String {
+        serde_json::json!({
+            "error": {
+                "type": "openheim_limit",
+                "code": code,
+                "message": "You've used this 5-hour Lite allowance.",
+                "plan": "lite",
+                "limit": { "window": "5h", "resets_at": "2026-10-18T16:00:00Z" },
+                "upgrade": { "plan": "pro", "plan_name": "Pro", "helps": true },
+                "action": "upgrade",
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn every_limit_code_parses() {
+        for (code, status) in [
+            ("subscription_required", 402),
+            ("model_not_in_plan", 403),
+            ("weekly_budget_exceeded", 402),
+            ("window_budget_exceeded", 429),
+            ("rate_limited", 429),
+            ("some_future_code", 429),
+        ] {
+            let rejection = ProviderRejection::from_body(status, &limit_body(code)).unwrap();
+            assert_eq!(rejection.status, status);
+            assert_eq!(rejection.kind, RejectionKind::Limit);
+            assert_eq!(rejection.code, code);
+            assert_eq!(rejection.message, "You've used this 5-hour Lite allowance.");
+            assert_eq!(rejection.details["upgrade"]["plan_name"], "Pro");
+            assert_eq!(rejection.details["limit"]["window"], "5h");
+        }
+    }
+
+    #[test]
+    fn every_auth_code_parses() {
+        for code in ["token_invalid", "token_expired", "token_revoked"] {
+            let body = format!(
+                r#"{{"error":{{"type":"openheim_auth","code":"{code}","message":"Sign in again."}}}}"#
+            );
+            let rejection = ProviderRejection::from_body(401, &body).unwrap();
+            assert_eq!(rejection.kind, RejectionKind::Auth);
+            assert_eq!(rejection.code, code);
+            assert_eq!(rejection.message, "Sign in again.");
+        }
+    }
+
+    #[test]
+    fn a_rejection_without_a_message_shows_its_code() {
+        let body = r#"{"error":{"type":"openheim_limit","code":"rate_limited"}}"#;
+        let rejection = ProviderRejection::from_body(429, body).unwrap();
+        assert_eq!(rejection.message, "rate_limited");
+        assert_eq!(Error::from(rejection).to_string(), "rate_limited");
+    }
+
+    #[test]
+    fn other_error_bodies_are_not_rejections() {
+        for (status, body) in [
+            (429, "rate limited"),
+            (
+                429,
+                r#"{"error":{"message":"Rate limit reached","type":"requests"}}"#,
+            ),
+            (
+                503,
+                r#"{"error":{"type":"account_syncing","message":"try again"}}"#,
+            ),
+            (
+                404,
+                r#"{"error":{"type":"model_not_found","message":"no such model"}}"#,
+            ),
+            (
+                400,
+                r#"{"type":"error","error":{"type":"invalid_request_error"}}"#,
+            ),
+            (429, r#"{"error":"openheim_limit"}"#),
+            (429, r#"[{"error":{"type":"openheim_limit"}}]"#),
+        ] {
+            assert!(
+                ProviderRejection::from_body(status, body).is_none(),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_not_retryable_for_a_provider_rejection() {
+        for code in ["rate_limited", "window_budget_exceeded"] {
+            let rejection = ProviderRejection::from_body(429, &limit_body(code)).unwrap();
+            assert!(!Error::from(rejection).is_retryable());
+        }
     }
 
     #[test]

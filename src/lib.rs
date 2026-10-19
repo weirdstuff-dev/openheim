@@ -104,7 +104,7 @@ pub use core::models::{
     StreamEvent, Tool, ToolResultBlock, ToolUseBlock,
 };
 pub use core::runtime::{AgentMode, LoadedSession};
-pub use error::{Error, Result};
+pub use error::{Error, ProviderRejection, RejectionKind, Result};
 pub use memory::{Conversation, ConversationMeta, PromptBuilder};
 #[cfg(feature = "rag")]
 pub use rag::LongTermMemory;
