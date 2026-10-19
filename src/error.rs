@@ -129,8 +129,9 @@ impl Error {
         }
     }
 
-    /// Returns true for transient errors that may succeed on retry (429, 5xx,
-    /// network errors, a reply cut off mid-stream). An HTTP error whose
+    /// Returns true for transient errors that may succeed on retry (429, 5xx
+    /// including Anthropic's 529 "overloaded", network errors, a reply cut
+    /// off mid-stream). An HTTP error whose
     /// `Retry-After` is longer than openheim waits out isn't.
     pub fn is_retryable(&self) -> bool {
         match self {
@@ -139,7 +140,7 @@ impl Error {
                 retry_after,
                 ..
             } => {
-                matches!(status, 429 | 500 | 502 | 503 | 504)
+                matches!(status, 429 | 500 | 502 | 503 | 504 | 529)
                     && retry_after.is_none_or(|wait| wait <= MAX_RETRY_AFTER)
             }
             Error::ReqwestError(e) => e.is_timeout() || e.is_connect(),
@@ -293,7 +294,7 @@ mod tests {
 
     #[test]
     fn is_retryable_for_5xx() {
-        for code in [500u16, 502, 503, 504] {
+        for code in [500u16, 502, 503, 504, 529] {
             assert!(
                 http_err(code).is_retryable(),
                 "expected retryable for status {}",
