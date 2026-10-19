@@ -512,6 +512,12 @@ pub struct ProviderConfig {
     /// the entry, so set `"off"` if one of them lacks adaptive thinking.
     #[serde(default)]
     pub thinking: Option<ThinkingMode>,
+    /// Send signed thinking back to an OpenAI-compatible endpoint that
+    /// streams it as `thinking_blocks` (a LiteLLM proxy in front of
+    /// Anthropic), so extended thinking stays on through tool calls. Off
+    /// when unset. Only the OpenAI and OpenAI-compatible clients read it.
+    #[serde(default)]
+    pub replay_thinking: Option<bool>,
 }
 
 impl std::fmt::Debug for ProviderConfig {
@@ -527,6 +533,7 @@ impl std::fmt::Debug for ProviderConfig {
             .field("max_tokens", &self.max_tokens)
             .field("context_window", &self.context_window)
             .field("thinking", &self.thinking)
+            .field("replay_thinking", &self.replay_thinking)
             .finish()
     }
 }
@@ -547,6 +554,7 @@ impl ProviderConfig {
             max_tokens: None,
             context_window: None,
             thinking: None,
+            replay_thinking: None,
         }
     }
 
@@ -592,6 +600,11 @@ impl ProviderConfig {
 
     pub fn with_thinking(mut self, thinking: ThinkingMode) -> Self {
         self.thinking = Some(thinking);
+        self
+    }
+
+    pub fn with_replay_thinking(mut self, replay_thinking: bool) -> Self {
+        self.replay_thinking = Some(replay_thinking);
         self
     }
 
@@ -658,6 +671,10 @@ pub struct AgentConfig {
     /// Whether to request extended thinking (`AnthropicClient` only); see
     /// [`ProviderConfig::resolve_thinking`].
     pub thinking: bool,
+    /// Whether to send signed thinking back as `thinking_blocks`
+    /// (`OpenAiClient` / `OpenAiCompatibleClient` only); see
+    /// [`ProviderConfig::replay_thinking`].
+    pub replay_thinking: bool,
 }
 
 /// `AgentConfig`'s deserialization shape. A missing `kind` is inferred from
@@ -678,6 +695,8 @@ struct AgentConfigWire {
     context_window: Option<u64>,
     #[serde(default)]
     thinking: bool,
+    #[serde(default)]
+    replay_thinking: bool,
 }
 
 impl From<AgentConfigWire> for AgentConfig {
@@ -695,6 +714,7 @@ impl From<AgentConfigWire> for AgentConfig {
             max_tokens: wire.max_tokens,
             context_window: wire.context_window,
             thinking: wire.thinking,
+            replay_thinking: wire.replay_thinking,
         }
     }
 }
@@ -712,6 +732,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("max_tokens", &self.max_tokens)
             .field("context_window", &self.context_window)
             .field("thinking", &self.thinking)
+            .field("replay_thinking", &self.replay_thinking)
             .finish()
     }
 }
@@ -744,6 +765,7 @@ impl AgentConfig {
             timeout_secs: default_timeout_secs(),
             max_tokens: None,
             context_window: None,
+            replay_thinking: false,
         }
     }
 
@@ -777,6 +799,11 @@ impl AgentConfig {
         self.thinking = thinking;
         self
     }
+
+    pub fn with_replay_thinking(mut self, replay_thinking: bool) -> Self {
+        self.replay_thinking = replay_thinking;
+        self
+    }
 }
 
 impl Default for AgentConfig {
@@ -792,6 +819,7 @@ impl Default for AgentConfig {
             max_tokens: None,
             context_window: None,
             thinking: false,
+            replay_thinking: false,
         }
     }
 }

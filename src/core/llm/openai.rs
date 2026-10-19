@@ -19,6 +19,9 @@ pub struct OpenAiClient {
     max_tokens: Option<u32>,
     /// Which request field carries `max_tokens`; see [`TokenLimitField`].
     token_limit_field: TokenLimitField,
+    /// Whether signed thinking goes back as `thinking_blocks`; see
+    /// [`OpenAiClient::with_replay_thinking`].
+    replay_thinking: bool,
 }
 
 /// OpenAI replaced `max_tokens` with `max_completion_tokens`, and its
@@ -45,6 +48,20 @@ impl OpenAiClient {
             model,
             max_tokens,
             token_limit_field: TokenLimitField::MaxCompletionTokens,
+            replay_thinking: false,
+        }
+    }
+
+    /// With `replay_thinking`, assistant replies of the current tool loop
+    /// (those since the last user message) carry their signed and redacted
+    /// thinking as `thinking_blocks`, the way a LiteLLM proxy in front of
+    /// Anthropic streams it. Anthropic needs it back to keep thinking through
+    /// tool calls. Unsigned thinking is never sent. Off by default: strict
+    /// OpenAI-compatible backends may reject the field.
+    pub fn with_replay_thinking(self, replay_thinking: bool) -> Self {
+        Self {
+            replay_thinking,
+            ..self
         }
     }
 
@@ -86,6 +103,33 @@ struct OpenAiMessage {
     tool_calls: Option<Vec<OpenAiRequestToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+    /// An assistant reply's signed thinking, when it's replayed (see
+    /// [`OpenAiClient::with_replay_thinking`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_blocks: Option<Vec<OpenAiThinkingBlock>>,
+}
+
+/// A thinking block in LiteLLM's format: streamed in `delta.thinking_blocks`
+/// and taken back on an assistant message. While a block streams, its text
+/// arrives without a signature. The signature comes in a final entry,
+/// usually with the block's whole text, which older LiteLLM versions leave
+/// empty. Redacted thinking arrives whole.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OpenAiThinkingBlock {
+    Thinking {
+        #[serde(default)]
+        thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    RedactedThinking {
+        #[serde(default)]
+        data: String,
+    },
+    /// A block type this client doesn't know; ignored.
+    #[serde(other, skip_serializing)]
+    Other,
 }
 
 /// OpenAI accepts `content` as either a plain string or an array of typed
@@ -205,8 +249,32 @@ struct OpenAiStreamDelta {
     /// models and plain OpenAI itself.
     #[serde(default)]
     reasoning_content: Option<String>,
+    /// LiteLLM's Anthropic thinking, signatures included; see
+    /// [`OpenAiThinkingBlock`].
+    #[serde(default)]
+    thinking_blocks: Option<Vec<OpenAiThinkingBlock>>,
+    /// LiteLLM copies `thinking_blocks` in here too. Kept as raw JSON so
+    /// nothing else in it can fail the chunk's parse.
+    #[serde(default)]
+    provider_specific_fields: Option<Value>,
     #[serde(default)]
     tool_calls: Option<Vec<OpenAiStreamToolCallDelta>>,
+}
+
+impl OpenAiStreamDelta {
+    /// `thinking_blocks`, or the copy in `provider_specific_fields` when the
+    /// delta has no top-level one.
+    fn take_thinking_blocks(&mut self) -> Vec<OpenAiThinkingBlock> {
+        if let Some(blocks) = self.thinking_blocks.take() {
+            return blocks;
+        }
+        self.provider_specific_fields
+            .as_mut()
+            .and_then(|fields| fields.get_mut("thinking_blocks"))
+            .map(Value::take)
+            .and_then(|blocks| serde_json::from_value(blocks).ok())
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -278,10 +346,22 @@ fn should_retry_without_stream_options(status: u16, body: &str) -> bool {
 
 // --- Conversions ---
 
-fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
+/// `messages` in OpenAI's format. With `replay_thinking`, the assistant
+/// replies after the last user message (the current tool loop) carry their
+/// signed thinking; see [`OpenAiClient::with_replay_thinking`]. Older turns
+/// never do: Anthropic doesn't need them, and they'd grow every request.
+fn convert_messages(messages: &[Message], replay_thinking: bool) -> Vec<OpenAiMessage> {
     let mut result = Vec::new();
+    let tool_loop_start = if replay_thinking {
+        messages
+            .iter()
+            .rposition(|m| m.role == Role::User)
+            .map_or(0, |i| i + 1)
+    } else {
+        messages.len()
+    };
 
-    for msg in messages {
+    for (i, msg) in messages.iter().enumerate() {
         match msg.role {
             Role::System => {
                 if let Some(text) = msg.text() {
@@ -290,6 +370,7 @@ fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
                         content: Some(OpenAiContent::Text(text)),
                         tool_calls: None,
                         tool_call_id: None,
+                        thinking_blocks: None,
                     });
                 }
             }
@@ -329,6 +410,7 @@ fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
                     content: Some(content),
                     tool_calls: None,
                     tool_call_id: None,
+                    thinking_blocks: None,
                 });
             }
             Role::Assistant => {
@@ -362,6 +444,11 @@ fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
                     content: text.map(OpenAiContent::Text),
                     tool_calls,
                     tool_call_id: None,
+                    thinking_blocks: if i >= tool_loop_start {
+                        signed_thinking(msg)
+                    } else {
+                        None
+                    },
                 });
             }
             Role::Tool => {
@@ -371,6 +458,7 @@ fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
                         content: Some(OpenAiContent::Text(tr.content)),
                         tool_calls: None,
                         tool_call_id: Some(tr.tool_call_id),
+                        thinking_blocks: None,
                     });
                 }
             }
@@ -380,20 +468,44 @@ fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
     result
 }
 
-/// An assistant message's content blocks: `Thinking`, then `Text`, then tool
-/// uses (the stream doesn't say how they interleave). Empty strings produce
-/// no block.
+/// `msg`'s signed and redacted thinking blocks in order, or `None` if it has
+/// none. Unsigned thinking is left out: only a signature makes thinking
+/// replayable, and some providers (DeepSeek) reject thinking sent back.
+fn signed_thinking(msg: &Message) -> Option<Vec<OpenAiThinkingBlock>> {
+    let blocks: Vec<_> = msg
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Thinking {
+                thinking,
+                signature: Some(signature),
+            } => Some(OpenAiThinkingBlock::Thinking {
+                thinking: thinking.clone(),
+                signature: Some(signature.clone()),
+            }),
+            ContentBlock::RedactedThinking { data } => {
+                Some(OpenAiThinkingBlock::RedactedThinking { data: data.clone() })
+            }
+            _ => None,
+        })
+        .collect();
+    (!blocks.is_empty()).then_some(blocks)
+}
+
+/// An assistant message's content blocks: the signed and redacted
+/// `thinking` blocks, then `reasoning` that no signature closed as an
+/// unsigned `Thinking`, then `Text`, then tool uses (the stream doesn't say
+/// how they interleave). Empty strings produce no block.
 fn assemble_content(
+    thinking: Vec<ContentBlock>,
     reasoning: String,
     text: String,
     tool_uses: Vec<ContentBlock>,
 ) -> Vec<ContentBlock> {
-    let mut content = Vec::new();
+    let mut content = thinking;
     if !reasoning.is_empty() {
         content.push(ContentBlock::Thinking {
             thinking: reasoning,
-            // The OpenAI-compatible `reasoning_content` field carries no
-            // replayable signature — that's Anthropic-specific.
             signature: None,
         });
     }
@@ -426,7 +538,7 @@ impl OpenAiClient {
         };
         OpenAiRequest {
             model: self.model.clone(),
-            messages: convert_messages(messages),
+            messages: convert_messages(messages, self.replay_thinking),
             tools: convert_tools(tools),
             max_completion_tokens,
             max_tokens,
@@ -489,12 +601,46 @@ impl LlmClient for OpenAiClient {
     }
 }
 
+impl OpenAiStream {
+    /// Records one entry of a delta's `thinking_blocks`. Text without a
+    /// signature already arrived as `reasoning_content`, so it's skipped. A
+    /// signature closes a block: its text is the entry's, or, from LiteLLM
+    /// versions that leave it empty, the reasoning streamed since the last
+    /// one.
+    fn thinking_block(&mut self, block: OpenAiThinkingBlock) {
+        match block {
+            OpenAiThinkingBlock::Thinking {
+                thinking,
+                signature: Some(signature),
+            } if !signature.is_empty() => {
+                let streamed = std::mem::take(&mut self.reasoning);
+                self.thinking.push(ContentBlock::Thinking {
+                    thinking: if thinking.is_empty() {
+                        streamed
+                    } else {
+                        thinking
+                    },
+                    signature: Some(signature),
+                });
+            }
+            OpenAiThinkingBlock::RedactedThinking { data } if !data.is_empty() => {
+                self.thinking.push(ContentBlock::RedactedThinking { data });
+            }
+            _ => {}
+        }
+    }
+}
+
 /// One streamed reply, assembled chunk by chunk.
 #[derive(Default)]
 struct OpenAiStream {
     text: String,
-    /// Kept alongside `text` so the final message persists the reasoning
-    /// (the live chunks are UI-only).
+    /// Thinking blocks a signature closed, and redacted ones, in the order
+    /// they arrived (only from `thinking_blocks`).
+    thinking: Vec<ContentBlock>,
+    /// Reasoning text since the last signed block, kept so the final message
+    /// persists it (the live chunks are UI-only). Without `thinking_blocks`,
+    /// that's all of it.
     reasoning: String,
     tool_calls: Vec<ToolCallAcc>,
     finish_reason: Option<FinishReason>,
@@ -517,7 +663,7 @@ impl StreamParser for OpenAiStream {
             self.usage = Some(Usage::from(u));
         }
 
-        let Some(choice) = event.choices.into_iter().next() else {
+        let Some(mut choice) = event.choices.into_iter().next() else {
             return Ok(false);
         };
 
@@ -525,11 +671,15 @@ impl StreamParser for OpenAiStream {
             self.finish_reason = Some(map_finish_reason(&fr));
         }
 
-        if let Some(reasoning) = choice.delta.reasoning_content
+        if let Some(reasoning) = choice.delta.reasoning_content.take()
             && !reasoning.is_empty()
         {
             self.reasoning.push_str(&reasoning);
             let _ = chunk_tx.send(LlmChunk::Thinking(reasoning));
+        }
+
+        for block in choice.delta.take_thinking_blocks() {
+            self.thinking_block(block);
         }
 
         if let Some(content) = choice.delta.content
@@ -578,7 +728,7 @@ impl StreamParser for OpenAiStream {
         Ok(Choice {
             message: Message {
                 role: Role::Assistant,
-                content: assemble_content(self.reasoning, self.text, tool_uses),
+                content: assemble_content(self.thinking, self.reasoning, self.text, tool_uses),
             },
             finish_reason: self.finish_reason,
             usage: self.usage,
@@ -697,7 +847,7 @@ mod tests {
     #[test]
     fn convert_messages_text_only_user_stays_plain_string() {
         let messages = vec![Message::user("hello")];
-        let result = convert_messages(&messages);
+        let result = convert_messages(&messages, false);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
         assert!(matches!(&result[0].content, Some(OpenAiContent::Text(t)) if t == "hello"));
@@ -717,7 +867,7 @@ mod tests {
                 },
             ],
         }];
-        let result = convert_messages(&messages);
+        let result = convert_messages(&messages, false);
         assert_eq!(result.len(), 1);
         let Some(OpenAiContent::Parts(parts)) = &result[0].content else {
             panic!("expected parts");
@@ -741,7 +891,7 @@ mod tests {
                 r#"{"path":"a.txt"}"#,
             )],
         }];
-        let result = convert_messages(&messages);
+        let result = convert_messages(&messages, false);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "assistant");
         let tool_calls = result[0].tool_calls.as_ref().unwrap();
@@ -750,32 +900,133 @@ mod tests {
     }
 
     // Thinking is persisted to history and replayed through ACP (see
-    // `assemble_content`) so the *user* sees it again, but it is
-    // deliberately never sent back to the provider: reasoning traces from
-    // models like DeepSeek/GLM can be large, and replaying every prior
-    // turn's thinking on every continuation request would balloon context
-    // usage turn over turn. Only the tool calls survive onto the
-    // continuation request.
+    // `assemble_content`) so the *user* sees it again, but unsigned thinking
+    // is never sent back to the provider: reasoning traces from models like
+    // DeepSeek/GLM can be large, replaying them would balloon context usage
+    // turn over turn, and DeepSeek rejects them. Only the tool calls survive
+    // onto the continuation request, even with replay on.
     #[test]
     fn convert_messages_assistant_never_replays_thinking_back_to_the_provider() {
-        let messages = vec![Message {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::Thinking {
-                    thinking: "let me check the file".into(),
-                    signature: None,
-                },
-                ContentBlock::tool_use("call_1", "read_file", r#"{"path":"a.txt"}"#),
-            ],
-        }];
-        let result = convert_messages(&messages);
-        assert_eq!(result.len(), 1);
-        assert!(result[0].tool_calls.is_some());
-        // `OpenAiMessage` has no `reasoning_content` field at all, so the
-        // thinking has nowhere to go — this also serializes to confirm it
-        // never appears in the JSON sent over the wire.
-        let json = serde_json::to_value(&result[0]).unwrap();
-        assert!(json.get("reasoning_content").is_none());
+        let messages = vec![
+            Message::user("read a.txt"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "let me check the file".into(),
+                        signature: None,
+                    },
+                    ContentBlock::tool_use("call_1", "read_file", r#"{"path":"a.txt"}"#),
+                ],
+            },
+        ];
+        for replay_thinking in [false, true] {
+            let result = convert_messages(&messages, replay_thinking);
+            assert_eq!(result.len(), 2);
+            assert!(result[1].tool_calls.is_some());
+            // Serialized to confirm the thinking never appears in the JSON
+            // sent over the wire.
+            let json = serde_json::to_value(&result[1]).unwrap();
+            assert!(json.get("reasoning_content").is_none());
+            assert!(json.get("thinking_blocks").is_none());
+        }
+    }
+
+    fn signed(thinking: &str, signature: &str) -> ContentBlock {
+        ContentBlock::Thinking {
+            thinking: thinking.into(),
+            signature: Some(signature.into()),
+        }
+    }
+
+    /// An assistant reply calling `read_file` after `thinking`.
+    fn tool_reply(id: &str, thinking: Vec<ContentBlock>) -> Message {
+        let mut content = thinking;
+        content.push(ContentBlock::tool_use(id, "read_file", "{}"));
+        Message::new(Role::Assistant, content)
+    }
+
+    /// Each converted message's `thinking_blocks`, as sent.
+    fn sent_thinking(messages: &[Message], replay_thinking: bool) -> Vec<Option<Value>> {
+        convert_messages(messages, replay_thinking)
+            .iter()
+            .map(|m| {
+                serde_json::to_value(m)
+                    .unwrap()
+                    .get("thinking_blocks")
+                    .cloned()
+            })
+            .collect()
+    }
+
+    // A previous turn's thinking stays home; the current tool loop's goes
+    // back, signed and redacted blocks in order, unsigned ones left out.
+    #[test]
+    fn signed_thinking_is_replayed_only_within_the_current_tool_loop() {
+        let messages = vec![
+            Message::user("first"),
+            tool_reply("call_1", vec![signed("old", "sig-old")]),
+            Message::tool_result("call_1", "read_file", "a", false),
+            Message::new(Role::Assistant, vec![ContentBlock::from("done")]),
+            Message::user("second"),
+            tool_reply(
+                "call_2",
+                vec![
+                    signed("plan", "sig-1"),
+                    ContentBlock::RedactedThinking { data: "enc".into() },
+                    ContentBlock::Thinking {
+                        thinking: "unsigned".into(),
+                        signature: None,
+                    },
+                ],
+            ),
+            Message::tool_result("call_2", "read_file", "b", false),
+            tool_reply("call_3", vec![signed("next", "sig-2")]),
+            Message::tool_result("call_3", "read_file", "c", false),
+        ];
+        let sent = sent_thinking(&messages, true);
+        assert_eq!(sent[1], None, "previous turn");
+        assert_eq!(
+            sent[5],
+            Some(serde_json::json!([
+                { "type": "thinking", "thinking": "plan", "signature": "sig-1" },
+                { "type": "redacted_thinking", "data": "enc" },
+            ]))
+        );
+        assert_eq!(
+            sent[7],
+            Some(serde_json::json!([
+                { "type": "thinking", "thinking": "next", "signature": "sig-2" },
+            ]))
+        );
+        for i in [0, 2, 3, 4, 6, 8] {
+            assert_eq!(sent[i], None, "message {i}");
+        }
+    }
+
+    #[test]
+    fn nothing_is_replayed_with_replay_off() {
+        let messages = vec![
+            Message::user("go"),
+            tool_reply("call_1", vec![signed("plan", "sig-1")]),
+            Message::tool_result("call_1", "read_file", "a", false),
+        ];
+        assert!(sent_thinking(&messages, false).iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn the_client_replays_only_once_told_to() {
+        let messages = [
+            Message::user("go"),
+            tool_reply("call_1", vec![signed("plan", "sig-1")]),
+        ];
+        let sent = |client: &OpenAiClient| {
+            serde_json::to_value(client.request(&messages, &[])).unwrap()["messages"][1]
+                .get("thinking_blocks")
+                .cloned()
+        };
+        assert_eq!(sent(&client(None)), None);
+        assert!(sent(&client(None).with_replay_thinking(true)).is_some());
     }
 
     #[test]
@@ -792,7 +1043,7 @@ mod tests {
             ),
             Message::user("still there?"),
         ];
-        let roles: Vec<_> = convert_messages(&messages)
+        let roles: Vec<_> = convert_messages(&messages, false)
             .into_iter()
             .map(|m| m.role)
             .collect();
@@ -807,7 +1058,7 @@ mod tests {
             "file content",
             false,
         )];
-        let result = convert_messages(&messages);
+        let result = convert_messages(&messages, false);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "tool");
         assert_eq!(result[0].tool_call_id.as_deref(), Some("call_1"));
@@ -856,24 +1107,30 @@ mod tests {
     #[test]
     fn assemble_content_puts_thinking_before_text_and_tool_uses() {
         let tool = ContentBlock::tool_use("call_0", "read_file", "{}");
+        let signed = ContentBlock::Thinking {
+            thinking: "first".into(),
+            signature: Some("sig".into()),
+        };
         let content = assemble_content(
+            vec![signed.clone()],
             "let me think".into(),
             "here's the answer".into(),
             vec![tool],
         );
-        assert_eq!(content.len(), 3);
+        assert_eq!(content.len(), 4);
+        assert_eq!(content[0], signed);
         assert!(matches!(
-            &content[0],
+            &content[1],
             ContentBlock::Thinking { thinking, signature }
                 if thinking == "let me think" && signature.is_none()
         ));
-        assert!(matches!(&content[1], ContentBlock::Text { text } if text == "here's the answer"));
-        assert!(matches!(&content[2], ContentBlock::ToolUse { name, .. } if name == "read_file"));
+        assert!(matches!(&content[2], ContentBlock::Text { text } if text == "here's the answer"));
+        assert!(matches!(&content[3], ContentBlock::ToolUse { name, .. } if name == "read_file"));
     }
 
     #[test]
     fn assemble_content_skips_empty_reasoning_and_text() {
-        assert!(assemble_content(String::new(), String::new(), vec![]).is_empty());
+        assert!(assemble_content(vec![], String::new(), String::new(), vec![]).is_empty());
     }
 
     #[test]
@@ -893,6 +1150,116 @@ mod tests {
                 ContentBlock::from("hi"),
             ]
         );
+    }
+
+    // LiteLLM v1.105.1 streaming Claude's thinking and a tool call: every
+    // thinking piece in both `reasoning_content` and `thinking_blocks` (with
+    // a copy in `provider_specific_fields`), then the signature with the
+    // block's whole text and an empty `reasoning_content`.
+    const LITELLM_SIGNED_REPLY: &[&str] = &[
+        r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"claude-sonnet-5-5","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}"#,
+        r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"claude-sonnet-5-5","choices":[{"index":0,"delta":{"content":"","reasoning_content":"Let me ","thinking_blocks":[{"type":"thinking","thinking":"Let me "}],"provider_specific_fields":{"thinking_blocks":[{"type":"thinking","thinking":"Let me "}]}}}]}"#,
+        r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"claude-sonnet-5-5","choices":[{"index":0,"delta":{"content":"","reasoning_content":"read it.","thinking_blocks":[{"type":"thinking","thinking":"read it."}],"provider_specific_fields":{"thinking_blocks":[{"type":"thinking","thinking":"read it."}]}}}]}"#,
+        r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"claude-sonnet-5-5","choices":[{"index":0,"delta":{"content":"","reasoning_content":"","thinking_blocks":[{"type":"thinking","thinking":"Let me read it.","signature":"EqQBCkgI"}],"provider_specific_fields":{"thinking_blocks":[{"type":"thinking","thinking":"Let me read it.","signature":"EqQBCkgI"}]}}}]}"#,
+        r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"claude-sonnet-5-5","choices":[{"index":0,"delta":{"content":"","tool_calls":[{"index":0,"id":"toolu_1","type":"function","function":{"name":"read_file","arguments":""}}]}}]}"#,
+        r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"claude-sonnet-5-5","choices":[{"index":0,"delta":{"content":"","tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"a.txt\"}"}}]}}]}"#,
+        r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"claude-sonnet-5-5","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "[DONE]",
+    ];
+
+    #[test]
+    fn streamed_thinking_blocks_with_a_late_signature_become_a_signed_block() {
+        let choice = parse_stream(LITELLM_SIGNED_REPLY).unwrap();
+        assert_eq!(
+            choice.message.content,
+            [
+                signed("Let me read it.", "EqQBCkgI"),
+                ContentBlock::tool_use("toolu_1", "read_file", r#"{"path":"a.txt"}"#),
+            ]
+        );
+    }
+
+    // Older LiteLLM versions send the signature with empty text; the block
+    // then gets the reasoning streamed before it.
+    #[test]
+    fn a_signature_without_text_signs_the_streamed_reasoning() {
+        let choice = parse_stream(&[
+            r#"{"choices":[{"delta":{"reasoning_content":"Let me","thinking_blocks":[{"type":"thinking","thinking":"Let me","signature":null}]}}]}"#,
+            r#"{"choices":[{"delta":{"thinking_blocks":[{"type":"thinking","thinking":"","signature":"EqQBCkgI"}]}}]}"#,
+            r#"{"choices":[{"delta":{"content":"Done."},"finish_reason":"stop"}]}"#,
+        ])
+        .unwrap();
+        assert_eq!(
+            choice.message.content,
+            [signed("Let me", "EqQBCkgI"), ContentBlock::from("Done.")]
+        );
+    }
+
+    // E.g. `max_tokens` reached mid-thought: the text is kept, unsigned.
+    #[test]
+    fn thinking_cut_off_before_its_signature_stays_unsigned() {
+        let choice = parse_stream(&[
+            r#"{"choices":[{"delta":{"reasoning_content":"Let me","thinking_blocks":[{"type":"thinking","thinking":"Let me"}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#,
+        ])
+        .unwrap();
+        assert_eq!(
+            choice.message.content,
+            [ContentBlock::Thinking {
+                thinking: "Let me".into(),
+                signature: None,
+            }]
+        );
+    }
+
+    // Each signature closes its own block, so two blocks keep their own text.
+    #[test]
+    fn redacted_and_several_signed_blocks_keep_their_order() {
+        let choice = parse_stream(&[
+            r#"{"choices":[{"delta":{"thinking_blocks":[{"type":"redacted_thinking","data":"EmwKAhgB"}]}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning_content":"one","thinking_blocks":[{"type":"thinking","thinking":"one"}]}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning_content":"","thinking_blocks":[{"type":"thinking","thinking":"one","signature":"sig-1"}]}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning_content":"two","thinking_blocks":[{"type":"thinking","thinking":"two"}]}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning_content":"","thinking_blocks":[{"type":"thinking","thinking":"two","signature":"sig-2"}]}}]}"#,
+            r#"{"choices":[{"delta":{"content":"Done."},"finish_reason":"stop"}]}"#,
+        ])
+        .unwrap();
+        assert_eq!(
+            choice.message.content,
+            [
+                ContentBlock::RedactedThinking {
+                    data: "EmwKAhgB".into(),
+                },
+                signed("one", "sig-1"),
+                signed("two", "sig-2"),
+                ContentBlock::from("Done."),
+            ]
+        );
+    }
+
+    #[test]
+    fn thinking_blocks_only_in_provider_specific_fields_are_read() {
+        let choice = parse_stream(&[
+            r#"{"choices":[{"delta":{"reasoning_content":"hm","provider_specific_fields":{"citation":null,"thinking_blocks":[{"type":"thinking","thinking":"hm","signature":"sig"}]}}}]}"#,
+            r#"{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}"#,
+        ])
+        .unwrap();
+        assert_eq!(
+            choice.message.content,
+            [signed("hm", "sig"), ContentBlock::from("ok")]
+        );
+    }
+
+    // An unknown block type, or odd `provider_specific_fields`, doesn't cost
+    // the rest of the chunk.
+    #[test]
+    fn unknown_thinking_entries_dont_drop_the_chunk() {
+        let choice = parse_stream(&[
+            r#"{"choices":[{"delta":{"content":"hi","thinking_blocks":[{"type":"summary","text":"x"}]}}]}"#,
+            r#"{"choices":[{"delta":{"content":"!","provider_specific_fields":"odd"},"finish_reason":"stop"}]}"#,
+        ])
+        .unwrap();
+        assert_eq!(choice.message.content, [ContentBlock::from("hi!")]);
     }
 
     #[test]

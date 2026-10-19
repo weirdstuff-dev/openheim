@@ -61,6 +61,7 @@ impl AppConfig {
             max_tokens: provider.max_tokens,
             context_window: provider.context_window,
             thinking: provider.resolve_thinking(kind),
+            replay_thinking: provider.replay_thinking.unwrap_or(false),
         }
     }
 
@@ -432,6 +433,37 @@ mod tests {
 
         let openai = config.resolve_provider_default("work-openai").unwrap();
         assert_eq!(openai.kind, ProviderKind::OpenAi);
+    }
+
+    #[test]
+    fn replay_thinking_is_off_unless_set() {
+        let config = config_from_toml(
+            r#"
+            [providers.proxy]
+            api_base = "http://localhost:4000/v1"
+            default_model = "claude-sonnet-5-5"
+            models = ["claude-sonnet-5-5"]
+            replay_thinking = true
+
+            [providers.ollama]
+            api_base = "http://localhost:11434/v1"
+            default_model = "llama3"
+            models = ["llama3"]
+            "#,
+        );
+
+        assert!(
+            config
+                .resolve_provider_default("proxy")
+                .unwrap()
+                .replay_thinking
+        );
+        assert!(
+            !config
+                .resolve_provider_default("ollama")
+                .unwrap()
+                .replay_thinking
+        );
     }
 
     #[test]

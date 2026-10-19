@@ -698,6 +698,7 @@ impl OpenheimBuilder {
                 max_tokens: self.max_tokens,
                 context_window: self.context_window,
                 thinking: None,
+                replay_thinking: None,
             },
         );
 
