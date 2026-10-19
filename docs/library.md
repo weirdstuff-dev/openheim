@@ -658,4 +658,4 @@ match client.get_session("bad-id").await {
 }
 ```
 
-Transient LLM errors (rate limits, 5xx, network timeouts) are retried automatically with exponential backoff before surfacing as `Error::HttpError` or `Error::ApiError`.
+Transient LLM errors (rate limits, 5xx, network timeouts) are retried automatically with exponential backoff before surfacing as `Error::HttpError` or `Error::ApiError`. A provider's `Retry-After` header replaces the backoff. If it asks for more than 10 seconds, the error is returned at once, with the wait in `Error::retry_after()`, so you can tell the user when to try again instead of the turn hanging silently.
