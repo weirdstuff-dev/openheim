@@ -151,7 +151,9 @@ impl RejectionKind {
 /// `code` is kept as sent, so codes this version doesn't know still parse.
 /// The fields that depend on the code (`plan`, `limit`, `upgrade`, `action`,
 /// …) are in `details`, which holds the whole `error` object unchanged.
+/// Built with [`ProviderRejection::from_body`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ProviderRejection {
     /// HTTP status of the response.
     pub status: u16,
@@ -159,7 +161,8 @@ pub struct ProviderRejection {
     /// E.g. `window_budget_exceeded` or `token_expired`; empty if the body
     /// had none.
     pub code: String,
-    /// The backend's English message, or `code` if it sent none.
+    /// The backend's English message. Without one, `code`, or a generic
+    /// message naming the HTTP status if that's empty too.
     pub message: String,
     /// The body's `error` object, every field included.
     pub details: serde_json::Map<String, serde_json::Value>,
@@ -183,7 +186,10 @@ impl ProviderRejection {
                 .map(str::to_owned)
         };
         let code = field("code").unwrap_or_default();
-        let message = field("message").unwrap_or_else(|| code.clone());
+        let message = field("message")
+            .filter(|m| !m.is_empty())
+            .or_else(|| (!code.is_empty()).then(|| code.clone()))
+            .unwrap_or_else(|| format!("request rejected by the provider (HTTP {status})"));
         Some(Self {
             status,
             kind,
@@ -309,6 +315,17 @@ mod tests {
         let rejection = ProviderRejection::from_body(429, body).unwrap();
         assert_eq!(rejection.message, "rate_limited");
         assert_eq!(Error::from(rejection).to_string(), "rate_limited");
+    }
+
+    #[test]
+    fn a_rejection_without_a_message_or_code_names_the_status() {
+        let body = r#"{"error":{"type":"openheim_auth","message":""}}"#;
+        let rejection = ProviderRejection::from_body(401, body).unwrap();
+        assert_eq!(rejection.code, "");
+        assert_eq!(
+            Error::from(rejection).to_string(),
+            "request rejected by the provider (HTTP 401)"
+        );
     }
 
     #[test]
