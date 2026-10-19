@@ -118,7 +118,7 @@ struct OpenAiMessage {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum OpenAiThinkingBlock {
     Thinking {
-        #[serde(default)]
+        #[serde(default, deserialize_with = "null_as_empty")]
         thinking: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
@@ -130,6 +130,13 @@ enum OpenAiThinkingBlock {
     /// A block type this client doesn't know; ignored.
     #[serde(other, skip_serializing)]
     Other,
+}
+
+/// A string field that may be `null`, read as empty.
+fn null_as_empty<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// OpenAI accepts `content` as either a plain string or an array of typed
@@ -250,11 +257,13 @@ struct OpenAiStreamDelta {
     #[serde(default)]
     reasoning_content: Option<String>,
     /// LiteLLM's Anthropic thinking, signatures included; see
-    /// [`OpenAiThinkingBlock`].
+    /// [`OpenAiThinkingBlock`]. Kept as raw JSON and parsed entry by entry
+    /// (see `take_thinking_blocks`), so an odd entry can't fail the chunk's
+    /// parse and lose its text or tool-call arguments.
     #[serde(default)]
-    thinking_blocks: Option<Vec<OpenAiThinkingBlock>>,
-    /// LiteLLM copies `thinking_blocks` in here too. Kept as raw JSON so
-    /// nothing else in it can fail the chunk's parse.
+    thinking_blocks: Option<Value>,
+    /// LiteLLM copies `thinking_blocks` in here too. Raw JSON for the same
+    /// reason.
     #[serde(default)]
     provider_specific_fields: Option<Value>,
     #[serde(default)]
@@ -263,17 +272,22 @@ struct OpenAiStreamDelta {
 
 impl OpenAiStreamDelta {
     /// `thinking_blocks`, or the copy in `provider_specific_fields` when the
-    /// delta has no top-level one.
+    /// delta has no top-level one. An entry that doesn't parse is skipped,
+    /// keeping the others.
     fn take_thinking_blocks(&mut self) -> Vec<OpenAiThinkingBlock> {
-        if let Some(blocks) = self.thinking_blocks.take() {
-            return blocks;
-        }
-        self.provider_specific_fields
-            .as_mut()
-            .and_then(|fields| fields.get_mut("thinking_blocks"))
-            .map(Value::take)
-            .and_then(|blocks| serde_json::from_value(blocks).ok())
-            .unwrap_or_default()
+        let raw = self.thinking_blocks.take().or_else(|| {
+            self.provider_specific_fields
+                .as_mut()
+                .and_then(|fields| fields.get_mut("thinking_blocks"))
+                .map(Value::take)
+        });
+        let Some(Value::Array(entries)) = raw else {
+            return Vec::new();
+        };
+        entries
+            .into_iter()
+            .filter_map(|entry| serde_json::from_value(entry).ok())
+            .collect()
     }
 }
 
@@ -1260,6 +1274,27 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(choice.message.content, [ContentBlock::from("hi!")]);
+    }
+
+    // A malformed entry is skipped on its own: the chunk's tool-call
+    // arguments and the valid entries next to it survive, and `null` text
+    // still lets a signature sign the streamed reasoning.
+    #[test]
+    fn a_malformed_thinking_entry_doesnt_drop_the_chunk_or_its_neighbours() {
+        let choice = parse_stream(&[
+            r#"{"choices":[{"delta":{"reasoning_content":"plan"}}]}"#,
+            r#"{"choices":[{"delta":{"thinking_blocks":[{"type":"thinking","thinking":null,"signature":"sig"},{"type":"thinking","thinking":"x","signature":7},{"type":"redacted_thinking","data":["bad"]},{"type":"redacted_thinking","data":"enc"}],"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        ])
+        .unwrap();
+        assert_eq!(
+            choice.message.content,
+            [
+                signed("plan", "sig"),
+                ContentBlock::RedactedThinking { data: "enc".into() },
+                ContentBlock::tool_use("call_1", "read_file", "{}"),
+            ]
+        );
     }
 
     #[test]
