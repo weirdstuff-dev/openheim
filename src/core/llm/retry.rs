@@ -8,12 +8,20 @@ use tokio::time::sleep;
 
 use super::{LlmChunk, LlmClient};
 use crate::core::models::{Choice, Message, Tool};
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 const MAX_RETRIES: u32 = 3;
 const INITIAL_BACKOFF_MS: u64 = 1000;
 
-/// A wrapper around any `LlmClient` that retries transient failures with exponential backoff.
+/// How long to wait before retrying after `e` on attempt `attempt` (from 0):
+/// the provider's `Retry-After` if it sent one, else exponential backoff.
+fn retry_delay(e: &Error, attempt: u32) -> Duration {
+    e.retry_after()
+        .unwrap_or_else(|| Duration::from_millis(INITIAL_BACKOFF_MS * 2u64.pow(attempt)))
+}
+
+/// A wrapper around any `LlmClient` that retries transient failures with
+/// exponential backoff, or after the provider's `Retry-After`.
 pub struct RetryClient {
     inner: Arc<dyn LlmClient>,
 }
@@ -31,7 +39,7 @@ impl LlmClient for RetryClient {
             match self.inner.send(messages, tools).await {
                 Ok(choice) => return Ok(choice),
                 Err(e) if attempt < MAX_RETRIES && e.is_retryable() => {
-                    let backoff = Duration::from_millis(INITIAL_BACKOFF_MS * 2u64.pow(attempt));
+                    let backoff = retry_delay(&e, attempt);
                     tracing::warn!(
                         "LLM request failed (attempt {}/{}): {}. Retrying in {:?}...",
                         attempt + 1,
@@ -84,7 +92,7 @@ impl LlmClient for RetryClient {
                         && e.is_retryable()
                         && !emitted.load(Ordering::SeqCst) =>
                 {
-                    let backoff = Duration::from_millis(INITIAL_BACKOFF_MS * 2u64.pow(attempt));
+                    let backoff = retry_delay(&e, attempt);
                     tracing::warn!(
                         "LLM stream failed before first chunk (attempt {}/{}): {}. Retrying in {:?}...",
                         attempt + 1,
@@ -105,8 +113,15 @@ impl LlmClient for RetryClient {
 mod tests {
     use super::*;
     use crate::core::models::FinishReason;
-    use crate::error::Error;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn http_err(status: u16, body: &str) -> Error {
+        Error::HttpError {
+            status,
+            body: body.into(),
+            retry_after: None,
+        }
+    }
 
     fn ok_choice(content: &str) -> Choice {
         Choice {
@@ -140,10 +155,7 @@ mod tests {
             _messages: &[Message],
             _tools: &[Tool],
         ) -> crate::error::Result<Choice> {
-            Err(Error::HttpError {
-                status: 400,
-                body: "bad request".into(),
-            })
+            Err(http_err(400, "bad request"))
         }
     }
 
@@ -161,10 +173,7 @@ mod tests {
         ) -> crate::error::Result<Choice> {
             let remaining = self.remaining_failures.fetch_sub(1, Ordering::SeqCst);
             if remaining > 0 {
-                Err(Error::HttpError {
-                    status: 429,
-                    body: "rate limited".into(),
-                })
+                Err(http_err(429, "rate limited"))
             } else {
                 Ok(ok_choice("recovered"))
             }
@@ -184,9 +193,24 @@ mod tests {
             _tools: &[Tool],
         ) -> crate::error::Result<Choice> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
+            Err(http_err(503, "service unavailable"))
+        }
+    }
+
+    /// Mock that always fails with a 429 carrying `Retry-After: retry_after`.
+    struct AlwaysRetryAfter {
+        retry_after: Duration,
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmClient for AlwaysRetryAfter {
+        async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> Result<Choice> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
             Err(Error::HttpError {
-                status: 503,
-                body: "service unavailable".into(),
+                status: 429,
+                body: "rate limited".into(),
+                retry_after: Some(self.retry_after),
             })
         }
     }
@@ -260,6 +284,42 @@ mod tests {
         assert_eq!(inner.call_count.load(Ordering::SeqCst), 4);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_short_retry_after_replaces_the_backoff() {
+        let inner = Arc::new(AlwaysRetryAfter {
+            retry_after: Duration::from_secs(3),
+            call_count: AtomicUsize::new(0),
+        });
+        let client = RetryClient::new(inner.clone());
+        let started = tokio::time::Instant::now();
+
+        let result = client.send(&[], &[]).await;
+
+        assert!(result.is_err());
+        assert_eq!(inner.call_count.load(Ordering::SeqCst), 4);
+        assert_eq!(started.elapsed(), Duration::from_secs(9));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_retry_after_is_returned_at_once() {
+        let inner = Arc::new(AlwaysRetryAfter {
+            retry_after: Duration::from_secs(5 * 3600),
+            call_count: AtomicUsize::new(0),
+        });
+        let client = RetryClient::new(inner.clone());
+        let started = tokio::time::Instant::now();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let result = client.send_streaming(&[], &[], tx).await;
+
+        assert_eq!(
+            result.unwrap_err().retry_after(),
+            Some(Duration::from_secs(5 * 3600))
+        );
+        assert_eq!(inner.call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
     /// Streaming mock that fails (without emitting) the first `failures` times,
     /// then succeeds. Records how many times `send_streaming` was entered.
     struct StreamFailThenSucceed {
@@ -282,10 +342,7 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.remaining_failures.fetch_sub(1, Ordering::SeqCst) > 0 {
                 // Fail before emitting anything — safe to retry.
-                Err(Error::HttpError {
-                    status: 503,
-                    body: "service unavailable".into(),
-                })
+                Err(http_err(503, "service unavailable"))
             } else {
                 let _ = chunk_tx.send(LlmChunk::Text("hello".into()));
                 Ok(ok_choice("hello"))
@@ -313,10 +370,7 @@ mod tests {
         ) -> Result<Choice> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let _ = chunk_tx.send(LlmChunk::Text("partial".into()));
-            Err(Error::HttpError {
-                status: 503,
-                body: "dropped mid-stream".into(),
-            })
+            Err(http_err(503, "dropped mid-stream"))
         }
     }
 

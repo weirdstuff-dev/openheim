@@ -47,7 +47,8 @@ const MAX_RETRIES: u32 = 2;
 const INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// `client.embed(inputs)`, retried up to [`MAX_RETRIES`] times on a
-/// transient failure (rate limit, 5xx, network).
+/// transient failure (rate limit, 5xx, network), after the provider's
+/// `Retry-After` if it sent one.
 async fn embed_with_retry(
     client: &dyn EmbeddingClient,
     inputs: &[String],
@@ -56,7 +57,9 @@ async fn embed_with_retry(
     loop {
         match client.embed(inputs).await {
             Err(e) if attempt < MAX_RETRIES && e.is_retryable() => {
-                let backoff = INITIAL_BACKOFF * 2u32.pow(attempt);
+                let backoff = e
+                    .retry_after()
+                    .unwrap_or(INITIAL_BACKOFF * 2u32.pow(attempt));
                 tracing::warn!(error = %e, ?backoff, "embeddings request failed; retrying");
                 tokio::time::sleep(backoff).await;
                 attempt += 1;
@@ -113,15 +116,10 @@ pub fn create_embedding_client(
 /// Reads a non-2xx response into [`Error::HttpError`] so retry logic and
 /// callers see the same shape the chat clients produce.
 pub(crate) async fn check_status(response: reqwest::Response) -> Result<reqwest::Response> {
-    let status = response.status();
-    if status.is_success() {
+    if response.status().is_success() {
         return Ok(response);
     }
-    let body = response.text().await.unwrap_or_default();
-    Err(Error::HttpError {
-        status: status.as_u16(),
-        body,
-    })
+    Err(Error::from_response(response).await)
 }
 
 #[cfg(test)]
@@ -248,6 +246,7 @@ pub(crate) mod test_support {
                 return Err(Error::HttpError {
                     status: self.status,
                     body: "embeddings unavailable".into(),
+                    retry_after: None,
                 });
             }
             self.embedded.fetch_add(inputs.len(), Ordering::SeqCst);

@@ -1,4 +1,10 @@
 use std::fmt;
+use std::time::Duration;
+
+/// The longest `Retry-After` openheim waits out before retrying. A longer one
+/// makes the error non-retryable, so the caller hears about it at once
+/// instead of after a silent wait.
+pub(crate) const MAX_RETRY_AFTER: Duration = Duration::from_secs(10);
 
 /// All errors that openheim can produce.
 #[derive(Debug, thiserror::Error)]
@@ -8,9 +14,14 @@ pub enum Error {
     #[error("API error: {0}")]
     ApiError(String),
 
-    /// HTTP error response from a provider (status code is preserved for retry logic).
+    /// HTTP error response from a provider. `retry_after` is the response's
+    /// `Retry-After` header, if it had a valid one.
     #[error("HTTP {status}: {body}")]
-    HttpError { status: u16, body: String },
+    HttpError {
+        status: u16,
+        body: String,
+        retry_after: Option<Duration>,
+    },
 
     /// The provider rejected a request as too long for the model's context
     /// window. The agent loop answers it by leaving out older turns, so a
@@ -98,16 +109,68 @@ impl Error {
         Error::ConfigError(msg.to_string())
     }
 
+    /// [`Error::HttpError`] for a non-2xx `response`: its status, its body
+    /// and its `Retry-After` header.
+    pub async fn from_response(response: reqwest::Response) -> Self {
+        let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| parse_retry_after(value, chrono::Utc::now()));
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<failed to read error body>".into());
+        Error::HttpError {
+            status,
+            body,
+            retry_after,
+        }
+    }
+
     /// Returns true for transient errors that may succeed on retry (429, 5xx,
-    /// network errors, a reply cut off mid-stream).
+    /// network errors, a reply cut off mid-stream). An HTTP error whose
+    /// `Retry-After` is longer than openheim waits out isn't.
     pub fn is_retryable(&self) -> bool {
         match self {
-            Error::HttpError { status, .. } => matches!(status, 429 | 500 | 502 | 503 | 504),
+            Error::HttpError {
+                status,
+                retry_after,
+                ..
+            } => {
+                matches!(status, 429 | 500 | 502 | 503 | 504)
+                    && retry_after.is_none_or(|wait| wait <= MAX_RETRY_AFTER)
+            }
             Error::ReqwestError(e) => e.is_timeout() || e.is_connect(),
             Error::IncompleteResponse(_) => true,
             _ => false,
         }
     }
+
+    /// How long the provider asked to wait before retrying (its
+    /// `Retry-After`), if it said.
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Error::HttpError { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+}
+
+/// A `Retry-After` value as a wait from `now`: either delay-seconds or an
+/// HTTP date (a date already past is no wait). `None` if it's neither.
+fn parse_retry_after(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(secs) = value.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    let at = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    Some(
+        (at.with_timezone(&chrono::Utc) - now)
+            .to_std()
+            .unwrap_or_default(),
+    )
 }
 
 #[cfg(feature = "rag")]
@@ -134,12 +197,98 @@ mod tests {
         Error::HttpError {
             status,
             body: "error".into(),
+            retry_after: None,
+        }
+    }
+
+    fn http_err_retry_after(status: u16, secs: u64) -> Error {
+        Error::HttpError {
+            status,
+            body: "error".into(),
+            retry_after: Some(Duration::from_secs(secs)),
         }
     }
 
     #[test]
     fn is_retryable_for_429() {
         assert!(http_err(429).is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_for_a_short_retry_after() {
+        assert!(http_err_retry_after(429, 0).is_retryable());
+        assert!(http_err_retry_after(429, MAX_RETRY_AFTER.as_secs()).is_retryable());
+        assert!(http_err_retry_after(503, 2).is_retryable());
+    }
+
+    // A limit that lifts in hours is reported at once, not after the backoff.
+    #[test]
+    fn is_not_retryable_for_a_long_retry_after() {
+        assert!(!http_err_retry_after(429, MAX_RETRY_AFTER.as_secs() + 1).is_retryable());
+        assert!(!http_err_retry_after(503, 18_000).is_retryable());
+    }
+
+    #[test]
+    fn a_retry_after_on_a_non_transient_status_is_still_not_retryable() {
+        assert!(!http_err_retry_after(403, 1).is_retryable());
+    }
+
+    #[test]
+    fn retry_after_parses_seconds_and_http_dates() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-18T15:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            parse_retry_after("120", now),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(parse_retry_after(" 5 ", now), Some(Duration::from_secs(5)));
+        assert_eq!(
+            parse_retry_after("Sun, 18 Oct 2026 16:00:00 GMT", now),
+            Some(Duration::from_secs(3600))
+        );
+        assert_eq!(
+            parse_retry_after("Sun, 18 Oct 2026 14:00:00 GMT", now),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(parse_retry_after("soon", now), None);
+        assert_eq!(parse_retry_after("-5", now), None);
+    }
+
+    fn response(status: u16, retry_after: Option<&str>, body: &str) -> reqwest::Response {
+        let mut builder = http::Response::builder().status(status);
+        if let Some(value) = retry_after {
+            builder = builder.header("Retry-After", value);
+        }
+        reqwest::Response::from(builder.body(body.to_string()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn from_response_keeps_status_body_and_retry_after() {
+        let err = Error::from_response(response(429, Some("18000"), "{\"error\":{}}")).await;
+        assert!(matches!(
+            err,
+            Error::HttpError { status: 429, ref body, retry_after: Some(wait) }
+                if body == "{\"error\":{}}" && wait == Duration::from_secs(18_000)
+        ));
+    }
+
+    #[tokio::test]
+    async fn from_response_ignores_a_missing_or_invalid_retry_after() {
+        for header in [None, Some("later")] {
+            let err = Error::from_response(response(503, header, "down")).await;
+            assert_eq!(err.retry_after(), None, "{header:?}");
+        }
+    }
+
+    #[test]
+    fn retry_after_is_only_set_for_http_errors() {
+        assert_eq!(
+            http_err_retry_after(429, 3).retry_after(),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(http_err(429).retry_after(), None);
+        assert_eq!(Error::Other("x".into()).retry_after(), None);
     }
 
     #[test]

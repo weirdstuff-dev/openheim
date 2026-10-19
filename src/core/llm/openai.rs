@@ -474,6 +474,7 @@ impl LlmClient for OpenAiClient {
             Err(Error::HttpError {
                 status,
                 body: err_body,
+                ..
             }) if should_retry_without_stream_options(status, &err_body) => {
                 let mut retry_body = body.clone();
                 if let Some(obj) = retry_body.as_object_mut() {

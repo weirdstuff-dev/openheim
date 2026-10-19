@@ -362,9 +362,12 @@ pub(crate) async fn serve_state(
 ///   so it's internal.)
 /// - `SessionLocked` / `SessionBusy` → `internal_error` with their fields as
 ///   structured `data`, so a client can offer "busy, retry".
+/// - `HttpError` → `internal_error` with `status`, `retry_after_secs` and
+///   the provider's `body` (parsed if it's JSON) as structured `data`, so a
+///   client that knows its provider can read the body.
 /// - Anything else → `internal_error` (-32603).
 ///
-/// Every case but the structured two puts `e.to_string()` in `data`.
+/// Every case but the structured three puts `e.to_string()` in `data`.
 fn to_acp_error(e: &Error) -> agent_client_protocol::Error {
     match e {
         Error::NotFound(_) => {
@@ -387,6 +390,20 @@ fn to_acp_error(e: &Error) -> agent_client_protocol::Error {
             agent_client_protocol::Error::internal_error().data(serde_json::json!({
                 "kind": "session_busy",
                 "session_id": session_id,
+            }))
+        }
+        Error::HttpError {
+            status,
+            body,
+            retry_after,
+        } => {
+            let body = serde_json::from_str::<serde_json::Value>(body)
+                .unwrap_or_else(|_| serde_json::Value::String(body.clone()));
+            agent_client_protocol::Error::internal_error().data(serde_json::json!({
+                "kind": "http_error",
+                "status": status,
+                "retry_after_secs": retry_after.map(|wait| wait.as_secs()),
+                "body": body,
             }))
         }
         _ => internal_error(e.to_string()),
@@ -424,6 +441,47 @@ mod to_acp_error_tests {
                 "session_id": "abc",
                 "pid": 42,
                 "host": "host1",
+            }))
+        );
+    }
+
+    #[test]
+    fn http_error_carries_status_retry_after_and_parsed_body() {
+        let e = Error::HttpError {
+            status: 429,
+            body: r#"{"error":{"code":"window_budget_exceeded","message":"Used up."}}"#.into(),
+            retry_after: Some(std::time::Duration::from_secs(18_000)),
+        };
+        let acp_error = to_acp_error(&e);
+        assert_eq!(
+            acp_error.code,
+            agent_client_protocol::Error::internal_error().code
+        );
+        assert_eq!(
+            acp_error.data,
+            Some(serde_json::json!({
+                "kind": "http_error",
+                "status": 429,
+                "retry_after_secs": 18_000,
+                "body": { "error": { "code": "window_budget_exceeded", "message": "Used up." } },
+            }))
+        );
+    }
+
+    #[test]
+    fn http_error_with_a_text_body_keeps_it_as_a_string() {
+        let e = Error::HttpError {
+            status: 502,
+            body: "Bad Gateway".into(),
+            retry_after: None,
+        };
+        assert_eq!(
+            to_acp_error(&e).data,
+            Some(serde_json::json!({
+                "kind": "http_error",
+                "status": 502,
+                "retry_after_secs": null,
+                "body": "Bad Gateway",
             }))
         );
     }
