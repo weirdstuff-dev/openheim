@@ -41,7 +41,7 @@ fn is_context_overflow(status: u16, body: &str) -> bool {
 
 /// POSTs `body` as JSON to `url` with `headers`, turning a non-2xx response
 /// into `Error::ContextOverflow` when it says the request was too long, and
-/// `Error::HttpError { status, body }` otherwise.
+/// `Error::HttpError` otherwise (see [`Error::from_response`]).
 pub(super) async fn post_json(
     client: &ReqwestClient,
     url: &str,
@@ -56,15 +56,12 @@ pub(super) async fn post_json(
     let response = request.send().await.map_err(Error::ReqwestError)?;
 
     if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "<failed to read error body>".into());
-        if is_context_overflow(status, &body) {
-            return Err(Error::ContextOverflow(body));
-        }
-        return Err(Error::HttpError { status, body });
+        return Err(match Error::from_response(response).await {
+            Error::HttpError { status, body, .. } if is_context_overflow(status, &body) => {
+                Error::ContextOverflow(body)
+            }
+            e => e,
+        });
     }
 
     Ok(response)

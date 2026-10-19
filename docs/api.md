@@ -1058,7 +1058,7 @@ Send a user message to the agent within a session. The agent will stream back re
 
 **Errors specific to `session/prompt` and `session/load`:**
 
-Both requests can fail with one of two structured errors, in addition to the plain-string errors listed under [Common JSON-RPC error codes](#6-error-handling) (e.g. `-32002` for a session that doesn't exist). Both carry a machine-readable `data.kind` so a client can offer a "busy, retry" UX instead of surfacing a generic failure.
+Both requests can fail with one of the structured errors below, in addition to the plain-string errors listed under [Common JSON-RPC error codes](#6-error-handling) (e.g. `-32002` for a session that doesn't exist). Each carries a machine-readable `data.kind`, so a client can offer "busy, retry" or show what the provider said instead of surfacing a generic failure.
 
 **`session_busy`** — another turn is already in flight for this session, in this process (only one `session/prompt` runs per session at a time). Retry once it completes; unlike `session_locked` below, this is expected under normal concurrent use and not a hard failure.
 
@@ -1081,6 +1081,21 @@ Both requests can fail with one of two structured errors, in addition to the pla
     "session_id": "550e8400-e29b-41d4-a716-446655440000",
     "pid": 12345,
     "host": "my-machine"
+  }
+}
+```
+
+**`http_error`**: `session/prompt` only. The LLM provider answered with an HTTP error, after any retries. `status` is the HTTP status. `retry_after_secs` is the provider's `Retry-After` in seconds, or `null` if it sent none. openheim waits out a `Retry-After` of up to 10 seconds itself, so a value here is usually a longer wait. `body` is the provider's response body, parsed if it's JSON and a string otherwise. openheim doesn't interpret it, so a client that knows its provider's error format can read it (e.g. to show a plan limit):
+
+```json
+{
+  "code": -32603,
+  "message": "Internal error",
+  "data": {
+    "kind": "http_error",
+    "status": 429,
+    "retry_after_secs": 18000,
+    "body": { "error": { "message": "Rate limit reached", "type": "rate_limit_error" } }
   }
 }
 ```
@@ -2102,10 +2117,10 @@ All REST endpoints return `200` with JSON body on success. If the server is misc
 | `-32600` | Invalid request |
 | `-32601` | Method not found (a method openheim doesn't implement) |
 | `-32602` | Invalid params (malformed session id, unsupported prompt content, unknown model, mode, or config option) |
-| `-32603` | Internal error (anything else, plus the structured `session_busy` / `session_locked` errors) |
+| `-32603` | Internal error (anything else, plus the structured `session_busy` / `session_locked` / `http_error` errors) |
 | `-32002` | Resource not found (the session or conversation doesn't exist) |
 
-Except for `session_busy` / `session_locked`, `data` is a human-readable string describing the problem.
+Except for `session_busy` / `session_locked` / `http_error`, `data` is a human-readable string describing the problem.
 
 ### Connection Lifecycle
 
