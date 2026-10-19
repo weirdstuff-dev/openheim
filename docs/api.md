@@ -1058,7 +1058,7 @@ Send a user message to the agent within a session. The agent will stream back re
 
 **Errors specific to `session/prompt` and `session/load`:**
 
-Both requests can fail with one of two structured errors, in addition to the plain-string errors listed under [Common JSON-RPC error codes](#6-error-handling) (e.g. `-32002` for a session that doesn't exist). Both carry a machine-readable `data.kind` so a client can offer a "busy, retry" UX instead of surfacing a generic failure.
+Both requests can fail with one of the structured errors below, in addition to the plain-string errors listed under [Common JSON-RPC error codes](#6-error-handling) (e.g. `-32002` for a session that doesn't exist). Each carries a machine-readable `data.kind`, so a client can offer "busy, retry" or show a plan limit instead of surfacing a generic failure.
 
 **`session_busy`** — another turn is already in flight for this session, in this process (only one `session/prompt` runs per session at a time). Retry once it completes; unlike `session_locked` below, this is expected under normal concurrent use and not a hard failure.
 
@@ -1081,6 +1081,26 @@ Both requests can fail with one of two structured errors, in addition to the pla
     "session_id": "550e8400-e29b-41d4-a716-446655440000",
     "pid": 12345,
     "host": "my-machine"
+  }
+}
+```
+
+**`provider_rejection`**: `session/prompt` only. The provider refused the turn because of the user's plan or account: a usage limit (`"type": "openheim_limit"`) or a bad token (`"type": "openheim_auth"`). openheim doesn't retry it, so it arrives at once. `data` is the provider's `error` object as sent, plus `kind` and the HTTP `status`. `code` and `message` are always present (`message` is an English fallback). Every other field depends on the backend and the code, so read them when present and ignore the ones you don't know:
+
+```json
+{
+  "code": -32603,
+  "message": "Internal error",
+  "data": {
+    "kind": "provider_rejection",
+    "status": 429,
+    "type": "openheim_limit",
+    "code": "window_budget_exceeded",
+    "message": "You've used this 5-hour Lite allowance.",
+    "plan": "lite",
+    "limit": { "window": "5h", "resets_at": "2026-10-18T16:00:00Z" },
+    "upgrade": { "plan": "pro", "helps": true },
+    "action": "upgrade"
   }
 }
 ```
@@ -2102,10 +2122,10 @@ All REST endpoints return `200` with JSON body on success. If the server is misc
 | `-32600` | Invalid request |
 | `-32601` | Method not found (a method openheim doesn't implement) |
 | `-32602` | Invalid params (malformed session id, unsupported prompt content, unknown model, mode, or config option) |
-| `-32603` | Internal error (anything else, plus the structured `session_busy` / `session_locked` errors) |
+| `-32603` | Internal error (anything else, plus the structured `session_busy` / `session_locked` / `provider_rejection` errors) |
 | `-32002` | Resource not found (the session or conversation doesn't exist) |
 
-Except for `session_busy` / `session_locked`, `data` is a human-readable string describing the problem.
+Except for `session_busy` / `session_locked` / `provider_rejection`, `data` is a human-readable string describing the problem.
 
 ### Connection Lifecycle
 

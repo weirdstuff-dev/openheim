@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Plan-limit and auth rejections are a structured error, and aren't retried.** A provider error body of the form `{"error": {"type": "openheim_limit" | "openheim_auth", "code": ..., "message": ...}}` becomes `Error::ProviderRejection` instead of `Error::HttpError`. Its `ProviderRejection` holds the HTTP `status`, a `kind` (`RejectionKind::Limit` or `Auth`), the `code`, the `message` and the whole `error` object as `details`. Codes this version doesn't know still parse. It isn't retried, even on a 429, so the user sees a limit at once instead of after about 7 s of backoff. Over ACP it's an `internal_error` whose `data` is the `error` object plus `"kind": "provider_rejection"` and `status` (see `docs/api.md`). Custom clients can build one with `ProviderRejection::from_body`. Context-overflow bodies and every other error body are handled as before.
+
 ## [0.16.0] - 2026-10-16
 
 ### Added

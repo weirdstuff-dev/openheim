@@ -659,3 +659,16 @@ match client.get_session("bad-id").await {
 ```
 
 Transient LLM errors (rate limits, 5xx, network timeouts) are retried automatically with exponential backoff before surfacing as `Error::HttpError` or `Error::ApiError`.
+
+A provider that rejects a request because of the user's plan or account, with an error body whose `error.type` is `openheim_limit` or `openheim_auth`, gives `Error::ProviderRejection` instead. It's returned at once, without retries, even for a 429. Its `code` and `message` are always set, and `details` holds the whole `error` object (`plan`, `limit.resets_at`, `upgrade`, `action`, …):
+
+```rust
+use openheim::{Error, RejectionKind};
+
+if let Err(Error::ProviderRejection(rejection)) = result {
+    match rejection.kind {
+        RejectionKind::Auth => eprintln!("sign in again: {}", rejection.message),
+        _ => eprintln!("{} (resets {})", rejection.message, rejection.details["limit"]["resets_at"]),
+    }
+}
+```
