@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-20
+
 ### Added
 
 - **`replay_thinking` provider setting, for Claude behind LiteLLM.** The OpenAI and OpenAI-compatible clients now keep the signatures LiteLLM streams in `delta.thinking_blocks` (and redacted thinking), so saved replies hold signed `Thinking` and `RedactedThinking` blocks as the Anthropic client's do. With `replay_thinking = true` on a provider (`ProviderConfig::with_replay_thinking`, `AgentConfig::with_replay_thinking`, `OpenAiClient::with_replay_thinking`, `OpenAiCompatibleClient::with_replay_thinking` in code), the replies of the current tool loop send that thinking back as `thinking_blocks`. Anthropic needs this to keep extended thinking on through tool calls, and LiteLLM's `modify_params` otherwise turns thinking off for those requests. Off by default. Unsigned thinking and older turns' thinking are never sent. See `replay_thinking` in `docs/configuration.md`.
