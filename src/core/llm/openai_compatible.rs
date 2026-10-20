@@ -29,6 +29,11 @@ impl OpenAiCompatibleClient {
                 .with_token_limit_field(TokenLimitField::MaxTokens),
         )
     }
+
+    /// See [`OpenAiClient::with_replay_thinking`].
+    pub fn with_replay_thinking(self, replay_thinking: bool) -> Self {
+        Self(self.0.with_replay_thinking(replay_thinking))
+    }
 }
 
 #[async_trait]

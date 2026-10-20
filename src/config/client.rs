@@ -29,13 +29,16 @@ pub fn build_http_client(timeout_secs: u64) -> Result<ReqwestClient> {
 /// Create the LLM client for `config.kind`, wrapped with retry logic.
 pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<dyn LlmClient> {
     let inner: Arc<dyn LlmClient> = match config.kind {
-        ProviderKind::OpenAi => Arc::new(OpenAiClient::new(
-            http_client.clone(),
-            config.api_base.clone(),
-            config.api_key.clone(),
-            config.model.clone(),
-            config.max_tokens,
-        )),
+        ProviderKind::OpenAi => Arc::new(
+            OpenAiClient::new(
+                http_client.clone(),
+                config.api_base.clone(),
+                config.api_key.clone(),
+                config.model.clone(),
+                config.max_tokens,
+            )
+            .with_replay_thinking(config.replay_thinking),
+        ),
         ProviderKind::Anthropic => Arc::new(AnthropicClient::new(
             http_client.clone(),
             config.api_base.clone(),
@@ -51,13 +54,16 @@ pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<d
             config.model.clone(),
             config.max_tokens,
         )),
-        ProviderKind::OpenAiCompatible => Arc::new(OpenAiCompatibleClient::new(
-            http_client.clone(),
-            config.api_base.clone(),
-            config.api_key.clone(),
-            config.model.clone(),
-            config.max_tokens,
-        )),
+        ProviderKind::OpenAiCompatible => Arc::new(
+            OpenAiCompatibleClient::new(
+                http_client.clone(),
+                config.api_base.clone(),
+                config.api_key.clone(),
+                config.model.clone(),
+                config.max_tokens,
+            )
+            .with_replay_thinking(config.replay_thinking),
+        ),
     };
     Arc::new(RetryClient::new(inner))
 }
