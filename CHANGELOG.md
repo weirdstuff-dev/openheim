@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-10-26
+
 ### Fixed
 
 - **`list_sessions` finds a session under any spelling of its cwd.** A session's working directory was saved exactly as the client sent it, so filtering by `/home/me/project/`, a path with `..` or one through a symlink missed sessions saved as `/home/me/project`. The cwd is now canonicalized when it exists on this machine, both when it's saved (`new_session`, `load_session`) and when it's used as a filter, so sessions saved by earlier versions match too. A client's own path that doesn't exist here is kept as given.
