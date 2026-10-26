@@ -202,6 +202,7 @@ impl AgentState {
         tokio::task::spawn_blocking(move || skills_manager.load_skills(&requested))
             .await
             .map_err(Error::from)??;
+        let cwd = normalize_cwd(cwd);
         let tool_cwd = tool_cwd(&cwd, &self.work_dir);
         // No write lease: only a running turn (`Self::prompt`) takes one.
         {
@@ -513,16 +514,24 @@ impl AgentState {
     }
 
     /// Persisted session metadata (all or filtered by `cwd`); the ACP
-    /// `SessionInfo` shape is the caller's concern.
+    /// `SessionInfo` shape is the caller's concern. Both sides of the filter
+    /// are normalized, so sessions saved before cwds were stored canonical
+    /// still match.
     pub async fn list_sessions(&self, cwd: Option<&Path>) -> Result<Vec<ConversationMeta>> {
         let history = self.memory.history.clone();
-        let metas = tokio::task::spawn_blocking(move || history.list_conversations())
-            .await
-            .map_err(Error::from)??;
-        Ok(metas
-            .into_iter()
-            .filter(|m| cwd.is_none_or(|filter| m.cwd.as_deref() == Some(filter)))
-            .collect())
+        let filter = cwd.map(|cwd| normalize_cwd(cwd.to_path_buf()));
+        tokio::task::spawn_blocking(move || {
+            let metas = history.list_conversations()?;
+            let Some(filter) = filter else {
+                return Ok(metas);
+            };
+            Ok(metas
+                .into_iter()
+                .filter(|m| m.cwd.clone().map(normalize_cwd).as_ref() == Some(&filter))
+                .collect())
+        })
+        .await
+        .map_err(Error::from)?
     }
 
     /// Makes the persisted session `session_id` live and returns what the
@@ -561,6 +570,7 @@ impl AgentState {
         }
 
         let llm = self.session_llm(&session_config)?;
+        let cwd = normalize_cwd(cwd);
         let tool_cwd = tool_cwd(&cwd, &self.work_dir);
         let (mode, provider, model) = {
             let mut sessions = self.sessions.write().await;
@@ -619,6 +629,13 @@ impl AgentState {
             warning,
         })
     }
+}
+
+/// `cwd` canonicalized (absolute, symlinks followed) when it exists on this
+/// machine, so one directory is saved and filtered under one spelling; as
+/// given otherwise (e.g. a client's own path).
+fn normalize_cwd(cwd: PathBuf) -> PathBuf {
+    cwd.canonicalize().unwrap_or(cwd)
 }
 
 /// Where a session's tools work: `cwd` when it's a directory inside
@@ -787,6 +804,41 @@ mod new_session_tests {
         assert_eq!(tool_cwd(&root.join("sub"), dir.path()), root.join("sub"));
         assert_eq!(tool_cwd(outside.path(), dir.path()), dir.path());
         assert_eq!(tool_cwd(&root.join("missing"), dir.path()), dir.path());
+    }
+
+    // A session's cwd is saved canonical, so listing by another spelling of
+    // the same directory (`..`, a trailing slash) still finds it.
+    #[tokio::test]
+    async fn list_sessions_matches_any_spelling_of_the_cwd() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
+        std::fs::create_dir(dir.path().join("project")).unwrap();
+        let mut state = sample_state(dir.path()).await;
+        state.llm = Arc::new(EndTurnLlm);
+
+        let session_id = state
+            .new_session(None, vec![], dir.path().join("project/../project"))
+            .await
+            .unwrap();
+        run_turn(&state, &session_id).await;
+
+        let canonical = dir.path().join("project").canonicalize().unwrap();
+        let saved = state.list_sessions(None).await.unwrap();
+        assert_eq!(saved[0].cwd.as_deref(), Some(canonical.as_path()));
+
+        let spelled = format!("{}/", dir.path().join("project").display());
+        let found = state
+            .list_sessions(Some(Path::new(&spelled)))
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(
+            state
+                .list_sessions(Some(dir.path()))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
