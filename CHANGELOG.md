@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **`list_sessions` finds a session under any spelling of its cwd.** A session's working directory was saved exactly as the client sent it, so filtering by `/home/me/project/`, a path with `..` or one through a symlink missed sessions saved as `/home/me/project`. The cwd is now canonicalized when it exists on this machine, both when it's saved (`new_session`, `load_session`) and when it's used as a filter, so sessions saved by earlier versions match too. A client's own path that doesn't exist here is kept as given.
+- **Memory writes wait for each other instead of failing with `SQLITE_BUSY`.** Two handles on one memory database (several clients in one process, or the app and the CLI) could fail `remember`, `forget`, edits and re-embedding at once whenever the other was writing. Writes now take the write lock up front and wait up to 5 seconds for it.
+
 ## [0.17.0] - 2026-10-20
 
 ### Added

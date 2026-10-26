@@ -19,8 +19,9 @@ pub struct SessionState {
     /// runtime's default; `None` means the default's client. Set together
     /// with `config`, and built before the sessions lock is taken.
     pub llm: Option<Arc<dyn LlmClient>>,
-    /// The client's working directory, as sent; saved with the conversation
-    /// and used to filter `list_sessions`.
+    /// The client's working directory, canonicalized when it exists on this
+    /// machine; saved with the conversation and used to filter
+    /// `list_sessions`.
     pub cwd: PathBuf,
     /// Where this session's tools work (`TurnContext::cwd`): `cwd` when it's
     /// a directory inside the work directory, otherwise the work directory.

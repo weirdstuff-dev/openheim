@@ -24,9 +24,13 @@ use std::path::Path;
 use std::sync::{Mutex, Once};
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::error::{Error, Result};
+
+/// How long a write waits for another handle's write to finish before
+/// failing with SQLITE_BUSY.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 static REGISTER_SQLITE_VEC: Once = Once::new();
 
@@ -115,6 +119,10 @@ impl VectorStore {
     }
 
     fn init(conn: Connection) -> Result<Self> {
+        // Several handles can share one file (clients in one process, or the
+        // app and the CLI). WAL lets readers through, but a second writer
+        // fails with SQLITE_BUSY at once unless it's allowed to wait.
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              CREATE TABLE IF NOT EXISTS meta (
@@ -160,6 +168,14 @@ impl VectorStore {
         Ok(conn
             .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
             .optional()?)
+    }
+
+    /// A write transaction that takes the write lock up front, so it waits
+    /// out another handle's write ([`BUSY_TIMEOUT`]). A deferred one reads
+    /// first (the FTS5 triggers do), and SQLite fails a reader's upgrade to
+    /// writer with SQLITE_BUSY at once instead of waiting.
+    fn write_tx(conn: &mut Connection) -> Result<Transaction<'_>> {
+        Ok(conn.transaction_with_behavior(TransactionBehavior::Immediate)?)
     }
 
     fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
@@ -209,7 +225,7 @@ impl VectorStore {
                 "embedding space changed; memories will be re-embedded"
             );
         }
-        let tx = conn.transaction()?;
+        let tx = Self::write_tx(&mut conn)?;
         tx.execute_batch("DROP TABLE IF EXISTS vec_memories;")?;
         tx.execute_batch(&format!(
             "CREATE VIRTUAL TABLE vec_memories USING vec0(
@@ -276,7 +292,7 @@ impl VectorStore {
             ));
         }
         let created_at = Utc::now();
-        let tx = conn.transaction()?;
+        let tx = Self::write_tx(&mut conn)?;
         tx.execute(
             "INSERT INTO memories (content, created_at) VALUES (?1, ?2)",
             params![content, created_at.to_rfc3339()],
@@ -311,7 +327,7 @@ impl VectorStore {
                 "vector table not initialised; call ensure_embedding_space first".into(),
             ));
         }
-        let tx = conn.transaction()?;
+        let tx = Self::write_tx(&mut conn)?;
         let updated = tx.execute(
             "UPDATE memories SET content = ?1 WHERE id = ?2",
             params![content, id],
@@ -350,19 +366,21 @@ impl VectorStore {
 
     /// (Re-)writes the vector for an existing note.
     pub fn set_embedding(&self, id: i64, embedding: &[f32]) -> Result<()> {
-        let conn = self.lock()?;
-        conn.execute("DELETE FROM vec_memories WHERE memory_id = ?1", [id])?;
-        conn.execute(
+        let mut conn = self.lock()?;
+        let tx = Self::write_tx(&mut conn)?;
+        tx.execute("DELETE FROM vec_memories WHERE memory_id = ?1", [id])?;
+        tx.execute(
             "INSERT INTO vec_memories (memory_id, embedding) VALUES (?1, ?2)",
             params![id, vector_blob(embedding)],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
     /// Removes a note and its vector. Returns whether it existed.
     pub fn delete(&self, id: i64) -> Result<bool> {
         let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
+        let tx = Self::write_tx(&mut conn)?;
         if Self::has_vec_table(&tx)? {
             tx.execute("DELETE FROM vec_memories WHERE memory_id = ?1", [id])?;
         }
@@ -513,6 +531,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fts, 1);
+    }
+
+    // Two handles on one file: a write waits out the other handle's write
+    // instead of failing with SQLITE_BUSY.
+    #[test]
+    fn second_handle_waits_for_a_running_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.db");
+        let first = VectorStore::open(&path).unwrap();
+        let second = VectorStore::open(&path).unwrap();
+
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let conn = first.lock().unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            conn.execute_batch("COMMIT").unwrap();
+        });
+        locked_rx.recv().unwrap();
+
+        second
+            .insert("written while the other handle held the lock", None)
+            .unwrap();
+        holder.join().unwrap();
+        assert_eq!(second.stats().unwrap().memories, 1);
     }
 
     #[test]
