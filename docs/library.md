@@ -350,7 +350,7 @@ client.set_session_reasoning(session.id(), ReasoningLevel::Medium).await?;
 let settings = session.settings().await?; // provider, model, mode, reasoning
 ```
 
-`OpenheimClient::builder().reasoning(level)` sets the level sessions start at when building the config in code.
+`OpenheimClient::builder().reasoning(level)` sets the level sessions start at. With a config file or `app_config`, it replaces the `reasoning` of the provider the builder resolves.
 
 ### Context usage
 
