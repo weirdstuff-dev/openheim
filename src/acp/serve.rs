@@ -144,7 +144,7 @@ pub(crate) async fn serve_state(
                                 &settings.model,
                                 settings.reasoning,
                             ))
-                            .modes(session_mode_state(AgentMode::Code)),
+                            .modes(session_mode_state(settings.mode)),
                     ),
                     Err(e) => responder.respond_with_error(to_acp_error(&e)),
                 }

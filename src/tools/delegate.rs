@@ -120,8 +120,11 @@ impl DelegateTool {
             Some(max_iterations) => config.with_max_iterations(max_iterations),
             None => config,
         };
+        let on_session_model = config.provider_name == self.base_config.provider_name
+            && config.model == self.base_config.model;
         let config = match profile.reasoning {
             Some(reasoning) => config.with_reasoning(reasoning),
+            None if on_session_model => config.with_reasoning(self.base_config.reasoning),
             None => config,
         };
 
@@ -365,6 +368,7 @@ fn inline_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProviderConfig;
     use crate::core::client_io::NoClientIo;
     use crate::core::models::{Choice, ContentBlock, FinishReason, ReasoningLevel, Role};
     use crate::core::permission::AllowAll;
@@ -484,6 +488,36 @@ mod tests {
         let (config, subagent_llm) = tool.resolve_runtime(&sample_profile("r", "d")).unwrap();
         assert_eq!(config.reasoning, ReasoningLevel::High);
         assert!(Arc::ptr_eq(&subagent_llm, &llm));
+    }
+
+    #[test]
+    fn profile_naming_the_session_model_keeps_its_reasoning_level_and_client() {
+        let llm: Arc<dyn LlmClient> = Arc::new(MockLlm::new(vec![]));
+        let app_config = sample_app_config().with_provider(
+            "mock",
+            ProviderConfig::new("https://example.com", "mock-model")
+                .with_api_key("key")
+                .with_reasoning(ReasoningLevel::Low),
+        );
+        let session_config = sample_agent_config().with_reasoning(ReasoningLevel::High);
+        let tool = DelegateTool::new(
+            Arc::new(EmptyExecutor),
+            vec![],
+            llm.clone(),
+            app_config,
+            sample_agent_config(),
+            Arc::default(),
+        )
+        .for_session(llm.clone(), session_config);
+
+        for provider in [None, Some("mock".to_string())] {
+            let mut profile = sample_profile("r", "d");
+            profile.model = Some("mock-model".into());
+            profile.provider = provider;
+            let (config, subagent_llm) = tool.resolve_runtime(&profile).unwrap();
+            assert_eq!(config.reasoning, ReasoningLevel::High);
+            assert!(Arc::ptr_eq(&subagent_llm, &llm));
+        }
     }
 
     #[test]

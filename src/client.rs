@@ -649,7 +649,7 @@ impl OpenheimBuilder {
         let (agent_config, mut app_config) = if programmatic {
             self.programmatic_config()?
         } else {
-            let app_config = match (self.app_config.take(), &self.config_path) {
+            let mut app_config = match (self.app_config.take(), &self.config_path) {
                 (Some(config), _) => config,
                 (None, Some(path)) => load_config_from(path)?,
                 (None, None) => load_config()?,
@@ -669,6 +669,11 @@ impl OpenheimBuilder {
             }
             if let Some(r) = self.reasoning {
                 agent_config.reasoning = r;
+                // Also on the provider entry, so sessions that re-resolve
+                // the provider (model switch, resume) start at it too.
+                if let Some(provider) = app_config.providers.get_mut(&agent_config.provider_name) {
+                    provider.reasoning = r;
+                }
             }
             (agent_config, app_config)
         };
@@ -1116,6 +1121,32 @@ models = ["m1"]
 
         assert_eq!(client.long_term_memory().stats().await.unwrap().memories, 1);
         assert!(!dir.path().join("memory.db").exists());
+    }
+
+    /// The builder's reasoning level holds for a session that switches
+    /// models without choosing a level of its own.
+    #[tokio::test]
+    async fn builder_reasoning_survives_a_model_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = OpenheimClient::builder()
+            .app_config(local_config())
+            .reasoning(ReasoningLevel::High)
+            .data_dir(dir.path())
+            .work_dir(dir.path())
+            .build()
+            .await
+            .unwrap();
+        let session = client.new_session().start().await.unwrap();
+        assert_eq!(
+            session.settings().await.unwrap().reasoning,
+            ReasoningLevel::High
+        );
+
+        session.switch_model("local", "m2").await.unwrap();
+        assert_eq!(
+            session.settings().await.unwrap().reasoning,
+            ReasoningLevel::High
+        );
     }
 
     /// `OpenheimClient::switch_model` reaches the same live session as the

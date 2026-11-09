@@ -453,12 +453,14 @@ impl AgentTask {
                 model: self.default_model.clone(),
             });
         }
-        if let Err(e) = carry_over(&new_session, current).await {
-            self.send(AgentUpdate::Error(e.to_string()));
-        }
+        let carried = carry_over(&new_session, current).await;
         self.send(AgentUpdate::NewSession(vec![ChatItem::SystemInfo(
             "─── new session".to_string(),
         )]));
+        // After `NewSession`, which clears the transcript.
+        if let Err(e) = carried {
+            self.send(AgentUpdate::Error(e.to_string()));
+        }
         Some(new_session)
     }
 }
