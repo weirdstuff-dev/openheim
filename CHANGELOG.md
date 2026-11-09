@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Reasoning levels, per provider and per session.** A new `reasoning` provider setting takes `"default"`, `"low"`, `"medium"` or `"high"` (`ReasoningLevel`). `"default"` sends no reasoning parameters, so the API's own default applies. The other levels map onto each API: Anthropic gets adaptive thinking at that `output_config.effort`, OpenAI and OpenAI-compatible endpoints get `reasoning_effort`, and Gemini gets `thinkingConfig.thinkingLevel`. Sessions start at their provider's level and can change it: over ACP with `session/set_config_option` (config id `reasoning`, category `thought_level`, listed next to `model` in `session/new` and `session/load` responses), in the TUI with `:reasoning <level>`, and in code with `SessionBuilder::reasoning`, `SessionHandle::set_reasoning` or `OpenheimClient::set_session_reasoning`. A level set on a session stays through model switches. Subagent profiles take a `reasoning` field too; without one, a subagent on the session's model runs at the session's level. See `reasoning` in `docs/configuration.md`.
+- **Modes can be set from every interface.** `code` and `architect` were ACP-only (`session/set_mode`). The TUI now has `:mode <name>`, and the library has `SessionBuilder::mode`, `SessionHandle::set_mode` and `OpenheimClient::set_session_mode`.
+- **Mode and reasoning level are saved with the session.** Both are written to the conversation's metadata (`ConversationMeta::mode`, `ConversationMeta::reasoning`) on each turn and restored when the session is loaded. A loaded session used to start in `code` mode. `LoadedSession::reasoning` gives the restored level, and `SessionHandle::settings()` returns a live session's provider, model, mode and level (`SessionSettings`).
+- `GET /api/config` shows each provider's `reasoning`, and the TUI footer shows the reasoning level and mode when they aren't the defaults.
+
+### Changed
+
+- **Breaking: `reasoning` replaces `thinking`.** The `thinking = "adaptive" | "off"` provider key is gone; a config that still sets it gets an unknown-key warning and runs at `"default"`. Use `reasoning = "low" | "medium" | "high"` for thinking and `reasoning = "default"` (or nothing) for none. In code, `ThinkingMode`, `ProviderConfig::thinking` / `with_thinking`, `ProviderConfig::resolve_thinking`, and `AgentConfig::thinking` / `with_thinking` are replaced by `ReasoningLevel`, `ProviderConfig::reasoning` / `with_reasoning` and `AgentConfig::reasoning` / `with_reasoning`. `AnthropicClient::new` no longer takes a `thinking` argument; every built-in client has `with_reasoning(level)` instead.
+- **Anthropic providers no longer think unless `reasoning` is set.** Thinking used to be on by default for Anthropic-kind providers. With no `reasoning` key, requests now carry no `thinking` field, so the model's own default applies: no thinking on models that don't think by default. The `config.toml` that `openheim init` writes sets `reasoning = "medium"` on its Anthropic provider.
+
 ## [0.17.1] - 2026-10-26
 
 ### Fixed

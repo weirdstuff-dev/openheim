@@ -329,6 +329,29 @@ let (provider, model) = session.switch_model("anthropic", "claude-opus-4-7").awa
 client.switch_model(session.id(), "openai", "gpt-4o").await?;
 ```
 
+### Mode and reasoning level
+
+A session runs in a mode, `AgentMode::Code` (every tool) or `AgentMode::Architect` (read-only tools only), at a `ReasoningLevel`: `Default` sends no reasoning parameters so the provider's own default applies, and `Low`/`Medium`/`High` set the provider's effort (see `reasoning` in [configuration](configuration.md#providersname)). Set either when starting the session or at any point after; the next prompt uses them, and both are saved with the conversation and restored by `resume_session`. A reasoning level set on a session stays through model switches; otherwise the session follows its provider's `reasoning`.
+
+```rust
+use openheim::{AgentMode, ReasoningLevel};
+
+let session = client
+    .new_session()
+    .mode(AgentMode::Architect)
+    .reasoning(ReasoningLevel::High)
+    .start()
+    .await?;
+
+session.set_mode(AgentMode::Code).await?;
+session.set_reasoning(ReasoningLevel::Low).await?;
+client.set_session_reasoning(session.id(), ReasoningLevel::Medium).await?;
+
+let settings = session.settings().await?; // provider, model, mode, reasoning
+```
+
+`OpenheimClient::builder().reasoning(level)` sets the level sessions start at when building the config in code.
+
 ### Context usage
 
 `session.context_usage().await?` returns the token usage of the most recent LLM call — how full the context window is *right now*, not a running total across the session. `None` until a provider has reported usage.
