@@ -28,7 +28,7 @@ This document describes every HTTP and WebSocket endpoint that openheim server e
      - [Load Session](#324-load-session)
      - [Send Prompt](#325-send-prompt)
      - [Streaming Updates (Server → Client)](#326-streaming-updates-server--client)
-     - [Mode and Reasoning Level](#327-mode-and-reasoning-level)
+     - [Mode and Effort Level](#327-mode-and-effort-level)
    - [Filesystem Channel](#33-filesystem-channel)
      - [Watch / Unwatch](#331-watch--unwatch)
      - [List Directory](#332-list-directory)
@@ -86,7 +86,7 @@ Returns the public server configuration: an explicit allow-list of fields, so an
       "timeout_secs": 120,
       "max_tokens": 4096,
       "context_window": 128000,
-      "reasoning": "default"
+      "effort": "default"
     },
     "anthropic": {
       "kind": "anthropic",
@@ -94,7 +94,7 @@ Returns the public server configuration: an explicit allow-list of fields, so an
       "default_model": "claude-3-5-sonnet-20241022",
       "models": ["claude-3-5-sonnet-20241022", "claude-3-opus-20240229"],
       "env_var": "ANTHROPIC_API_KEY",
-      "reasoning": "medium"
+      "effort": "medium"
     }
   },
   "mcp_servers": {
@@ -112,7 +112,7 @@ Returns the public server configuration: an explicit allow-list of fields, so an
 }
 ```
 
-> **Note:** `api_key` is never included. `mcp_servers` entries omit `args` entirely (command lines often carry tokens) and show only the keys of `env` and `headers`, each with the value `"<redacted>"`. Provider `api_base` and MCP `url` values are shown without any `user:password@` part, query string, or fragment. `memory` has no `db_path`, and `data_dir` is never included. `kind` is always present (resolved from the provider name when the config doesn't set it), and so is `reasoning` (`"default"` when unset). Unset optional fields are omitted.
+> **Note:** `api_key` is never included. `mcp_servers` entries omit `args` entirely (command lines often carry tokens) and show only the keys of `env` and `headers`, each with the value `"<redacted>"`. Provider `api_base` and MCP `url` values are shown without any `user:password@` part, query string, or fragment. `memory` has no `db_path`, and `data_dir` is never included. `kind` is always present (resolved from the provider name when the config doesn't set it), and so is `effort` (`"default"` when unset). Unset optional fields are omitted.
 
 ---
 
@@ -484,8 +484,8 @@ Returns a list of all persisted conversation sessions, sorted newest-first by `u
 | `skills` | `string[]` | Skills loaded for this session |
 | `cwd` | `string \| null` | Working directory — populated after the first prompt in the session |
 | `context_usage` | `Usage \| undefined` | Snapshot of the most recent turn's context size (the last LLM call's token usage) — how full the context window is *right now*, not a running total. Omitted until the first turn completes. See `Usage` in [§4 TypeScript Interfaces](#4-typescript-interfaces). |
-| `mode` | `"code" \| "architect" \| undefined` | The session's mode as of its last turn; see [§3.2.7](#327-mode-and-reasoning-level) |
-| `reasoning` | `string \| undefined` | The reasoning level the session set (`default`/`low`/`medium`/`high`); omitted when it runs at its provider's |
+| `mode` | `"code" \| "architect" \| undefined` | The session's mode as of its last turn; see [§3.2.7](#327-mode-and-effort-level) |
+| `effort` | `string \| undefined` | The effort level the session set (`default`/`low`/`medium`/`high`); omitted when it runs at its provider's |
 
 > Sessions are persisted to `~/.openheim/history/{uuid}.json` (metadata) and `~/.openheim/history/{uuid}.jsonl` (messages, appended incrementally as the conversation grows) and survive server restarts.
 
@@ -840,7 +840,7 @@ Creates a new blank conversation session. Returns a `sessionId` used for all sub
 }
 ```
 
-> The `sessionId` is a UUID. Store it — it's required for all prompt requests. `modes` and `configOptions` are described in [§3.2.7](#327-mode-and-reasoning-level).
+> The `sessionId` is a UUID. Store it — it's required for all prompt requests. `modes` and `configOptions` are described in [§3.2.7](#327-mode-and-effort-level).
 
 ---
 
@@ -1250,23 +1250,23 @@ pending → in_progress → completed
 
 ---
 
-#### 3.2.7 Mode and Reasoning Level
+#### 3.2.7 Mode and Effort Level
 
-Each session has a **mode** and a **reasoning level**, set independently of each other and of the model. Both are saved with the conversation on its next turn and restored by `session/load`.
+Each session has a **mode** and an **effort level**, set independently of each other and of the model. Both are saved with the conversation on its next turn and restored by `session/load`.
 
 | Mode | Tools offered |
 |---|---|
 | `code` (default) | Every tool, each call through the permission prompt |
 | `architect` | Only read-only tools (`read_file`, `list_dir`, `search`, `web_fetch`, `search_memory`, and custom tools that declare `read_only`) |
 
-| Reasoning level | What is sent to the provider |
+| Effort level | What is sent to the provider |
 |---|---|
 | `default` | Nothing: the provider's own default applies. For Claude models that don't think by default, that means no thinking. |
 | `low` / `medium` / `high` | Anthropic: adaptive thinking with `output_config.effort`. OpenAI and OpenAI-compatible: `reasoning_effort`. Gemini: `thinkingConfig.thinkingLevel`. |
 
-A session starts in `code` mode at its provider's `reasoning` setting (see [configuration](configuration.md#providersname)). A level set on a session stays through later model switches; a session that never set one follows the provider of whichever model it's on.
+A session starts in `code` mode at its provider's `effort` setting (see [configuration](configuration.md#providersname)). A level set on a session stays through later model switches; a session that never set one follows the provider of whichever model it's on.
 
-`session/new` and `session/load` responses describe both: `modes` lists the modes with `currentModeId`, and `configOptions` holds the `model` selector and the `reasoning` selector (category `thought_level`):
+`session/new` and `session/load` responses describe both: `modes` lists the modes with `currentModeId`, and `configOptions` holds the `model` selector and the `effort` selector (category `thought_level`):
 
 ```json
 {
@@ -1274,7 +1274,7 @@ A session starts in `code` mode at its provider's `reasoning` setting (see [conf
   "modes": { "currentModeId": "code", "availableModes": [{ "id": "code", "name": "Code" }, { "id": "architect", "name": "Architect" }] },
   "configOptions": [
     { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "gpt-4-turbo", "options": [ … ] },
-    { "id": "reasoning", "name": "Reasoning", "category": "thought_level", "type": "select", "currentValue": "default",
+    { "id": "effort", "name": "Effort", "category": "thought_level", "type": "select", "currentValue": "default",
       "options": [{ "value": "default", "name": "Default" }, { "value": "low", "name": "Low" }, { "value": "medium", "name": "Medium" }, { "value": "high", "name": "High" }] }
   ]
 }
@@ -1287,14 +1287,14 @@ A session starts in `code` mode at its provider's `reasoning` setting (see [conf
   "params": { "sessionId": "550e8400-…", "modeId": "architect" } }
 ```
 
-**Set the reasoning level** (or, with `configId: "model"`, the model):
+**Set the effort level** (or, with `configId: "model"`, the model):
 
 ```json
 { "jsonrpc": "2.0", "id": 8, "method": "session/set_config_option",
-  "params": { "sessionId": "550e8400-…", "configId": "reasoning", "value": "high" } }
+  "params": { "sessionId": "550e8400-…", "configId": "effort", "value": "high" } }
 ```
 
-The `session/set_config_option` response's `configOptions` holds both selectors at their new values; switching the model can change the reasoning level too, when the session never set one. An unknown mode, config option or value is an `-32602` error.
+The `session/set_config_option` response's `configOptions` holds both selectors at their new values; switching the model can change the effort level too, when the session never set one. An unknown mode, config option or value is an `-32602` error.
 
 ---
 
@@ -1667,11 +1667,11 @@ interface ProviderConfig {
   timeout_secs?: number;
   max_tokens?: number;
   context_window?: number;
-  reasoning: ReasoningLevel; // the level sessions on this provider start at
+  effort: Effort; // the level sessions on this provider start at
   // api_key is NEVER included in responses
 }
 
-type ReasoningLevel = "default" | "low" | "medium" | "high";
+type Effort = "default" | "low" | "medium" | "high";
 
 interface AppConfig {
   default_provider: string;
@@ -1747,7 +1747,7 @@ interface ConversationMeta {
   cwd?: string | null;  // populated after first prompt in the session
   context_usage?: Usage; // omitted until the first turn completes
   mode?: "code" | "architect";  // as of the last turn
-  reasoning?: ReasoningLevel;   // omitted unless the session set one
+  effort?: Effort;   // omitted unless the session set one
 }
 
 // Usage of the most recent LLM call — how full the context window is right
@@ -2219,7 +2219,7 @@ Except for `session_busy` / `session_locked` / `http_error`, `data` is a human-r
 | `agent` | `session/load` | Resume a persisted session + replay history |
 | `agent` | `session/prompt` | Send a message in the active session |
 | `agent` | `session/set_mode` | Switch a session between `code` and `architect` |
-| `agent` | `session/set_config_option` | Set a session's `model` or `reasoning` level |
+| `agent` | `session/set_config_option` | Set a session's `model` or `effort` level |
 | `fs` | `watch` | Start watching directory |
 | `fs` | `unwatch` | Stop watching |
 | `fs` | `list` | List directory contents |

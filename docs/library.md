@@ -329,28 +329,28 @@ let (provider, model) = session.switch_model("anthropic", "claude-opus-4-7").awa
 client.switch_model(session.id(), "openai", "gpt-4o").await?;
 ```
 
-### Mode and reasoning level
+### Mode and effort level
 
-A session runs in a mode, `AgentMode::Code` (every tool) or `AgentMode::Architect` (read-only tools only), at a `ReasoningLevel`: `Default` sends no reasoning parameters so the provider's own default applies, and `Low`/`Medium`/`High` set the provider's effort (see `reasoning` in [configuration](configuration.md#providersname)). Set either when starting the session or at any point after; the next prompt uses them, and both are saved with the conversation and restored by `resume_session`. A reasoning level set on a session stays through model switches; otherwise the session follows its provider's `reasoning`.
+A session runs in a mode, `AgentMode::Code` (every tool) or `AgentMode::Architect` (read-only tools only), at an `Effort` level: `Default` sends no effort parameters so the provider's own default applies, and `Low`/`Medium`/`High` set the provider's effort (see `effort` in [configuration](configuration.md#providersname)). Set either when starting the session or at any point after; the next prompt uses them, and both are saved with the conversation and restored by `resume_session`. An effort level set on a session stays through model switches; otherwise the session follows its provider's `effort`.
 
 ```rust
-use openheim::{AgentMode, ReasoningLevel};
+use openheim::{AgentMode, Effort};
 
 let session = client
     .new_session()
     .mode(AgentMode::Architect)
-    .reasoning(ReasoningLevel::High)
+    .effort(Effort::High)
     .start()
     .await?;
 
 session.set_mode(AgentMode::Code).await?;
-session.set_reasoning(ReasoningLevel::Low).await?;
-client.set_session_reasoning(session.id(), ReasoningLevel::Medium).await?;
+session.set_effort(Effort::Low).await?;
+client.set_session_effort(session.id(), Effort::Medium).await?;
 
-let settings = session.settings().await?; // provider, model, mode, reasoning
+let settings = session.settings().await?; // provider, model, mode, effort
 ```
 
-`OpenheimClient::builder().reasoning(level)` sets the level sessions start at. With a config file or `app_config`, it replaces the `reasoning` of the provider the builder resolves.
+`OpenheimClient::builder().effort(level)` sets the level sessions start at. With a config file or `app_config`, it replaces the `effort` of the provider the builder resolves.
 
 ### Context usage
 

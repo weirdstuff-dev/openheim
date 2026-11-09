@@ -28,15 +28,15 @@ Running `openheim` with no subcommand opens the interactive terminal UI. Type a 
 |---|---|
 | `:help` | Show all commands |
 | `:q` / `:quit` | Exit |
-| `:new` | Start a new session (keeps the current model, mode and reasoning level) |
+| `:new` | Start a new session (keeps the current model, mode and effort level) |
 | `:sessions` | Browse and restore saved sessions (interactive picker) |
 | `:config` | Show current configuration |
 | `:models` | Open model picker (arrow keys + Enter to switch mid-session) |
 | `:models <name>` | Switch to a model directly without opening the picker |
 | `:mode` | Show the session's mode |
 | `:mode <name>` | Switch mode: `code` (every tool) or `architect` (read-only tools) |
-| `:reasoning` | Show the session's reasoning level |
-| `:reasoning <level>` | Set the reasoning level: `default` (the provider's own default), `low`, `medium` or `high`. Kept through model switches. |
+| `:effort` | Show the session's effort level |
+| `:effort <level>` | Set the effort level: `default` (the provider's own default), `low`, `medium` or `high`. Kept through model switches. |
 | `:mcp` | Show MCP server statuses |
 | `:skills` | List available skills |
 | `:theme` | Open theme color picker |
