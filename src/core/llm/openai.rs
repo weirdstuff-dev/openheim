@@ -4,9 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
-use crate::core::models::{
-    Choice, ContentBlock, FinishReason, Message, ReasoningLevel, Role, Tool, Usage,
-};
+use crate::core::models::{Choice, ContentBlock, Effort, FinishReason, Message, Role, Tool, Usage};
 use crate::error::{Error, Result};
 
 use super::sse::{StreamParser, parse_payload, read_stream};
@@ -24,8 +22,8 @@ pub struct OpenAiClient {
     /// Whether signed thinking goes back as `thinking_blocks`; see
     /// [`OpenAiClient::with_replay_thinking`].
     replay_thinking: bool,
-    /// See [`OpenAiClient::with_reasoning`].
-    reasoning: ReasoningLevel,
+    /// See [`OpenAiClient::with_effort`].
+    effort: Effort,
 }
 
 /// OpenAI replaced `max_tokens` with `max_completion_tokens`, and its
@@ -53,15 +51,15 @@ impl OpenAiClient {
             max_tokens,
             token_limit_field: TokenLimitField::MaxCompletionTokens,
             replay_thinking: false,
-            reasoning: ReasoningLevel::Default,
+            effort: Effort::Default,
         }
     }
 
-    /// Sends `reasoning` as `reasoning_effort`. [`ReasoningLevel::Default`]
+    /// Sends `effort` as `reasoning_effort`. [`Effort::Default`]
     /// (the default) leaves the field out, so the model's own default
     /// applies; models without reasoning reject the field, so they need it.
-    pub fn with_reasoning(self, reasoning: ReasoningLevel) -> Self {
-        Self { reasoning, ..self }
+    pub fn with_effort(self, effort: Effort) -> Self {
+        Self { effort, ..self }
     }
 
     /// With `replay_thinking`, assistant replies of the current tool loop
@@ -570,7 +568,7 @@ impl OpenAiClient {
             tools: convert_tools(tools),
             max_completion_tokens,
             max_tokens,
-            reasoning_effort: self.reasoning.effort(),
+            reasoning_effort: self.effort.api_value(),
         }
     }
 
@@ -1126,19 +1124,19 @@ mod tests {
     }
 
     #[test]
-    fn default_reasoning_sends_no_reasoning_effort() {
+    fn default_effort_sends_no_reasoning_effort() {
         let json = request_json(&client(None));
         assert!(json.get("reasoning_effort").is_none());
     }
 
     #[test]
-    fn reasoning_level_is_sent_as_reasoning_effort() {
+    fn effort_is_sent_as_reasoning_effort() {
         for (level, effort) in [
-            (ReasoningLevel::Low, "low"),
-            (ReasoningLevel::Medium, "medium"),
-            (ReasoningLevel::High, "high"),
+            (Effort::Low, "low"),
+            (Effort::Medium, "medium"),
+            (Effort::High, "high"),
         ] {
-            let json = request_json(&client(None).with_reasoning(level));
+            let json = request_json(&client(None).with_effort(level));
             assert_eq!(json["reasoning_effort"], effort);
         }
     }

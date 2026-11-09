@@ -60,7 +60,7 @@ impl AppConfig {
             timeout_secs: provider.resolve_timeout_secs(),
             max_tokens: provider.max_tokens,
             context_window: provider.context_window,
-            reasoning: provider.reasoning,
+            effort: provider.effort,
             replay_thinking: provider.replay_thinking.unwrap_or(false),
         }
     }
@@ -170,7 +170,7 @@ impl AppConfig {
 mod tests {
     use super::*;
     use crate::config::ProviderConfig;
-    use crate::core::models::ReasoningLevel;
+    use crate::core::models::Effort;
 
     fn sample_config() -> AppConfig {
         let mut config = AppConfig::new("openai");
@@ -466,14 +466,14 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_is_default_unless_set() {
+    fn effort_is_default_unless_set() {
         let config = config_from_toml(
             r#"
             [providers.anthropic]
             api_base = "https://api.anthropic.com/v1"
             default_model = "claude-sonnet-5-5"
             models = ["claude-sonnet-5-5"]
-            reasoning = "high"
+            effort = "high"
 
             [providers.ollama]
             api_base = "http://localhost:11434/v1"
@@ -482,9 +482,9 @@ mod tests {
             "#,
         );
 
-        let reasoning = |name| config.resolve_provider_default(name).unwrap().reasoning;
-        assert_eq!(reasoning("anthropic"), ReasoningLevel::High);
-        assert_eq!(reasoning("ollama"), ReasoningLevel::Default);
+        let effort = |name| config.resolve_provider_default(name).unwrap().effort;
+        assert_eq!(effort("anthropic"), Effort::High);
+        assert_eq!(effort("ollama"), Effort::Default);
     }
 
     #[test]

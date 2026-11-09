@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use reqwest::Client as ReqwestClient;
 use tokio::sync::mpsc;
 
-use crate::core::models::{Choice, Message, ReasoningLevel, Tool};
+use crate::core::models::{Choice, Effort, Message, Tool};
 use crate::error::Result;
 
 use super::openai::{OpenAiClient, TokenLimitField};
@@ -35,9 +35,9 @@ impl OpenAiCompatibleClient {
         Self(self.0.with_replay_thinking(replay_thinking))
     }
 
-    /// See [`OpenAiClient::with_reasoning`].
-    pub fn with_reasoning(self, reasoning: ReasoningLevel) -> Self {
-        Self(self.0.with_reasoning(reasoning))
+    /// See [`OpenAiClient::with_effort`].
+    pub fn with_effort(self, effort: Effort) -> Self {
+        Self(self.0.with_effort(effort))
     }
 }
 

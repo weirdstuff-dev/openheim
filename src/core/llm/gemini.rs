@@ -4,9 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
-use crate::core::models::{
-    Choice, ContentBlock, FinishReason, Message, ReasoningLevel, Role, Tool, Usage,
-};
+use crate::core::models::{Choice, ContentBlock, Effort, FinishReason, Message, Role, Tool, Usage};
 use crate::error::{Error, Result};
 
 use super::sse::{StreamParser, parse_payload, read_stream};
@@ -19,8 +17,8 @@ pub struct GeminiClient {
     api_key: String,
     model: String,
     max_tokens: Option<u32>,
-    /// See [`Self::with_reasoning`].
-    reasoning: ReasoningLevel,
+    /// See [`Self::with_effort`].
+    effort: Effort,
 }
 
 impl GeminiClient {
@@ -37,17 +35,17 @@ impl GeminiClient {
             api_key,
             model,
             max_tokens,
-            reasoning: ReasoningLevel::Default,
+            effort: Effort::Default,
         }
     }
 
-    /// Sends `reasoning` as `generationConfig.thinkingConfig.thinkingLevel`.
-    /// [`ReasoningLevel::Default`] (the default) leaves `thinkingConfig` out,
+    /// Sends `effort` as `generationConfig.thinkingConfig.thinkingLevel`.
+    /// [`Effort::Default`] (the default) leaves `thinkingConfig` out,
     /// so the model's own default applies. Models that predate thinking
     /// levels (Gemini 2.5 and earlier) reject the field, as do models that
     /// don't offer the level asked for.
-    pub fn with_reasoning(self, reasoning: ReasoningLevel) -> Self {
-        Self { reasoning, ..self }
+    pub fn with_effort(self, effort: Effort) -> Self {
+        Self { effort, ..self }
     }
 }
 
@@ -406,8 +404,8 @@ fn gemini_system_instruction(messages: &[Message]) -> Option<GeminiContent> {
 impl GeminiClient {
     fn build_request(&self, messages: &[Message], tools: &[Tool]) -> GeminiRequest {
         let thinking_config = self
-            .reasoning
-            .effort()
+            .effort
+            .api_value()
             .map(|thinking_level| GeminiThinkingConfig { thinking_level });
         let generation_config = (self.max_tokens.is_some() || thinking_config.is_some()).then_some(
             GeminiGenerationConfig {
@@ -854,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn default_reasoning_and_no_limit_send_no_generation_config() {
+    fn default_effort_and_no_limit_send_no_generation_config() {
         assert!(
             request_json(&client(None))
                 .get("generationConfig")
@@ -863,19 +861,19 @@ mod tests {
     }
 
     #[test]
-    fn default_reasoning_sends_only_the_limit() {
+    fn default_effort_sends_only_the_limit() {
         let json = request_json(&client(Some(1000)));
         assert_eq!(json["generationConfig"], json!({ "maxOutputTokens": 1000 }));
     }
 
     #[test]
-    fn reasoning_level_is_sent_as_thinking_level() {
+    fn effort_level_is_sent_as_thinking_level() {
         for (level, thinking_level) in [
-            (ReasoningLevel::Low, "low"),
-            (ReasoningLevel::Medium, "medium"),
-            (ReasoningLevel::High, "high"),
+            (Effort::Low, "low"),
+            (Effort::Medium, "medium"),
+            (Effort::High, "high"),
         ] {
-            let json = request_json(&client(None).with_reasoning(level));
+            let json = request_json(&client(None).with_effort(level));
             assert_eq!(
                 json["generationConfig"],
                 json!({ "thinkingConfig": { "thinkingLevel": thinking_level } })

@@ -4,9 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
-use crate::core::models::{
-    Choice, ContentBlock, FinishReason, Message, ReasoningLevel, Role, Tool, Usage,
-};
+use crate::core::models::{Choice, ContentBlock, Effort, FinishReason, Message, Role, Tool, Usage};
 use crate::error::{Error, Result};
 
 use super::sse::{StreamParser, parse_payload, read_stream};
@@ -29,8 +27,8 @@ pub struct AnthropicClient {
     api_key: String,
     model: String,
     max_tokens: u32,
-    /// See [`Self::with_reasoning`].
-    reasoning: ReasoningLevel,
+    /// See [`Self::with_effort`].
+    effort: Effort,
 }
 
 impl AnthropicClient {
@@ -47,15 +45,15 @@ impl AnthropicClient {
             api_key,
             model,
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-            reasoning: ReasoningLevel::Default,
+            effort: Effort::Default,
         }
     }
 
-    /// [`ReasoningLevel::Default`] (the default) sends neither `thinking`
+    /// [`Effort::Default`] (the default) sends neither `thinking`
     /// nor `output_config`, so the model's own default applies. Any other
     /// level requests adaptive thinking at that `output_config.effort`.
-    pub fn with_reasoning(self, reasoning: ReasoningLevel) -> Self {
-        Self { reasoning, ..self }
+    pub fn with_effort(self, effort: Effort) -> Self {
+        Self { effort, ..self }
     }
 }
 
@@ -586,20 +584,20 @@ fn extract_system(messages: &[Message]) -> Option<String> {
     }
 }
 
-/// The `thinking` and `output_config` fields for `reasoning`: both unset for
-/// [`ReasoningLevel::Default`], otherwise adaptive thinking at that effort.
+/// The `thinking` and `output_config` fields for `effort`: both unset for
+/// [`Effort::Default`], otherwise adaptive thinking at that effort.
 ///
 /// Current Claude models accept only adaptive thinking (the fixed-budget
 /// form is rejected or deprecated); models that predate it reject it, and
-/// need `reasoning = "default"` on their provider entry. Adaptive thinking
+/// need `effort = "default"` on their provider entry. Adaptive thinking
 /// is interleaved without an `anthropic-beta` header.
-fn reasoning_config(
-    reasoning: ReasoningLevel,
+fn effort_config(
+    effort: Effort,
 ) -> (
     Option<AnthropicThinkingConfig>,
     Option<AnthropicOutputConfig>,
 ) {
-    match reasoning.effort() {
+    match effort.api_value() {
         None => (None, None),
         Some(effort) => (
             Some(AnthropicThinkingConfig {
@@ -613,7 +611,7 @@ fn reasoning_config(
 
 impl AnthropicClient {
     fn build_request(&self, messages: &[Message], tools: &[Tool]) -> AnthropicRequest {
-        let (thinking, output_config) = reasoning_config(self.reasoning);
+        let (thinking, output_config) = effort_config(self.effort);
         AnthropicRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
@@ -848,7 +846,7 @@ mod tests {
         assert!(map_stop_reason(None).is_none());
     }
 
-    fn client_with_reasoning(reasoning: ReasoningLevel) -> AnthropicClient {
+    fn client_with_effort(effort: Effort) -> AnthropicClient {
         AnthropicClient::new(
             ReqwestClient::new(),
             "https://api.anthropic.com/v1".into(),
@@ -856,13 +854,13 @@ mod tests {
             "claude-sonnet-5".into(),
             None,
         )
-        .with_reasoning(reasoning)
+        .with_effort(effort)
     }
 
     #[test]
-    fn default_reasoning_sends_no_thinking_or_effort() {
-        let request = client_with_reasoning(ReasoningLevel::Default)
-            .build_request(&[Message::user("hi")], &[]);
+    fn default_effort_sends_no_thinking_or_effort() {
+        let request =
+            client_with_effort(Effort::Default).build_request(&[Message::user("hi")], &[]);
         assert!(request.stream);
         let json = serde_json::to_value(&request).unwrap();
         assert!(json.get("thinking").is_none());
@@ -870,15 +868,15 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_level_sends_adaptive_thinking_at_that_effort() {
+    fn effort_level_sends_adaptive_thinking_at_that_effort() {
         for (level, effort) in [
-            (ReasoningLevel::Low, "low"),
-            (ReasoningLevel::Medium, "medium"),
-            (ReasoningLevel::High, "high"),
+            (Effort::Low, "low"),
+            (Effort::Medium, "medium"),
+            (Effort::High, "high"),
         ] {
             // `build_request` is the single request source for both `send`
             // and `send_streaming`.
-            let request = client_with_reasoning(level).build_request(&[Message::user("hi")], &[]);
+            let request = client_with_effort(level).build_request(&[Message::user("hi")], &[]);
             assert!(request.stream);
             let json = serde_json::to_value(&request).unwrap();
             assert_eq!(json["thinking"]["type"], "adaptive");

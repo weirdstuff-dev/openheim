@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::core::models::{Message, ReasoningLevel, Role, Usage};
+use crate::core::models::{Effort, Message, Role, Usage};
 use crate::core::runtime::AgentMode;
 use crate::error::{Error, Result};
 use crate::memory::lease::{self, SessionLease};
@@ -37,10 +37,10 @@ pub struct ConversationMeta {
     /// were stored) loads as [`AgentMode::Code`].
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub mode: Option<AgentMode>,
-    /// The reasoning level chosen for the session, if one was; `None` runs
-    /// at the provider's `reasoning`.
+    /// The effort level chosen for the session, if one was; `None` runs
+    /// at the provider's `effort`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub reasoning: Option<ReasoningLevel>,
+    pub effort: Option<Effort>,
 }
 
 impl ConversationMeta {
@@ -64,7 +64,7 @@ impl ConversationMeta {
             cwd: None,
             context_usage: None,
             mode: None,
-            reasoning: None,
+            effort: None,
         }
     }
 

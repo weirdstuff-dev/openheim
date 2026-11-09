@@ -12,9 +12,7 @@ use agent_client_protocol::schema::v1::{
 use crate::{
     config::AppConfig,
     core::{
-        models::{
-            Message, ReasoningLevel, StopReason as CoreStopReason, StreamEvent, TranscriptEntry,
-        },
+        models::{Effort, Message, StopReason as CoreStopReason, StreamEvent, TranscriptEntry},
         runtime::AgentMode,
     },
     memory::ConversationMeta,
@@ -24,32 +22,32 @@ use crate::{
 /// `session/set_config_option` id for the model selector.
 pub(super) const MODEL_CONFIG_ID: &str = "model";
 
-/// `session/set_config_option` id for the reasoning level selector.
-pub(super) const REASONING_CONFIG_ID: &str = "reasoning";
+/// `session/set_config_option` id for the effort level selector.
+pub(super) const EFFORT_CONFIG_ID: &str = "effort";
 
-/// The reasoning level selector config option: every [`ReasoningLevel`].
-pub(super) fn session_reasoning_config_option(current: ReasoningLevel) -> SessionConfigOption {
-    let levels: Vec<SessionConfigSelectOption> = ReasoningLevel::ALL
+/// The effort level selector config option: every [`Effort`].
+pub(super) fn session_effort_config_option(current: Effort) -> SessionConfigOption {
+    let levels: Vec<SessionConfigSelectOption> = Effort::ALL
         .into_iter()
         .map(|level| {
             let name = match level {
-                ReasoningLevel::Default => "Default",
-                ReasoningLevel::Low => "Low",
-                ReasoningLevel::Medium => "Medium",
-                ReasoningLevel::High => "High",
+                Effort::Default => "Default",
+                Effort::Low => "Low",
+                Effort::Medium => "Medium",
+                Effort::High => "High",
             };
             let option = SessionConfigSelectOption::new(level.as_str(), name);
             match level {
-                ReasoningLevel::Default => {
-                    option.description("The provider's own default; no reasoning parameters sent.")
+                Effort::Default => {
+                    option.description("The provider's own default; no effort parameters sent.")
                 }
                 _ => option,
             }
         })
         .collect();
     SessionConfigOption::select(
-        REASONING_CONFIG_ID,
-        "Reasoning",
+        EFFORT_CONFIG_ID,
+        "Effort",
         current.as_str().to_string(),
         levels,
     )
@@ -60,11 +58,11 @@ pub(super) fn session_reasoning_config_option(current: ReasoningLevel) -> Sessio
 pub(super) fn session_config_options(
     app_config: &AppConfig,
     current_model: &str,
-    current_reasoning: ReasoningLevel,
+    current_effort: Effort,
 ) -> Vec<SessionConfigOption> {
     vec![
         session_model_config_option(app_config, current_model),
-        session_reasoning_config_option(current_reasoning),
+        session_effort_config_option(current_effort),
     ]
 }
 
@@ -253,10 +251,9 @@ mod tool_kind_tests {
     }
 
     #[test]
-    fn reasoning_option_offers_every_level_as_a_thought_level() {
-        let json =
-            serde_json::to_value(session_reasoning_config_option(ReasoningLevel::Medium)).unwrap();
-        assert_eq!(json["id"], REASONING_CONFIG_ID);
+    fn effort_option_offers_every_level_as_a_thought_level() {
+        let json = serde_json::to_value(session_effort_config_option(Effort::Medium)).unwrap();
+        assert_eq!(json["id"], EFFORT_CONFIG_ID);
         assert_eq!(json["category"], "thought_level");
         assert_eq!(json["currentValue"], "medium");
         let values: Vec<_> = json["options"]

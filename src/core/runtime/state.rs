@@ -22,9 +22,7 @@ use crate::{
         agent::run_agent,
         client_io::ClientIo,
         llm::LlmClient,
-        models::{
-            ContentBlock, Message, ReasoningLevel, Role, StopReason as CoreStopReason, StreamEvent,
-        },
+        models::{ContentBlock, Effort, Message, Role, StopReason as CoreStopReason, StreamEvent},
         permission::{Approvals, PermissionGate, RememberingGate},
         turn::TurnContext,
     },
@@ -184,8 +182,8 @@ impl AgentState {
         Ok(Some(create_client(config, &http_client)))
     }
 
-    /// Starts a session in [`AgentMode::Code`] at its provider's reasoning
-    /// level; [`Self::set_session_mode`] and [`Self::set_session_reasoning`]
+    /// Starts a session in [`AgentMode::Code`] at its provider's effort
+    /// level; [`Self::set_session_mode`] and [`Self::set_session_effort`]
     /// change them.
     pub async fn new_session(
         &self,
@@ -218,7 +216,7 @@ impl AgentState {
                     chat_id,
                     config,
                     llm,
-                    reasoning: None,
+                    effort: None,
                     cwd,
                     tool_cwd,
                     skills,
@@ -252,42 +250,42 @@ impl AgentState {
         }
     }
 
-    /// Replaces a live session's config and chosen reasoning level with
+    /// Replaces a live session's config and chosen effort level with
     /// what `update` makes of the current ones, along with its client.
     ///
     /// The client is built outside the sessions lock, so the update is
     /// retried if another call changed the session meanwhile; otherwise a
-    /// concurrent model switch and reasoning change could each undo the
+    /// concurrent model switch and effort change could each undo the
     /// other.
     async fn update_session_config(
         &self,
         session_id: &str,
-        update: impl Fn(&AgentConfig, Option<ReasoningLevel>) -> (AgentConfig, Option<ReasoningLevel>),
+        update: impl Fn(&AgentConfig, Option<Effort>) -> (AgentConfig, Option<Effort>),
     ) -> Result<AgentConfig> {
         let not_found = || Error::NotFound(format!("session not found: {session_id}"));
         loop {
-            let (current, current_reasoning) = {
+            let (current, current_effort) = {
                 let sessions = self.sessions.read().await;
                 let s = sessions.get(session_id).ok_or_else(not_found)?;
-                (s.config.clone(), s.reasoning)
+                (s.config.clone(), s.effort)
             };
-            let (config, reasoning) = update(&current, current_reasoning);
+            let (config, effort) = update(&current, current_effort);
             let llm = self.session_llm(&config)?;
             let mut sessions = self.sessions.write().await;
             let s = sessions.get_mut(session_id).ok_or_else(not_found)?;
-            if !same_client(&s.config, &current) || s.reasoning != current_reasoning {
+            if !same_client(&s.config, &current) || s.effort != current_effort {
                 continue;
             }
             s.config = config.clone();
             s.llm = llm;
-            s.reasoning = reasoning;
+            s.effort = effort;
             s.last_active = Instant::now();
             return Ok(config);
         }
     }
 
     /// Switches a live session to `new_config`'s model, keeping the
-    /// session's reasoning level if one was chosen. Returns the session's
+    /// session's effort level if one was chosen. Returns the session's
     /// `(provider, model)`. Shared by the two public model-switch entry
     /// points below.
     async fn apply_session_config(
@@ -296,8 +294,8 @@ impl AgentState {
         new_config: AgentConfig,
     ) -> Result<(String, String)> {
         let config = self
-            .update_session_config(session_id, |_, reasoning| {
-                (with_reasoning(new_config.clone(), reasoning), reasoning)
+            .update_session_config(session_id, |_, effort| {
+                (with_effort(new_config.clone(), effort), effort)
             })
             .await?;
         Ok((config.provider_name, config.model))
@@ -323,7 +321,7 @@ impl AgentState {
         self.apply_session_config(session_id, new_config).await
     }
 
-    /// A live session's model, mode and the reasoning level it runs at.
+    /// A live session's model, mode and the effort level it runs at.
     pub async fn session_settings(&self, session_id: &str) -> Result<SessionSettings> {
         let sessions = self.sessions.read().await;
         let s = sessions
@@ -333,7 +331,7 @@ impl AgentState {
             provider: s.config.provider_name.clone(),
             model: s.config.model.clone(),
             mode: s.mode,
-            reasoning: s.config.reasoning,
+            effort: s.config.effort,
         })
     }
 
@@ -348,15 +346,11 @@ impl AgentState {
         Ok(())
     }
 
-    /// Sets a live session's reasoning level; the next turn runs at it, and
+    /// Sets a live session's effort level; the next turn runs at it, and
     /// it stays through later model switches.
-    pub async fn set_session_reasoning(
-        &self,
-        session_id: &str,
-        reasoning: ReasoningLevel,
-    ) -> Result<()> {
+    pub async fn set_session_effort(&self, session_id: &str, effort: Effort) -> Result<()> {
         self.update_session_config(session_id, |config, _| {
-            (config.clone().with_reasoning(reasoning), Some(reasoning))
+            (config.clone().with_effort(effort), Some(effort))
         })
         .await?;
         Ok(())
@@ -414,7 +408,7 @@ impl AgentState {
             cancel,
             approvals,
             mode,
-            reasoning,
+            effort,
             _prompt_guard,
         ) = {
             // Write lock: each turn gets a fresh cancellation token, since a
@@ -464,7 +458,7 @@ impl AgentState {
                 s.cancel.clone(),
                 s.approved_tools.clone(),
                 s.mode,
-                s.reasoning,
+                s.effort,
                 prompt_guard,
             )
         };
@@ -499,7 +493,7 @@ impl AgentState {
         conversation.meta.model = Some(config.model.clone());
         conversation.meta.provider = Some(config.provider_name.clone());
         conversation.meta.mode = Some(mode);
-        conversation.meta.reasoning = reasoning;
+        conversation.meta.effort = effort;
         let user_message = Message {
             role: Role::User,
             content: prompt,
@@ -638,14 +632,14 @@ impl AgentState {
         } else if let Some(model) = &conversation.meta.model {
             session_config.model = model.clone();
         }
-        // A chosen reasoning level is kept even when the provider fell back.
-        let reasoning = conversation.meta.reasoning;
-        let session_config = with_reasoning(session_config, reasoning);
+        // A chosen effort level is kept even when the provider fell back.
+        let effort = conversation.meta.effort;
+        let session_config = with_effort(session_config, effort);
 
         let llm = self.session_llm(&session_config)?;
         let cwd = normalize_cwd(cwd);
         let tool_cwd = tool_cwd(&cwd, &self.work_dir);
-        let (mode, reasoning, provider, model) = {
+        let (mode, effort, provider, model) = {
             let mut sessions = self.sessions.write().await;
             // An already-live session keeps its control state (see
             // `insert_or_keep_live`). Loading takes no write lease.
@@ -654,7 +648,7 @@ impl AgentState {
                     chat_id: uuid,
                     config: session_config,
                     llm,
-                    reasoning,
+                    effort,
                     cwd,
                     tool_cwd,
                     skills: conversation.meta.skills.clone(),
@@ -686,12 +680,12 @@ impl AgentState {
                     session_id: session_id.to_string(),
                 });
             }
-            // The live session's mode, reasoning level, provider and model,
+            // The live session's mode, effort level, provider and model,
             // which may differ from the saved ones (e.g. after
             // `session/set_config_option`).
             (
                 live.mode,
-                live.config.reasoning,
+                live.config.effort,
                 live.config.provider_name.clone(),
                 live.config.model.clone(),
             )
@@ -699,7 +693,7 @@ impl AgentState {
 
         Ok(LoadedSession {
             mode,
-            reasoning,
+            effort,
             messages: conversation.messages,
             provider,
             model,
@@ -708,11 +702,11 @@ impl AgentState {
     }
 }
 
-/// `config` at `reasoning` when a session chose one, as its provider set it
+/// `config` at `effort` when a session chose one, as its provider set it
 /// otherwise.
-fn with_reasoning(config: AgentConfig, reasoning: Option<ReasoningLevel>) -> AgentConfig {
-    match reasoning {
-        Some(reasoning) => config.with_reasoning(reasoning),
+fn with_effort(config: AgentConfig, effort: Option<Effort>) -> AgentConfig {
+    match effort {
+        Some(effort) => config.with_effort(effort),
         None => config,
     }
 }
@@ -743,7 +737,7 @@ pub struct SessionSettings {
     pub model: String,
     pub mode: AgentMode,
     /// The level chosen for the session, or its provider's.
-    pub reasoning: ReasoningLevel,
+    pub effort: Effort,
 }
 
 /// What [`OpenheimClient::resume_session`](crate::OpenheimClient::resume_session)
@@ -752,9 +746,9 @@ pub struct SessionSettings {
 pub struct LoadedSession {
     /// The mode the session is live under.
     pub mode: AgentMode,
-    /// The reasoning level the session runs at: the one chosen for it, or
+    /// The effort level the session runs at: the one chosen for it, or
     /// its provider's.
-    pub reasoning: ReasoningLevel,
+    pub effort: Effort,
     /// The full saved conversation, for the caller to replay in its own form
     /// (`acp::util::replay_history_messages` for ACP).
     pub messages: Vec<Message>,
@@ -788,7 +782,7 @@ mod prompt_lease_ordering_tests {
                 5,
             ),
             llm: None,
-            reasoning: None,
+            effort: None,
             cwd: PathBuf::from("/tmp"),
             tool_cwd: PathBuf::from("/tmp"),
             skills: vec![],
@@ -1218,10 +1212,10 @@ mod new_session_tests {
         assert_eq!(saved.meta.provider.as_deref(), Some("mock"));
     }
 
-    // A reasoning level chosen for a session stays through a model switch,
+    // An effort level chosen for a session stays through a model switch,
     // gets its own client, and leaves other sessions alone.
     #[tokio::test]
-    async fn chosen_reasoning_survives_a_model_switch() {
+    async fn chosen_effort_survives_a_model_switch() {
         let dir = tempdir().unwrap();
         let (state, session_id) = state_with_session(dir.path()).await;
         let other = state
@@ -1230,7 +1224,7 @@ mod new_session_tests {
             .unwrap();
 
         state
-            .set_session_reasoning(&session_id, ReasoningLevel::High)
+            .set_session_effort(&session_id, Effort::High)
             .await
             .unwrap();
         {
@@ -1245,18 +1239,18 @@ mod new_session_tests {
             .unwrap();
         let settings = state.session_settings(&session_id).await.unwrap();
         assert_eq!(settings.model, "other-model");
-        assert_eq!(settings.reasoning, ReasoningLevel::High);
+        assert_eq!(settings.effort, Effort::High);
         assert_eq!(
-            state.session_settings(&other).await.unwrap().reasoning,
-            ReasoningLevel::Default
+            state.session_settings(&other).await.unwrap().effort,
+            Effort::Default
         );
     }
 
-    // Mode and a chosen reasoning level are saved with the conversation and
+    // Mode and a chosen effort level are saved with the conversation and
     // restored when it's loaded again (here: into a fresh runtime, as after
     // a restart).
     #[tokio::test]
-    async fn mode_and_reasoning_are_restored_on_load() {
+    async fn mode_and_effort_are_restored_on_load() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
         let mut state = sample_state(dir.path()).await;
@@ -1270,7 +1264,7 @@ mod new_session_tests {
             .await
             .unwrap();
         state
-            .set_session_reasoning(&session_id, ReasoningLevel::Low)
+            .set_session_effort(&session_id, Effort::Low)
             .await
             .unwrap();
         // The level built a real client for the session; swap in the mock.
@@ -1280,7 +1274,7 @@ mod new_session_tests {
         let uuid = Uuid::parse_str(&session_id).unwrap();
         let saved = state.memory.history.load_conversation(&uuid).unwrap();
         assert_eq!(saved.meta.mode, Some(AgentMode::Architect));
-        assert_eq!(saved.meta.reasoning, Some(ReasoningLevel::Low));
+        assert_eq!(saved.meta.effort, Some(Effort::Low));
 
         let restarted = sample_state(dir.path()).await;
         let loaded = restarted
@@ -1288,15 +1282,15 @@ mod new_session_tests {
             .await
             .unwrap();
         assert_eq!(loaded.mode, AgentMode::Architect);
-        assert_eq!(loaded.reasoning, ReasoningLevel::Low);
+        assert_eq!(loaded.effort, Effort::Low);
         let sessions = restarted.sessions.read().await;
-        assert_eq!(sessions[&session_id].reasoning, Some(ReasoningLevel::Low));
+        assert_eq!(sessions[&session_id].effort, Some(Effort::Low));
     }
 
     // A session that never chose a level saves none, so it follows its
-    // provider's `reasoning` after a reload.
+    // provider's `effort` after a reload.
     #[tokio::test]
-    async fn unchosen_reasoning_is_not_saved() {
+    async fn unchosen_effort_is_not_saved() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
         let mut state = sample_state(dir.path()).await;
@@ -1310,7 +1304,7 @@ mod new_session_tests {
         let uuid = Uuid::parse_str(&session_id).unwrap();
         let saved = state.memory.history.load_conversation(&uuid).unwrap();
         assert_eq!(saved.meta.mode, Some(AgentMode::Code));
-        assert_eq!(saved.meta.reasoning, None);
+        assert_eq!(saved.meta.effort, None);
     }
 
     /// Answers each call with the next scripted choice, whoever makes it —

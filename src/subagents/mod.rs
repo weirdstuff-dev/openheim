@@ -9,7 +9,7 @@
 //! +++
 //! description = "Reviews code changes for correctness, security, and style."
 //! model = "claude-haiku-4-5"
-//! reasoning = "low"
+//! effort = "low"
 //! tools = ["read_file"]
 //! max_iterations = 6
 //! +++
@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::core::models::ReasoningLevel;
+use crate::core::models::Effort;
 use crate::error::{Error, Result};
 
 /// A user-defined subagent persona loaded from `~/.openheim/agents/{name}.md`.
@@ -38,10 +38,10 @@ pub struct AgentProfile {
     pub model: Option<String>,
     /// Overrides the parent's provider when set (paired with `model`).
     pub provider: Option<String>,
-    /// The subagent's reasoning level. `None` runs at the parent session's
-    /// level on the parent's model, or at the provider's `reasoning` on a
+    /// The subagent's effort level. `None` runs at the parent session's
+    /// level on the parent's model, or at the provider's `effort` on a
     /// model of its own.
-    pub reasoning: Option<ReasoningLevel>,
+    pub effort: Option<Effort>,
     /// Restricts the subagent to this set of tool names. `None` inherits the parent's tools.
     pub tools: Option<Vec<String>>,
     /// Caps the subagent's agent-loop iterations. `None` inherits the parent's setting.
@@ -60,7 +60,7 @@ struct AgentProfileMeta {
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
-    reasoning: Option<ReasoningLevel>,
+    effort: Option<Effort>,
     #[serde(default)]
     tools: Option<Vec<String>>,
     #[serde(default)]
@@ -131,7 +131,7 @@ fn parse_profile(name: &str, content: &str) -> Result<AgentProfile> {
         description: meta.description,
         model: meta.model,
         provider: meta.provider,
-        reasoning: meta.reasoning,
+        effort: meta.effort,
         tools: meta.tools,
         max_iterations: meta.max_iterations,
         system_prompt: body.trim().to_string(),
@@ -175,7 +175,7 @@ mod tests {
         let content = "+++\n\
 description = \"Reviews diffs for correctness and style.\"\n\
 model = \"claude-haiku-4-5\"\n\
-reasoning = \"low\"\n\
+effort = \"low\"\n\
 tools = [\"read_file\"]\n\
 max_iterations = 6\n\
 +++\n\
@@ -189,7 +189,7 @@ You are a meticulous code reviewer.\n";
         );
         assert_eq!(profile.model.as_deref(), Some("claude-haiku-4-5"));
         assert_eq!(profile.provider, None);
-        assert_eq!(profile.reasoning, Some(ReasoningLevel::Low));
+        assert_eq!(profile.effort, Some(Effort::Low));
         assert_eq!(profile.tools, Some(vec!["read_file".to_string()]));
         assert_eq!(profile.max_iterations, Some(6));
         assert_eq!(profile.system_prompt, "You are a meticulous code reviewer.");

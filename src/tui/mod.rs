@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use crate::{
     client::{OpenheimClient, SessionHandle},
     core::{
-        models::{ReasoningLevel, StopReason},
+        models::{Effort, StopReason},
         permission::PermissionGate,
         runtime::AgentMode,
     },
@@ -255,7 +255,7 @@ impl AgentTask {
         mut commands: mpsc::UnboundedReceiver<AgentCommand>,
         mut cancel: mpsc::UnboundedReceiver<()>,
     ) {
-        // A new session starts on the model, mode and reasoning level the
+        // A new session starts on the model, mode and effort level the
         // current one is on.
         let mut current_provider = self.default_provider.clone();
         let mut current_model = self.default_model.clone();
@@ -264,7 +264,7 @@ impl AgentTask {
         let mut current = match session.settings().await {
             Ok(settings) => Current {
                 mode: Some(settings.mode),
-                reasoning: Some(settings.reasoning),
+                effort: Some(settings.effort),
             },
             Err(_) => Current::default(),
         };
@@ -289,12 +289,10 @@ impl AgentTask {
                     Ok(()) => self.report_settings(&session, &mut current).await,
                     Err(e) => self.send(AgentUpdate::Error(e.to_string())),
                 },
-                AgentCommand::SetReasoning(reasoning) => {
-                    match session.set_reasoning(reasoning).await {
-                        Ok(()) => self.report_settings(&session, &mut current).await,
-                        Err(e) => self.send(AgentUpdate::Error(e.to_string())),
-                    }
-                }
+                AgentCommand::SetEffort(effort) => match session.set_effort(effort).await {
+                    Ok(()) => self.report_settings(&session, &mut current).await,
+                    Err(e) => self.send(AgentUpdate::Error(e.to_string())),
+                },
                 AgentCommand::SwitchSession { id, cwd } => {
                     let resumed = self
                         .resume(&id, cwd, &mut current_provider, &mut current_model)
@@ -325,7 +323,7 @@ impl AgentTask {
         let _ = self.updates.send(update);
     }
 
-    /// Tells the UI about `session`'s mode and reasoning level where they
+    /// Tells the UI about `session`'s mode and effort level where they
     /// differ from `current`, which is updated to match.
     async fn report_settings(&self, session: &SessionHandle, current: &mut Current) {
         let settings = match session.settings().await {
@@ -336,9 +334,9 @@ impl AgentTask {
             current.mode = Some(settings.mode);
             self.send(AgentUpdate::ModeChanged(settings.mode));
         }
-        if current.reasoning != Some(settings.reasoning) {
-            current.reasoning = Some(settings.reasoning);
-            self.send(AgentUpdate::ReasoningChanged(settings.reasoning));
+        if current.effort != Some(settings.effort) {
+            current.effort = Some(settings.effort);
+            self.send(AgentUpdate::EffortChanged(settings.effort));
         }
     }
 
@@ -424,7 +422,7 @@ impl AgentTask {
 
     /// Starts a new session on the active model (`provider`/`model`), or on
     /// the default one if that no longer resolves, updating both to match.
-    /// It takes on `current`'s mode, and its reasoning level when that isn't
+    /// It takes on `current`'s mode, and its effort level when that isn't
     /// already the new session's.
     async fn new_session(
         &self,
@@ -465,15 +463,15 @@ impl AgentTask {
     }
 }
 
-/// The mode and reasoning level the UI last showed; `None` before the first
+/// The mode and effort level the UI last showed; `None` before the first
 /// report.
 #[derive(Debug, Clone, Copy, Default)]
 struct Current {
     mode: Option<AgentMode>,
-    reasoning: Option<ReasoningLevel>,
+    effort: Option<Effort>,
 }
 
-/// Puts `session` on `current`'s mode and reasoning level. The level is only
+/// Puts `session` on `current`'s mode and effort level. The level is only
 /// set when it differs from the session's own, so a session still on its
 /// provider's level keeps following it through model switches.
 async fn carry_over(session: &SessionHandle, current: Current) -> crate::error::Result<()> {
@@ -481,8 +479,8 @@ async fn carry_over(session: &SessionHandle, current: Current) -> crate::error::
     if let Some(mode) = current.mode.filter(|&m| m != settings.mode) {
         session.set_mode(mode).await?;
     }
-    if let Some(reasoning) = current.reasoning.filter(|&r| r != settings.reasoning) {
-        session.set_reasoning(reasoning).await?;
+    if let Some(effort) = current.effort.filter(|&r| r != settings.effort) {
+        session.set_effort(effort).await?;
     }
     Ok(())
 }

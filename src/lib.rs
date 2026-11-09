@@ -100,8 +100,8 @@ pub use core::llm::{
     AnthropicClient, GeminiClient, LlmClient, OpenAiClient, OpenAiCompatibleClient,
 };
 pub use core::models::{
-    AgentResult, Choice, ContentBlock, FinishReason, FunctionDefinition, Message, ReasoningLevel,
-    Role, StopReason, StreamEvent, Tool, ToolResultBlock, ToolUseBlock,
+    AgentResult, Choice, ContentBlock, Effort, FinishReason, FunctionDefinition, Message, Role,
+    StopReason, StreamEvent, Tool, ToolResultBlock, ToolUseBlock,
 };
 pub use core::runtime::{AgentMode, LoadedSession, SessionSettings};
 pub use error::{Error, Result};

@@ -223,11 +223,8 @@ pub(crate) const WELCOME_COMMANDS: &[(&str, &str)] = &[
     (":models <name>", "switch model mid-session"),
     (":mode", "current mode"),
     (":mode <name>", "switch mode (code, architect)"),
-    (":reasoning", "current reasoning level"),
-    (
-        ":reasoning <level>",
-        "set reasoning (default, low, medium, high)",
-    ),
+    (":effort", "current effort level"),
+    (":effort <level>", "set effort (default, low, medium, high)"),
     (":skills", "available skills"),
     (":mcp", "MCP servers"),
     (":theme", "change accent color"),

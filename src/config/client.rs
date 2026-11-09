@@ -38,7 +38,7 @@ pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<d
                 config.max_tokens,
             )
             .with_replay_thinking(config.replay_thinking)
-            .with_reasoning(config.reasoning),
+            .with_effort(config.effort),
         ),
         ProviderKind::Anthropic => Arc::new(
             AnthropicClient::new(
@@ -48,7 +48,7 @@ pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<d
                 config.model.clone(),
                 config.max_tokens,
             )
-            .with_reasoning(config.reasoning),
+            .with_effort(config.effort),
         ),
         ProviderKind::Gemini => Arc::new(
             GeminiClient::new(
@@ -58,7 +58,7 @@ pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<d
                 config.model.clone(),
                 config.max_tokens,
             )
-            .with_reasoning(config.reasoning),
+            .with_effort(config.effort),
         ),
         ProviderKind::OpenAiCompatible => Arc::new(
             OpenAiCompatibleClient::new(
@@ -69,7 +69,7 @@ pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<d
                 config.max_tokens,
             )
             .with_replay_thinking(config.replay_thinking)
-            .with_reasoning(config.reasoning),
+            .with_effort(config.effort),
         ),
     };
     Arc::new(RetryClient::new(inner))
@@ -101,15 +101,15 @@ impl HttpClients {
     }
 }
 
-/// Whether `a` and `b` name the same model at the same reasoning level, so
+/// Whether `a` and `b` name the same model at the same effort level, so
 /// one LLM client serves both.
 pub(crate) fn same_client(a: &AgentConfig, b: &AgentConfig) -> bool {
-    a.provider_name == b.provider_name && a.model == b.model && a.reasoning == b.reasoning
+    a.provider_name == b.provider_name && a.model == b.model && a.effort == b.effort
 }
 
 /// The LLM client for `target`: `baseline_llm` when it has the same provider,
-/// model and reasoning level, otherwise a new one on `http`'s shared
-/// `reqwest::Client`. Used for sessions that switched models or reasoning
+/// model and effort level, otherwise a new one on `http`'s shared
+/// `reqwest::Client`. Used for sessions that switched models or effort
 /// levels, and for subagents.
 pub(crate) fn client_for_config(
     target: &AgentConfig,
@@ -182,13 +182,13 @@ mod tests {
     }
 
     #[test]
-    fn client_for_config_builds_new_when_reasoning_differs() {
+    fn client_for_config_builds_new_when_effort_differs() {
         let baseline = baseline_config();
         let baseline_llm: Arc<dyn LlmClient> = Arc::new(DummyClient);
 
         let target = baseline
             .clone()
-            .with_reasoning(crate::core::models::ReasoningLevel::High);
+            .with_effort(crate::core::models::Effort::High);
 
         let client =
             client_for_config(&target, &baseline, &baseline_llm, &HttpClients::default()).unwrap();

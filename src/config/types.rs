@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-use crate::core::models::ReasoningLevel;
+use crate::core::models::Effort;
 
 /// Public model info for a single provider (no credentials).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -498,11 +498,11 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub context_window: Option<u64>,
     /// How hard the models reason (`"default"`, `"low"`, `"medium"` or
-    /// `"high"`; see [`ReasoningLevel`]). Sessions start at this level and
-    /// can change it. `"default"` (when unset) sends no reasoning
+    /// `"high"`; see [`Effort`]). Sessions start at this level and
+    /// can change it. `"default"` (when unset) sends no effort
     /// parameters, so it's the one to keep for models that reject them.
     #[serde(default)]
-    pub reasoning: ReasoningLevel,
+    pub effort: Effort,
     /// Send signed thinking back to an OpenAI-compatible endpoint that
     /// streams it as `thinking_blocks` (a LiteLLM proxy in front of
     /// Anthropic), so extended thinking stays on through tool calls. Off
@@ -523,7 +523,7 @@ impl std::fmt::Debug for ProviderConfig {
             .field("timeout_secs", &self.timeout_secs)
             .field("max_tokens", &self.max_tokens)
             .field("context_window", &self.context_window)
-            .field("reasoning", &self.reasoning)
+            .field("effort", &self.effort)
             .field("replay_thinking", &self.replay_thinking)
             .finish()
     }
@@ -544,7 +544,7 @@ impl ProviderConfig {
             timeout_secs: None,
             max_tokens: None,
             context_window: None,
-            reasoning: ReasoningLevel::Default,
+            effort: Effort::Default,
             replay_thinking: None,
         }
     }
@@ -589,8 +589,8 @@ impl ProviderConfig {
         self
     }
 
-    pub fn with_reasoning(mut self, reasoning: ReasoningLevel) -> Self {
-        self.reasoning = reasoning;
+    pub fn with_effort(mut self, effort: Effort) -> Self {
+        self.effort = effort;
         self
     }
 
@@ -648,8 +648,8 @@ pub struct AgentConfig {
     /// The model's context window in tokens; see
     /// [`ProviderConfig::context_window`].
     pub context_window: Option<u64>,
-    /// How hard the model reasons; see [`ProviderConfig::reasoning`].
-    pub reasoning: ReasoningLevel,
+    /// How hard the model reasons; see [`ProviderConfig::effort`].
+    pub effort: Effort,
     /// Whether to send signed thinking back as `thinking_blocks`
     /// (`OpenAiClient` / `OpenAiCompatibleClient` only); see
     /// [`ProviderConfig::replay_thinking`].
@@ -673,7 +673,7 @@ struct AgentConfigWire {
     #[serde(default)]
     context_window: Option<u64>,
     #[serde(default)]
-    reasoning: ReasoningLevel,
+    effort: Effort,
     #[serde(default)]
     replay_thinking: bool,
 }
@@ -692,7 +692,7 @@ impl From<AgentConfigWire> for AgentConfig {
             timeout_secs: wire.timeout_secs,
             max_tokens: wire.max_tokens,
             context_window: wire.context_window,
-            reasoning: wire.reasoning,
+            effort: wire.effort,
             replay_thinking: wire.replay_thinking,
         }
     }
@@ -710,7 +710,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("timeout_secs", &self.timeout_secs)
             .field("max_tokens", &self.max_tokens)
             .field("context_window", &self.context_window)
-            .field("reasoning", &self.reasoning)
+            .field("effort", &self.effort)
             .field("replay_thinking", &self.replay_thinking)
             .finish()
     }
@@ -742,7 +742,7 @@ impl AgentConfig {
             timeout_secs: default_timeout_secs(),
             max_tokens: None,
             context_window: None,
-            reasoning: ReasoningLevel::Default,
+            effort: Effort::Default,
             replay_thinking: false,
         }
     }
@@ -773,8 +773,8 @@ impl AgentConfig {
         self
     }
 
-    pub fn with_reasoning(mut self, reasoning: ReasoningLevel) -> Self {
-        self.reasoning = reasoning;
+    pub fn with_effort(mut self, effort: Effort) -> Self {
+        self.effort = effort;
         self
     }
 
@@ -796,7 +796,7 @@ impl Default for AgentConfig {
             timeout_secs: default_timeout_secs(),
             max_tokens: None,
             context_window: None,
-            reasoning: ReasoningLevel::Default,
+            effort: Effort::Default,
             replay_thinking: false,
         }
     }

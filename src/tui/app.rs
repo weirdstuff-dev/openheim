@@ -9,7 +9,7 @@ use ratatui::{
 use crate::{
     config::{AgentConfig, AppConfig, RuntimePaths},
     core::{
-        models::{ReasoningLevel, StreamEvent},
+        models::{Effort, StreamEvent},
         permission::PermissionDecision,
         runtime::AgentMode,
     },
@@ -34,8 +34,8 @@ const HELP_TEXT: &str = ":help                show this\n\
                          :models <name>       switch to model mid-session\n\
                          :mode                current mode\n\
                          :mode <name>         switch mode (code, architect)\n\
-                         :reasoning           current reasoning level\n\
-                         :reasoning <level>   set reasoning (default, low, medium, high)\n\
+                         :effort           current effort level\n\
+                         :effort <level>   set effort (default, low, medium, high)\n\
                          :mcp                 MCP servers\n\
                          :skills              available skills\n\
                          :theme               change accent color\n\
@@ -99,7 +99,7 @@ pub(super) struct App {
     screen: Screen,
     overlay: Option<Overlay>,
     permissions: PermissionQueue,
-    /// The session's provider, model and reasoning level, for the footer.
+    /// The session's provider, model and effort level, for the footer.
     agent_config: AgentConfig,
     mode: AgentMode,
     app_config: AppConfig,
@@ -143,15 +143,15 @@ impl App {
         }
     }
 
-    /// The footer's right label: provider, model, the reasoning level and
+    /// The footer's right label: provider, model, the effort level and
     /// mode when they aren't the defaults, and the context size once known.
     fn footer_summary(&self) -> String {
         let mut parts = vec![
             self.agent_config.provider_name.clone(),
             self.agent_config.model.clone(),
         ];
-        if self.agent_config.reasoning != ReasoningLevel::Default {
-            parts.push(format!("reasoning: {}", self.agent_config.reasoning));
+        if self.agent_config.effort != Effort::Default {
+            parts.push(format!("effort: {}", self.agent_config.effort));
         }
         if self.mode != AgentMode::Code {
             parts.push(self.mode.as_str().to_string());
@@ -190,9 +190,9 @@ impl App {
                 self.mode = mode;
                 self.push(ChatItem::SystemInfo(format!("mode: {}", mode.as_str())));
             }
-            AgentUpdate::ReasoningChanged(reasoning) => {
-                self.agent_config.reasoning = reasoning;
-                self.push(ChatItem::SystemInfo(format!("reasoning: {reasoning}")));
+            AgentUpdate::EffortChanged(effort) => {
+                self.agent_config.effort = effort;
+                self.push(ChatItem::SystemInfo(format!("effort: {effort}")));
             }
             AgentUpdate::SessionList(sessions) => {
                 if sessions.is_empty() {
@@ -546,19 +546,16 @@ impl App {
                     }
                 }
             }
-            "reasoning" => {
+            "effort" => {
                 if arg.is_empty() {
                     self.push(ChatItem::SystemInfo(format!(
-                        "reasoning: {} (default, low, medium, high)",
-                        self.agent_config.reasoning
+                        "effort: {} (default, low, medium, high)",
+                        self.agent_config.effort
                     )));
                 } else {
-                    match ReasoningLevel::parse(arg) {
-                        Ok(reasoning) => {
-                            let _ = self
-                                .channels
-                                .commands
-                                .send(AgentCommand::SetReasoning(reasoning));
+                    match Effort::parse(arg) {
+                        Ok(effort) => {
+                            let _ = self.channels.commands.send(AgentCommand::SetEffort(effort));
                         }
                         Err(e) => self.push(ChatItem::SystemInfo(e.to_string())),
                     }

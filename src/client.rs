@@ -17,7 +17,7 @@ use crate::{
     },
     core::{
         client_io::{ClientIo, NoClientIo},
-        models::{ContentBlock, ReasoningLevel, StopReason, StreamEvent},
+        models::{ContentBlock, Effort, StopReason, StreamEvent},
         permission::{AllowAll, PermissionGate},
         runtime::{AgentMode, AgentState, LoadedSession, SessionSettings},
     },
@@ -73,7 +73,7 @@ impl OpenheimClient {
             skills: vec![],
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             mode: AgentMode::Code,
-            reasoning: None,
+            effort: None,
         }
     }
 
@@ -132,16 +132,10 @@ impl OpenheimClient {
         self.state.set_session_mode(session_id, mode).await
     }
 
-    /// Sets a live session's reasoning level; the same as
-    /// [`SessionHandle::set_reasoning`], for callers that hold only the id.
-    pub async fn set_session_reasoning(
-        &self,
-        session_id: &str,
-        reasoning: ReasoningLevel,
-    ) -> Result<()> {
-        self.state
-            .set_session_reasoning(session_id, reasoning)
-            .await
+    /// Sets a live session's effort level; the same as
+    /// [`SessionHandle::set_effort`], for callers that hold only the id.
+    pub async fn set_session_effort(&self, session_id: &str, effort: Effort) -> Result<()> {
+        self.state.set_session_effort(session_id, effort).await
     }
 
     // ── Memory ────────────────────────────────────────────────────────────────
@@ -186,7 +180,7 @@ pub struct SessionBuilder<'a> {
     skills: Vec<String>,
     cwd: PathBuf,
     mode: AgentMode,
-    reasoning: Option<ReasoningLevel>,
+    effort: Option<Effort>,
 }
 
 impl<'a> SessionBuilder<'a> {
@@ -218,10 +212,10 @@ impl<'a> SessionBuilder<'a> {
         self
     }
 
-    /// The reasoning level the session starts at. Defaults to its
-    /// provider's `reasoning`.
-    pub fn reasoning(mut self, reasoning: ReasoningLevel) -> Self {
-        self.reasoning = Some(reasoning);
+    /// The effort level the session starts at. Defaults to its
+    /// provider's `effort`.
+    pub fn effort(mut self, effort: Effort) -> Self {
+        self.effort = Some(effort);
         self
     }
 
@@ -234,8 +228,8 @@ impl<'a> SessionBuilder<'a> {
         if self.mode != AgentMode::Code {
             self.state.set_session_mode(&id, self.mode).await?;
         }
-        if let Some(reasoning) = self.reasoning {
-            self.state.set_session_reasoning(&id, reasoning).await?;
+        if let Some(effort) = self.effort {
+            self.state.set_session_effort(&id, effort).await?;
         }
         Ok(SessionHandle::new(id, self.state.clone()))
     }
@@ -370,7 +364,7 @@ impl SessionHandle {
         self.state.switch_model(&self.id, provider, model).await
     }
 
-    /// The provider, model, mode and reasoning level this session runs on.
+    /// The provider, model, mode and effort level this session runs on.
     pub async fn settings(&self) -> Result<SessionSettings> {
         self.state.session_settings(&self.id).await
     }
@@ -380,10 +374,10 @@ impl SessionHandle {
         self.state.set_session_mode(&self.id, mode).await
     }
 
-    /// Set the reasoning level for this session; the next prompt runs at
+    /// Set the effort level for this session; the next prompt runs at
     /// it, and it stays through later [`Self::switch_model`] calls.
-    pub async fn set_reasoning(&self, reasoning: ReasoningLevel) -> Result<()> {
-        self.state.set_session_reasoning(&self.id, reasoning).await
+    pub async fn set_effort(&self, effort: Effort) -> Result<()> {
+        self.state.set_session_effort(&self.id, effort).await
     }
 }
 
@@ -481,7 +475,7 @@ pub struct OpenheimBuilder {
     timeout_secs: Option<u64>,
     max_tokens: Option<u32>,
     context_window: Option<u64>,
-    reasoning: Option<ReasoningLevel>,
+    effort: Option<Effort>,
     mcp_servers: BTreeMap<String, McpServerConfig>,
     default_skills: Vec<String>,
     work_dir: Option<PathBuf>,
@@ -563,10 +557,10 @@ impl OpenheimBuilder {
         self
     }
 
-    /// The reasoning level sessions start at; see `reasoning` in
-    /// `docs/configuration.md`. Defaults to [`ReasoningLevel::Default`].
-    pub fn reasoning(mut self, reasoning: ReasoningLevel) -> Self {
-        self.reasoning = Some(reasoning);
+    /// The effort level sessions start at; see `effort` in
+    /// `docs/configuration.md`. Defaults to [`Effort::Default`].
+    pub fn effort(mut self, effort: Effort) -> Self {
+        self.effort = Some(effort);
         self
     }
 
@@ -667,12 +661,12 @@ impl OpenheimBuilder {
             if let Some(w) = self.context_window {
                 agent_config.context_window = Some(w);
             }
-            if let Some(r) = self.reasoning {
-                agent_config.reasoning = r;
+            if let Some(r) = self.effort {
+                agent_config.effort = r;
                 // Also on the provider entry, so sessions that re-resolve
                 // the provider (model switch, resume) start at it too.
                 if let Some(provider) = app_config.providers.get_mut(&agent_config.provider_name) {
-                    provider.reasoning = r;
+                    provider.effort = r;
                 }
             }
             (agent_config, app_config)
@@ -770,7 +764,7 @@ impl OpenheimBuilder {
                 timeout_secs: Some(timeout),
                 max_tokens: self.max_tokens,
                 context_window: self.context_window,
-                reasoning: self.reasoning.unwrap_or_default(),
+                effort: self.effort.unwrap_or_default(),
                 replay_thinking: None,
             },
         );
@@ -1123,30 +1117,24 @@ models = ["m1"]
         assert!(!dir.path().join("memory.db").exists());
     }
 
-    /// The builder's reasoning level holds for a session that switches
+    /// The builder's effort level holds for a session that switches
     /// models without choosing a level of its own.
     #[tokio::test]
-    async fn builder_reasoning_survives_a_model_switch() {
+    async fn builder_effort_survives_a_model_switch() {
         let dir = tempfile::tempdir().unwrap();
         let client = OpenheimClient::builder()
             .app_config(local_config())
-            .reasoning(ReasoningLevel::High)
+            .effort(Effort::High)
             .data_dir(dir.path())
             .work_dir(dir.path())
             .build()
             .await
             .unwrap();
         let session = client.new_session().start().await.unwrap();
-        assert_eq!(
-            session.settings().await.unwrap().reasoning,
-            ReasoningLevel::High
-        );
+        assert_eq!(session.settings().await.unwrap().effort, Effort::High);
 
         session.switch_model("local", "m2").await.unwrap();
-        assert_eq!(
-            session.settings().await.unwrap().reasoning,
-            ReasoningLevel::High
-        );
+        assert_eq!(session.settings().await.unwrap().effort, Effort::High);
     }
 
     /// `OpenheimClient::switch_model` reaches the same live session as the

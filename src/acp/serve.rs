@@ -21,7 +21,7 @@ use tokio::sync::RwLock;
 use crate::{
     client::OpenheimClient,
     core::client_io::ClientIo,
-    core::models::ReasoningLevel,
+    core::models::Effort,
     core::permission::PermissionGate,
     core::runtime::{AgentMode, AgentState},
     error::Error,
@@ -32,7 +32,7 @@ use super::{
     convert::convert_prompt_blocks,
     permission::AcpPermissionGate,
     util::{
-        MODEL_CONFIG_ID, REASONING_CONFIG_ID, conversation_metas_to_session_info, map_stop_reason,
+        EFFORT_CONFIG_ID, MODEL_CONFIG_ID, conversation_metas_to_session_info, map_stop_reason,
         replay_history_messages, session_config_options, session_mode_state,
         stream_event_to_session_update,
     },
@@ -142,7 +142,7 @@ pub(crate) async fn serve_state(
                             .config_options(session_config_options(
                                 &state_session.app_config,
                                 &settings.model,
-                                settings.reasoning,
+                                settings.effort,
                             ))
                             .modes(session_mode_state(settings.mode)),
                     ),
@@ -266,7 +266,7 @@ pub(crate) async fn serve_state(
                                 .config_options(session_config_options(
                                     &state_load.app_config,
                                     &loaded.model,
-                                    loaded.reasoning,
+                                    loaded.effort,
                                 ))
                                 .modes(session_mode_state(loaded.mode)),
                         )
@@ -282,7 +282,7 @@ pub(crate) async fn serve_state(
                         _cx: ConnectionTo<Client>| {
                 let session_id = req.session_id.0.as_ref().to_string();
                 let config_id = req.config_id.0.as_ref();
-                if config_id != MODEL_CONFIG_ID && config_id != REASONING_CONFIG_ID {
+                if config_id != MODEL_CONFIG_ID && config_id != EFFORT_CONFIG_ID {
                     return responder.respond_with_error(
                         agent_client_protocol::Error::invalid_params().data(format!(
                             "unknown session config option '{}'",
@@ -302,19 +302,15 @@ pub(crate) async fn serve_state(
                     if config_id == MODEL_CONFIG_ID {
                         state.set_session_model(&session_id, value).await?;
                     } else {
-                        let reasoning = ReasoningLevel::parse(value)?;
-                        state.set_session_reasoning(&session_id, reasoning).await?;
+                        let effort = Effort::parse(value)?;
+                        state.set_session_effort(&session_id, effort).await?;
                     }
                     state.session_settings(&session_id).await
                 };
                 match updated.await {
                     // The response carries every option, not only the one set.
                     Ok(settings) => responder.respond(SetSessionConfigOptionResponse::new(
-                        session_config_options(
-                            &state.app_config,
-                            &settings.model,
-                            settings.reasoning,
-                        ),
+                        session_config_options(&state.app_config, &settings.model, settings.effort),
                     )),
                     Err(e) => responder.respond_with_error(to_acp_error(&e)),
                 }
