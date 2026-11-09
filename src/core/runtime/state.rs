@@ -17,12 +17,14 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    config::{AgentConfig, AppConfig, HttpClients, RuntimePaths, create_client, same_model},
+    config::{AgentConfig, AppConfig, HttpClients, RuntimePaths, create_client, same_client},
     core::{
         agent::run_agent,
         client_io::ClientIo,
         llm::LlmClient,
-        models::{ContentBlock, Message, Role, StopReason as CoreStopReason, StreamEvent},
+        models::{
+            ContentBlock, Message, ReasoningLevel, Role, StopReason as CoreStopReason, StreamEvent,
+        },
         permission::{Approvals, PermissionGate, RememberingGate},
         turn::TurnContext,
     },
@@ -160,7 +162,7 @@ impl AgentState {
     }
 
     /// The default model/provider new sessions start on.
-    #[cfg_attr(not(any(feature = "acp", feature = "tui")), allow(dead_code))]
+    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
     pub fn config(&self) -> &AgentConfig {
         &self.config
     }
@@ -175,13 +177,16 @@ impl AgentState {
     /// on the default model, otherwise a new client on the shared
     /// `reqwest::Client`. Call it before taking the sessions lock.
     fn session_llm(&self, config: &AgentConfig) -> Result<Option<Arc<dyn LlmClient>>> {
-        if same_model(config, &self.config) {
+        if same_client(config, &self.config) {
             return Ok(None);
         }
         let http_client = self.http.get(config.timeout_secs)?;
         Ok(Some(create_client(config, &http_client)))
     }
 
+    /// Starts a session in [`AgentMode::Code`] at its provider's reasoning
+    /// level; [`Self::set_session_mode`] and [`Self::set_session_reasoning`]
+    /// change them.
     pub async fn new_session(
         &self,
         model: Option<&str>,
@@ -213,6 +218,7 @@ impl AgentState {
                     chat_id,
                     config,
                     llm,
+                    reasoning: None,
                     cwd,
                     tool_cwd,
                     skills,
@@ -246,24 +252,55 @@ impl AgentState {
         }
     }
 
-    /// Swaps a live session's [`AgentConfig`], returning its `(provider, model)`.
-    /// Shared by the two public model-switch entry points below.
+    /// Replaces a live session's config and chosen reasoning level with
+    /// what `update` makes of the current ones, along with its client.
+    ///
+    /// The client is built outside the sessions lock, so the update is
+    /// retried if another call changed the session meanwhile; otherwise a
+    /// concurrent model switch and reasoning change could each undo the
+    /// other.
+    async fn update_session_config(
+        &self,
+        session_id: &str,
+        update: impl Fn(&AgentConfig, Option<ReasoningLevel>) -> (AgentConfig, Option<ReasoningLevel>),
+    ) -> Result<AgentConfig> {
+        let not_found = || Error::NotFound(format!("session not found: {session_id}"));
+        loop {
+            let (current, current_reasoning) = {
+                let sessions = self.sessions.read().await;
+                let s = sessions.get(session_id).ok_or_else(not_found)?;
+                (s.config.clone(), s.reasoning)
+            };
+            let (config, reasoning) = update(&current, current_reasoning);
+            let llm = self.session_llm(&config)?;
+            let mut sessions = self.sessions.write().await;
+            let s = sessions.get_mut(session_id).ok_or_else(not_found)?;
+            if !same_client(&s.config, &current) || s.reasoning != current_reasoning {
+                continue;
+            }
+            s.config = config.clone();
+            s.llm = llm;
+            s.reasoning = reasoning;
+            s.last_active = Instant::now();
+            return Ok(config);
+        }
+    }
+
+    /// Switches a live session to `new_config`'s model, keeping the
+    /// session's reasoning level if one was chosen. Returns the session's
+    /// `(provider, model)`. Shared by the two public model-switch entry
+    /// points below.
     async fn apply_session_config(
         &self,
         session_id: &str,
         new_config: AgentConfig,
     ) -> Result<(String, String)> {
-        let provider_name = new_config.provider_name.clone();
-        let model_name = new_config.model.clone();
-        let llm = self.session_llm(&new_config)?;
-        let mut sessions = self.sessions.write().await;
-        let s = sessions
-            .get_mut(session_id)
-            .ok_or_else(|| Error::NotFound(format!("session not found: {session_id}")))?;
-        s.config = new_config;
-        s.llm = llm;
-        s.last_active = Instant::now();
-        Ok((provider_name, model_name))
+        let config = self
+            .update_session_config(session_id, |_, reasoning| {
+                (with_reasoning(new_config.clone(), reasoning), reasoning)
+            })
+            .await?;
+        Ok((config.provider_name, config.model))
     }
 
     pub async fn switch_model(
@@ -286,15 +323,42 @@ impl AgentState {
         self.apply_session_config(session_id, new_config).await
     }
 
-    #[cfg_attr(not(feature = "acp"), allow(dead_code))]
-    pub async fn set_session_mode(&self, session_id: &str, mode_id: &str) -> Result<()> {
-        let mode = AgentMode::parse(mode_id)?;
+    /// A live session's model, mode and the reasoning level it runs at.
+    pub async fn session_settings(&self, session_id: &str) -> Result<SessionSettings> {
+        let sessions = self.sessions.read().await;
+        let s = sessions
+            .get(session_id)
+            .ok_or_else(|| Error::NotFound(format!("session not found: {session_id}")))?;
+        Ok(SessionSettings {
+            provider: s.config.provider_name.clone(),
+            model: s.config.model.clone(),
+            mode: s.mode,
+            reasoning: s.config.reasoning,
+        })
+    }
+
+    /// Sets a live session's mode; the next turn runs under it.
+    pub async fn set_session_mode(&self, session_id: &str, mode: AgentMode) -> Result<()> {
         let mut sessions = self.sessions.write().await;
         let s = sessions
             .get_mut(session_id)
             .ok_or_else(|| Error::NotFound(format!("session not found: {session_id}")))?;
         s.mode = mode;
         s.last_active = Instant::now();
+        Ok(())
+    }
+
+    /// Sets a live session's reasoning level; the next turn runs at it, and
+    /// it stays through later model switches.
+    pub async fn set_session_reasoning(
+        &self,
+        session_id: &str,
+        reasoning: ReasoningLevel,
+    ) -> Result<()> {
+        self.update_session_config(session_id, |config, _| {
+            (config.clone().with_reasoning(reasoning), Some(reasoning))
+        })
+        .await?;
         Ok(())
     }
 
@@ -349,6 +413,8 @@ impl AgentState {
             tool_cwd,
             cancel,
             approvals,
+            mode,
+            reasoning,
             _prompt_guard,
         ) = {
             // Write lock: each turn gets a fresh cancellation token, since a
@@ -397,6 +463,8 @@ impl AgentState {
                 s.tool_cwd.clone(),
                 s.cancel.clone(),
                 s.approved_tools.clone(),
+                s.mode,
+                s.reasoning,
                 prompt_guard,
             )
         };
@@ -427,9 +495,11 @@ impl AgentState {
 
         conversation.meta.cwd = Some(cwd);
         // `prepare` only sets model/provider on a new conversation. Set the
-        // session's live values so a mid-session model switch is saved.
+        // session's live values so a mid-session switch is saved.
         conversation.meta.model = Some(config.model.clone());
         conversation.meta.provider = Some(config.provider_name.clone());
+        conversation.meta.mode = Some(mode);
+        conversation.meta.reasoning = reasoning;
         let user_message = Message {
             role: Role::User,
             content: prompt,
@@ -568,11 +638,14 @@ impl AgentState {
         } else if let Some(model) = &conversation.meta.model {
             session_config.model = model.clone();
         }
+        // A chosen reasoning level is kept even when the provider fell back.
+        let reasoning = conversation.meta.reasoning;
+        let session_config = with_reasoning(session_config, reasoning);
 
         let llm = self.session_llm(&session_config)?;
         let cwd = normalize_cwd(cwd);
         let tool_cwd = tool_cwd(&cwd, &self.work_dir);
-        let (mode, provider, model) = {
+        let (mode, reasoning, provider, model) = {
             let mut sessions = self.sessions.write().await;
             // An already-live session keeps its control state (see
             // `insert_or_keep_live`). Loading takes no write lease.
@@ -581,12 +654,13 @@ impl AgentState {
                     chat_id: uuid,
                     config: session_config,
                     llm,
+                    reasoning,
                     cwd,
                     tool_cwd,
                     skills: conversation.meta.skills.clone(),
                     cancel: CancellationToken::new(),
                     approved_tools: Approvals::default(),
-                    mode: AgentMode::Code,
+                    mode: conversation.meta.mode.unwrap_or_default(),
                     prompt_lock: Arc::new(Mutex::new(())),
                     last_active: Instant::now(),
                 })
@@ -612,10 +686,12 @@ impl AgentState {
                     session_id: session_id.to_string(),
                 });
             }
-            // The live session's mode, provider and model, which may differ from the
-            // saved ones (e.g. after `session/set_config_option`).
+            // The live session's mode, reasoning level, provider and model,
+            // which may differ from the saved ones (e.g. after
+            // `session/set_config_option`).
             (
                 live.mode,
+                live.config.reasoning,
                 live.config.provider_name.clone(),
                 live.config.model.clone(),
             )
@@ -623,11 +699,21 @@ impl AgentState {
 
         Ok(LoadedSession {
             mode,
+            reasoning,
             messages: conversation.messages,
             provider,
             model,
             warning,
         })
+    }
+}
+
+/// `config` at `reasoning` when a session chose one, as its provider set it
+/// otherwise.
+fn with_reasoning(config: AgentConfig, reasoning: Option<ReasoningLevel>) -> AgentConfig {
+    match reasoning {
+        Some(reasoning) => config.with_reasoning(reasoning),
+        None => config,
     }
 }
 
@@ -648,12 +734,27 @@ fn tool_cwd(cwd: &Path, work_dir: &Path) -> PathBuf {
     }
 }
 
+/// What a live session currently runs on (see
+/// [`SessionHandle::settings`](crate::SessionHandle::settings)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SessionSettings {
+    pub provider: String,
+    pub model: String,
+    pub mode: AgentMode,
+    /// The level chosen for the session, or its provider's.
+    pub reasoning: ReasoningLevel,
+}
+
 /// What [`OpenheimClient::resume_session`](crate::OpenheimClient::resume_session)
 /// loaded.
 #[non_exhaustive]
 pub struct LoadedSession {
     /// The mode the session is live under.
     pub mode: AgentMode,
+    /// The reasoning level the session runs at: the one chosen for it, or
+    /// its provider's.
+    pub reasoning: ReasoningLevel,
     /// The full saved conversation, for the caller to replay in its own form
     /// (`acp::util::replay_history_messages` for ACP).
     pub messages: Vec<Message>,
@@ -687,6 +788,7 @@ mod prompt_lease_ordering_tests {
                 5,
             ),
             llm: None,
+            reasoning: None,
             cwd: PathBuf::from("/tmp"),
             tool_cwd: PathBuf::from("/tmp"),
             skills: vec![],
@@ -1114,6 +1216,101 @@ mod new_session_tests {
         let saved = state.memory.history.load_conversation(&uuid).unwrap();
         assert_eq!(saved.meta.model.as_deref(), Some("other-model"));
         assert_eq!(saved.meta.provider.as_deref(), Some("mock"));
+    }
+
+    // A reasoning level chosen for a session stays through a model switch,
+    // gets its own client, and leaves other sessions alone.
+    #[tokio::test]
+    async fn chosen_reasoning_survives_a_model_switch() {
+        let dir = tempdir().unwrap();
+        let (state, session_id) = state_with_session(dir.path()).await;
+        let other = state
+            .new_session(None, vec![], dir.path().to_path_buf())
+            .await
+            .unwrap();
+
+        state
+            .set_session_reasoning(&session_id, ReasoningLevel::High)
+            .await
+            .unwrap();
+        {
+            let sessions = state.sessions.read().await;
+            assert!(sessions[&session_id].llm.is_some());
+            assert!(sessions[&other].llm.is_none());
+        }
+
+        state
+            .set_session_model(&session_id, "other-model")
+            .await
+            .unwrap();
+        let settings = state.session_settings(&session_id).await.unwrap();
+        assert_eq!(settings.model, "other-model");
+        assert_eq!(settings.reasoning, ReasoningLevel::High);
+        assert_eq!(
+            state.session_settings(&other).await.unwrap().reasoning,
+            ReasoningLevel::Default
+        );
+    }
+
+    // Mode and a chosen reasoning level are saved with the conversation and
+    // restored when it's loaded again (here: into a fresh runtime, as after
+    // a restart).
+    #[tokio::test]
+    async fn mode_and_reasoning_are_restored_on_load() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
+        let mut state = sample_state(dir.path()).await;
+        state.llm = Arc::new(EndTurnLlm);
+        let session_id = state
+            .new_session(None, vec![], dir.path().to_path_buf())
+            .await
+            .unwrap();
+        state
+            .set_session_mode(&session_id, AgentMode::Architect)
+            .await
+            .unwrap();
+        state
+            .set_session_reasoning(&session_id, ReasoningLevel::Low)
+            .await
+            .unwrap();
+        // The level built a real client for the session; swap in the mock.
+        set_session_llm(&state, &session_id, Arc::new(EndTurnLlm)).await;
+        run_turn(&state, &session_id).await;
+
+        let uuid = Uuid::parse_str(&session_id).unwrap();
+        let saved = state.memory.history.load_conversation(&uuid).unwrap();
+        assert_eq!(saved.meta.mode, Some(AgentMode::Architect));
+        assert_eq!(saved.meta.reasoning, Some(ReasoningLevel::Low));
+
+        let restarted = sample_state(dir.path()).await;
+        let loaded = restarted
+            .load_session(&session_id, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        assert_eq!(loaded.mode, AgentMode::Architect);
+        assert_eq!(loaded.reasoning, ReasoningLevel::Low);
+        let sessions = restarted.sessions.read().await;
+        assert_eq!(sessions[&session_id].reasoning, Some(ReasoningLevel::Low));
+    }
+
+    // A session that never chose a level saves none, so it follows its
+    // provider's `reasoning` after a reload.
+    #[tokio::test]
+    async fn unchosen_reasoning_is_not_saved() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
+        let mut state = sample_state(dir.path()).await;
+        state.llm = Arc::new(EndTurnLlm);
+        let session_id = state
+            .new_session(None, vec![], dir.path().to_path_buf())
+            .await
+            .unwrap();
+        run_turn(&state, &session_id).await;
+
+        let uuid = Uuid::parse_str(&session_id).unwrap();
+        let saved = state.memory.history.load_conversation(&uuid).unwrap();
+        assert_eq!(saved.meta.mode, Some(AgentMode::Code));
+        assert_eq!(saved.meta.reasoning, None);
     }
 
     /// Answers each call with the next scripted choice, whoever makes it —

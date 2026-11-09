@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
-use crate::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool, Usage};
+use crate::core::models::{
+    Choice, ContentBlock, FinishReason, Message, ReasoningLevel, Role, Tool, Usage,
+};
 use crate::error::{Error, Result};
 
 use super::sse::{StreamParser, parse_payload, read_stream};
@@ -27,11 +29,8 @@ pub struct AnthropicClient {
     api_key: String,
     model: String,
     max_tokens: u32,
-    /// Whether to request extended thinking. Resolved by the caller from
-    /// `[providers.<name>].thinking` (see
-    /// [`crate::config::ProviderConfig::resolve_thinking`]); the client
-    /// makes no model-name-based guess of its own.
-    thinking: bool,
+    /// See [`Self::with_reasoning`].
+    reasoning: ReasoningLevel,
 }
 
 impl AnthropicClient {
@@ -41,7 +40,6 @@ impl AnthropicClient {
         api_key: String,
         model: String,
         max_tokens: Option<u32>,
-        thinking: bool,
     ) -> Self {
         Self {
             client,
@@ -49,8 +47,15 @@ impl AnthropicClient {
             api_key,
             model,
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-            thinking,
+            reasoning: ReasoningLevel::Default,
         }
+    }
+
+    /// [`ReasoningLevel::Default`] (the default) sends neither `thinking`
+    /// nor `output_config`, so the model's own default applies. Any other
+    /// level requests adaptive thinking at that `output_config.effort`.
+    pub fn with_reasoning(self, reasoning: ReasoningLevel) -> Self {
+        Self { reasoning, ..self }
     }
 }
 
@@ -68,6 +73,13 @@ struct AnthropicRequest {
     tools: Vec<AnthropicTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<AnthropicThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<AnthropicOutputConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicOutputConfig {
+    effort: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -574,22 +586,34 @@ fn extract_system(messages: &[Message]) -> Option<String> {
     }
 }
 
-/// Anthropic's adaptive-thinking request config when `enabled`.
+/// The `thinking` and `output_config` fields for `reasoning`: both unset for
+/// [`ReasoningLevel::Default`], otherwise adaptive thinking at that effort.
 ///
 /// Current Claude models accept only adaptive thinking (the fixed-budget
 /// form is rejected or deprecated); models that predate it reject it, and
-/// need `thinking = "off"` on their provider entry (see
-/// [`crate::config::ProviderConfig::resolve_thinking`]). Adaptive thinking
+/// need `reasoning = "default"` on their provider entry. Adaptive thinking
 /// is interleaved without an `anthropic-beta` header.
-fn thinking_config(enabled: bool) -> Option<AnthropicThinkingConfig> {
-    enabled.then_some(AnthropicThinkingConfig {
-        thinking_type: "adaptive",
-        display: "summarized",
-    })
+fn reasoning_config(
+    reasoning: ReasoningLevel,
+) -> (
+    Option<AnthropicThinkingConfig>,
+    Option<AnthropicOutputConfig>,
+) {
+    match reasoning.effort() {
+        None => (None, None),
+        Some(effort) => (
+            Some(AnthropicThinkingConfig {
+                thinking_type: "adaptive",
+                display: "summarized",
+            }),
+            Some(AnthropicOutputConfig { effort }),
+        ),
+    }
 }
 
 impl AnthropicClient {
     fn build_request(&self, messages: &[Message], tools: &[Tool]) -> AnthropicRequest {
+        let (thinking, output_config) = reasoning_config(self.reasoning);
         AnthropicRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
@@ -597,7 +621,8 @@ impl AnthropicClient {
             system: extract_system(messages),
             messages: convert_messages(messages),
             tools: convert_tools(tools),
-            thinking: thinking_config(self.thinking),
+            thinking,
+            output_config,
         }
     }
 
@@ -823,39 +848,43 @@ mod tests {
         assert!(map_stop_reason(None).is_none());
     }
 
-    #[test]
-    fn thinking_config_enabled_when_requested() {
-        let config = thinking_config(true);
-        assert!(config.is_some());
-        assert_eq!(config.unwrap().thinking_type, "adaptive");
-    }
-
-    #[test]
-    fn thinking_config_disabled_when_not_requested() {
-        assert!(thinking_config(false).is_none());
-    }
-
-    fn client_with_thinking(thinking: bool) -> AnthropicClient {
+    fn client_with_reasoning(reasoning: ReasoningLevel) -> AnthropicClient {
         AnthropicClient::new(
             ReqwestClient::new(),
             "https://api.anthropic.com/v1".into(),
             "test-key".into(),
             "claude-sonnet-5".into(),
             None,
-            thinking,
         )
+        .with_reasoning(reasoning)
     }
 
     #[test]
-    fn build_request_always_streams_and_respects_thinking() {
-        // `build_request` is the single request source for both `send` and
-        // `send_streaming`; both must stream and honor the thinking config.
-        let request = client_with_thinking(true).build_request(&[Message::user("hi")], &[]);
+    fn default_reasoning_sends_no_thinking_or_effort() {
+        let request = client_with_reasoning(ReasoningLevel::Default)
+            .build_request(&[Message::user("hi")], &[]);
         assert!(request.stream);
-        assert!(request.thinking.is_some());
+        let json = serde_json::to_value(&request).unwrap();
+        assert!(json.get("thinking").is_none());
+        assert!(json.get("output_config").is_none());
+    }
 
-        let request = client_with_thinking(false).build_request(&[Message::user("hi")], &[]);
-        assert!(request.thinking.is_none());
+    #[test]
+    fn reasoning_level_sends_adaptive_thinking_at_that_effort() {
+        for (level, effort) in [
+            (ReasoningLevel::Low, "low"),
+            (ReasoningLevel::Medium, "medium"),
+            (ReasoningLevel::High, "high"),
+        ] {
+            // `build_request` is the single request source for both `send`
+            // and `send_streaming`.
+            let request = client_with_reasoning(level).build_request(&[Message::user("hi")], &[]);
+            assert!(request.stream);
+            let json = serde_json::to_value(&request).unwrap();
+            assert_eq!(json["thinking"]["type"], "adaptive");
+            assert_eq!(json["thinking"]["display"], "summarized");
+            assert_eq!(json["output_config"]["effort"], effort);
+        }
     }
 
     #[test]

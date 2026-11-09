@@ -105,8 +105,9 @@ impl DelegateTool {
     }
 
     /// The [`AgentConfig`] and [`LlmClient`] a subagent runs on, with the
-    /// profile's `model`/`provider`/`max_iterations` overrides applied. The
-    /// parent's client is reused when provider and model match.
+    /// profile's `model`/`provider`/`reasoning`/`max_iterations` overrides
+    /// applied. The parent's client is reused when provider, model and
+    /// reasoning level match.
     fn resolve_runtime(&self, profile: &AgentProfile) -> Result<(AgentConfig, Arc<dyn LlmClient>)> {
         let config = match (&profile.provider, &profile.model) {
             (Some(provider), Some(model)) => {
@@ -117,6 +118,10 @@ impl DelegateTool {
         };
         let config = match profile.max_iterations {
             Some(max_iterations) => config.with_max_iterations(max_iterations),
+            None => config,
+        };
+        let config = match profile.reasoning {
+            Some(reasoning) => config.with_reasoning(reasoning),
             None => config,
         };
 
@@ -350,6 +355,7 @@ fn inline_profile(
         description: String::new(),
         model: args.model.clone(),
         provider: args.provider.clone(),
+        reasoning: None,
         tools: args.tools.clone(),
         max_iterations: args.max_iterations.map(|n| n.min(session_max_iterations)),
         system_prompt: system_prompt.to_string(),
@@ -360,7 +366,7 @@ fn inline_profile(
 mod tests {
     use super::*;
     use crate::core::client_io::NoClientIo;
-    use crate::core::models::{Choice, ContentBlock, FinishReason, Role};
+    use crate::core::models::{Choice, ContentBlock, FinishReason, ReasoningLevel, Role};
     use crate::core::permission::AllowAll;
     use crate::tools::SystemToolExecutor;
     use crate::tools::test_support::TurnHarness;
@@ -388,6 +394,7 @@ mod tests {
             description: description.into(),
             model: None,
             provider: None,
+            reasoning: None,
             tools: None,
             max_iterations: None,
             system_prompt: "You are a test subagent.".into(),
@@ -466,6 +473,30 @@ mod tests {
             sample_agent_config(),
             Arc::default(),
         )
+    }
+
+    #[test]
+    fn subagent_on_the_session_model_keeps_its_reasoning_level_and_client() {
+        let llm: Arc<dyn LlmClient> = Arc::new(MockLlm::new(vec![]));
+        let session_config = sample_agent_config().with_reasoning(ReasoningLevel::High);
+        let tool = make_tool(vec![], llm.clone()).for_session(llm.clone(), session_config);
+
+        let (config, subagent_llm) = tool.resolve_runtime(&sample_profile("r", "d")).unwrap();
+        assert_eq!(config.reasoning, ReasoningLevel::High);
+        assert!(Arc::ptr_eq(&subagent_llm, &llm));
+    }
+
+    #[test]
+    fn profile_reasoning_overrides_the_session_level() {
+        let llm: Arc<dyn LlmClient> = Arc::new(MockLlm::new(vec![]));
+        let session_config = sample_agent_config().with_reasoning(ReasoningLevel::High);
+        let tool = make_tool(vec![], llm.clone()).for_session(llm.clone(), session_config);
+        let mut profile = sample_profile("r", "d");
+        profile.reasoning = Some(ReasoningLevel::Low);
+
+        let (config, subagent_llm) = tool.resolve_runtime(&profile).unwrap();
+        assert_eq!(config.reasoning, ReasoningLevel::Low);
+        assert!(!Arc::ptr_eq(&subagent_llm, &llm));
     }
 
     #[test]

@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
-use crate::core::models::{Choice, ContentBlock, FinishReason, Message, Role, Tool, Usage};
+use crate::core::models::{
+    Choice, ContentBlock, FinishReason, Message, ReasoningLevel, Role, Tool, Usage,
+};
 use crate::error::{Error, Result};
 
 use super::sse::{StreamParser, parse_payload, read_stream};
@@ -22,6 +24,8 @@ pub struct OpenAiClient {
     /// Whether signed thinking goes back as `thinking_blocks`; see
     /// [`OpenAiClient::with_replay_thinking`].
     replay_thinking: bool,
+    /// See [`OpenAiClient::with_reasoning`].
+    reasoning: ReasoningLevel,
 }
 
 /// OpenAI replaced `max_tokens` with `max_completion_tokens`, and its
@@ -49,7 +53,15 @@ impl OpenAiClient {
             max_tokens,
             token_limit_field: TokenLimitField::MaxCompletionTokens,
             replay_thinking: false,
+            reasoning: ReasoningLevel::Default,
         }
+    }
+
+    /// Sends `reasoning` as `reasoning_effort`. [`ReasoningLevel::Default`]
+    /// (the default) leaves the field out, so the model's own default
+    /// applies; models without reasoning reject the field, so they need it.
+    pub fn with_reasoning(self, reasoning: ReasoningLevel) -> Self {
+        Self { reasoning, ..self }
     }
 
     /// With `replay_thinking`, assistant replies of the current tool loop
@@ -92,6 +104,8 @@ struct OpenAiRequest {
     max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -556,6 +570,7 @@ impl OpenAiClient {
             tools: convert_tools(tools),
             max_completion_tokens,
             max_tokens,
+            reasoning_effort: self.reasoning.effort(),
         }
     }
 
@@ -1108,6 +1123,24 @@ mod tests {
         let json = request_json(&client(Some(1000)));
         assert_eq!(json["max_completion_tokens"], 1000);
         assert!(json.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn default_reasoning_sends_no_reasoning_effort() {
+        let json = request_json(&client(None));
+        assert!(json.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn reasoning_level_is_sent_as_reasoning_effort() {
+        for (level, effort) in [
+            (ReasoningLevel::Low, "low"),
+            (ReasoningLevel::Medium, "medium"),
+            (ReasoningLevel::High, "high"),
+        ] {
+            let json = request_json(&client(None).with_reasoning(level));
+            assert_eq!(json["reasoning_effort"], effort);
+        }
     }
 
     #[test]

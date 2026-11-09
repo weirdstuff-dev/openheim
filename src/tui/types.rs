@@ -12,6 +12,8 @@ pub(crate) enum AgentUpdate {
         provider: String,
         model: String,
     },
+    ModeChanged(crate::core::runtime::AgentMode),
+    ReasoningChanged(crate::core::models::ReasoningLevel),
     /// The context size after a session switch; `None` clears the footer.
     Usage(Option<crate::core::models::Usage>),
     /// Answers a `:sessions` request — persisted conversation metadata,

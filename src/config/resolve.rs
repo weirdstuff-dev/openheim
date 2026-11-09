@@ -60,7 +60,7 @@ impl AppConfig {
             timeout_secs: provider.resolve_timeout_secs(),
             max_tokens: provider.max_tokens,
             context_window: provider.context_window,
-            thinking: provider.resolve_thinking(kind),
+            reasoning: provider.reasoning,
             replay_thinking: provider.replay_thinking.unwrap_or(false),
         }
     }
@@ -170,6 +170,7 @@ impl AppConfig {
 mod tests {
     use super::*;
     use crate::config::ProviderConfig;
+    use crate::core::models::ReasoningLevel;
 
     fn sample_config() -> AppConfig {
         let mut config = AppConfig::new("openai");
@@ -428,8 +429,6 @@ mod tests {
         let claude = config.resolve_provider_default("claude-work").unwrap();
         assert_eq!(claude.kind, ProviderKind::Anthropic);
         assert_eq!(claude.provider_name, "claude-work");
-        // Thinking follows the kind, not the name.
-        assert!(claude.thinking);
 
         let openai = config.resolve_provider_default("work-openai").unwrap();
         assert_eq!(openai.kind, ProviderKind::OpenAi);
@@ -464,6 +463,28 @@ mod tests {
                 .unwrap()
                 .replay_thinking
         );
+    }
+
+    #[test]
+    fn reasoning_is_default_unless_set() {
+        let config = config_from_toml(
+            r#"
+            [providers.anthropic]
+            api_base = "https://api.anthropic.com/v1"
+            default_model = "claude-sonnet-5-5"
+            models = ["claude-sonnet-5-5"]
+            reasoning = "high"
+
+            [providers.ollama]
+            api_base = "http://localhost:11434/v1"
+            default_model = "llama3"
+            models = ["llama3"]
+            "#,
+        );
+
+        let reasoning = |name| config.resolve_provider_default(name).unwrap().reasoning;
+        assert_eq!(reasoning("anthropic"), ReasoningLevel::High);
+        assert_eq!(reasoning("ollama"), ReasoningLevel::Default);
     }
 
     #[test]

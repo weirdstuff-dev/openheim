@@ -12,7 +12,9 @@ use agent_client_protocol::schema::v1::{
 use crate::{
     config::AppConfig,
     core::{
-        models::{Message, StopReason as CoreStopReason, StreamEvent, TranscriptEntry},
+        models::{
+            Message, ReasoningLevel, StopReason as CoreStopReason, StreamEvent, TranscriptEntry,
+        },
         runtime::AgentMode,
     },
     memory::ConversationMeta,
@@ -21,6 +23,50 @@ use crate::{
 
 /// `session/set_config_option` id for the model selector.
 pub(super) const MODEL_CONFIG_ID: &str = "model";
+
+/// `session/set_config_option` id for the reasoning level selector.
+pub(super) const REASONING_CONFIG_ID: &str = "reasoning";
+
+/// The reasoning level selector config option: every [`ReasoningLevel`].
+pub(super) fn session_reasoning_config_option(current: ReasoningLevel) -> SessionConfigOption {
+    let levels: Vec<SessionConfigSelectOption> = ReasoningLevel::ALL
+        .into_iter()
+        .map(|level| {
+            let name = match level {
+                ReasoningLevel::Default => "Default",
+                ReasoningLevel::Low => "Low",
+                ReasoningLevel::Medium => "Medium",
+                ReasoningLevel::High => "High",
+            };
+            let option = SessionConfigSelectOption::new(level.as_str(), name);
+            match level {
+                ReasoningLevel::Default => {
+                    option.description("The provider's own default; no reasoning parameters sent.")
+                }
+                _ => option,
+            }
+        })
+        .collect();
+    SessionConfigOption::select(
+        REASONING_CONFIG_ID,
+        "Reasoning",
+        current.as_str().to_string(),
+        levels,
+    )
+    .category(SessionConfigOptionCategory::ThoughtLevel)
+}
+
+/// Every config option a session offers, at its current values.
+pub(super) fn session_config_options(
+    app_config: &AppConfig,
+    current_model: &str,
+    current_reasoning: ReasoningLevel,
+) -> Vec<SessionConfigOption> {
+    vec![
+        session_model_config_option(app_config, current_model),
+        session_reasoning_config_option(current_reasoning),
+    ]
+}
 
 /// The model selector config option: every configured model, each tagged
 /// with its `provider` in `_meta`.
@@ -204,6 +250,22 @@ mod tool_kind_tests {
             tool_kind_for("some_mcp_server__custom_tool", &e),
             ToolKind::Other
         );
+    }
+
+    #[test]
+    fn reasoning_option_offers_every_level_as_a_thought_level() {
+        let json =
+            serde_json::to_value(session_reasoning_config_option(ReasoningLevel::Medium)).unwrap();
+        assert_eq!(json["id"], REASONING_CONFIG_ID);
+        assert_eq!(json["category"], "thought_level");
+        assert_eq!(json["currentValue"], "medium");
+        let values: Vec<_> = json["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["value"].as_str().unwrap())
+            .collect();
+        assert_eq!(values, ["default", "low", "medium", "high"]);
     }
 }
 

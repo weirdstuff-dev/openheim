@@ -17,9 +17,9 @@ use crate::{
     },
     core::{
         client_io::{ClientIo, NoClientIo},
-        models::{ContentBlock, StopReason, StreamEvent},
+        models::{ContentBlock, ReasoningLevel, StopReason, StreamEvent},
         permission::{AllowAll, PermissionGate},
-        runtime::{AgentState, LoadedSession},
+        runtime::{AgentMode, AgentState, LoadedSession, SessionSettings},
     },
     error::Result,
     mcp::McpServerStatus,
@@ -72,6 +72,8 @@ impl OpenheimClient {
             model: None,
             skills: vec![],
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            mode: AgentMode::Code,
+            reasoning: None,
         }
     }
 
@@ -124,6 +126,24 @@ impl OpenheimClient {
         self.state.switch_model(session_id, provider, model).await
     }
 
+    /// Sets a live session's mode; the same as [`SessionHandle::set_mode`],
+    /// for callers that hold only the id.
+    pub async fn set_session_mode(&self, session_id: &str, mode: AgentMode) -> Result<()> {
+        self.state.set_session_mode(session_id, mode).await
+    }
+
+    /// Sets a live session's reasoning level; the same as
+    /// [`SessionHandle::set_reasoning`], for callers that hold only the id.
+    pub async fn set_session_reasoning(
+        &self,
+        session_id: &str,
+        reasoning: ReasoningLevel,
+    ) -> Result<()> {
+        self.state
+            .set_session_reasoning(session_id, reasoning)
+            .await
+    }
+
     // ── Memory ────────────────────────────────────────────────────────────────
 
     /// Names of the skills in the data directory's `skills/`, sorted.
@@ -165,6 +185,8 @@ pub struct SessionBuilder<'a> {
     model: Option<String>,
     skills: Vec<String>,
     cwd: PathBuf,
+    mode: AgentMode,
+    reasoning: Option<ReasoningLevel>,
 }
 
 impl<'a> SessionBuilder<'a> {
@@ -190,12 +212,31 @@ impl<'a> SessionBuilder<'a> {
         self
     }
 
+    /// The mode the session starts in. Defaults to [`AgentMode::Code`].
+    pub fn mode(mut self, mode: AgentMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// The reasoning level the session starts at. Defaults to its
+    /// provider's `reasoning`.
+    pub fn reasoning(mut self, reasoning: ReasoningLevel) -> Self {
+        self.reasoning = Some(reasoning);
+        self
+    }
+
     /// Create the session and return a handle for prompting.
     pub async fn start(self) -> Result<SessionHandle> {
         let id = self
             .state
             .new_session(self.model.as_deref(), self.skills, self.cwd)
             .await?;
+        if self.mode != AgentMode::Code {
+            self.state.set_session_mode(&id, self.mode).await?;
+        }
+        if let Some(reasoning) = self.reasoning {
+            self.state.set_session_reasoning(&id, reasoning).await?;
+        }
         Ok(SessionHandle::new(id, self.state.clone()))
     }
 }
@@ -328,6 +369,22 @@ impl SessionHandle {
     pub async fn switch_model(&self, provider: &str, model: &str) -> Result<(String, String)> {
         self.state.switch_model(&self.id, provider, model).await
     }
+
+    /// The provider, model, mode and reasoning level this session runs on.
+    pub async fn settings(&self) -> Result<SessionSettings> {
+        self.state.session_settings(&self.id).await
+    }
+
+    /// Set the mode for this session; the next prompt runs under it.
+    pub async fn set_mode(&self, mode: AgentMode) -> Result<()> {
+        self.state.set_session_mode(&self.id, mode).await
+    }
+
+    /// Set the reasoning level for this session; the next prompt runs at
+    /// it, and it stays through later [`Self::switch_model`] calls.
+    pub async fn set_reasoning(&self, reasoning: ReasoningLevel) -> Result<()> {
+        self.state.set_session_reasoning(&self.id, reasoning).await
+    }
 }
 
 // ── PromptInput ───────────────────────────────────────────────────────────────
@@ -424,6 +481,7 @@ pub struct OpenheimBuilder {
     timeout_secs: Option<u64>,
     max_tokens: Option<u32>,
     context_window: Option<u64>,
+    reasoning: Option<ReasoningLevel>,
     mcp_servers: BTreeMap<String, McpServerConfig>,
     default_skills: Vec<String>,
     work_dir: Option<PathBuf>,
@@ -502,6 +560,13 @@ impl OpenheimBuilder {
     /// `docs/configuration.md`.
     pub fn context_window(mut self, tokens: u64) -> Self {
         self.context_window = Some(tokens);
+        self
+    }
+
+    /// The reasoning level sessions start at; see `reasoning` in
+    /// `docs/configuration.md`. Defaults to [`ReasoningLevel::Default`].
+    pub fn reasoning(mut self, reasoning: ReasoningLevel) -> Self {
+        self.reasoning = Some(reasoning);
         self
     }
 
@@ -602,6 +667,9 @@ impl OpenheimBuilder {
             if let Some(w) = self.context_window {
                 agent_config.context_window = Some(w);
             }
+            if let Some(r) = self.reasoning {
+                agent_config.reasoning = r;
+            }
             (agent_config, app_config)
         };
 
@@ -697,7 +765,7 @@ impl OpenheimBuilder {
                 timeout_secs: Some(timeout),
                 max_tokens: self.max_tokens,
                 context_window: self.context_window,
-                thinking: None,
+                reasoning: self.reasoning.unwrap_or_default(),
                 replay_thinking: None,
             },
         );

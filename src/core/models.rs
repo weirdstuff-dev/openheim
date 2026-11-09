@@ -364,6 +364,74 @@ pub enum FinishReason {
     Other(String),
 }
 
+/// How hard the model should reason before answering. Each `core::llm`
+/// client maps it onto its own request field: Anthropic's adaptive thinking
+/// plus `output_config.effort`, OpenAI's `reasoning_effort`, Gemini's
+/// `thinkingConfig.thinkingLevel`.
+///
+/// [`Self::Default`] sends none of them, so the API's own default applies,
+/// whatever that is for the model (on Anthropic models that don't think by
+/// default, that means no thinking). It is also the only level that works
+/// with models that reject reasoning parameters.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ReasoningLevel {
+    /// No reasoning parameters are sent; the API decides.
+    #[default]
+    Default,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningLevel {
+    /// Every level, in order, e.g. for a selector.
+    pub const ALL: [ReasoningLevel; 4] = [
+        ReasoningLevel::Default,
+        ReasoningLevel::Low,
+        ReasoningLevel::Medium,
+        ReasoningLevel::High,
+    ];
+
+    /// The level's id as written in config files and on the wire.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ReasoningLevel::Default => "default",
+            ReasoningLevel::Low => "low",
+            ReasoningLevel::Medium => "medium",
+            ReasoningLevel::High => "high",
+        }
+    }
+
+    /// The effort value the provider APIs share (`"low"`, `"medium"`,
+    /// `"high"`), or `None` for [`Self::Default`].
+    pub const fn effort(self) -> Option<&'static str> {
+        match self {
+            ReasoningLevel::Default => None,
+            level => Some(level.as_str()),
+        }
+    }
+
+    /// Inverse of [`Self::as_str`].
+    pub fn parse(level: &str) -> crate::error::Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|l| l.as_str() == level)
+            .ok_or_else(|| {
+                crate::error::Error::InvalidArgument(format!(
+                    "unknown reasoning level: {level} (expected default, low, medium or high)"
+                ))
+            })
+    }
+}
+
+impl std::fmt::Display for ReasoningLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A single completion choice returned by the provider.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -553,6 +621,17 @@ pub enum StreamEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_level_ids_round_trip_through_parse_and_serde() {
+        for level in ReasoningLevel::ALL {
+            assert_eq!(ReasoningLevel::parse(level.as_str()).unwrap(), level);
+            assert_eq!(serde_json::to_value(level).unwrap(), level.as_str());
+        }
+        assert_eq!(ReasoningLevel::Default.effort(), None);
+        assert_eq!(ReasoningLevel::High.effort(), Some("high"));
+        assert!(ReasoningLevel::parse("max").is_err());
+    }
 
     #[test]
     fn message_user_sets_correct_fields() {

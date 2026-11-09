@@ -9,6 +9,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use super::types::{AppConfig, McpServerConfig, ProviderConfig, ProviderKind};
+use crate::core::models::ReasoningLevel;
 
 /// Placeholder for a value that exists but isn't shown.
 pub(super) const REDACTED: &str = "<redacted>";
@@ -57,6 +58,8 @@ pub struct PublicProviderConfig {
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    /// The level sessions on this provider start at.
+    pub reasoning: ReasoningLevel,
 }
 
 /// An MCP server entry. `args` is left out entirely (command lines routinely
@@ -128,6 +131,7 @@ fn public_provider(name: &str, p: &ProviderConfig) -> PublicProviderConfig {
         timeout_secs: p.timeout_secs,
         max_tokens: p.max_tokens,
         context_window: p.context_window,
+        reasoning: p.reasoning,
     }
 }
 

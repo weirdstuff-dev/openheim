@@ -21,6 +21,7 @@ use tokio::sync::RwLock;
 use crate::{
     client::OpenheimClient,
     core::client_io::ClientIo,
+    core::models::ReasoningLevel,
     core::permission::PermissionGate,
     core::runtime::{AgentMode, AgentState},
     error::Error,
@@ -31,8 +32,8 @@ use super::{
     convert::convert_prompt_blocks,
     permission::AcpPermissionGate,
     util::{
-        MODEL_CONFIG_ID, conversation_metas_to_session_info, map_stop_reason,
-        replay_history_messages, session_mode_state, session_model_config_option,
+        MODEL_CONFIG_ID, REASONING_CONFIG_ID, conversation_metas_to_session_info, map_stop_reason,
+        replay_history_messages, session_config_options, session_mode_state,
         stream_event_to_session_update,
     },
 };
@@ -56,7 +57,7 @@ pub(crate) async fn serve_state(
     let state_prompt = state.clone();
     let state_list = state.clone();
     let state_load = state.clone();
-    let state_set_model = state.clone();
+    let state_set_config = state.clone();
     let state_set_mode = state.clone();
     let state_cancel = state.clone();
 
@@ -128,20 +129,21 @@ pub(crate) async fn serve_state(
                     .and_then(|v| v.as_str())
                     .map(String::from);
 
-                let current_model = model
-                    .as_deref()
-                    .unwrap_or(&state_session.config().model)
-                    .to_string();
-                let model_config =
-                    session_model_config_option(&state_session.app_config, &current_model);
-
-                match state_session
-                    .new_session(model.as_deref(), skills, req.cwd)
-                    .await
-                {
-                    Ok(session_key) => responder.respond(
+                let created = async {
+                    let session_key = state_session
+                        .new_session(model.as_deref(), skills, req.cwd)
+                        .await?;
+                    let settings = state_session.session_settings(&session_key).await?;
+                    Ok::<_, Error>((session_key, settings))
+                };
+                match created.await {
+                    Ok((session_key, settings)) => responder.respond(
                         NewSessionResponse::new(session_key)
-                            .config_options(vec![model_config])
+                            .config_options(session_config_options(
+                                &state_session.app_config,
+                                &settings.model,
+                                settings.reasoning,
+                            ))
                             .modes(session_mode_state(AgentMode::Code)),
                     ),
                     Err(e) => responder.respond_with_error(to_acp_error(&e)),
@@ -259,11 +261,13 @@ pub(crate) async fn serve_state(
                                 ));
                             },
                         );
-                        let model_config =
-                            session_model_config_option(&state_load.app_config, &loaded.model);
                         responder.respond(
                             LoadSessionResponse::new()
-                                .config_options(vec![model_config])
+                                .config_options(session_config_options(
+                                    &state_load.app_config,
+                                    &loaded.model,
+                                    loaded.reasoning,
+                                ))
                                 .modes(session_mode_state(loaded.mode)),
                         )
                     }
@@ -277,7 +281,8 @@ pub(crate) async fn serve_state(
                         responder,
                         _cx: ConnectionTo<Client>| {
                 let session_id = req.session_id.0.as_ref().to_string();
-                if req.config_id.0.as_ref() != MODEL_CONFIG_ID {
+                let config_id = req.config_id.0.as_ref();
+                if config_id != MODEL_CONFIG_ID && config_id != REASONING_CONFIG_ID {
                     return responder.respond_with_error(
                         agent_client_protocol::Error::invalid_params().data(format!(
                             "unknown session config option '{}'",
@@ -285,23 +290,32 @@ pub(crate) async fn serve_state(
                         )),
                     );
                 }
-                let Some(model_id) = req.value.as_value_id().cloned() else {
+                let Some(value_id) = req.value.as_value_id().cloned() else {
                     return responder.respond_with_error(
                         agent_client_protocol::Error::invalid_params()
-                            .data("model config option requires a value id"),
+                            .data(format!("{config_id} config option requires a value id")),
                     );
                 };
-                match state_set_model
-                    .set_session_model(&session_id, model_id.0.as_ref())
-                    .await
-                {
-                    Ok(_) => {
-                        let config = session_model_config_option(
-                            &state_set_model.app_config,
-                            model_id.0.as_ref(),
-                        );
-                        responder.respond(SetSessionConfigOptionResponse::new(vec![config]))
+                let value = value_id.0.as_ref();
+                let state = &state_set_config;
+                let updated = async {
+                    if config_id == MODEL_CONFIG_ID {
+                        state.set_session_model(&session_id, value).await?;
+                    } else {
+                        let reasoning = ReasoningLevel::parse(value)?;
+                        state.set_session_reasoning(&session_id, reasoning).await?;
                     }
+                    state.session_settings(&session_id).await
+                };
+                match updated.await {
+                    // The response carries every option, not only the one set.
+                    Ok(settings) => responder.respond(SetSessionConfigOptionResponse::new(
+                        session_config_options(
+                            &state.app_config,
+                            &settings.model,
+                            settings.reasoning,
+                        ),
+                    )),
                     Err(e) => responder.respond_with_error(to_acp_error(&e)),
                 }
             },
@@ -310,8 +324,11 @@ pub(crate) async fn serve_state(
         .on_receive_request(
             async move |req: SetSessionModeRequest, responder, _cx: ConnectionTo<Client>| {
                 let session_id = req.session_id.0.as_ref().to_string();
-                let mode_id = req.mode_id.0.as_ref();
-                match state_set_mode.set_session_mode(&session_id, mode_id).await {
+                let set = async {
+                    let mode = AgentMode::parse(req.mode_id.0.as_ref())?;
+                    state_set_mode.set_session_mode(&session_id, mode).await
+                };
+                match set.await {
                     Ok(()) => responder.respond(SetSessionModeResponse::new()),
                     Err(e) => responder.respond_with_error(to_acp_error(&e)),
                 }
