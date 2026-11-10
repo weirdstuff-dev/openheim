@@ -2,7 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::core::models::{Message, Role, Usage};
+use crate::core::models::{Effort, Message, Role, Usage};
+use crate::core::runtime::AgentMode;
 use crate::error::{Error, Result};
 use crate::memory::lease::{self, SessionLease};
 use std::path::PathBuf;
@@ -32,6 +33,14 @@ pub struct ConversationMeta {
     /// `None` until the first turn completes.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub context_usage: Option<Usage>,
+    /// The session's mode as of its last turn; `None` (saved before modes
+    /// were stored) loads as [`AgentMode::Code`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mode: Option<AgentMode>,
+    /// The effort level chosen for the session, if one was; `None` runs
+    /// at the provider's `effort`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<Effort>,
 }
 
 impl ConversationMeta {
@@ -54,6 +63,8 @@ impl ConversationMeta {
             skills,
             cwd: None,
             context_usage: None,
+            mode: None,
+            effort: None,
         }
     }
 

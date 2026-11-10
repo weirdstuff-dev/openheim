@@ -8,7 +8,11 @@ use ratatui::{
 
 use crate::{
     config::{AgentConfig, AppConfig, RuntimePaths},
-    core::{models::StreamEvent, permission::PermissionDecision},
+    core::{
+        models::{Effort, StreamEvent},
+        permission::PermissionDecision,
+        runtime::AgentMode,
+    },
     memory::{ConversationMeta, SkillsManager},
 };
 
@@ -21,17 +25,21 @@ use super::types::{AgentUpdate, ChatItem, ConfigRow, Screen, Status};
 
 /// What `:help` shows. The welcome screen lists the same commands
 /// (`render::WELCOME_COMMANDS`).
-const HELP_TEXT: &str = ":help              show this\n\
-                         :q / :quit         exit\n\
-                         :new               start a new session\n\
-                         :sessions          browse and restore saved sessions\n\
-                         :config            current config\n\
-                         :models            list available models\n\
-                         :models <name>     switch to model mid-session\n\
-                         :mcp               MCP servers\n\
-                         :skills            available skills\n\
-                         :theme             change accent color\n\
-                         :theme <name>      apply color directly\n\n\
+const HELP_TEXT: &str = ":help                show this\n\
+                         :q / :quit           exit\n\
+                         :new                 start a new session\n\
+                         :sessions            browse and restore saved sessions\n\
+                         :config              current config\n\
+                         :models              list available models\n\
+                         :models <name>       switch to model mid-session\n\
+                         :mode                current mode\n\
+                         :mode <name>         switch mode (code, architect)\n\
+                         :effort           current effort level\n\
+                         :effort <level>   set effort (default, low, medium, high)\n\
+                         :mcp                 MCP servers\n\
+                         :skills              available skills\n\
+                         :theme               change accent color\n\
+                         :theme <name>        apply color directly\n\n\
                          ↑/↓  scroll · PgUp/PgDn  page\n\
                          Ctrl+C  cancel the running turn · Ctrl+C twice  quit";
 
@@ -91,7 +99,9 @@ pub(super) struct App {
     screen: Screen,
     overlay: Option<Overlay>,
     permissions: PermissionQueue,
+    /// The session's provider, model and effort level, for the footer.
     agent_config: AgentConfig,
+    mode: AgentMode,
     app_config: AppConfig,
     /// Where `:skills` looks and `:theme` writes.
     paths: RuntimePaths,
@@ -123,6 +133,7 @@ impl App {
             overlay: None,
             permissions: PermissionQueue::default(),
             agent_config,
+            mode: AgentMode::Code,
             app_config,
             paths,
             skills,
@@ -130,6 +141,25 @@ impl App {
             channels,
             context_usage: None,
         }
+    }
+
+    /// The footer's right label: provider, model, the effort level and
+    /// mode when they aren't the defaults, and the context size once known.
+    fn footer_summary(&self) -> String {
+        let mut parts = vec![
+            self.agent_config.provider_name.clone(),
+            self.agent_config.model.clone(),
+        ];
+        if self.agent_config.effort != Effort::Default {
+            parts.push(format!("effort: {}", self.agent_config.effort));
+        }
+        if self.mode != AgentMode::Code {
+            parts.push(self.mode.as_str().to_string());
+        }
+        if let Some(usage) = &self.context_usage {
+            parts.push(format_token_count(usage.total()));
+        }
+        parts.join(" · ")
     }
 
     fn push(&mut self, item: ChatItem) {
@@ -155,6 +185,14 @@ impl App {
                 self.push(ChatItem::SystemInfo(format!(
                     "switched to {provider} / {model}"
                 )));
+            }
+            AgentUpdate::ModeChanged(mode) => {
+                self.mode = mode;
+                self.push(ChatItem::SystemInfo(format!("mode: {}", mode.as_str())));
+            }
+            AgentUpdate::EffortChanged(effort) => {
+                self.agent_config.effort = effort;
+                self.push(ChatItem::SystemInfo(format!("effort: {effort}")));
             }
             AgentUpdate::SessionList(sessions) => {
                 if sessions.is_empty() {
@@ -493,6 +531,36 @@ impl App {
                     }
                 }
             }
+            "mode" => {
+                if arg.is_empty() {
+                    self.push(ChatItem::SystemInfo(format!(
+                        "mode: {} (code, architect)",
+                        self.mode.as_str()
+                    )));
+                } else {
+                    match AgentMode::parse(arg) {
+                        Ok(mode) => {
+                            let _ = self.channels.commands.send(AgentCommand::SetMode(mode));
+                        }
+                        Err(e) => self.push(ChatItem::SystemInfo(e.to_string())),
+                    }
+                }
+            }
+            "effort" => {
+                if arg.is_empty() {
+                    self.push(ChatItem::SystemInfo(format!(
+                        "effort: {} (default, low, medium, high)",
+                        self.agent_config.effort
+                    )));
+                } else {
+                    match Effort::parse(arg) {
+                        Ok(effort) => {
+                            let _ = self.channels.commands.send(AgentCommand::SetEffort(effort));
+                        }
+                        Err(e) => self.push(ChatItem::SystemInfo(e.to_string())),
+                    }
+                }
+            }
             "skills" => {
                 match SkillsManager::with_dir(self.paths.data_dir.join("skills")).list_skills() {
                     Ok(names) if names.is_empty() => {
@@ -688,18 +756,7 @@ impl App {
                 Status::Thinking => Some(format!("{frame} thinking… · Ctrl+C to cancel")),
                 Status::Streaming => Some(format!("{frame} streaming… · Ctrl+C to cancel")),
             },
-            right: match &self.context_usage {
-                Some(usage) => format!(
-                    "{} · {} · {}",
-                    self.agent_config.provider_name,
-                    self.agent_config.model,
-                    format_token_count(usage.total())
-                ),
-                None => format!(
-                    "{} · {}",
-                    self.agent_config.provider_name, self.agent_config.model
-                ),
-            },
+            right: self.footer_summary(),
         };
         let input_has_focus = self.overlay.is_none() && self.permissions.is_empty();
         render::render_input_bar(f, input_area, &self.input, &labels, input_has_focus, theme);

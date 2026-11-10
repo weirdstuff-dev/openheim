@@ -364,6 +364,69 @@ pub enum FinishReason {
     Other(String),
 }
 
+/// How hard the model should think before answering. Each `core::llm`
+/// client maps it onto its own request field: Anthropic's adaptive thinking
+/// plus `output_config.effort`, OpenAI's `reasoning_effort`, Gemini's
+/// `thinkingConfig.thinkingLevel`.
+///
+/// [`Self::Default`] sends none of them, so the API's own default applies,
+/// whatever that is for the model (on Anthropic models that don't think by
+/// default, that means no thinking). It is also the only level that works
+/// with models that reject effort parameters.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Effort {
+    /// No effort parameters are sent; the API decides.
+    #[default]
+    Default,
+    Low,
+    Medium,
+    High,
+}
+
+impl Effort {
+    /// Every level, in order, e.g. for a selector.
+    pub const ALL: [Effort; 4] = [Effort::Default, Effort::Low, Effort::Medium, Effort::High];
+
+    /// The level's id as written in config files and on the wire.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Effort::Default => "default",
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+        }
+    }
+
+    /// The value the provider APIs share (`"low"`, `"medium"`, `"high"`),
+    /// or `None` for [`Self::Default`].
+    pub const fn api_value(self) -> Option<&'static str> {
+        match self {
+            Effort::Default => None,
+            level => Some(level.as_str()),
+        }
+    }
+
+    /// Inverse of [`Self::as_str`].
+    pub fn parse(level: &str) -> crate::error::Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|l| l.as_str() == level)
+            .ok_or_else(|| {
+                crate::error::Error::InvalidArgument(format!(
+                    "unknown effort: {level} (expected default, low, medium or high)"
+                ))
+            })
+    }
+}
+
+impl std::fmt::Display for Effort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A single completion choice returned by the provider.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -553,6 +616,17 @@ pub enum StreamEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effort_ids_round_trip_through_parse_and_serde() {
+        for level in Effort::ALL {
+            assert_eq!(Effort::parse(level.as_str()).unwrap(), level);
+            assert_eq!(serde_json::to_value(level).unwrap(), level.as_str());
+        }
+        assert_eq!(Effort::Default.api_value(), None);
+        assert_eq!(Effort::High.api_value(), Some("high"));
+        assert!(Effort::parse("max").is_err());
+    }
 
     #[test]
     fn message_user_sets_correct_fields() {

@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
+use crate::core::models::Effort;
+
 /// Public model info for a single provider (no credentials).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -430,18 +432,6 @@ impl AppConfig {
     }
 }
 
-/// Extended-thinking mode for a provider. Only [`AnthropicClient`](crate::core::llm::AnthropicClient)
-/// consults this today; other providers ignore it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum ThinkingMode {
-    /// Request Anthropic's adaptive extended thinking.
-    Adaptive,
-    /// Never request extended thinking.
-    Off,
-}
-
 /// Which wire protocol a provider speaks, i.e. which client talks to it.
 /// Set per provider with `kind = "…"`; when omitted it is inferred from the
 /// provider's name (see [`Self::infer_from_name`]).
@@ -507,11 +497,12 @@ pub struct ProviderConfig {
     /// request as too long.
     #[serde(default)]
     pub context_window: Option<u64>,
-    /// Extended thinking (`"adaptive"` or `"off"`); see
-    /// [`Self::resolve_thinking`] for the default. Applies to every model of
-    /// the entry, so set `"off"` if one of them lacks adaptive thinking.
+    /// How hard the models reason (`"default"`, `"low"`, `"medium"` or
+    /// `"high"`; see [`Effort`]). Sessions start at this level and
+    /// can change it. `"default"` (when unset) sends no effort
+    /// parameters, so it's the one to keep for models that reject them.
     #[serde(default)]
-    pub thinking: Option<ThinkingMode>,
+    pub effort: Effort,
     /// Send signed thinking back to an OpenAI-compatible endpoint that
     /// streams it as `thinking_blocks` (a LiteLLM proxy in front of
     /// Anthropic), so extended thinking stays on through tool calls. Off
@@ -532,7 +523,7 @@ impl std::fmt::Debug for ProviderConfig {
             .field("timeout_secs", &self.timeout_secs)
             .field("max_tokens", &self.max_tokens)
             .field("context_window", &self.context_window)
-            .field("thinking", &self.thinking)
+            .field("effort", &self.effort)
             .field("replay_thinking", &self.replay_thinking)
             .finish()
     }
@@ -553,7 +544,7 @@ impl ProviderConfig {
             timeout_secs: None,
             max_tokens: None,
             context_window: None,
-            thinking: None,
+            effort: Effort::Default,
             replay_thinking: None,
         }
     }
@@ -598,8 +589,8 @@ impl ProviderConfig {
         self
     }
 
-    pub fn with_thinking(mut self, thinking: ThinkingMode) -> Self {
-        self.thinking = Some(thinking);
+    pub fn with_effort(mut self, effort: Effort) -> Self {
+        self.effort = effort;
         self
     }
 
@@ -631,17 +622,6 @@ impl ProviderConfig {
         self.kind
             .unwrap_or_else(|| ProviderKind::infer_from_name(provider_name))
     }
-
-    /// Whether extended thinking should be requested, given this provider's
-    /// `thinking` setting and its resolved `kind`. Unset defaults to `true`
-    /// only for [`ProviderKind::Anthropic`] — the only client that reads this.
-    pub fn resolve_thinking(&self, kind: ProviderKind) -> bool {
-        match self.thinking {
-            Some(ThinkingMode::Adaptive) => true,
-            Some(ThinkingMode::Off) => false,
-            None => kind == ProviderKind::Anthropic,
-        }
-    }
 }
 
 /// Runtime configuration passed to agent/LLM code
@@ -668,9 +648,8 @@ pub struct AgentConfig {
     /// The model's context window in tokens; see
     /// [`ProviderConfig::context_window`].
     pub context_window: Option<u64>,
-    /// Whether to request extended thinking (`AnthropicClient` only); see
-    /// [`ProviderConfig::resolve_thinking`].
-    pub thinking: bool,
+    /// How hard the model reasons; see [`ProviderConfig::effort`].
+    pub effort: Effort,
     /// Whether to send signed thinking back as `thinking_blocks`
     /// (`OpenAiClient` / `OpenAiCompatibleClient` only); see
     /// [`ProviderConfig::replay_thinking`].
@@ -694,7 +673,7 @@ struct AgentConfigWire {
     #[serde(default)]
     context_window: Option<u64>,
     #[serde(default)]
-    thinking: bool,
+    effort: Effort,
     #[serde(default)]
     replay_thinking: bool,
 }
@@ -713,7 +692,7 @@ impl From<AgentConfigWire> for AgentConfig {
             timeout_secs: wire.timeout_secs,
             max_tokens: wire.max_tokens,
             context_window: wire.context_window,
-            thinking: wire.thinking,
+            effort: wire.effort,
             replay_thinking: wire.replay_thinking,
         }
     }
@@ -731,7 +710,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("timeout_secs", &self.timeout_secs)
             .field("max_tokens", &self.max_tokens)
             .field("context_window", &self.context_window)
-            .field("thinking", &self.thinking)
+            .field("effort", &self.effort)
             .field("replay_thinking", &self.replay_thinking)
             .finish()
     }
@@ -745,7 +724,7 @@ pub(crate) fn default_timeout_secs() -> u64 {
 impl AgentConfig {
     /// `kind` is inferred from `provider_name` (see
     /// [`ProviderKind::infer_from_name`]); override it with
-    /// [`Self::with_kind`]. `thinking` is on for an Anthropic `kind`.
+    /// [`Self::with_kind`].
     pub fn new(
         provider_name: String,
         api_base: String,
@@ -753,10 +732,8 @@ impl AgentConfig {
         model: String,
         max_iterations: usize,
     ) -> Self {
-        let kind = ProviderKind::infer_from_name(&provider_name);
         Self {
-            thinking: kind == ProviderKind::Anthropic,
-            kind,
+            kind: ProviderKind::infer_from_name(&provider_name),
             provider_name,
             api_base,
             api_key,
@@ -765,11 +742,12 @@ impl AgentConfig {
             timeout_secs: default_timeout_secs(),
             max_tokens: None,
             context_window: None,
+            effort: Effort::Default,
             replay_thinking: false,
         }
     }
 
-    /// Sets the wire protocol. Leaves `thinking` as it was.
+    /// Sets the wire protocol.
     pub fn with_kind(mut self, kind: ProviderKind) -> Self {
         self.kind = kind;
         self
@@ -795,8 +773,8 @@ impl AgentConfig {
         self
     }
 
-    pub fn with_thinking(mut self, thinking: bool) -> Self {
-        self.thinking = thinking;
+    pub fn with_effort(mut self, effort: Effort) -> Self {
+        self.effort = effort;
         self
     }
 
@@ -818,7 +796,7 @@ impl Default for AgentConfig {
             timeout_secs: default_timeout_secs(),
             max_tokens: None,
             context_window: None,
-            thinking: false,
+            effort: Effort::Default,
             replay_thinking: false,
         }
     }

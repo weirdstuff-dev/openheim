@@ -3,14 +3,14 @@ mod public;
 mod resolve;
 mod types;
 
-pub(crate) use client::{HttpClients, client_for_config, same_model};
+pub(crate) use client::{HttpClients, client_for_config, same_client};
 pub use client::{build_http_client, create_client};
 pub use public::{
     PublicConfig, PublicMcpServerConfig, PublicMemoryConfig, PublicProviderConfig, PublicTuiConfig,
 };
 pub use types::{
     AgentConfig, AppConfig, EmbeddingConfig, McpServerConfig, MemoryConfig, ModelsInfo,
-    ProviderConfig, ProviderKind, ProviderModels, ThinkingMode, TuiConfig,
+    ProviderConfig, ProviderKind, ProviderModels, TuiConfig,
 };
 pub(crate) use types::{RuntimePaths, default_timeout_secs};
 

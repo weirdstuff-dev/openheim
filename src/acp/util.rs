@@ -12,7 +12,7 @@ use agent_client_protocol::schema::v1::{
 use crate::{
     config::AppConfig,
     core::{
-        models::{Message, StopReason as CoreStopReason, StreamEvent, TranscriptEntry},
+        models::{Effort, Message, StopReason as CoreStopReason, StreamEvent, TranscriptEntry},
         runtime::AgentMode,
     },
     memory::ConversationMeta,
@@ -21,6 +21,50 @@ use crate::{
 
 /// `session/set_config_option` id for the model selector.
 pub(super) const MODEL_CONFIG_ID: &str = "model";
+
+/// `session/set_config_option` id for the effort level selector.
+pub(super) const EFFORT_CONFIG_ID: &str = "effort";
+
+/// The effort level selector config option: every [`Effort`].
+pub(super) fn session_effort_config_option(current: Effort) -> SessionConfigOption {
+    let levels: Vec<SessionConfigSelectOption> = Effort::ALL
+        .into_iter()
+        .map(|level| {
+            let name = match level {
+                Effort::Default => "Default",
+                Effort::Low => "Low",
+                Effort::Medium => "Medium",
+                Effort::High => "High",
+            };
+            let option = SessionConfigSelectOption::new(level.as_str(), name);
+            match level {
+                Effort::Default => {
+                    option.description("The provider's own default; no effort parameters sent.")
+                }
+                _ => option,
+            }
+        })
+        .collect();
+    SessionConfigOption::select(
+        EFFORT_CONFIG_ID,
+        "Effort",
+        current.as_str().to_string(),
+        levels,
+    )
+    .category(SessionConfigOptionCategory::ThoughtLevel)
+}
+
+/// Every config option a session offers, at its current values.
+pub(super) fn session_config_options(
+    app_config: &AppConfig,
+    current_model: &str,
+    current_effort: Effort,
+) -> Vec<SessionConfigOption> {
+    vec![
+        session_model_config_option(app_config, current_model),
+        session_effort_config_option(current_effort),
+    ]
+}
 
 /// The model selector config option: every configured model, each tagged
 /// with its `provider` in `_meta`.
@@ -204,6 +248,21 @@ mod tool_kind_tests {
             tool_kind_for("some_mcp_server__custom_tool", &e),
             ToolKind::Other
         );
+    }
+
+    #[test]
+    fn effort_option_offers_every_level_as_a_thought_level() {
+        let json = serde_json::to_value(session_effort_config_option(Effort::Medium)).unwrap();
+        assert_eq!(json["id"], EFFORT_CONFIG_ID);
+        assert_eq!(json["category"], "thought_level");
+        assert_eq!(json["currentValue"], "medium");
+        let values: Vec<_> = json["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["value"].as_str().unwrap())
+            .collect();
+        assert_eq!(values, ["default", "low", "medium", "high"]);
     }
 }
 
