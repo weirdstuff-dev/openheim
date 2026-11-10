@@ -8,17 +8,24 @@ use uuid::Uuid;
 
 use crate::config::AgentConfig;
 use crate::core::llm::LlmClient;
+use crate::core::models::Effort;
 use crate::core::permission::Approvals;
 use crate::core::runtime::AgentMode;
 use crate::error::{Error, Result};
 
 pub struct SessionState {
     pub chat_id: Uuid,
+    /// The session's model, with `effort` already applied when it's set.
     pub config: AgentConfig,
-    /// The client for `config` when it names another model than the
-    /// runtime's default; `None` means the default's client. Set together
-    /// with `config`, and built before the sessions lock is taken.
+    /// The client for `config` when it names another model or effort
+    /// level than the runtime's default; `None` means the default's client.
+    /// Set together with `config`, and built before the sessions lock is
+    /// taken.
     pub llm: Option<Arc<dyn LlmClient>>,
+    /// The effort level chosen for this session, kept across model
+    /// switches. `None` until one is chosen: the session then runs at its
+    /// provider's `effort`.
+    pub effort: Option<Effort>,
     /// The client's working directory, canonicalized when it exists on this
     /// machine; saved with the conversation and used to filter
     /// `list_sessions`.
@@ -34,7 +41,8 @@ pub struct SessionState {
     /// each turn's `RememberingGate`; keyed by
     /// [`crate::core::permission::approval_key`].
     pub approved_tools: Approvals,
-    /// Set via `session/set_mode`. Controls which tools are offered to the LLM.
+    /// Controls which tools are offered to the LLM. Saved with the
+    /// conversation, and restored when it's loaded.
     pub mode: AgentMode,
     /// Held for a whole turn, so an overlapping prompt on the same session in
     /// this process is rejected instead of racing it. (The cross-process
@@ -151,6 +159,7 @@ mod tests {
                 5,
             ),
             llm: None,
+            effort: None,
             cwd: PathBuf::from("/tmp"),
             tool_cwd: PathBuf::from("/tmp"),
             skills: vec![],

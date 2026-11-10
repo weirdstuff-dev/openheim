@@ -341,6 +341,8 @@ impl Theme {
 pub(super) enum AgentCommand {
     Prompt(String),
     SwitchModel { provider: String, model: String },
+    SetMode(crate::core::runtime::AgentMode),
+    SetEffort(crate::core::models::Effort),
     SwitchSession { id: String, cwd: std::path::PathBuf },
     ListSessions,
     NewSession,

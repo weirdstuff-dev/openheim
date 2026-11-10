@@ -66,6 +66,7 @@ All frontmatter fields are optional:
 | `description` | string | Shown to the orchestrator so it knows when to delegate to this subagent. Omitting it is allowed but makes the subagent harder for the LLM to discover. |
 | `model` | string | Overrides the parent's model for this subagent's run. Omitted = the parent session's current model, including after a mid-session model switch. |
 | `provider` | string | Overrides the parent's provider. Only used when `model` is also set. |
+| `effort` | `"default"` \| `"low"` \| `"medium"` \| `"high"` | The subagent's effort level (see [`effort`](configuration.md#providersname)). Omitted = the parent session's current level when the subagent runs on the parent's model, or its provider's `effort` when `model` names another one. |
 | `tools` | array of strings | Restricts the subagent to this set of tool names. Omitted = inherits the full tool set the parent has access to. |
 | `max_iterations` | integer | Caps the subagent's agent-loop iterations. Omitted = inherits the parent's `max_iterations`. |
 

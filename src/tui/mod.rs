@@ -24,7 +24,11 @@ use tokio::sync::mpsc;
 
 use crate::{
     client::{OpenheimClient, SessionHandle},
-    core::{models::StopReason, permission::PermissionGate},
+    core::{
+        models::{Effort, StopReason},
+        permission::PermissionGate,
+        runtime::AgentMode,
+    },
 };
 
 use app::App;
@@ -251,9 +255,19 @@ impl AgentTask {
         mut commands: mpsc::UnboundedReceiver<AgentCommand>,
         mut cancel: mpsc::UnboundedReceiver<()>,
     ) {
-        // A new session starts on the model the current one is on.
+        // A new session starts on the model, mode and effort level the
+        // current one is on.
         let mut current_provider = self.default_provider.clone();
         let mut current_model = self.default_model.clone();
+        // The UI starts out showing the first session's settings
+        // (`App::new`), so there's nothing to report for it.
+        let mut current = match session.settings().await {
+            Ok(settings) => Current {
+                mode: Some(settings.mode),
+                effort: Some(settings.effort),
+            },
+            Err(_) => Current::default(),
+        };
         while let Some(command) = commands.recv().await {
             match command {
                 AgentCommand::Prompt(prompt) => {
@@ -265,24 +279,36 @@ impl AgentTask {
                             current_provider = provider.clone();
                             current_model = model.clone();
                             self.send(AgentUpdate::ModelChanged { provider, model });
+                            // The new provider's level, unless one was chosen.
+                            self.report_settings(&session, &mut current).await;
                         }
                         Err(e) => self.send(AgentUpdate::Error(e.to_string())),
                     }
                 }
+                AgentCommand::SetMode(mode) => match session.set_mode(mode).await {
+                    Ok(()) => self.report_settings(&session, &mut current).await,
+                    Err(e) => self.send(AgentUpdate::Error(e.to_string())),
+                },
+                AgentCommand::SetEffort(effort) => match session.set_effort(effort).await {
+                    Ok(()) => self.report_settings(&session, &mut current).await,
+                    Err(e) => self.send(AgentUpdate::Error(e.to_string())),
+                },
                 AgentCommand::SwitchSession { id, cwd } => {
                     let resumed = self
                         .resume(&id, cwd, &mut current_provider, &mut current_model)
                         .await;
                     if let Some(restored) = resumed {
                         session = restored;
+                        self.report_settings(&session, &mut current).await;
                     }
                 }
                 AgentCommand::NewSession => {
                     let started = self
-                        .new_session(&mut current_provider, &mut current_model)
+                        .new_session(&mut current_provider, &mut current_model, current)
                         .await;
                     if let Some(new_session) = started {
                         session = new_session;
+                        self.report_settings(&session, &mut current).await;
                     }
                 }
                 AgentCommand::ListSessions => match self.client.list_sessions(None).await {
@@ -295,6 +321,23 @@ impl AgentTask {
 
     fn send(&self, update: AgentUpdate) {
         let _ = self.updates.send(update);
+    }
+
+    /// Tells the UI about `session`'s mode and effort level where they
+    /// differ from `current`, which is updated to match.
+    async fn report_settings(&self, session: &SessionHandle, current: &mut Current) {
+        let settings = match session.settings().await {
+            Ok(settings) => settings,
+            Err(e) => return self.send(AgentUpdate::Error(e.to_string())),
+        };
+        if current.mode != Some(settings.mode) {
+            current.mode = Some(settings.mode);
+            self.send(AgentUpdate::ModeChanged(settings.mode));
+        }
+        if current.effort != Some(settings.effort) {
+            current.effort = Some(settings.effort);
+            self.send(AgentUpdate::EffortChanged(settings.effort));
+        }
     }
 
     /// Runs one turn, cancelling it if `cancel` fires meanwhile.
@@ -379,10 +422,13 @@ impl AgentTask {
 
     /// Starts a new session on the active model (`provider`/`model`), or on
     /// the default one if that no longer resolves, updating both to match.
+    /// It takes on `current`'s mode, and its effort level when that isn't
+    /// already the new session's.
     async fn new_session(
         &self,
         provider: &mut String,
         model: &mut String,
+        current: Current,
     ) -> Option<SessionHandle> {
         let new_session = match self
             .client
@@ -405,11 +451,38 @@ impl AgentTask {
                 model: self.default_model.clone(),
             });
         }
+        let carried = carry_over(&new_session, current).await;
         self.send(AgentUpdate::NewSession(vec![ChatItem::SystemInfo(
             "─── new session".to_string(),
         )]));
+        // After `NewSession`, which clears the transcript.
+        if let Err(e) = carried {
+            self.send(AgentUpdate::Error(e.to_string()));
+        }
         Some(new_session)
     }
+}
+
+/// The mode and effort level the UI last showed; `None` before the first
+/// report.
+#[derive(Debug, Clone, Copy, Default)]
+struct Current {
+    mode: Option<AgentMode>,
+    effort: Option<Effort>,
+}
+
+/// Puts `session` on `current`'s mode and effort level. The level is only
+/// set when it differs from the session's own, so a session still on its
+/// provider's level keeps following it through model switches.
+async fn carry_over(session: &SessionHandle, current: Current) -> crate::error::Result<()> {
+    let settings = session.settings().await?;
+    if let Some(mode) = current.mode.filter(|&m| m != settings.mode) {
+        session.set_mode(mode).await?;
+    }
+    if let Some(effort) = current.effort.filter(|&r| r != settings.effort) {
+        session.set_effort(effort).await?;
+    }
+    Ok(())
 }
 
 /// The `ChatItem`s a live turn would have shown for one saved message.

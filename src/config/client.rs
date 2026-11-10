@@ -37,23 +37,29 @@ pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<d
                 config.model.clone(),
                 config.max_tokens,
             )
-            .with_replay_thinking(config.replay_thinking),
+            .with_replay_thinking(config.replay_thinking)
+            .with_effort(config.effort),
         ),
-        ProviderKind::Anthropic => Arc::new(AnthropicClient::new(
-            http_client.clone(),
-            config.api_base.clone(),
-            config.api_key.clone(),
-            config.model.clone(),
-            config.max_tokens,
-            config.thinking,
-        )),
-        ProviderKind::Gemini => Arc::new(GeminiClient::new(
-            http_client.clone(),
-            config.api_base.clone(),
-            config.api_key.clone(),
-            config.model.clone(),
-            config.max_tokens,
-        )),
+        ProviderKind::Anthropic => Arc::new(
+            AnthropicClient::new(
+                http_client.clone(),
+                config.api_base.clone(),
+                config.api_key.clone(),
+                config.model.clone(),
+                config.max_tokens,
+            )
+            .with_effort(config.effort),
+        ),
+        ProviderKind::Gemini => Arc::new(
+            GeminiClient::new(
+                http_client.clone(),
+                config.api_base.clone(),
+                config.api_key.clone(),
+                config.model.clone(),
+                config.max_tokens,
+            )
+            .with_effort(config.effort),
+        ),
         ProviderKind::OpenAiCompatible => Arc::new(
             OpenAiCompatibleClient::new(
                 http_client.clone(),
@@ -62,7 +68,8 @@ pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<d
                 config.model.clone(),
                 config.max_tokens,
             )
-            .with_replay_thinking(config.replay_thinking),
+            .with_replay_thinking(config.replay_thinking)
+            .with_effort(config.effort),
         ),
     };
     Arc::new(RetryClient::new(inner))
@@ -94,21 +101,23 @@ impl HttpClients {
     }
 }
 
-/// Whether `a` and `b` name the same model, so one LLM client serves both.
-pub(crate) fn same_model(a: &AgentConfig, b: &AgentConfig) -> bool {
-    a.provider_name == b.provider_name && a.model == b.model
+/// Whether `a` and `b` name the same model at the same effort level, so
+/// one LLM client serves both.
+pub(crate) fn same_client(a: &AgentConfig, b: &AgentConfig) -> bool {
+    a.provider_name == b.provider_name && a.model == b.model && a.effort == b.effort
 }
 
-/// The LLM client for `target`: `baseline_llm` when it has the same provider
-/// and model, otherwise a new one on `http`'s shared `reqwest::Client`. Used
-/// for sessions that switched models and for subagents.
+/// The LLM client for `target`: `baseline_llm` when it has the same provider,
+/// model and effort level, otherwise a new one on `http`'s shared
+/// `reqwest::Client`. Used for sessions that switched models or effort
+/// levels, and for subagents.
 pub(crate) fn client_for_config(
     target: &AgentConfig,
     baseline: &AgentConfig,
     baseline_llm: &Arc<dyn LlmClient>,
     http: &HttpClients,
 ) -> Result<Arc<dyn LlmClient>> {
-    if same_model(target, baseline) {
+    if same_client(target, baseline) {
         Ok(baseline_llm.clone())
     } else {
         Ok(create_client(target, &http.get(target.timeout_secs)?))
@@ -166,6 +175,20 @@ mod tests {
 
         let mut target = baseline.clone();
         target.model = "gpt-4o".into();
+
+        let client =
+            client_for_config(&target, &baseline, &baseline_llm, &HttpClients::default()).unwrap();
+        assert!(!Arc::ptr_eq(&client, &baseline_llm));
+    }
+
+    #[test]
+    fn client_for_config_builds_new_when_effort_differs() {
+        let baseline = baseline_config();
+        let baseline_llm: Arc<dyn LlmClient> = Arc::new(DummyClient);
+
+        let target = baseline
+            .clone()
+            .with_effort(crate::core::models::Effort::High);
 
         let client =
             client_for_config(&target, &baseline, &baseline_llm, &HttpClients::default()).unwrap();

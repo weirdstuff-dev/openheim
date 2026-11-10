@@ -105,8 +105,9 @@ impl DelegateTool {
     }
 
     /// The [`AgentConfig`] and [`LlmClient`] a subagent runs on, with the
-    /// profile's `model`/`provider`/`max_iterations` overrides applied. The
-    /// parent's client is reused when provider and model match.
+    /// profile's `model`/`provider`/`effort`/`max_iterations` overrides
+    /// applied. The parent's client is reused when provider, model and
+    /// effort level match.
     fn resolve_runtime(&self, profile: &AgentProfile) -> Result<(AgentConfig, Arc<dyn LlmClient>)> {
         let config = match (&profile.provider, &profile.model) {
             (Some(provider), Some(model)) => {
@@ -117,6 +118,13 @@ impl DelegateTool {
         };
         let config = match profile.max_iterations {
             Some(max_iterations) => config.with_max_iterations(max_iterations),
+            None => config,
+        };
+        let on_session_model = config.provider_name == self.base_config.provider_name
+            && config.model == self.base_config.model;
+        let config = match profile.effort {
+            Some(effort) => config.with_effort(effort),
+            None if on_session_model => config.with_effort(self.base_config.effort),
             None => config,
         };
 
@@ -350,6 +358,7 @@ fn inline_profile(
         description: String::new(),
         model: args.model.clone(),
         provider: args.provider.clone(),
+        effort: None,
         tools: args.tools.clone(),
         max_iterations: args.max_iterations.map(|n| n.min(session_max_iterations)),
         system_prompt: system_prompt.to_string(),
@@ -359,8 +368,9 @@ fn inline_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProviderConfig;
     use crate::core::client_io::NoClientIo;
-    use crate::core::models::{Choice, ContentBlock, FinishReason, Role};
+    use crate::core::models::{Choice, ContentBlock, Effort, FinishReason, Role};
     use crate::core::permission::AllowAll;
     use crate::tools::SystemToolExecutor;
     use crate::tools::test_support::TurnHarness;
@@ -388,6 +398,7 @@ mod tests {
             description: description.into(),
             model: None,
             provider: None,
+            effort: None,
             tools: None,
             max_iterations: None,
             system_prompt: "You are a test subagent.".into(),
@@ -466,6 +477,60 @@ mod tests {
             sample_agent_config(),
             Arc::default(),
         )
+    }
+
+    #[test]
+    fn subagent_on_the_session_model_keeps_its_effort_level_and_client() {
+        let llm: Arc<dyn LlmClient> = Arc::new(MockLlm::new(vec![]));
+        let session_config = sample_agent_config().with_effort(Effort::High);
+        let tool = make_tool(vec![], llm.clone()).for_session(llm.clone(), session_config);
+
+        let (config, subagent_llm) = tool.resolve_runtime(&sample_profile("r", "d")).unwrap();
+        assert_eq!(config.effort, Effort::High);
+        assert!(Arc::ptr_eq(&subagent_llm, &llm));
+    }
+
+    #[test]
+    fn profile_naming_the_session_model_keeps_its_effort_level_and_client() {
+        let llm: Arc<dyn LlmClient> = Arc::new(MockLlm::new(vec![]));
+        let app_config = sample_app_config().with_provider(
+            "mock",
+            ProviderConfig::new("https://example.com", "mock-model")
+                .with_api_key("key")
+                .with_effort(Effort::Low),
+        );
+        let session_config = sample_agent_config().with_effort(Effort::High);
+        let tool = DelegateTool::new(
+            Arc::new(EmptyExecutor),
+            vec![],
+            llm.clone(),
+            app_config,
+            sample_agent_config(),
+            Arc::default(),
+        )
+        .for_session(llm.clone(), session_config);
+
+        for provider in [None, Some("mock".to_string())] {
+            let mut profile = sample_profile("r", "d");
+            profile.model = Some("mock-model".into());
+            profile.provider = provider;
+            let (config, subagent_llm) = tool.resolve_runtime(&profile).unwrap();
+            assert_eq!(config.effort, Effort::High);
+            assert!(Arc::ptr_eq(&subagent_llm, &llm));
+        }
+    }
+
+    #[test]
+    fn profile_effort_overrides_the_session_level() {
+        let llm: Arc<dyn LlmClient> = Arc::new(MockLlm::new(vec![]));
+        let session_config = sample_agent_config().with_effort(Effort::High);
+        let tool = make_tool(vec![], llm.clone()).for_session(llm.clone(), session_config);
+        let mut profile = sample_profile("r", "d");
+        profile.effort = Some(Effort::Low);
+
+        let (config, subagent_llm) = tool.resolve_runtime(&profile).unwrap();
+        assert_eq!(config.effort, Effort::Low);
+        assert!(!Arc::ptr_eq(&subagent_llm, &llm));
     }
 
     #[test]

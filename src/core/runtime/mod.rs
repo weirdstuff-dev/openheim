@@ -10,12 +10,13 @@ pub mod session;
 
 mod state;
 
-pub use state::{AgentState, LoadedSession};
+pub use state::{AgentState, LoadedSession, SessionSettings};
 
-/// Which tool policy a session runs under, set via `session/set_mode`.
-/// [`Self::as_str`] gives the wire-level mode id; [`Self::parse`] is the
+/// Which tool policy a session runs under. [`Self::as_str`] gives the
+/// wire-level mode id (also its serialized form); [`Self::parse`] is the
 /// inverse, for the boundary where that id arrives as a `&str`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AgentMode {
     /// Full tool access; tool calls go through the permission gate as normal.

@@ -53,6 +53,7 @@ env_var = "OPENAI_API_KEY"
 # timeout_secs = 120  # Connect and idle-read timeout in seconds (default: 120)
 # max_tokens = 4096   # Maximum output tokens for LLM responses
 # context_window = 128000  # Context window in tokens; older turns are left out of requests to fit it
+# effort = "default"  # default | low | medium | high; "default" sends nothing, so the API's own default applies
 
 # Anthropic Claude
 [providers.anthropic]
@@ -60,6 +61,7 @@ api_base = "https://api.anthropic.com/v1"
 default_model = "claude-sonnet-4-6"
 models = ["claude-sonnet-4-6", "claude-opus-4-7"]
 env_var = "ANTHROPIC_API_KEY"
+effort = "medium"  # adaptive thinking at medium effort; sessions can change it (:effort)
 
 # Google Gemini
 # [providers.gemini]

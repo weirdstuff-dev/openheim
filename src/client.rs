@@ -17,9 +17,9 @@ use crate::{
     },
     core::{
         client_io::{ClientIo, NoClientIo},
-        models::{ContentBlock, StopReason, StreamEvent},
+        models::{ContentBlock, Effort, StopReason, StreamEvent},
         permission::{AllowAll, PermissionGate},
-        runtime::{AgentState, LoadedSession},
+        runtime::{AgentMode, AgentState, LoadedSession, SessionSettings},
     },
     error::Result,
     mcp::McpServerStatus,
@@ -72,6 +72,8 @@ impl OpenheimClient {
             model: None,
             skills: vec![],
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            mode: AgentMode::Code,
+            effort: None,
         }
     }
 
@@ -124,6 +126,18 @@ impl OpenheimClient {
         self.state.switch_model(session_id, provider, model).await
     }
 
+    /// Sets a live session's mode; the same as [`SessionHandle::set_mode`],
+    /// for callers that hold only the id.
+    pub async fn set_session_mode(&self, session_id: &str, mode: AgentMode) -> Result<()> {
+        self.state.set_session_mode(session_id, mode).await
+    }
+
+    /// Sets a live session's effort level; the same as
+    /// [`SessionHandle::set_effort`], for callers that hold only the id.
+    pub async fn set_session_effort(&self, session_id: &str, effort: Effort) -> Result<()> {
+        self.state.set_session_effort(session_id, effort).await
+    }
+
     // ── Memory ────────────────────────────────────────────────────────────────
 
     /// Names of the skills in the data directory's `skills/`, sorted.
@@ -165,6 +179,8 @@ pub struct SessionBuilder<'a> {
     model: Option<String>,
     skills: Vec<String>,
     cwd: PathBuf,
+    mode: AgentMode,
+    effort: Option<Effort>,
 }
 
 impl<'a> SessionBuilder<'a> {
@@ -190,12 +206,31 @@ impl<'a> SessionBuilder<'a> {
         self
     }
 
+    /// The mode the session starts in. Defaults to [`AgentMode::Code`].
+    pub fn mode(mut self, mode: AgentMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// The effort level the session starts at. Defaults to its
+    /// provider's `effort`.
+    pub fn effort(mut self, effort: Effort) -> Self {
+        self.effort = Some(effort);
+        self
+    }
+
     /// Create the session and return a handle for prompting.
     pub async fn start(self) -> Result<SessionHandle> {
         let id = self
             .state
             .new_session(self.model.as_deref(), self.skills, self.cwd)
             .await?;
+        if self.mode != AgentMode::Code {
+            self.state.set_session_mode(&id, self.mode).await?;
+        }
+        if let Some(effort) = self.effort {
+            self.state.set_session_effort(&id, effort).await?;
+        }
         Ok(SessionHandle::new(id, self.state.clone()))
     }
 }
@@ -328,6 +363,22 @@ impl SessionHandle {
     pub async fn switch_model(&self, provider: &str, model: &str) -> Result<(String, String)> {
         self.state.switch_model(&self.id, provider, model).await
     }
+
+    /// The provider, model, mode and effort level this session runs on.
+    pub async fn settings(&self) -> Result<SessionSettings> {
+        self.state.session_settings(&self.id).await
+    }
+
+    /// Set the mode for this session; the next prompt runs under it.
+    pub async fn set_mode(&self, mode: AgentMode) -> Result<()> {
+        self.state.set_session_mode(&self.id, mode).await
+    }
+
+    /// Set the effort level for this session; the next prompt runs at
+    /// it, and it stays through later [`Self::switch_model`] calls.
+    pub async fn set_effort(&self, effort: Effort) -> Result<()> {
+        self.state.set_session_effort(&self.id, effort).await
+    }
 }
 
 // ── PromptInput ───────────────────────────────────────────────────────────────
@@ -424,6 +475,7 @@ pub struct OpenheimBuilder {
     timeout_secs: Option<u64>,
     max_tokens: Option<u32>,
     context_window: Option<u64>,
+    effort: Option<Effort>,
     mcp_servers: BTreeMap<String, McpServerConfig>,
     default_skills: Vec<String>,
     work_dir: Option<PathBuf>,
@@ -502,6 +554,13 @@ impl OpenheimBuilder {
     /// `docs/configuration.md`.
     pub fn context_window(mut self, tokens: u64) -> Self {
         self.context_window = Some(tokens);
+        self
+    }
+
+    /// The effort level sessions start at; see `effort` in
+    /// `docs/configuration.md`. Defaults to [`Effort::Default`].
+    pub fn effort(mut self, effort: Effort) -> Self {
+        self.effort = Some(effort);
         self
     }
 
@@ -584,7 +643,7 @@ impl OpenheimBuilder {
         let (agent_config, mut app_config) = if programmatic {
             self.programmatic_config()?
         } else {
-            let app_config = match (self.app_config.take(), &self.config_path) {
+            let mut app_config = match (self.app_config.take(), &self.config_path) {
                 (Some(config), _) => config,
                 (None, Some(path)) => load_config_from(path)?,
                 (None, None) => load_config()?,
@@ -601,6 +660,14 @@ impl OpenheimBuilder {
             }
             if let Some(w) = self.context_window {
                 agent_config.context_window = Some(w);
+            }
+            if let Some(r) = self.effort {
+                agent_config.effort = r;
+                // Also on the provider entry, so sessions that re-resolve
+                // the provider (model switch, resume) start at it too.
+                if let Some(provider) = app_config.providers.get_mut(&agent_config.provider_name) {
+                    provider.effort = r;
+                }
             }
             (agent_config, app_config)
         };
@@ -697,7 +764,7 @@ impl OpenheimBuilder {
                 timeout_secs: Some(timeout),
                 max_tokens: self.max_tokens,
                 context_window: self.context_window,
-                thinking: None,
+                effort: self.effort.unwrap_or_default(),
                 replay_thinking: None,
             },
         );
@@ -1048,6 +1115,26 @@ models = ["m1"]
 
         assert_eq!(client.long_term_memory().stats().await.unwrap().memories, 1);
         assert!(!dir.path().join("memory.db").exists());
+    }
+
+    /// The builder's effort level holds for a session that switches
+    /// models without choosing a level of its own.
+    #[tokio::test]
+    async fn builder_effort_survives_a_model_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = OpenheimClient::builder()
+            .app_config(local_config())
+            .effort(Effort::High)
+            .data_dir(dir.path())
+            .work_dir(dir.path())
+            .build()
+            .await
+            .unwrap();
+        let session = client.new_session().start().await.unwrap();
+        assert_eq!(session.settings().await.unwrap().effort, Effort::High);
+
+        session.switch_model("local", "m2").await.unwrap();
+        assert_eq!(session.settings().await.unwrap().effort, Effort::High);
     }
 
     /// `OpenheimClient::switch_model` reaches the same live session as the
