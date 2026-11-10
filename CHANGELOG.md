@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-10
+
 ### Added
 
 - **Effort levels, per provider and per session.** A new `effort` provider setting takes `"default"`, `"low"`, `"medium"` or `"high"` (`Effort`). `"default"` sends no effort parameters, so the API's own default applies. The other levels map onto each API: Anthropic gets adaptive thinking at that `output_config.effort`, OpenAI and OpenAI-compatible endpoints get `reasoning_effort`, and Gemini gets `thinkingConfig.thinkingLevel`. Sessions start at their provider's level and can change it: over ACP with `session/set_config_option` (config id `effort`, category `thought_level`, listed next to `model` in `session/new` and `session/load` responses), in the TUI with `:effort <level>`, and in code with `SessionBuilder::effort`, `SessionHandle::set_effort` or `OpenheimClient::set_session_effort`. A level set on a session stays through model switches. Subagent profiles take an `effort` field too; without one, a subagent on the session's model runs at the session's level. See `effort` in `docs/configuration.md`.
