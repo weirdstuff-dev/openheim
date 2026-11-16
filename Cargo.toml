@@ -2,7 +2,7 @@
 name = "openheim"
 version = "0.18.0"
 edition = "2024"
-description = "A fast, multi-provider LLM agent runtime written in Rust"
+description = "Multi-provider LLM agent runtime: terminal, ACP for editors, WebSocket server, or embed it in your Rust app"
 license = "MIT"
 repository = "https://github.com/weirdstuff-dev/openheim"
 homepage = "https://openheim.io"
