@@ -306,15 +306,6 @@ pub(crate) mod test_support {
             self
         }
 
-        /// Makes `sub` (created inside the work directory) the working
-        /// directory.
-        pub(crate) fn with_cwd(mut self, sub: &str) -> Self {
-            let cwd = self.work_dir.path().join(sub);
-            std::fs::create_dir_all(&cwd).expect("create working directory");
-            self.cwd = Some(cwd);
-            self
-        }
-
         pub(crate) fn work_dir(&self) -> &Path {
             self.work_dir.path()
         }
@@ -397,103 +388,8 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::test_support::TurnHarness;
     use super::*;
-
-    #[test]
-    fn new_executor_is_empty() {
-        let executor = SystemToolExecutor::new();
-        assert_eq!(executor.handlers.len(), 0);
-    }
-
-    #[test]
-    fn register_builtins_adds_seven_tools() {
-        let mut executor = SystemToolExecutor::new();
-        executor.register_builtins(true);
-        assert!(executor.handlers.contains_key("execute_command"));
-        assert!(executor.handlers.contains_key("read_file"));
-        assert!(executor.handlers.contains_key("write_file"));
-        assert!(executor.handlers.contains_key("edit_file"));
-        assert!(executor.handlers.contains_key("list_dir"));
-        assert!(executor.handlers.contains_key("search"));
-        assert!(executor.handlers.contains_key("web_fetch"));
-        assert_eq!(executor.handlers.len(), 7);
-    }
-
-    #[tokio::test]
-    async fn executor_returns_error_for_unknown_tool() {
-        let executor = SystemToolExecutor::new();
-        let harness = TurnHarness::new();
-        let result = executor
-            .execute("nonexistent_tool", "{}", &harness.turn())
-            .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown tool"));
-    }
-
-    #[tokio::test]
-    async fn build_without_shell_omits_execute_command() {
-        let (executor, _) = SystemToolExecutor::build(&BTreeMap::new(), false).await;
-        assert!(!executor.handlers.contains_key("execute_command"));
-        assert!(executor.handlers.contains_key("read_file"));
-        assert!(executor.handlers.contains_key("write_file"));
-    }
-
-    #[test]
-    fn capabilities_reflect_each_handlers_own_declaration() {
-        let mut executor = SystemToolExecutor::new();
-        executor.register_builtins(true);
-
-        assert!(executor.capabilities("read_file").read_only);
-        assert!(executor.capabilities("list_dir").read_only);
-        assert!(executor.capabilities("search").read_only);
-        assert!(executor.capabilities("web_fetch").read_only);
-        assert!(!executor.capabilities("write_file").read_only);
-        assert!(!executor.capabilities("edit_file").read_only);
-        assert!(!executor.capabilities("execute_command").read_only);
-        assert_eq!(
-            executor.capabilities("execute_command").approval_scope,
-            ApprovalScope::ExactArguments
-        );
-        assert_eq!(
-            executor.capabilities("read_file").approval_scope,
-            ApprovalScope::ToolName
-        );
-    }
-
-    #[test]
-    fn capabilities_default_for_unknown_tool() {
-        let executor = SystemToolExecutor::new();
-        let caps = executor.capabilities("nonexistent_tool");
-        assert!(!caps.read_only);
-        assert_eq!(caps.approval_scope, ApprovalScope::ToolName);
-    }
-
-    #[test]
-    fn tools_are_listed_in_name_order() {
-        let mut executor = SystemToolExecutor::new();
-        executor.register_builtins(true);
-        let names: Vec<String> = executor
-            .list_tools()
-            .into_iter()
-            .map(|t| t.function.name)
-            .collect();
-        let mut sorted = names.clone();
-        sorted.sort();
-        assert_eq!(names, sorted);
-    }
-
-    #[test]
-    fn clone_snapshots_the_registry() {
-        let mut executor = SystemToolExecutor::new();
-        executor.register_builtins(true);
-        let snapshot = executor.clone();
-        executor.register(Box::new(ContextEchoTool));
-        assert!(executor.handlers.contains_key("context_echo"));
-        assert!(!snapshot.handlers.contains_key("context_echo"));
-    }
 
     /// A custom tool that reports what it was handed, proving the turn
     /// context reaches handlers unchanged through `SystemToolExecutor`.

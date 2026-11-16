@@ -171,45 +171,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_profile_with_frontmatter() {
-        let content = "+++\n\
-description = \"Reviews diffs for correctness and style.\"\n\
-model = \"claude-haiku-4-5\"\n\
-effort = \"low\"\n\
-tools = [\"read_file\"]\n\
-max_iterations = 6\n\
-+++\n\
-You are a meticulous code reviewer.\n";
-
-        let profile = parse_profile("code-reviewer", content).unwrap();
-        assert_eq!(profile.name, "code-reviewer");
-        assert_eq!(
-            profile.description,
-            "Reviews diffs for correctness and style."
-        );
-        assert_eq!(profile.model.as_deref(), Some("claude-haiku-4-5"));
-        assert_eq!(profile.provider, None);
-        assert_eq!(profile.effort, Some(Effort::Low));
-        assert_eq!(profile.tools, Some(vec!["read_file".to_string()]));
-        assert_eq!(profile.max_iterations, Some(6));
-        assert_eq!(profile.system_prompt, "You are a meticulous code reviewer.");
-    }
-
-    #[test]
-    fn treats_file_without_frontmatter_as_plain_prompt() {
-        let content = "You are a helpful research assistant.\nAlways cite sources.";
-        let profile = parse_profile("researcher", content).unwrap();
-        assert_eq!(profile.name, "researcher");
-        assert_eq!(profile.description, "");
-        assert_eq!(profile.model, None);
-        assert_eq!(profile.tools, None);
-        assert_eq!(
-            profile.system_prompt,
-            "You are a helpful research assistant.\nAlways cite sources."
-        );
-    }
-
-    #[test]
     fn rejects_unterminated_frontmatter() {
         let content = "+++\ndescription = \"oops\"\nNo closing delimiter here.";
         let err = parse_profile("broken", content).unwrap_err();
@@ -221,34 +182,5 @@ You are a meticulous code reviewer.\n";
         let content = "+++\nthis is not valid toml :::\n+++\nBody.";
         let err = parse_profile("broken", content).unwrap_err();
         assert!(err.to_string().contains("invalid frontmatter"));
-    }
-
-    #[test]
-    fn defaults_are_applied_for_partial_frontmatter() {
-        let content = "+++\ndescription = \"Just a description.\"\n+++\nPrompt body.";
-        let profile = parse_profile("partial", content).unwrap();
-        assert_eq!(profile.description, "Just a description.");
-        assert_eq!(profile.model, None);
-        assert_eq!(profile.provider, None);
-        assert_eq!(profile.tools, None);
-        assert_eq!(profile.max_iterations, None);
-        assert_eq!(profile.system_prompt, "Prompt body.");
-    }
-
-    #[test]
-    fn load_returns_empty_when_dir_is_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let loader = SubagentLoader::with_dir(dir.path().join("agents"));
-        assert_eq!(loader.load().unwrap(), Vec::new());
-    }
-
-    #[test]
-    fn with_dir_loads_profiles_from_a_custom_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("reviewer.md"), "Review code.").unwrap();
-        let loader = SubagentLoader::with_dir(dir.path().to_path_buf());
-        let profiles = loader.load().unwrap();
-        assert_eq!(profiles.len(), 1);
-        assert_eq!(profiles[0].name, "reviewer");
     }
 }

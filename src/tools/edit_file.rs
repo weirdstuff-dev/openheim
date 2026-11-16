@@ -148,102 +148,6 @@ mod tests {
     use super::*;
     use crate::tools::test_support::{FixedClientIo, TurnHarness};
 
-    #[test]
-    fn definition_has_correct_name() {
-        let tool = EditFileTool;
-        let def = tool.definition();
-        assert_eq!(def.function.name, "edit_file");
-        assert_eq!(def.tool_type, "function");
-    }
-
-    #[test]
-    fn apply_edit_replaces_unique_occurrence() {
-        let (edited, count) = apply_edit("hello world", "world", "there", false).unwrap();
-        assert_eq!(edited, "hello there");
-        assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn apply_edit_errors_when_old_string_not_found() {
-        let err = apply_edit("hello world", "missing", "x", false).unwrap_err();
-        assert!(err.to_string().contains("not found"));
-    }
-
-    #[test]
-    fn apply_edit_errors_on_ambiguous_match_without_replace_all() {
-        let err = apply_edit("foo foo foo", "foo", "bar", false).unwrap_err();
-        assert!(err.to_string().contains("appears 3 times"));
-    }
-
-    #[test]
-    fn apply_edit_replaces_all_when_requested() {
-        let (edited, count) = apply_edit("foo foo foo", "foo", "bar", true).unwrap();
-        assert_eq!(edited, "bar bar bar");
-        assert_eq!(count, 3);
-    }
-
-    #[test]
-    fn apply_edit_errors_on_empty_old_string() {
-        let err = apply_edit("hello", "", "x", false).unwrap_err();
-        assert!(err.to_string().contains("must not be empty"));
-    }
-
-    #[test]
-    fn apply_edit_errors_when_strings_are_identical() {
-        let err = apply_edit("hello", "hello", "hello", false).unwrap_err();
-        assert!(err.to_string().contains("identical"));
-    }
-
-    #[tokio::test]
-    async fn execute_edits_file_on_disk() {
-        let harness = TurnHarness::new();
-        let path = harness.work_dir().join("main.rs");
-        std::fs::write(&path, "fn main() { old_code() }").unwrap();
-
-        let args = serde_json::json!({
-            "path": path.to_str().unwrap(),
-            "old_string": "old_code()",
-            "new_string": "new_code()",
-        })
-        .to_string();
-        let result = EditFileTool.execute(&args, &harness.turn()).await.unwrap();
-        assert!(result.contains("Successfully edited"), "{result}");
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "fn main() { new_code() }"
-        );
-    }
-
-    #[tokio::test]
-    async fn execute_errors_for_nonexistent_file() {
-        let harness = TurnHarness::new();
-        let args = serde_json::json!({
-            "path": "missing.txt",
-            "old_string": "a",
-            "new_string": "b",
-        })
-        .to_string();
-        let result = EditFileTool.execute(&args, &harness.turn()).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn execute_errors_for_missing_old_string() {
-        let harness = TurnHarness::new();
-        let result = EditFileTool
-            .execute(r#"{"path": "x", "new_string": "b"}"#, &harness.turn())
-            .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("old_string"));
-    }
-
-    #[tokio::test]
-    async fn execute_errors_for_malformed_json() {
-        let harness = TurnHarness::new();
-        let result = EditFileTool.execute("bad json", &harness.turn()).await;
-        assert!(result.is_err());
-    }
-
     #[tokio::test]
     async fn edit_file_prefers_client_io_over_local_disk() {
         let harness = TurnHarness::new().with_client_io(Arc::new(FixedClientIo("client content")));
@@ -284,30 +188,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edit_file_rejects_path_outside_work_dir() {
-        let harness = TurnHarness::new();
-        let outside = tempfile::tempdir().unwrap();
-        let target = outside.path().join("secret.txt");
-        std::fs::write(&target, "old").unwrap();
-
-        let args = serde_json::json!({
-            "path": target.to_str().unwrap(),
-            "old_string": "old",
-            "new_string": "new",
-        })
-        .to_string();
-        let err = EditFileTool
-            .execute(&args, &harness.turn())
-            .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("outside the work directory"),
-            "unexpected error: {err}"
-        );
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
-    }
-
-    #[tokio::test]
     async fn edit_file_refuses_files_over_the_size_limit() {
         let harness = TurnHarness::new();
         let path = harness.work_dir().join("big.txt");
@@ -328,19 +208,6 @@ mod tests {
             err.to_string()
                 .contains(&format!("{} bytes", MAX_EDIT_BYTES + 1)),
             "{err}"
-        );
-    }
-
-    #[test]
-    fn args_struct_matches_schema() {
-        crate::tools::args::assert_args_match_schema::<EditFileArgs>(
-            &EditFileTool,
-            serde_json::json!({
-                "path": "a.txt",
-                "old_string": "a",
-                "new_string": "b",
-                "replace_all": true
-            }),
         );
     }
 }

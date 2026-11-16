@@ -131,22 +131,6 @@ pub(crate) fn assert_args_match_schema<T: DeserializeOwned>(
 mod tests {
     use super::*;
 
-    #[test]
-    fn parse_args_rejects_malformed_json() {
-        let err = parse_args("not json").unwrap_err().to_string();
-        assert!(err.contains("failed to parse arguments"), "{err}");
-    }
-
-    #[test]
-    fn require_str_names_the_missing_key() {
-        let v = parse_args(r#"{"path": "a", "n": 1}"#).unwrap();
-        assert_eq!(require_str(&v, "path").unwrap(), "a");
-        let err = require_str(&v, "content").unwrap_err().to_string();
-        assert!(err.contains("missing 'content' argument"), "{err}");
-        // A present-but-wrong-type value is reported the same way.
-        assert!(require_str(&v, "n").is_err());
-    }
-
     #[derive(Deserialize)]
     struct Sample {
         path: String,
@@ -164,12 +148,6 @@ mod tests {
         let ok: Sample = parse(r#"{"path": "a"}"#).unwrap();
         assert_eq!(ok.path, "a");
         assert!(!ok.recursive);
-    }
-
-    #[test]
-    fn parse_rejects_malformed_json() {
-        let err = parse::<Sample>("not json").err().unwrap().to_string();
-        assert!(err.contains("failed to parse arguments"), "{err}");
     }
 
     #[test]

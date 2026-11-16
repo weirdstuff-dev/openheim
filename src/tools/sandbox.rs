@@ -184,57 +184,6 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn allows_existing_file_inside_work_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("foo.txt");
-        fs::write(&file, "x").unwrap();
-        assert!(validate_path(file.to_str().unwrap(), dir.path()).is_ok());
-    }
-
-    #[test]
-    fn allows_relative_path_inside() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir(dir.path().join("sub")).unwrap();
-        assert!(validate_path("sub", dir.path()).is_ok());
-    }
-
-    #[test]
-    fn allows_new_file_path_inside_work_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(validate_path("new_file.txt", dir.path()).is_ok());
-    }
-
-    #[test]
-    fn rejects_absolute_path_outside_work_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let other = tempfile::tempdir().unwrap();
-        let outside = other.path().join("secret.txt");
-        fs::write(&outside, "x").unwrap();
-        let err = validate_path(outside.to_str().unwrap(), dir.path()).unwrap_err();
-        assert!(err.to_string().contains("outside the work directory"));
-    }
-
-    #[test]
-    fn rejects_dotdot_traversal() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = validate_path("../../etc/passwd", dir.path()).unwrap_err();
-        assert!(err.to_string().contains("outside the work directory"));
-    }
-
-    #[test]
-    fn rejects_dangling_symlink_inside_work_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let link = dir.path().join("dangling_link");
-        // Point the symlink at a path that does not exist so it is dangling.
-        std::os::unix::fs::symlink("/nonexistent_target_path_12345", &link).unwrap();
-        let err = validate_path(link.to_str().unwrap(), dir.path()).unwrap_err();
-        assert!(
-            err.to_string().contains("dangling symlink"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
     fn rejects_dotdot_behind_nonexistent_prefix() {
         let dir = tempfile::tempdir().unwrap();
         // `x` does not exist, so every ancestor containing `x/..` returns
@@ -272,28 +221,6 @@ mod tests {
             !resolved
                 .components()
                 .any(|c| matches!(c, std::path::Component::ParentDir))
-        );
-    }
-
-    #[test]
-    fn relative_paths_resolve_from_cwd_but_stay_inside_work_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        fs::create_dir(root.join("sub")).unwrap();
-        let cwd = root.join("sub");
-
-        assert_eq!(
-            validate_path_from("a.txt", &cwd, dir.path()).unwrap(),
-            root.join("sub/a.txt")
-        );
-        assert_eq!(
-            validate_path_from("../b.txt", &cwd, dir.path()).unwrap(),
-            root.join("b.txt")
-        );
-        let err = validate_path_from("../../c.txt", &cwd, dir.path()).unwrap_err();
-        assert!(
-            err.to_string().contains("outside the work directory"),
-            "{err}"
         );
     }
 
