@@ -250,7 +250,7 @@ println!("session id: {}", session.id());
 
 ### Send a prompt (streaming)
 
-`prompt` runs one turn and calls your callback with each [`StreamEvent`](https://docs.rs/openheim) as the agent works: streamed text and thinking, tool calls and results, `Usage` (context size, live per LLM call), `ContextTrimmed` (older turns left out of the request to fit the context window), and `Finished`. It returns the turn's `StopReason` (`EndTurn`/`MaxIterations`/`MaxTokens`/`Refusal`/`Cancelled`/`NoContent`); `StopReason::notice()` gives a short user-facing line for the abnormal ones.
+`prompt` runs one turn and calls your callback with each [`StreamEvent`](https://docs.rs/openheim) as the agent works: streamed text and thinking, tool calls and results, `Usage` (context size, live per LLM call), `ContextTrimmed` (older turns left out of the request to fit the context window), `ToolOutputsOmitted` (older tool outputs of the turn in progress left out, when that turn alone doesn't fit), and `Finished`. It returns the turn's `StopReason` (`EndTurn`/`MaxIterations`/`MaxTokens`/`Refusal`/`Cancelled`/`NoContent`); `StopReason::notice()` gives a short user-facing line for the abnormal ones.
 
 ```rust
 use openheim::StreamEvent;
@@ -505,6 +505,8 @@ session.acp_replay(&loaded.messages, |update| {
 ```rust
 client.delete_session("550e8400-e29b-41d4-a716-446655440000").await?;
 ```
+
+A turn running on the session is cancelled first, and the delete waits up to 10 seconds for it to end; if it doesn't, the call fails with `Error::SessionBusy` and the session stays. While another `openheim` process runs a turn on it, the call fails with `Error::SessionLocked`.
 
 ---
 

@@ -1273,7 +1273,8 @@ A session starts in `execute` mode at its provider's `effort` setting (see [conf
   "sessionId": "550e8400-e29b-41d4-a716-446655440000",
   "modes": { "currentModeId": "execute", "availableModes": [{ "id": "execute", "name": "Execute" }, { "id": "plan", "name": "Plan" }] },
   "configOptions": [
-    { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "gpt-4-turbo", "options": [ … ] },
+    { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "openai/gpt-4-turbo",
+      "options": [{ "value": "openai/gpt-4-turbo", "name": "gpt-4-turbo", "description": "openai", "_meta": { "provider": "openai" } }, …] },
     { "id": "effort", "name": "Effort", "category": "thought_level", "type": "select", "currentValue": "default",
       "options": [{ "value": "default", "name": "Default" }, { "value": "low", "name": "Low" }, { "value": "medium", "name": "Medium" }, { "value": "high", "name": "High" }] }
   ]
@@ -1293,6 +1294,8 @@ A session starts in `execute` mode at its provider's `effort` setting (see [conf
 { "jsonrpc": "2.0", "id": 8, "method": "session/set_config_option",
   "params": { "sessionId": "550e8400-…", "configId": "effort", "value": "high" } }
 ```
+
+Each `model` option's value is `provider/model`, so a model configured under two providers appears once per provider and either can be picked; its `name` is the model and its `description` the provider. Setting the model also accepts a bare model name, which resolves to the first provider (alphabetically) that lists it. A value that is also a `provider/model` id for a configured provider is read as that id: with provider `anthropic` listing `claude` and provider `router` listing `anthropic/claude`, `anthropic/claude` selects `anthropic`, and `router`'s model is selected with `router/anthropic/claude`.
 
 The `session/set_config_option` response's `configOptions` holds both selectors at their new values; switching the model can change the effort level too, when the session never set one. An unknown mode, config option or value is an `-32602` error.
 
@@ -2185,7 +2188,7 @@ Except for `session_busy` / `session_locked` / `http_error`, `data` is a human-r
 ### Connection Lifecycle
 
 - The WebSocket stays open until the client disconnects or sends a `Close` frame.
-- If the server shuts down (SIGINT), it drains gracefully.
+- On SIGINT or SIGTERM the server shuts down gracefully: it stops accepting connections, cancels the turns in flight and gives them up to 5 seconds to end. A turn that ends in time releases its session lock. In `openheim serve`, a turn still running after that is dropped as the process exits, which releases its lock too; an embedder calling `transport::ws::serve` keeps such a turn, and its lock, until the turn ends or its runtime is dropped.
 - If the connection drops, the client should reconnect and re-initialize (call `initialize`, then either `session/new` for a fresh session or `session/load` to resume an existing one).
 - Conversation history is persisted to disk — sessions survive WebSocket reconnections and server restarts.
 

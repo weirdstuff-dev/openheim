@@ -37,7 +37,7 @@ tui = ["dep:crossterm", "dep:ratatui", "dep:unicode-width", "dep:unicode-segment
 # Agent Client Protocol (`openheim::acp`, `openheim::transport::{run,stdio,ws}`).
 acp = ["dep:agent-client-protocol"]
 # WebSocket/REST server (`openheim::transport::ws`). `tokio/signal` backs the
-# ctrl-c shutdown handler; nothing outside this feature needs it.
+# Ctrl-C/SIGTERM shutdown handler; nothing outside this feature needs it.
 server = ["dep:axum", "dep:notify", "dep:tower-http", "dep:walkdir", "acp", "tokio/signal"]
 # Tool-driven long-term memory (`openheim::rag`: `remember`, `search_memory`,
 # `forget`): bundled SQLite with FTS5 + the sqlite-vec extension.
@@ -78,6 +78,10 @@ sqlite-vec = { version = "0.1.9", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal", "hostname"] }
+
+# `proc_pidinfo`, for a session lease holder's process start time.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

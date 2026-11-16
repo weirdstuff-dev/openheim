@@ -204,8 +204,33 @@ pub(crate) enum FsResponse {
     Error { message: String },
 }
 
-/// Serves `client` over HTTP and WebSocket until Ctrl-C, then shuts down
-/// gracefully.
+/// How long [`serve`] waits, once it stops accepting connections, for the
+/// turns it cancelled to end.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// Resolves on Ctrl-C or, on Unix, SIGTERM (how Docker, systemd and
+/// Kubernetes stop a service).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut terminate) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+/// Serves `client` over HTTP and WebSocket until Ctrl-C or SIGTERM, then
+/// shuts down gracefully: stops accepting connections, cancels the turns
+/// in flight and waits up to 5 seconds for them to end, so their session
+/// leases are released and their shell commands killed. A turn still
+/// running after that keeps its lease until it ends or the runtime it runs
+/// on is dropped (as `openheim serve` does on returning).
 pub async fn serve(client: OpenheimClient, host: String, port: u16) -> crate::error::Result<()> {
     let state = client.state().clone();
 
@@ -225,7 +250,7 @@ pub async fn serve(client: OpenheimClient, host: String, port: u16) -> crate::er
         .route("/api/sessions", get(sessions_handler))
         .route("/api/sessions/{id}", get(session_handler))
         .layer(cors)
-        .with_state(state);
+        .with_state(state.clone());
 
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -237,12 +262,15 @@ pub async fn serve(client: OpenheimClient, host: String, port: u16) -> crate::er
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+            shutdown_signal().await;
             tracing::info!("Shutdown signal received");
         })
         .await
         .map_err(|e| crate::error::Error::Other(format!("Server error: {e}")))?;
 
+    // WebSocket connections outlive the HTTP server (they're upgraded off
+    // it), so their turns are ended here.
+    state.shutdown(SHUTDOWN_GRACE).await;
     Ok(())
 }
 

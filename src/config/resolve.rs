@@ -1,6 +1,36 @@
 use super::types::{AgentConfig, AppConfig, EmbeddingConfig, ProviderConfig, ProviderKind};
 use crate::error::{Error, Result};
 
+/// Whether `url`'s host is this machine: `localhost`, `127.0.0.0/8` or
+/// `::1`, judged as written, without a DNS lookup. Requests there are sent
+/// directly, never through a proxy (see `config::client`), so they don't
+/// leave the machine.
+pub(crate) fn is_loopback_url(url: &str) -> bool {
+    let Some(host) = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+    else {
+        return false;
+    };
+    // IPv6 literals come bracketed: `[::1]`.
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Whether `url` is plain `http://` to a host off this machine, where
+/// credentials would cross the network unencrypted. Loopback
+/// ([`is_loopback_url`]) never leaves the machine, so a key may go there
+/// over `http://`, as local model servers and proxies expect.
+pub(crate) fn is_insecure_remote_http(url: &str) -> bool {
+    match reqwest::Url::parse(url) {
+        Ok(parsed) => parsed.scheme() == "http" && !is_loopback_url(url),
+        Err(_) => url.starts_with("http://"),
+    }
+}
+
 fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<()> {
     if provider.api_base.is_empty() {
         return Err(Error::config(format!(
@@ -14,11 +44,11 @@ fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<()> {
             name, provider.api_base
         )));
     }
-    if provider.api_base.starts_with("http://") && !provider.resolve_api_key().is_empty() {
+    if is_insecure_remote_http(&provider.api_base) && !provider.resolve_api_key().is_empty() {
         return Err(Error::config(format!(
-            "Provider '{}' api_base '{}' uses http:// but has an API key configured; \
-             credentials must not be sent over an unencrypted connection. Use https:// \
-             or drop the API key for keyless local endpoints",
+            "Provider '{}' api_base '{}' uses http:// to a non-loopback host but has an API \
+             key configured; credentials must not be sent over an unencrypted connection. \
+             Use https://, or drop the API key for keyless endpoints",
             name, provider.api_base
         )));
     }
@@ -257,6 +287,43 @@ mod tests {
         let err = validate_provider("test", &p).unwrap_err();
         assert!(err.to_string().contains("http://"));
         assert!(err.to_string().contains("API key"));
+    }
+
+    // A key sent to this machine over http:// never crosses the network,
+    // as with a local proxy or model server that wants one.
+    #[test]
+    fn validate_allows_http_api_base_with_api_key_on_loopback() {
+        for base in [
+            "http://localhost:8080/v1",
+            "http://LOCALHOST/v1",
+            "http://127.0.0.1:4000",
+            "http://127.1.2.3/v1",
+            "http://[::1]:8080/v1",
+        ] {
+            let p = provider_with_base(base);
+            assert!(validate_provider("test", &p).is_ok(), "{base}");
+        }
+    }
+
+    #[test]
+    fn only_plain_http_off_this_machine_is_insecure() {
+        for url in [
+            "http://example.com",
+            "http://192.168.1.10:8080",
+            "http://localhost.example.com",
+            "http://[::2]",
+            "http://0.0.0.0:8080",
+        ] {
+            assert!(is_insecure_remote_http(url), "{url}");
+        }
+        for url in [
+            "https://example.com",
+            "http://localhost",
+            "http://127.0.0.1",
+            "http://[::1]",
+        ] {
+            assert!(!is_insecure_remote_http(url), "{url}");
+        }
     }
 
     #[test]

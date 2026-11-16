@@ -57,19 +57,45 @@ pub(super) fn session_effort_config_option(current: Effort) -> SessionConfigOpti
 /// Every config option a session offers, at its current values.
 pub(super) fn session_config_options(
     app_config: &AppConfig,
+    current_provider: &str,
     current_model: &str,
     current_effort: Effort,
 ) -> Vec<SessionConfigOption> {
     vec![
-        session_model_config_option(app_config, current_model),
+        session_model_config_option(app_config, current_provider, current_model),
         session_effort_config_option(current_effort),
     ]
 }
 
-/// The model selector config option: every configured model, each tagged
-/// with its `provider` in `_meta`.
+/// The model selector's value id for `model` under `provider`:
+/// `provider/model`, so a model listed under two providers gets two
+/// distinct options.
+pub(super) fn model_option_id(provider: &str, model: &str) -> String {
+    format!("{provider}/{model}")
+}
+
+/// The `(provider, model)` a [`model_option_id`] names, if `id` is one for
+/// a configured provider and one of its models. Matched against the config
+/// rather than split, since model names may contain `/` themselves.
+pub(super) fn parse_model_option_id<'a>(
+    app_config: &'a AppConfig,
+    id: &'a str,
+) -> Option<(&'a str, &'a str)> {
+    app_config.providers.iter().find_map(|(name, p)| {
+        let model = id.strip_prefix(name.as_str())?.strip_prefix('/')?;
+        p.models
+            .iter()
+            .any(|m| m == model)
+            .then_some((name.as_str(), model))
+    })
+}
+
+/// The model selector config option: every configured model, with value id
+/// [`model_option_id`], named after the model, and described and tagged in
+/// `_meta` with its `provider`.
 pub(super) fn session_model_config_option(
     app_config: &AppConfig,
+    current_provider: &str,
     current_model: &str,
 ) -> SessionConfigOption {
     let available_models: Vec<SessionConfigSelectOption> = app_config
@@ -82,14 +108,16 @@ pub(super) fn session_model_config_option(
                     "provider".to_string(),
                     serde_json::Value::String(provider_name.clone()),
                 );
-                SessionConfigSelectOption::new(m.clone(), m.clone()).meta(meta)
+                SessionConfigSelectOption::new(model_option_id(provider_name, m), m.clone())
+                    .description(provider_name.clone())
+                    .meta(meta)
             })
         })
         .collect();
     SessionConfigOption::select(
         MODEL_CONFIG_ID,
         "Model",
-        current_model.to_string(),
+        model_option_id(current_provider, current_model),
         available_models,
     )
     .category(SessionConfigOptionCategory::Model)
@@ -290,11 +318,12 @@ pub(super) fn raw_input(
 
 /// Maps one core [`StreamEvent`] from a live turn onto the [`SessionUpdate`]
 /// it corresponds to, if any. `IterationStart`, `Usage`, `ContextTrimmed`,
-/// `Finished`, and `MessageAppended` have no ACP wire equivalent — they're
-/// `AgentState`-internal or ACP-client-facing-nothing signals (history
-/// persistence, context-size bookkeeping, turn-done) — and map to `None`.
-/// `ContextTrimmed` isn't sent as agent text either: the client would keep
-/// it as part of the model's reply.
+/// `ToolOutputsOmitted`, `Finished`, and `MessageAppended` have no ACP wire
+/// equivalent — they're `AgentState`-internal or ACP-client-facing-nothing
+/// signals (history persistence, context-size bookkeeping, turn-done) — and
+/// map to `None`. `ContextTrimmed` and `ToolOutputsOmitted` aren't sent as
+/// agent text either: the client would keep them as part of the model's
+/// reply.
 pub(crate) fn stream_event_to_session_update(
     event: StreamEvent,
     executor: &dyn ToolExecutor,
@@ -343,6 +372,7 @@ pub(crate) fn stream_event_to_session_update(
         StreamEvent::IterationStart { .. }
         | StreamEvent::Usage { .. }
         | StreamEvent::ContextTrimmed { .. }
+        | StreamEvent::ToolOutputsOmitted { .. }
         | StreamEvent::Finished { .. }
         | StreamEvent::MessageAppended { .. } => None,
     }
@@ -650,5 +680,81 @@ mod stream_event_tests {
             )
             .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod model_option_tests {
+    use super::*;
+    use crate::config::ProviderConfig;
+
+    /// `gpt-4o` under two providers, plus a model whose name has a `/`.
+    fn app_config() -> AppConfig {
+        let mut config = AppConfig::new("openai");
+        config.providers.insert(
+            "openai".to_string(),
+            ProviderConfig::for_tests("https://example.com", &["gpt-4o"]),
+        );
+        config.providers.insert(
+            "openrouter".to_string(),
+            ProviderConfig::for_tests("https://example.com", &["gpt-4o", "openai/gpt-4o"]),
+        );
+        config
+    }
+
+    /// The option's `currentValue` and its options' value ids.
+    fn values(option: &SessionConfigOption) -> (String, Vec<String>) {
+        let json = serde_json::to_value(option).unwrap();
+        let ids = json["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["value"].as_str().unwrap().to_string())
+            .collect();
+        (json["currentValue"].as_str().unwrap().to_string(), ids)
+    }
+
+    #[test]
+    fn a_model_under_two_providers_gets_two_options() {
+        let config = app_config();
+        let option = session_model_config_option(&config, "openrouter", "gpt-4o");
+        let (current, ids) = values(&option);
+        assert_eq!(current, "openrouter/gpt-4o");
+        assert_eq!(
+            ids,
+            [
+                "openai/gpt-4o",
+                "openrouter/gpt-4o",
+                "openrouter/openai/gpt-4o"
+            ]
+        );
+    }
+
+    #[test]
+    fn every_option_id_parses_back_to_its_provider_and_model() {
+        let config = app_config();
+        let (_, ids) = values(&session_model_config_option(&config, "openai", "gpt-4o"));
+        let parsed: Vec<_> = ids
+            .iter()
+            .map(|id| parse_model_option_id(&config, id).unwrap())
+            .collect();
+        assert_eq!(
+            parsed,
+            [
+                ("openai", "gpt-4o"),
+                ("openrouter", "gpt-4o"),
+                ("openrouter", "openai/gpt-4o"),
+            ]
+        );
+    }
+
+    // Left to name-based resolution: a bare model name, or a provider or
+    // model that isn't configured.
+    #[test]
+    fn other_values_are_not_option_ids() {
+        let config = app_config();
+        for value in ["gpt-4o", "nope/gpt-4o", "openai/nope", "openai/"] {
+            assert_eq!(parse_model_option_id(&config, value), None, "{value}");
+        }
     }
 }
