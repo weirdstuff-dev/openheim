@@ -250,7 +250,7 @@ println!("session id: {}", session.id());
 
 ### Send a prompt (streaming)
 
-`prompt` runs one turn and calls your callback with each [`StreamEvent`](https://docs.rs/openheim) as the agent works: streamed text and thinking, tool calls and results, `Usage` (context size, live per LLM call), `ContextTrimmed` (older turns left out of the request to fit the context window), and `Finished`. It returns the turn's `StopReason` (`EndTurn`/`MaxIterations`/`MaxTokens`/`Refusal`/`Cancelled`/`NoContent`); `StopReason::notice()` gives a short user-facing line for the abnormal ones.
+`prompt` runs one turn and calls your callback with each [`StreamEvent`](https://docs.rs/openheim) as the agent works: streamed text and thinking, tool calls and results, `Usage` (context size, live per LLM call), `ContextTrimmed` (older turns left out of the request to fit the context window), `ToolOutputsOmitted` (older tool outputs of the turn in progress left out, when that turn alone doesn't fit), and `Finished`. It returns the turn's `StopReason` (`EndTurn`/`MaxIterations`/`MaxTokens`/`Refusal`/`Cancelled`/`NoContent`); `StopReason::notice()` gives a short user-facing line for the abnormal ones.
 
 ```rust
 use openheim::StreamEvent;
