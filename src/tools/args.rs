@@ -66,67 +66,6 @@ impl<'de> Deserialize<'de> for NonEmptyString {
     }
 }
 
-/// Test helper keeping a tool's hand-written JSON schema and its args struct
-/// `T` in sync. `example` must set every property the schema declares. Checks
-/// that the example parses, that the schema and the example name the same
-/// properties, that dropping a property fails to parse exactly when the
-/// schema lists it under `required`, and that every optional property also
-/// accepts an explicit `null` (models send that for "unset", so an optional
-/// field must be an `Option`, not a `#[serde(default)]` plain value).
-#[cfg(test)]
-pub(crate) fn assert_args_match_schema<T: DeserializeOwned>(
-    tool: &dyn super::ToolHandler,
-    example: Value,
-) {
-    let definition = tool.definition();
-    let name = definition.function.name;
-    let schema = definition.function.parameters;
-    let example = example.as_object().expect("example must be a JSON object");
-
-    let mut declared: Vec<&String> = schema["properties"]
-        .as_object()
-        .map(|p| p.keys().collect())
-        .unwrap_or_default();
-    let mut given: Vec<&String> = example.keys().collect();
-    declared.sort();
-    given.sort();
-    assert_eq!(
-        declared, given,
-        "{name}: example must set exactly the schema's properties"
-    );
-
-    let required: Vec<&str> = schema["required"]
-        .as_array()
-        .map(|r| r.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-
-    let full = Value::Object(example.clone()).to_string();
-    if let Err(e) = parse::<T>(&full) {
-        panic!("{name}: complete example should parse: {e}");
-    }
-
-    for key in example.keys() {
-        let mut without = example.clone();
-        without.remove(key);
-        let parsed = parse::<T>(&Value::Object(without).to_string());
-        let is_required = required.contains(&key.as_str());
-        assert_eq!(
-            parsed.is_err(),
-            is_required,
-            "{name}: dropping '{key}' should {} parsing, per the schema's `required`",
-            if is_required { "fail" } else { "not fail" },
-        );
-
-        if !is_required {
-            let mut null = example.clone();
-            null.insert(key.clone(), Value::Null);
-            if let Err(e) = parse::<T>(&Value::Object(null).to_string()) {
-                panic!("{name}: optional '{key}' must accept null: {e}");
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

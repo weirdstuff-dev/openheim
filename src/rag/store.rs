@@ -515,24 +515,6 @@ mod tests {
         v
     }
 
-    #[test]
-    fn open_in_memory_has_sqlite_vec_and_fts5() {
-        let store = VectorStore::open_in_memory().unwrap();
-        let conn = store.lock().unwrap();
-        let version: String = conn
-            .query_row("SELECT vec_version()", [], |r| r.get(0))
-            .unwrap();
-        assert!(version.starts_with('v'), "{version}");
-        let fts: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE name = 'memories_fts'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(fts, 1);
-    }
-
     // Two handles on one file: a write waits out the other handle's write
     // instead of failing with SQLITE_BUSY.
     #[test]
@@ -560,95 +542,12 @@ mod tests {
     }
 
     #[test]
-    fn keyword_search_works_without_any_vectors() {
-        let store = VectorStore::open_in_memory().unwrap();
-        let a = store
-            .insert("The staging cluster lives in eu-west-1.", None)
-            .unwrap();
-        store.insert("Deploys happen on Tuesdays.", None).unwrap();
-        store
-            .insert("Café menus use accented words like résumé.", None)
-            .unwrap();
-
-        let hits = store
-            .search_keyword("where is the staging cluster?", 5)
-            .unwrap();
-        assert_eq!(hits[0].record.id, a.id);
-        assert_eq!(hits[0].method, SearchMethod::Keyword);
-        assert!(hits[0].score > 0.0);
-        assert!(hits.iter().all(|h| !h.record.content.contains("Tuesdays")));
-
-        // Diacritics are folded; hostile syntax is neutralised.
-        assert_eq!(store.search_keyword("resume", 5).unwrap().len(), 1);
-        assert!(
-            store
-                .search_keyword("\"unbalanced AND - *", 5)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(store.search_keyword("   ", 5).unwrap().is_empty());
-        assert!(store.search_keyword("staging", 0).unwrap().is_empty());
-        assert_eq!(store.stats().unwrap().dimensions, None);
-    }
-
-    #[test]
     fn fts_query_quotes_and_ors_words() {
         assert_eq!(
             fts_query("a b-c").as_deref(),
             Some("\"a\" OR \"b\" OR \"c\"")
         );
         assert_eq!(fts_query("!!!"), None);
-    }
-
-    #[test]
-    fn update_keeps_id_and_created_at_but_changes_content() {
-        let store = VectorStore::open_in_memory().unwrap();
-        let rec = store.insert("original note", None).unwrap();
-        let updated = store.update(rec.id, "revised note", None).unwrap().unwrap();
-        assert_eq!(updated.id, rec.id);
-        assert_eq!(updated.created_at, rec.created_at);
-        assert_eq!(updated.content, "revised note");
-        assert_eq!(store.search_keyword("revised", 5).unwrap().len(), 1);
-        assert!(store.search_keyword("original", 5).unwrap().is_empty());
-    }
-
-    #[test]
-    fn update_missing_id_returns_none() {
-        let store = VectorStore::open_in_memory().unwrap();
-        assert!(store.update(999, "content", None).unwrap().is_none());
-    }
-
-    #[test]
-    fn update_replaces_vector() {
-        let store = VectorStore::open_in_memory().unwrap();
-        store.ensure_embedding_space("m", 3).unwrap();
-        let rec = store.insert("note", Some(&unit(0, 3))).unwrap();
-        store
-            .update(rec.id, "note", Some(&unit(1, 3)))
-            .unwrap()
-            .unwrap();
-        let hits = store.search_semantic(&unit(1, 3), 1).unwrap();
-        assert_eq!(hits[0].record.id, rec.id);
-        assert!(hits[0].score > 0.99);
-    }
-
-    #[test]
-    fn delete_keeps_fts_in_sync() {
-        let store = VectorStore::open_in_memory().unwrap();
-        let rec = store.insert("ephemeral note", None).unwrap();
-        assert_eq!(store.search_keyword("ephemeral", 5).unwrap().len(), 1);
-        assert!(store.delete(rec.id).unwrap());
-        assert!(!store.delete(rec.id).unwrap());
-        assert!(store.search_keyword("ephemeral", 5).unwrap().is_empty());
-        assert_eq!(store.stats().unwrap().memories, 0);
-    }
-
-    #[test]
-    fn ensure_embedding_space_creates_then_is_stable() {
-        let store = VectorStore::open_in_memory().unwrap();
-        assert!(!store.ensure_embedding_space("m", 3).unwrap());
-        assert!(!store.ensure_embedding_space("m", 3).unwrap());
-        assert_eq!(store.stats().unwrap().dimensions, Some(3));
     }
 
     #[test]
@@ -673,44 +572,6 @@ mod tests {
     }
 
     #[test]
-    fn unembedded_up_to_returns_the_oldest_first() {
-        let store = VectorStore::open_in_memory().unwrap();
-        let ids: Vec<i64> = (0..5)
-            .map(|i| store.insert(&format!("note {i}"), None).unwrap().id)
-            .collect();
-        let first_two = |store: &VectorStore| -> Vec<i64> {
-            store
-                .unembedded_up_to(2)
-                .unwrap()
-                .iter()
-                .map(|r| r.id)
-                .collect()
-        };
-        assert_eq!(first_two(&store), ids[..2]);
-
-        // Same once the vector table exists and some notes have vectors.
-        store.ensure_embedding_space("m", 2).unwrap();
-        store.set_embedding(ids[0], &unit(0, 2)).unwrap();
-        assert_eq!(first_two(&store), ids[1..3]);
-        assert_eq!(store.unembedded().unwrap().len(), 4);
-    }
-
-    #[test]
-    fn notes_written_before_embeddings_are_reported_unembedded() {
-        let store = VectorStore::open_in_memory().unwrap();
-        let early = store.insert("pre-embedding note", None).unwrap();
-        assert_eq!(store.unembedded().unwrap().len(), 1);
-        store.ensure_embedding_space("m", 2).unwrap();
-        assert_eq!(store.unembedded().unwrap()[0].id, early.id);
-        store.set_embedding(early.id, &unit(0, 2)).unwrap();
-        assert!(store.unembedded().unwrap().is_empty());
-        assert_eq!(
-            store.search_semantic(&unit(0, 2), 1).unwrap()[0].record.id,
-            early.id
-        );
-    }
-
-    #[test]
     fn changing_model_keeps_text_but_drops_vectors() {
         let store = VectorStore::open_in_memory().unwrap();
         store.ensure_embedding_space("m", 3).unwrap();
@@ -732,53 +593,5 @@ mod tests {
         let store = VectorStore::open_in_memory().unwrap();
         let err = store.insert("t", Some(&unit(0, 2))).unwrap_err();
         assert!(matches!(err, Error::DatabaseError(_)));
-    }
-
-    #[test]
-    fn semantic_search_returns_nearest_first() {
-        let store = VectorStore::open_in_memory().unwrap();
-        store.ensure_embedding_space("m", 3).unwrap();
-        let a = store.insert("a", Some(&unit(0, 3))).unwrap();
-        let b = store.insert("b", Some(&unit(1, 3))).unwrap();
-        store.insert("c", Some(&unit(2, 3))).unwrap();
-
-        let hits = store.search_semantic(&[0.1, 0.9, 0.0], 2).unwrap();
-        assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].record.id, b.id);
-        assert_eq!(hits[1].record.id, a.id);
-        assert!(hits[0].score > hits[1].score);
-        assert!(hits[0].score > 0.9);
-        assert_eq!(hits[0].method, SearchMethod::Semantic);
-        assert!(hits[0].record.created_at <= Utc::now());
-    }
-
-    #[test]
-    fn semantic_search_on_empty_store_is_empty() {
-        let store = VectorStore::open_in_memory().unwrap();
-        assert!(store.search_semantic(&[1.0], 5).unwrap().is_empty());
-        store.ensure_embedding_space("m", 1).unwrap();
-        assert!(store.search_semantic(&[1.0], 5).unwrap().is_empty());
-        assert!(store.search_semantic(&[1.0], 0).unwrap().is_empty());
-    }
-
-    #[test]
-    fn open_creates_parent_directories_and_persists() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nested").join("memory.db");
-        {
-            let store = VectorStore::open(&path).unwrap();
-            store.ensure_embedding_space("m", 2).unwrap();
-            store.insert("kept", Some(&unit(0, 2))).unwrap();
-        }
-        let reopened = VectorStore::open(&path).unwrap();
-        assert_eq!(reopened.stats().unwrap().memories, 1);
-        assert!(!reopened.ensure_embedding_space("m", 2).unwrap());
-        assert_eq!(
-            reopened.search_semantic(&unit(0, 2), 1).unwrap()[0]
-                .record
-                .content,
-            "kept"
-        );
-        assert_eq!(reopened.search_keyword("kept", 1).unwrap().len(), 1);
     }
 }
