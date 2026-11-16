@@ -82,50 +82,66 @@ impl Wire {
 
 /// An ACP client over stdio (`openheim acp`) or WebSocket (`/acp`). It
 /// answers permission requests with `permission` (an option kind such as
-/// `allow_once` or `reject_once`) and keeps every notification.
+/// `allow_once` or `reject_once`) and keeps every notification. With the
+/// `fs` capability it serves `fs/*` requests from `files`, its open
+/// editor buffers keyed by absolute path.
 pub struct Acp {
     wire: Wire,
     next_id: u64,
     pub permission: &'static str,
     pub notifications: Vec<Value>,
     pub permission_requests: Vec<Value>,
+    pub files: std::collections::HashMap<String, String>,
     _child: Child,
 }
 
 impl Acp {
     pub async fn stdio(env: &Env) -> Self {
+        Self::stdio_with(env, json!({})).await
+    }
+
+    /// `openheim acp`, initialized with `capabilities`.
+    pub async fn stdio_with(env: &Env, capabilities: Value) -> Self {
         let mut child = openheim(env, &["acp"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .unwrap();
         let stdin = child.stdin.take().unwrap();
         let lines = BufReader::new(child.stdout.take().unwrap()).lines();
-        Self::new(Wire::Stdio { stdin, lines }, child).await
+        Self::new(Wire::Stdio { stdin, lines }, child, capabilities).await
     }
 
     pub async fn ws(server: Server) -> Self {
         let url = format!("ws://{}/acp", server.addr);
         let (ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
-        Self::new(Wire::Ws(Box::new(ws)), server.child).await
+        Self::new(Wire::Ws(Box::new(ws)), server.child, json!({})).await
     }
 
-    async fn new(wire: Wire, child: Child) -> Self {
+    async fn new(wire: Wire, child: Child, capabilities: Value) -> Self {
         let mut acp = Self {
             wire,
             next_id: 0,
             permission: "allow_once",
             notifications: vec![],
             permission_requests: vec![],
+            files: Default::default(),
             _child: child,
         };
         acp.call(
             "initialize",
-            json!({"protocolVersion": 1, "clientCapabilities": {}}),
+            json!({"protocolVersion": 1, "clientCapabilities": capabilities}),
         )
         .await
         .unwrap();
         acp
+    }
+
+    /// Sends a notification.
+    pub async fn notify(&mut self, method: &str, params: Value) {
+        let msg = json!({"jsonrpc": "2.0", "method": method, "params": params});
+        self.wire.send(&msg).await;
     }
 
     /// Sends a request without waiting for its response; returns its id.
@@ -173,6 +189,24 @@ impl Acp {
                 let id = option["optionId"].clone();
                 self.permission_requests.push(req["params"].clone());
                 json!({"outcome": {"outcome": "selected", "optionId": id}})
+            }
+            "fs/read_text_file" => {
+                let path = req["params"]["path"].as_str().unwrap();
+                match self.files.get(path) {
+                    Some(content) => json!({"content": content}),
+                    None => {
+                        let error = json!({"code": -32002, "message": "not open"});
+                        let reply = json!({"jsonrpc": "2.0", "id": req["id"], "error": error});
+                        return self.wire.send(&reply).await;
+                    }
+                }
+            }
+            "fs/write_text_file" => {
+                let params = &req["params"];
+                let path = params["path"].as_str().unwrap().to_string();
+                self.files
+                    .insert(path, params["content"].as_str().unwrap().into());
+                json!({})
             }
             other => panic!("unexpected agent request {other}"),
         };
@@ -231,6 +265,7 @@ impl Server {
             env,
             &["serve", "--host", "127.0.0.1", "--port", &port.to_string()],
         )
+        .stderr(Stdio::null())
         .spawn()
         .unwrap();
         let addr = format!("127.0.0.1:{port}");
@@ -255,5 +290,67 @@ impl Server {
             .json()
             .await
             .unwrap()
+    }
+
+    /// Opens `/ws`, the enveloped agent + fs socket.
+    pub async fn ws(&self) -> Ws {
+        let url = format!("ws://{}/ws", self.addr);
+        let (ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        Ws {
+            wire: Wire::Ws(Box::new(ws)),
+            next_id: 0,
+            unsolicited: vec![],
+        }
+    }
+}
+
+/// A `/ws` client. Fs messages without an id (the greeting, watcher
+/// events) are kept in `unsolicited`.
+pub struct Ws {
+    wire: Wire,
+    next_id: u64,
+    pub unsolicited: Vec<Value>,
+}
+
+impl Ws {
+    pub async fn send(&mut self, msg: Value) {
+        self.wire.send(&msg).await;
+    }
+
+    /// The next message on `channel`.
+    pub async fn recv(&mut self, channel: &str) -> Value {
+        loop {
+            let msg = self.wire.recv().await;
+            if msg["channel"] == channel {
+                return msg["data"].clone();
+            }
+        }
+    }
+
+    /// Sends fs request `req` and returns its reply.
+    pub async fn fs(&mut self, mut req: Value) -> Value {
+        self.next_id += 1;
+        req["id"] = json!(self.next_id);
+        self.send(json!({"channel": "fs", "data": req})).await;
+        loop {
+            let data = self.recv("fs").await;
+            if data["id"] == json!(self.next_id) {
+                return data;
+            }
+            self.unsolicited.push(data);
+        }
+    }
+
+    /// Waits for an unsolicited fs message of `kind`.
+    pub async fn event(&mut self, kind: &str) -> Value {
+        if let Some(i) = self.unsolicited.iter().position(|m| m["type"] == kind) {
+            return self.unsolicited.remove(i);
+        }
+        loop {
+            let data = self.recv("fs").await;
+            if data["type"] == kind && data.get("id").is_none() {
+                return data;
+            }
+        }
     }
 }

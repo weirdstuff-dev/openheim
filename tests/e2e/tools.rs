@@ -218,8 +218,10 @@ async fn execute_command_runs_in_the_session_cwd_and_reports_failure() {
         )
         .await;
     assert!(failed.contains("partial"), "{failed}");
-    let big = env
-        .err(
+    // Whether the writer dies of the closed pipe or finishes first is a
+    // race, so only the cut is checked, not the exit status.
+    let (big, _) = env
+        .call(
             "execute_command",
             json!({"command": "printf '%0100000d' 0"}),
         )
