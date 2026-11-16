@@ -331,19 +331,19 @@ client.switch_model(session.id(), "openai", "gpt-4o").await?;
 
 ### Mode and effort level
 
-A session runs in a mode, `AgentMode::Code` (every tool) or `AgentMode::Architect` (read-only tools only), at an `Effort` level: `Default` sends no effort parameters so the provider's own default applies, and `Low`/`Medium`/`High` set the provider's effort (see `effort` in [configuration](configuration.md#providersname)). Set either when starting the session or at any point after; the next prompt uses them, and both are saved with the conversation and restored by `resume_session`. An effort level set on a session stays through model switches; otherwise the session follows its provider's `effort`.
+A session runs in a mode, `AgentMode::Execute` (every tool) or `AgentMode::Plan` (read-only tools only), at an `Effort` level: `Default` sends no effort parameters so the provider's own default applies, and `Low`/`Medium`/`High` set the provider's effort (see `effort` in [configuration](configuration.md#providersname)). Set either when starting the session or at any point after; the next prompt uses them, and both are saved with the conversation and restored by `resume_session`. An effort level set on a session stays through model switches; otherwise the session follows its provider's `effort`.
 
 ```rust
 use openheim::{AgentMode, Effort};
 
 let session = client
     .new_session()
-    .mode(AgentMode::Architect)
+    .mode(AgentMode::Plan)
     .effort(Effort::High)
     .start()
     .await?;
 
-session.set_mode(AgentMode::Code).await?;
+session.set_mode(AgentMode::Execute).await?;
 session.set_effort(Effort::Low).await?;
 client.set_session_effort(session.id(), Effort::Medium).await?;
 
