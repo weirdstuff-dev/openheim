@@ -3,6 +3,7 @@
 
 mod agent;
 mod common;
+mod config;
 mod providers;
 mod rag;
 mod sessions;
