@@ -92,7 +92,7 @@ pub struct Acp {
     pub notifications: Vec<Value>,
     pub permission_requests: Vec<Value>,
     pub files: std::collections::HashMap<String, String>,
-    _child: Child,
+    child: Child,
 }
 
 impl Acp {
@@ -127,7 +127,7 @@ impl Acp {
             notifications: vec![],
             permission_requests: vec![],
             files: Default::default(),
-            _child: child,
+            child,
         };
         acp.call(
             "initialize",
@@ -136,6 +136,12 @@ impl Acp {
         .await
         .unwrap();
         acp
+    }
+
+    /// Kills the agent process and waits until it's reaped, so its pid is
+    /// dead from then on.
+    pub async fn kill(mut self) {
+        self.child.kill().await.unwrap();
     }
 
     /// Sends a notification.
@@ -256,29 +262,58 @@ pub struct Server {
 }
 
 impl Server {
+    /// The port is picked by binding port 0 and freeing it, so another
+    /// listener in this test binary can take it before `serve` binds. The
+    /// server only counts as up once it answers as one (`/api/models`
+    /// listing the env's models); if it exits because the port was taken,
+    /// it's started again on a new one.
     pub async fn start(env: &Env) -> Self {
-        let port = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
-        };
-        let child = openheim(
-            env,
-            &["serve", "--host", "127.0.0.1", "--port", &port.to_string()],
-        )
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-        let addr = format!("127.0.0.1:{port}");
-        let server = Self { addr, child };
-        let deadline = tokio::time::Instant::now() + TIMEOUT;
-        while TcpStream::connect(&server.addr).await.is_err() {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "serve never came up"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        // Its log goes to a file, quoted if it fails.
+        let log = env.data().join("serve.log");
+        let read_log = || std::fs::read_to_string(&log).unwrap_or_default();
+        for _ in 0..3 {
+            let port = {
+                let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                l.local_addr().unwrap().port()
+            };
+            let port_arg = port.to_string();
+            let child = openheim(env, &["serve", "--host", "127.0.0.1", "--port", &port_arg])
+                .stderr(std::fs::File::create(&log).unwrap())
+                .spawn()
+                .unwrap();
+            let mut server = Self {
+                addr: format!("127.0.0.1:{port}"),
+                child,
+            };
+            let deadline = tokio::time::Instant::now() + TIMEOUT;
+            loop {
+                if server.is_ours().await {
+                    return server;
+                }
+                if let Some(status) = server.child.try_wait().unwrap() {
+                    if read_log().contains("Failed to bind") {
+                        break;
+                    }
+                    panic!("serve exited with {status}:\n{}", read_log());
+                }
+                if tokio::time::Instant::now() > deadline {
+                    panic!("serve never came up:\n{}", read_log());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
         }
-        server
+        panic!("serve couldn't get a free port:\n{}", read_log());
+    }
+
+    async fn is_ours(&self) -> bool {
+        let Ok(response) = reqwest::get(format!("http://{}/api/models", self.addr)).await else {
+            return false;
+        };
+        response.status().is_success()
+            && response
+                .text()
+                .await
+                .is_ok_and(|body| body.contains("fake-model-2"))
     }
 
     pub async fn get(&self, path: &str) -> Value {

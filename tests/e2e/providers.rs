@@ -132,13 +132,30 @@ async fn thinking_is_streamed_and_signed_thinking_replayed_in_the_tool_loop() {
                 |e| matches!(e, StreamEvent::ThinkingContent { content } if content == "pondering")
             ));
         }
-        assert!(sent(&env, 1).contains("sig"), "{kind:?}: not replayed");
+        let requests = env.llm.requests();
+        assert_eq!(signatures(&requests[1].body), ["sig"], "{kind:?}");
         if kind == Kind::Compatible {
             assert!(
-                !sent(&env, 2).contains("sig"),
+                signatures(&requests[2].body).is_empty(),
                 "replayed outside its tool loop"
             );
         }
+    }
+}
+
+/// Every thinking signature in a request body, in order: Anthropic's and
+/// OpenAI-compatible `signature`, Gemini's `thoughtSignature`.
+fn signatures(body: &Value) -> Vec<String> {
+    match body {
+        Value::Object(map) => map
+            .iter()
+            .flat_map(|(key, value)| match (key.as_str(), value) {
+                ("signature" | "thoughtSignature", Value::String(s)) => vec![s.clone()],
+                _ => signatures(value),
+            })
+            .collect(),
+        Value::Array(items) => items.iter().flat_map(signatures).collect(),
+        _ => vec![],
     }
 }
 
@@ -150,11 +167,9 @@ async fn thinking_is_not_replayed_by_default_on_openai() {
     session.say("one").await;
     session.say("two").await;
 
-    let last = sent(&env, 1);
-    assert!(
-        !last.contains("pondering") && !last.contains("sig"),
-        "{last}"
-    );
+    let last = &env.llm.requests()[1].body;
+    assert!(!last.to_string().contains("pondering"), "{last}");
+    assert!(signatures(last).is_empty(), "{last}");
 }
 
 #[tokio::test]

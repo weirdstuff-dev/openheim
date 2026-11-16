@@ -138,7 +138,8 @@ pub struct Request {
 struct Shared {
     script: Mutex<VecDeque<Reply>>,
     requests: Mutex<Vec<Request>>,
-    /// Texts embedded so far, and whether `/embeddings` answers 503.
+    /// Texts embedded so far, and whether `/embeddings` rejects every
+    /// request (a 400, so the embedder fails at once instead of retrying).
     embedded: Mutex<Vec<String>>,
     embeddings_down: std::sync::atomic::AtomicBool,
 }
@@ -192,6 +193,7 @@ impl FakeLlm {
         self.shared.embedded.lock().unwrap().clone()
     }
 
+    /// Makes `/embeddings` reject every request until set back.
     pub fn set_embeddings_down(&self, down: bool) {
         self.shared.embeddings_down.store(down, Ordering::SeqCst);
     }
@@ -218,16 +220,19 @@ async fn handle(
     if uri.path().ends_with("/embeddings") {
         return embeddings(&shared, &body);
     }
-    let call = {
+    // Recording the request and taking its reply under one lock keeps
+    // concurrent requests paired with the script in arrival order. The only
+    // place both locks are held; `requests` is always taken first.
+    let (call, reply) = {
         let mut requests = shared.requests.lock().unwrap();
         requests.push(Request {
             path: uri.to_string(),
             headers,
             body,
         });
-        requests.len()
+        let reply = shared.script.lock().unwrap().pop_front();
+        (requests.len(), reply)
     };
-    let reply = shared.script.lock().unwrap().pop_front();
     match reply {
         None => (StatusCode::BAD_REQUEST, "fake llm: no reply scripted").into_response(),
         Some(Reply::Hang) => std::future::pending().await,

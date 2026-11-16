@@ -6,7 +6,7 @@ use openheim::StreamEvent;
 use openheim::core::permission::PermissionDecision;
 use serde_json::{Value, json};
 
-use crate::common::{Env, Gate, Kind, Reply, finish, status, text, tool, tools};
+use crate::common::{Env, Gate, Kind, Reply, eventually, finish, status, text, tool, tools};
 
 const SHELL: &str = "allow_shell = true";
 
@@ -183,17 +183,14 @@ async fn always_allowed_tools_skip_the_gate() {
     assert!(gate.asked().is_empty());
 }
 
-/// Runs `prompt` and cancels it once `requests` LLM requests arrived plus
-/// `delay`.
-async fn cancel_during(
+/// Runs a prompt and cancels it once `ready` holds.
+async fn cancel_when(
     session: &crate::common::Session,
-    env: &Env,
-    requests: usize,
-    delay_ms: u64,
+    what: &str,
+    ready: impl Fn() -> bool,
 ) -> crate::common::Turn {
     let (turn, ()) = tokio::join!(session.say("x"), async {
-        env.llm.wait_for(requests).await;
-        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        eventually(what, &ready).await;
         session.handle.cancel().await;
     });
     turn
@@ -205,7 +202,7 @@ async fn cancel_ends_a_hanging_llm_call() {
     env.script([Reply::Hang]);
     let session = env.session().await;
 
-    let turn = cancel_during(&session, &env, 1, 0).await;
+    let turn = cancel_when(&session, "the request", || env.llm.requests().len() == 1).await;
 
     assert_eq!(turn.stop, StopReason::Cancelled);
 }
@@ -214,9 +211,13 @@ async fn cancel_ends_a_hanging_llm_call() {
 async fn cancel_ends_a_pending_permission_prompt() {
     let env = Env::new().await;
     env.script([tool("list_dir", json!({"path": "."}))]);
-    let session = env.session().await.gate(&Gate::hang());
+    let gate = Gate::hang();
+    let session = env.session().await.gate(&gate);
 
-    let turn = cancel_during(&session, &env, 1, 50).await;
+    let turn = cancel_when(&session, "the permission check", || {
+        !gate.asked().is_empty()
+    })
+    .await;
 
     assert_eq!(turn.stop, StopReason::Cancelled);
 }
@@ -227,14 +228,17 @@ async fn cancelled_tool_calls_are_answered_on_the_next_turn() {
     env.script([
         tools(&[
             ("list_dir", json!({"path": "."})),
-            ("execute_command", json!({"command": "sleep 30"})),
+            (
+                "execute_command",
+                json!({"command": "touch started; sleep 30"}),
+            ),
         ]),
         text("next"),
     ]);
     let session = env.session().await;
 
     let started = std::time::Instant::now();
-    let turn = cancel_during(&session, &env, 1, 300).await;
+    let turn = cancel_when(&session, "the command", || env.path("started").exists()).await;
     assert_eq!(turn.stop, StopReason::Cancelled);
     assert!(started.elapsed().as_secs() < 10);
 

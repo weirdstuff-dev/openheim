@@ -108,11 +108,16 @@ async fn the_binary_reads_keys_from_the_environment_and_picks_models() {
         (&requests[0].body["model"], &requests[1].body["model"]),
         (&json!("m1"), &json!("m2"))
     );
+    // An unlisted model is refused before anything is sent.
+    env.script([text("unused")]);
     let out = openheim(&env, &["run", "--model", "m3", "hello"])
+        .env("E2E_KEY", "from-env")
         .output()
         .await
         .unwrap();
     assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("m3"));
+    assert_eq!(env.llm.requests().len(), 2);
 }
 
 #[tokio::test]

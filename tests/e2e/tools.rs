@@ -180,7 +180,7 @@ async fn paths_cannot_leave_the_work_dir() {
         ),
         (
             "edit_file",
-            json!({"path": secret, "old_string": "s", "new_string": "t"}),
+            json!({"path": secret, "old_string": "TOP", "new_string": "t"}),
         ),
         ("list_dir", json!({"path": outside.path()})),
         (
@@ -188,8 +188,13 @@ async fn paths_cannot_leave_the_work_dir() {
             json!({"pattern": "secret", "path": outside.path()}),
         ),
     ] {
+        // Refused by the sandbox, not by some later failure.
         let error = env.err(tool_name, args.clone()).await;
-        assert!(!error.contains("TOP-SECRET"), "{tool_name} {args}: {error}");
+        let refused = ["outside the work directory", "dangling symlink"];
+        assert!(
+            refused.iter().any(|r| error.contains(r)) && !error.contains("TOP-SECRET"),
+            "{tool_name} {args}: {error}"
+        );
     }
     assert_eq!(
         std::fs::read_to_string(secret).unwrap(),
@@ -271,7 +276,12 @@ async fn web_fetch_refuses_local_and_private_addresses() {
         "http://[::1]/",
         "http://[::ffff:127.0.0.1]/",
     ] {
-        env.err("web_fetch", json!({"url": url})).await;
+        // Refused by policy, not by a failed connection.
+        let error = env.err("web_fetch", json!({"url": url})).await;
+        assert!(
+            error.contains("Refusing to fetch") || error.contains("only http and https"),
+            "{url}: {error}"
+        );
     }
 }
 

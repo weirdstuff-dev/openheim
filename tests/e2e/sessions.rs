@@ -248,7 +248,7 @@ async fn a_turn_in_another_process_locks_the_session() {
         Err(Error::SessionLocked { .. })
     ));
 
-    drop(acp);
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // A dead holder's lease is taken over.
+    acp.kill().await;
     client.delete_session(&id).await.unwrap();
 }

@@ -16,6 +16,18 @@ pub use llm::{
     Answer, FakeLlm, Kind, Reply, finish, rate_limited, status, text, thinking, tool, tools,
 };
 
+/// Waits up to 10s for `cond`, polling; panics naming `what` if it never
+/// holds.
+pub async fn eventually(what: &str, cond: impl Fn() -> bool) {
+    for _ in 0..1000 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
 pub struct Env {
     pub llm: FakeLlm,
     /// Holds `config.toml` and the data (history, skills, memory.db).
