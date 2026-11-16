@@ -115,9 +115,9 @@ pub(super) fn session_mode_state(current_mode: AgentMode) -> SessionModeState {
     SessionModeState::new(
         current_mode.as_str().to_string(),
         vec![
-            SessionMode::new(AgentMode::Code.as_str(), "Code")
+            SessionMode::new(AgentMode::Execute.as_str(), "Execute")
                 .description("Full tool access; tool calls request permission."),
-            SessionMode::new(AgentMode::Architect.as_str(), "Architect")
+            SessionMode::new(AgentMode::Plan.as_str(), "Plan")
                 .description("Read-only: inspects and plans without editing or executing."),
         ],
     )

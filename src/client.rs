@@ -72,7 +72,7 @@ impl OpenheimClient {
             model: None,
             skills: vec![],
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
-            mode: AgentMode::Code,
+            mode: AgentMode::Execute,
             effort: None,
         }
     }
@@ -206,7 +206,7 @@ impl<'a> SessionBuilder<'a> {
         self
     }
 
-    /// The mode the session starts in. Defaults to [`AgentMode::Code`].
+    /// The mode the session starts in. Defaults to [`AgentMode::Execute`].
     pub fn mode(mut self, mode: AgentMode) -> Self {
         self.mode = mode;
         self
@@ -225,7 +225,7 @@ impl<'a> SessionBuilder<'a> {
             .state
             .new_session(self.model.as_deref(), self.skills, self.cwd)
             .await?;
-        if self.mode != AgentMode::Code {
+        if self.mode != AgentMode::Execute {
             self.state.set_session_mode(&id, self.mode).await?;
         }
         if let Some(effort) = self.effort {

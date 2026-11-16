@@ -165,7 +165,7 @@ mod tests {
             skills: vec![],
             cancel: CancellationToken::new(),
             approved_tools: Approvals::default(),
-            mode: AgentMode::Code,
+            mode: AgentMode::Execute,
             prompt_lock: Arc::new(Mutex::new(())),
             last_active: Instant::now(),
         }

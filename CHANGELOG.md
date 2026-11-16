@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: the `code` and `architect` modes are now `execute` and `plan`.** `AgentMode::Code` is `AgentMode::Execute` and `AgentMode::Architect` is `AgentMode::Plan`. ACP `session/set_mode` takes `modeId` `"execute"` or `"plan"`, `availableModes` lists them as "Execute" and "Plan", and the TUI's `:mode` takes the new names. Conversations saved with `"code"` or `"architect"` still load, in the matching new mode.
+
 ## [0.18.0] - 2026-11-10
 
 ### Added

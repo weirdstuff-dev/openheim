@@ -1,5 +1,5 @@
 //! [`ToolCapabilities`]: what each [`super::ToolHandler`] declares about
-//! itself, read by Architect mode's allowlist, `approval_key`, and ACP's
+//! itself, read by Plan mode's allowlist, `approval_key`, and ACP's
 //! tool-kind mapping.
 
 /// Coarse hint of what kind of action a tool performs. Mirrors ACP's
@@ -34,7 +34,7 @@ pub enum ApprovalScope {
 }
 
 /// What a [`super::ToolHandler`] declares about itself: whether it's
-/// read-only (offered in Architect mode), its [`ToolKindHint`] (client UI),
+/// read-only (offered in Plan mode), its [`ToolKindHint`] (client UI),
 /// and how its approvals are scoped.
 ///
 /// The default (not read-only, [`ToolKindHint::Other`],
@@ -46,7 +46,7 @@ pub enum ApprovalScope {
 #[derive(Debug, Clone, Copy, Default)]
 #[non_exhaustive]
 pub struct ToolCapabilities {
-    /// Safe to expose in Architect mode (no filesystem/shell/network writes,
+    /// Safe to expose in Plan mode (no filesystem/shell/network writes,
     /// no state mutation).
     pub read_only: bool,
     pub kind: ToolKindHint,
