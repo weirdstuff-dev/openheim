@@ -2185,7 +2185,7 @@ Except for `session_busy` / `session_locked` / `http_error`, `data` is a human-r
 ### Connection Lifecycle
 
 - The WebSocket stays open until the client disconnects or sends a `Close` frame.
-- If the server shuts down (SIGINT), it drains gracefully.
+- On SIGINT or SIGTERM the server shuts down gracefully: it stops accepting connections, cancels the turns in flight and gives them up to 5 seconds to end, so their sessions are left unlocked.
 - If the connection drops, the client should reconnect and re-initialize (call `initialize`, then either `session/new` for a fresh session or `session/load` to resume an existing one).
 - Conversation history is persisted to disk — sessions survive WebSocket reconnections and server restarts.
 
