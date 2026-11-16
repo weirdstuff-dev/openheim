@@ -222,7 +222,7 @@ pub(crate) const WELCOME_COMMANDS: &[(&str, &str)] = &[
     (":models", "list available models"),
     (":models <name>", "switch model mid-session"),
     (":mode", "current mode"),
-    (":mode <name>", "switch mode (code, architect)"),
+    (":mode <name>", "switch mode (execute, plan)"),
     (":effort", "current effort level"),
     (":effort <level>", "set effort (default, low, medium, high)"),
     (":skills", "available skills"),

@@ -14,36 +14,62 @@ pub use state::{AgentState, LoadedSession, SessionSettings};
 
 /// Which tool policy a session runs under. [`Self::as_str`] gives the
 /// wire-level mode id (also its serialized form); [`Self::parse`] is the
-/// inverse, for the boundary where that id arrives as a `&str`.
+/// inverse, for the boundary where that id arrives as a `&str`. Saved
+/// conversations that stored `"code"` or `"architect"` deserialize as
+/// [`Self::Execute`] and [`Self::Plan`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AgentMode {
     /// Full tool access; tool calls go through the permission gate as normal.
     #[default]
-    Code,
+    #[serde(alias = "code")]
+    Execute,
     /// Read-only: only tools that declare `read_only` are offered (the
     /// built-in `read_file`, `list_dir`, `search`, `web_fetch`,
     /// `search_memory`, and any custom tool that opts in). They still go
     /// through the permission gate.
-    Architect,
+    #[serde(alias = "architect")]
+    Plan,
 }
 
 impl AgentMode {
     pub const fn as_str(self) -> &'static str {
         match self {
-            AgentMode::Code => "code",
-            AgentMode::Architect => "architect",
+            AgentMode::Execute => "execute",
+            AgentMode::Plan => "plan",
         }
     }
 
     pub fn parse(mode_id: &str) -> crate::error::Result<Self> {
         match mode_id {
-            "code" => Ok(AgentMode::Code),
-            "architect" => Ok(AgentMode::Architect),
+            "execute" => Ok(AgentMode::Execute),
+            "plan" => Ok(AgentMode::Plan),
             other => Err(crate::error::Error::InvalidArgument(format!(
                 "unknown session mode: {other}"
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AgentMode;
+
+    #[test]
+    fn serializes_as_its_mode_id() {
+        for mode in [AgentMode::Execute, AgentMode::Plan] {
+            let json = serde_json::to_string(&mode).unwrap();
+            assert_eq!(json, format!("\"{}\"", mode.as_str()));
+            assert_eq!(AgentMode::parse(mode.as_str()).unwrap(), mode);
+        }
+    }
+
+    #[test]
+    fn loads_the_previous_mode_ids() {
+        let execute: AgentMode = serde_json::from_str("\"code\"").unwrap();
+        let plan: AgentMode = serde_json::from_str("\"architect\"").unwrap();
+        assert_eq!(execute, AgentMode::Execute);
+        assert_eq!(plan, AgentMode::Plan);
     }
 }

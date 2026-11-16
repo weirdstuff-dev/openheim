@@ -182,7 +182,7 @@ impl AgentState {
         Ok(Some(create_client(config, &http_client)))
     }
 
-    /// Starts a session in [`AgentMode::Code`] at its provider's effort
+    /// Starts a session in [`AgentMode::Execute`] at its provider's effort
     /// level; [`Self::set_session_mode`] and [`Self::set_session_effort`]
     /// change them.
     pub async fn new_session(
@@ -222,7 +222,7 @@ impl AgentState {
                     skills,
                     cancel: CancellationToken::new(),
                     approved_tools: Approvals::default(),
-                    mode: AgentMode::Code,
+                    mode: AgentMode::Execute,
                     prompt_lock: Arc::new(Mutex::new(())),
                     last_active: Instant::now(),
                 },
@@ -426,8 +426,8 @@ impl AgentState {
             s.cancel = CancellationToken::new();
             s.last_active = Instant::now();
             let llm = s.llm.clone().unwrap_or_else(|| self.llm.clone());
-            let executor: Arc<dyn ToolExecutor> = if s.mode == AgentMode::Architect {
-                // Architect mode gets every tool that declares itself
+            let executor: Arc<dyn ToolExecutor> = if s.mode == AgentMode::Plan {
+                // Plan mode gets every tool that declares itself
                 // read-only, built-in or custom.
                 let read_only: Vec<String> = self
                     .executor
@@ -439,7 +439,7 @@ impl AgentState {
                 Arc::new(ScopedExecutor::new(self.executor.clone(), read_only))
             } else {
                 // Subagents without a model of their own run on this
-                // session's model. (Architect mode has no `delegate_task`:
+                // session's model. (Plan mode has no `delegate_task`:
                 // it isn't read-only.)
                 let delegate = self.delegate.for_session(llm.clone(), s.config.clone());
                 Arc::new(OverlayExecutor::new(
@@ -788,7 +788,7 @@ mod prompt_lease_ordering_tests {
             skills: vec![],
             cancel: CancellationToken::new(),
             approved_tools: Approvals::default(),
-            mode: AgentMode::Code,
+            mode: AgentMode::Execute,
             prompt_lock: Arc::new(Mutex::new(())),
             last_active: Instant::now(),
         }
@@ -1260,7 +1260,7 @@ mod new_session_tests {
             .await
             .unwrap();
         state
-            .set_session_mode(&session_id, AgentMode::Architect)
+            .set_session_mode(&session_id, AgentMode::Plan)
             .await
             .unwrap();
         state
@@ -1273,7 +1273,7 @@ mod new_session_tests {
 
         let uuid = Uuid::parse_str(&session_id).unwrap();
         let saved = state.memory.history.load_conversation(&uuid).unwrap();
-        assert_eq!(saved.meta.mode, Some(AgentMode::Architect));
+        assert_eq!(saved.meta.mode, Some(AgentMode::Plan));
         assert_eq!(saved.meta.effort, Some(Effort::Low));
 
         let restarted = sample_state(dir.path()).await;
@@ -1281,7 +1281,7 @@ mod new_session_tests {
             .load_session(&session_id, dir.path().to_path_buf())
             .await
             .unwrap();
-        assert_eq!(loaded.mode, AgentMode::Architect);
+        assert_eq!(loaded.mode, AgentMode::Plan);
         assert_eq!(loaded.effort, Effort::Low);
         let sessions = restarted.sessions.read().await;
         assert_eq!(sessions[&session_id].effort, Some(Effort::Low));
@@ -1303,7 +1303,7 @@ mod new_session_tests {
 
         let uuid = Uuid::parse_str(&session_id).unwrap();
         let saved = state.memory.history.load_conversation(&uuid).unwrap();
-        assert_eq!(saved.meta.mode, Some(AgentMode::Code));
+        assert_eq!(saved.meta.mode, Some(AgentMode::Execute));
         assert_eq!(saved.meta.effort, None);
     }
 

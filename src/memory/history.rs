@@ -34,7 +34,7 @@ pub struct ConversationMeta {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub context_usage: Option<Usage>,
     /// The session's mode as of its last turn; `None` (saved before modes
-    /// were stored) loads as [`AgentMode::Code`].
+    /// were stored) loads as [`AgentMode::Execute`].
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub mode: Option<AgentMode>,
     /// The effort level chosen for the session, if one was; `None` runs
