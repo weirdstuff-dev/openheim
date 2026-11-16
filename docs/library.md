@@ -506,6 +506,8 @@ session.acp_replay(&loaded.messages, |update| {
 client.delete_session("550e8400-e29b-41d4-a716-446655440000").await?;
 ```
 
+A turn running on the session is cancelled first, and the delete waits up to 10 seconds for it to end; if it doesn't, the call fails with `Error::SessionBusy` and the session stays. While another `openheim` process runs a turn on it, the call fails with `Error::SessionLocked`.
+
 ---
 
 ## Skills
