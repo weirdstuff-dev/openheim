@@ -258,6 +258,11 @@ impl App {
                     "{dropped} earlier messages left out of the request to fit the context window"
                 )));
             }
+            StreamEvent::ToolOutputsOmitted { omitted } => {
+                self.push(ChatItem::SystemInfo(format!(
+                    "{omitted} older tool outputs left out of the request to fit the context window"
+                )));
+            }
             StreamEvent::Finished { .. } => {
                 self.status = Status::Idle;
             }

@@ -125,9 +125,9 @@ struct Request {
     bytes: usize,
 }
 
-/// The request for `messages`: unanswered tool calls answered, the oldest
-/// turns left out if `fitter` says they don't fit, and the system prompt
-/// from `prompt_builder` in front.
+/// The request for `messages`: unanswered tool calls answered, as fitted by
+/// `fitter` (see [`ContextFitter::fit`]), and the system prompt from
+/// `prompt_builder` in front.
 fn prepare_request(
     messages: &[Message],
     prompt_builder: Option<&PromptBuilder>,
@@ -147,12 +147,13 @@ fn prepare_request(
     }
 }
 
-/// The error for a request that stays too long with every earlier turn left
-/// out.
+/// The error for a request that stays too long with every earlier turn,
+/// and the outputs of the current turn's older tool results, left out.
 fn turn_too_long(provider_message: &str) -> Error {
     Error::ContextOverflow(format!(
-        "the current turn alone doesn't fit in the model's context window; \
-         start a new session (provider said: {provider_message})"
+        "the current turn doesn't fit in the model's context window even with \
+         earlier turns and older tool outputs left out; start a new session \
+         (provider said: {provider_message})"
     ))
 }
 
@@ -199,11 +200,14 @@ fn stop_for_reply_without_tools(
 /// system prompt and skills to each request.
 ///
 /// A request that doesn't fit the context window leaves out the oldest whole
-/// turns, never the one in progress; `messages` itself keeps them. That
-/// happens before sending when `config.context_window` is set and the
-/// request is estimated at over 90% of it, and after the provider rejects a
-/// request as too long (up to two retries per call). Each change in how
-/// many messages are left out is reported as [`StreamEvent::ContextTrimmed`].
+/// turns, never the one in progress; if that alone is still too long, the
+/// outputs of its older tool results are replaced with a placeholder.
+/// `messages` itself keeps everything. That happens before sending when
+/// `config.context_window` is set and the request is estimated at over 90%
+/// of it, and after the provider rejects a request as too long (up to two
+/// retries per call). Each change in how many messages, or tool outputs,
+/// are left out is reported as [`StreamEvent::ContextTrimmed`] (or
+/// [`StreamEvent::ToolOutputsOmitted`]).
 ///
 /// `callback` receives a [`StreamEvent`] for each step: iteration start,
 /// streamed text and thinking, tool calls, tool results, and completion. It
@@ -217,7 +221,7 @@ fn stop_for_reply_without_tools(
 ///
 /// Returns `Ok` unless an LLM call fails; [`AgentResult::stop_reason`] says
 /// why the turn ended. [`Error::ContextOverflow`] means the turn in progress
-/// alone is too long for the model.
+/// is too long for the model even with those outputs left out.
 pub async fn run_agent<F>(
     llm: &dyn LlmClient,
     tool_executor: &dyn ToolExecutor,
@@ -233,8 +237,10 @@ where
     let tools = tool_executor.list_tools();
     let system = prompt_builder.map(|b| b.build(&[])).unwrap_or_default();
     let mut fitter = ContextFitter::new(config.context_window, &system, &tools);
-    // The last `ContextTrimmed` count sent, so it goes out only on a change.
+    // The last `ContextTrimmed` and `ToolOutputsOmitted` counts sent, so
+    // each goes out only on a change.
     let mut reported_dropped = 0;
+    let mut reported_omitted = 0;
     let mut final_response = String::new();
     let mut iterations_used = 0;
     let mut context_usage: Option<Usage> = None;
@@ -255,8 +261,8 @@ where
             iteration: iter_num,
         });
 
-        // A request rejected as too long is rebuilt with more of the oldest
-        // turns left out and sent again, a bounded number of times.
+        // A request rejected as too long is rebuilt with more left out and
+        // sent again, a bounded number of times.
         let mut overflow_retries = 0;
         let choice = loop {
             let request = prepare_request(messages, prompt_builder, &fitter);
@@ -265,6 +271,11 @@ where
                 callback(StreamEvent::ContextTrimmed {
                     dropped: reported_dropped,
                 });
+            }
+            let omitted = request.fitted.omitted_outputs;
+            if omitted > 0 && omitted != reported_omitted {
+                reported_omitted = omitted;
+                callback(StreamEvent::ToolOutputsOmitted { omitted });
             }
 
             let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<LlmChunk>();
@@ -316,7 +327,8 @@ where
                     overflow_retries += 1;
                     tracing::warn!(
                         dropped = request.fitted.dropped,
-                        "request exceeded the context window; retrying with fewer earlier turns"
+                        omitted_outputs = request.fitted.omitted_outputs,
+                        "request exceeded the context window; retrying with less of the history"
                     );
                 }
                 Err(e) => return Err(e),
@@ -1634,6 +1646,50 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].len(), 3);
         assert_eq!(trimmed, [2]);
+    }
+
+    // A single turn too long for the window sends its older tool output as
+    // a placeholder and the newest whole, rather than failing.
+    #[tokio::test]
+    async fn a_long_single_turn_leaves_out_older_tool_outputs() {
+        let llm = WindowedLlm::new(usize::MAX);
+        let big = "x".repeat(4000);
+        let call = |id: &str| Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::tool_use(id, "read_file", "{}")],
+        };
+        let history = vec![
+            Message::user("go"),
+            call("a"),
+            Message::tool_result("a", "read_file", &big, false),
+            call("b"),
+            Message::tool_result("b", "read_file", &big, false),
+        ];
+        let mut messages = history.clone();
+        let mut harness = Harness::new();
+        // About 5.4 KB at the default 4 bytes per token: room for one output.
+        harness.config.context_window = Some(1500);
+        let mut omitted = Vec::new();
+
+        let result = harness
+            .run(&llm, &MockToolExecutor::new(""), &mut messages, |event| {
+                if let StreamEvent::ToolOutputsOmitted { omitted: n } = event {
+                    omitted.push(n);
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.final_response, "fits");
+        let sent: Vec<_> = llm.requests()[0]
+            .iter()
+            .filter_map(Message::tool_result_block)
+            .map(|r| r.content)
+            .collect();
+        assert_eq!(sent, [crate::core::context::OMITTED_OUTPUT, big.as_str()]);
+        assert_eq!(omitted, [1]);
+        // The stored history keeps the output.
+        assert_eq!(messages[..5], history);
     }
 
     #[test]
