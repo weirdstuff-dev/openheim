@@ -81,6 +81,8 @@ Each key under `[providers]` defines a provider. The key name is the provider id
 
 Key resolution order: `env_var` (if set and non-empty) → `api_key` → empty string (for keyless providers like Ollama).
 
+A key is refused with a plain `http://` `api_base` to another machine, so it never crosses the network unencrypted. Loopback (`localhost`, `127.0.0.0/8`, `[::1]`) is allowed over `http://`, e.g. a local proxy or model server that wants a key.
+
 ### Examples
 
 ```toml
@@ -158,7 +160,7 @@ url = "https://api.firecrawl.dev/mcp"
 headers = { Authorization = "Bearer my-key" }
 ```
 
-`headers` is rejected over a plain `http://` URL — credentials must not be sent unencrypted; use `https://` or drop the headers for a keyless local server.
+`headers` is rejected over a plain `http://` URL to another machine — credentials must not cross the network unencrypted; use `https://` or drop the headers. Loopback (`localhost`, `127.0.0.0/8`, `[::1]`) is allowed over `http://`, since it never leaves the machine.
 
 The `name` key is sanitized when building tool names: anything but ASCII letters, digits and underscores (hyphens and spaces included) becomes an underscore. So `my-db` → `my_db__query_table`. The tool's own name keeps hyphens but is sanitized the same way otherwise, so `fs.read` is exposed as `files__fs_read`. A full name starting with a digit gets a leading `_`, and one longer than 64 characters is shortened and ends in a hash of the original, so every provider accepts it.
 
