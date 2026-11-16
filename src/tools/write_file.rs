@@ -41,9 +41,15 @@ async fn write_local(path: &Path, content: &str) -> Result<()> {
 /// Replaces `path` with `content` via a temp file in the same directory,
 /// synced and then renamed over it, so a crash or a full disk leaves the old
 /// file or the new one, never a truncated mix. Missing parent directories
-/// are created. An existing file keeps its permissions (an executable
-/// script stays executable), and one this process may not write is
-/// refused, as a plain write would refuse it.
+/// are created.
+///
+/// An existing file keeps its permissions (an executable script stays
+/// executable) and, on Unix, its owner and group; its content is never
+/// readable by anyone else meanwhile, as the temp file starts out private.
+/// One this process may not write is refused, as a plain write would refuse
+/// it. Where a rename can't keep what the file is (its owner can't be kept,
+/// or it has other hard links), it's overwritten in place instead, without
+/// the atomicity.
 fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
 
@@ -53,37 +59,60 @@ fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
     };
     std::fs::create_dir_all(dir)?;
     let existing = match std::fs::metadata(path) {
-        Ok(meta) => Some(meta.permissions()),
+        Ok(meta) => Some(meta),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),
     };
-    if existing.is_some() {
+    if let Some(meta) = &existing {
         // Fails, as a plain write would, if this process may not write the
         // file; the rename alone needs only the directory to be writable.
         // Opened without truncating, so the file is untouched.
         std::fs::OpenOptions::new().write(true).open(path)?;
+        #[cfg(unix)]
+        if std::os::unix::fs::MetadataExt::nlink(meta) > 1 {
+            return std::fs::write(path, content);
+        }
     }
 
-    let file_name = path
-        .file_name()
-        .map_or_else(|| "file".into(), |name| name.to_string_lossy().into_owned());
-    let tmp = dir.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
-    let written = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
-        file.write_all(content)?;
-        if let Some(permissions) = existing {
-            file.set_permissions(permissions)?;
-        }
-        file.sync_all()?;
-        std::fs::rename(&tmp, path)
-    })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    // A fixed-length name, so a target name near the filesystem's limit
+    // still leaves room for it.
+    let tmp = dir.join(format!(".openheim-{}.tmp", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if existing.is_some() {
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     }
-    written
+    let mut file = options.open(&tmp)?;
+    let written = (|| {
+        if let Some(meta) = &existing {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if std::os::unix::fs::fchown(&file, Some(meta.uid()), Some(meta.gid())).is_err() {
+                    return Ok(false);
+                }
+            }
+            file.set_permissions(meta.permissions())?;
+        }
+        file.write_all(content)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path).map(|()| true)
+    })();
+    drop(file);
+    match written {
+        Ok(true) => Ok(()),
+        // The owner or group can't be kept: a replacement would change who
+        // may read the file.
+        Ok(false) => {
+            let _ = std::fs::remove_file(&tmp);
+            std::fs::write(path, content)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 /// Writes content to a file at the given path, creating any missing parent directories.
@@ -314,12 +343,45 @@ mod tests {
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
         permissions.set_readonly(true);
         std::fs::set_permissions(&path, permissions).unwrap();
+        if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+            // Privileged (root): write bits don't stop this process.
+            return;
+        }
 
         let err = write_atomic(&path, b"new").unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
         assert_eq!(entries(dir.path()), ["locked.txt"]);
+    }
+
+    // A rename would split a hard-linked file from its other names, so it's
+    // written in place and every name sees the new content.
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_linked_file_keeps_its_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        let other = dir.path().join("b.txt");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::hard_link(&path, &other).unwrap();
+
+        write_atomic(&path, b"new").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "new");
+        assert_eq!(entries(dir.path()), ["a.txt", "b.txt"]);
+    }
+
+    // The temp file's name doesn't grow with the target's.
+    #[test]
+    fn a_name_near_the_length_limit_can_be_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!("{}.txt", "n".repeat(240)));
+        std::fs::write(&path, "old").unwrap();
+
+        write_atomic(&path, b"new").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
     }
 
     // A failed write (here, the target is a directory) leaves no temp file.
