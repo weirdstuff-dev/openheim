@@ -848,41 +848,6 @@ mod tests {
         assert!(dir.path().join("history").is_dir());
     }
 
-    /// `resume_session` works without the `acp` feature: it hands back the
-    /// persisted `Message`s straight from `HistoryManager`. Writes a
-    /// conversation directly via the client's `HistoryManager` (mock-free,
-    /// no LLM call) and resumes it by id.
-    #[tokio::test]
-    async fn resume_session_loads_a_conversation_written_via_history_manager() {
-        let dir = tempfile::tempdir().unwrap();
-        let client = OpenheimClient::builder()
-            .provider("openai")
-            .api_key("test-key")
-            .model("gpt-4o")
-            .data_dir(dir.path())
-            .build()
-            .await
-            .unwrap();
-
-        let history = client.state.memory.history.clone();
-        let mut conv = history
-            .create_conversation(Some("gpt-4o".into()), Some("openai".into()), vec![])
-            .unwrap();
-        conv.messages.push(crate::core::models::Message::user("hi"));
-        conv.messages
-            .push(crate::core::models::Message::assistant("hello there"));
-        history.save_conversation(&conv).unwrap();
-
-        let (handle, loaded) = client
-            .resume_session(&conv.meta.id.to_string(), dir.path().to_path_buf())
-            .await
-            .unwrap();
-
-        assert_eq!(handle.id(), conv.meta.id.to_string());
-        assert_eq!(loaded.messages, conv.messages);
-        assert!(loaded.warning.is_none());
-    }
-
     fn local_config() -> AppConfig {
         AppConfig::new("local").with_provider(
             "local",
@@ -1122,54 +1087,6 @@ models = ["m1"]
 
         assert_eq!(client.long_term_memory().stats().await.unwrap().memories, 1);
         assert!(!dir.path().join("memory.db").exists());
-    }
-
-    /// The builder's effort level holds for a session that switches
-    /// models without choosing a level of its own.
-    #[tokio::test]
-    async fn builder_effort_survives_a_model_switch() {
-        let dir = tempfile::tempdir().unwrap();
-        let client = OpenheimClient::builder()
-            .app_config(local_config())
-            .effort(Effort::High)
-            .data_dir(dir.path())
-            .work_dir(dir.path())
-            .build()
-            .await
-            .unwrap();
-        let session = client.new_session().start().await.unwrap();
-        assert_eq!(session.settings().await.unwrap().effort, Effort::High);
-
-        session.switch_model("local", "m2").await.unwrap();
-        assert_eq!(session.settings().await.unwrap().effort, Effort::High);
-    }
-
-    /// `OpenheimClient::switch_model` reaches the same live session as the
-    /// handle, from a clone of the client too.
-    #[tokio::test]
-    async fn client_switch_model_switches_a_live_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let client = OpenheimClient::builder()
-            .app_config(local_config())
-            .data_dir(dir.path())
-            .work_dir(dir.path())
-            .build()
-            .await
-            .unwrap();
-        let session = client.new_session().start().await.unwrap();
-
-        let switched = client
-            .clone()
-            .switch_model(session.id(), "local", "m2")
-            .await
-            .unwrap();
-        assert_eq!(switched, ("local".to_string(), "m2".to_string()));
-
-        let err = client
-            .switch_model("not-a-session", "local", "m2")
-            .await
-            .unwrap_err();
-        assert!(matches!(err, crate::error::Error::NotFound(_)), "{err}");
     }
 
     #[cfg(feature = "acp")]

@@ -56,20 +56,3 @@ impl LlmClient for OpenAiCompatibleClient {
         self.0.send_streaming(messages, tools, chunk_tx).await
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn compatible_backends_get_max_tokens() {
-        let client = OpenAiCompatibleClient::new(
-            ReqwestClient::new(),
-            "http://localhost:11434/v1".into(),
-            String::new(),
-            "llama3".into(),
-            Some(1000),
-        );
-        assert_eq!(client.0.token_limit_field(), TokenLimitField::MaxTokens);
-    }
-}

@@ -662,361 +662,13 @@ impl LlmClient for AnthropicClient {
     }
 }
 
+/// Streams and histories the black-box suite's fake provider doesn't
+/// produce.
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn convert_messages_user_message() {
-        let messages = vec![Message::user("hello")];
-        let result = convert_messages(&messages);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].role, "user");
-        assert!(
-            matches!(&result[0].content[0], AnthropicContentBlock::Text { text } if text == "hello")
-        );
-    }
-
-    #[test]
-    fn convert_messages_user_message_with_image() {
-        let messages = vec![Message {
-            role: Role::User,
-            content: vec![
-                ContentBlock::Text {
-                    text: "what is this?".into(),
-                },
-                ContentBlock::Image {
-                    data: "base64data".into(),
-                    mime_type: "image/png".into(),
-                },
-            ],
-        }];
-        let result = convert_messages(&messages);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].content.len(), 2);
-        assert!(matches!(
-            &result[0].content[1],
-            AnthropicContentBlock::Image { source }
-                if source.media_type == "image/png" && source.data == "base64data"
-        ));
-    }
-
-    #[test]
-    fn convert_messages_system_is_excluded() {
-        let messages = vec![Message {
-            role: Role::System,
-            content: vec![ContentBlock::Text {
-                text: "system prompt".into(),
-            }],
-        }];
-        let result = convert_messages(&messages);
-        assert_eq!(result.len(), 0);
-    }
-
-    #[test]
-    fn convert_messages_assistant_with_tool_calls() {
-        let messages = vec![Message {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::Text {
-                    text: "thinking".into(),
-                },
-                ContentBlock::tool_use("call_1", "read_file", r#"{"path":"a.txt"}"#),
-            ],
-        }];
-        let result = convert_messages(&messages);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].role, "assistant");
-        assert_eq!(result[0].content.len(), 2); // text + tool_use
-    }
-
-    #[test]
-    fn convert_messages_replays_thinking_block_first() {
-        let messages = vec![Message {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::Thinking {
-                    thinking: "reasoning about the file".into(),
-                    signature: Some("sig123".into()),
-                },
-                ContentBlock::Text {
-                    text: "here's my answer".into(),
-                },
-                ContentBlock::tool_use("call_1", "read_file", r#"{"path":"a.txt"}"#),
-            ],
-        }];
-        let result = convert_messages(&messages);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].content.len(), 3); // thinking + text + tool_use
-        assert!(matches!(
-            &result[0].content[0],
-            AnthropicContentBlock::Thinking { thinking, signature }
-                if thinking == "reasoning about the file" && signature == "sig123"
-        ));
-    }
-
-    // A stored call with malformed arguments (e.g. cut off at the output
-    // limit) must not fail every later request in the conversation.
-    #[test]
-    fn convert_messages_sends_malformed_tool_arguments_as_an_empty_object() {
-        for arguments in [r#"{"path":"a.t"#, "[1]", ""] {
-            let messages = vec![Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::tool_use("call_1", "read_file", arguments)],
-            }];
-            let result = convert_messages(&messages);
-            assert!(
-                matches!(
-                    &result[0].content[0],
-                    AnthropicContentBlock::ToolUse { input, .. } if *input == json!({})
-                ),
-                "{arguments:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn convert_messages_merges_consecutive_tool_results() {
-        let messages = vec![
-            Message::tool_result("call_1", "read_file", "content1", false),
-            Message::tool_result("call_2", "write_file", "content2", false),
-        ];
-        let result = convert_messages(&messages);
-        // Both tool results should merge into a single user message
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].role, "user");
-        assert_eq!(result[0].content.len(), 2);
-    }
-
-    #[test]
-    fn convert_tools_maps_definitions() {
-        let tools = vec![Tool::function(
-            "read_file",
-            "Read a file",
-            json!({"type": "object"}),
-        )];
-        let result = convert_tools(&tools);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].name, "read_file");
-        assert_eq!(result[0].description, "Read a file");
-    }
-
-    #[test]
-    fn convert_tools_empty_input() {
-        let result = convert_tools(&[]);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn map_stop_reason_translates_known_values() {
-        assert_eq!(map_stop_reason(Some("end_turn")), Some(FinishReason::Stop));
-        assert_eq!(
-            map_stop_reason(Some("tool_use")),
-            Some(FinishReason::ToolCalls)
-        );
-        assert_eq!(
-            map_stop_reason(Some("max_tokens")),
-            Some(FinishReason::MaxTokens)
-        );
-        assert_eq!(
-            map_stop_reason(Some("model_context_window_exceeded")),
-            Some(FinishReason::MaxTokens)
-        );
-        assert_eq!(
-            map_stop_reason(Some("refusal")),
-            Some(FinishReason::Refusal)
-        );
-        assert_eq!(
-            map_stop_reason(Some("pause_turn")),
-            Some(FinishReason::Paused)
-        );
-    }
-
-    #[test]
-    fn map_stop_reason_passes_through_unknown_values() {
-        assert_eq!(
-            map_stop_reason(Some("stop_sequence")),
-            Some(FinishReason::Other("stop_sequence".to_string()))
-        );
-    }
-
-    #[test]
-    fn map_stop_reason_none_stays_none() {
-        assert!(map_stop_reason(None).is_none());
-    }
-
-    fn client_with_effort(effort: Effort) -> AnthropicClient {
-        AnthropicClient::new(
-            ReqwestClient::new(),
-            "https://api.anthropic.com/v1".into(),
-            "test-key".into(),
-            "claude-sonnet-5".into(),
-            None,
-        )
-        .with_effort(effort)
-    }
-
-    #[test]
-    fn default_effort_sends_no_thinking_or_effort() {
-        let request =
-            client_with_effort(Effort::Default).build_request(&[Message::user("hi")], &[]);
-        assert!(request.stream);
-        let json = serde_json::to_value(&request).unwrap();
-        assert!(json.get("thinking").is_none());
-        assert!(json.get("output_config").is_none());
-    }
-
-    #[test]
-    fn effort_level_sends_adaptive_thinking_at_that_effort() {
-        for (level, effort) in [
-            (Effort::Low, "low"),
-            (Effort::Medium, "medium"),
-            (Effort::High, "high"),
-        ] {
-            // `build_request` is the single request source for both `send`
-            // and `send_streaming`.
-            let request = client_with_effort(level).build_request(&[Message::user("hi")], &[]);
-            assert!(request.stream);
-            let json = serde_json::to_value(&request).unwrap();
-            assert_eq!(json["thinking"]["type"], "adaptive");
-            assert_eq!(json["thinking"]["display"], "summarized");
-            assert_eq!(json["output_config"]["effort"], effort);
-        }
-    }
-
-    #[test]
-    fn stream_event_deserializes_message_start_usage() {
-        let event: AnthropicStreamEvent = serde_json::from_str(
-            r#"{"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":0,"cache_creation_input_tokens":3,"cache_read_input_tokens":1}}}"#,
-        )
-        .unwrap();
-        let AnthropicStreamEvent::MessageStart { message } = event else {
-            panic!("expected MessageStart");
-        };
-        assert_eq!(message.usage.input_tokens, 12);
-        assert_eq!(message.usage.cache_creation_input_tokens, 3);
-        assert_eq!(message.usage.cache_read_input_tokens, 1);
-    }
-
-    #[test]
-    fn stream_event_deserializes_content_block_start_tool_use() {
-        let event: AnthropicStreamEvent = serde_json::from_str(
-            r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"call_1","name":"read_file","input":{}}}"#,
-        )
-        .unwrap();
-        let AnthropicStreamEvent::ContentBlockStart {
-            index,
-            content_block,
-        } = event
-        else {
-            panic!("expected ContentBlockStart");
-        };
-        assert_eq!(index, 2);
-        let AnthropicStreamContentBlock::ToolUse { id, name } = content_block else {
-            panic!("expected ToolUse content block");
-        };
-        assert_eq!(id, "call_1");
-        assert_eq!(name, "read_file");
-    }
-
-    #[test]
-    fn stream_event_deserializes_every_content_block_start() {
-        let block = |json: &str| {
-            let event: AnthropicStreamEvent = serde_json::from_str(&format!(
-                r#"{{"type":"content_block_start","index":0,"content_block":{json}}}"#
-            ))
-            .unwrap();
-            let AnthropicStreamEvent::ContentBlockStart { content_block, .. } = event else {
-                panic!("expected ContentBlockStart for {json}");
-            };
-            content_block
-        };
-        assert!(matches!(
-            block(r#"{"type":"text","text":""}"#),
-            AnthropicStreamContentBlock::Text {}
-        ));
-        assert!(matches!(
-            block(r#"{"type":"thinking","thinking":"","signature":""}"#),
-            AnthropicStreamContentBlock::Thinking {}
-        ));
-        assert!(matches!(
-            block(r#"{"type":"redacted_thinking","data":"enc"}"#),
-            AnthropicStreamContentBlock::RedactedThinking { data } if data == "enc"
-        ));
-        assert!(matches!(
-            block(r#"{"type":"server_tool_use","id":"s1","name":"web_search","input":{}}"#),
-            AnthropicStreamContentBlock::Other
-        ));
-    }
-
-    #[test]
-    fn stream_event_deserializes_every_delta_variant() {
-        let cases = [
-            (r#"{"type":"text_delta","text":"hi"}"#, "text"),
-            (
-                r#"{"type":"thinking_delta","thinking":"pondering"}"#,
-                "thinking",
-            ),
-            (
-                r#"{"type":"signature_delta","signature":"sig"}"#,
-                "signature",
-            ),
-            (
-                r#"{"type":"input_json_delta","partial_json":"{\"a\""}"#,
-                "input_json",
-            ),
-        ];
-        for (json, label) in cases {
-            let event: AnthropicStreamEvent = serde_json::from_str(&format!(
-                r#"{{"type":"content_block_delta","index":0,"delta":{json}}}"#
-            ))
-            .unwrap();
-            let AnthropicStreamEvent::ContentBlockDelta { delta, .. } = event else {
-                panic!("expected ContentBlockDelta for {label}");
-            };
-            assert!(
-                !matches!(delta, AnthropicStreamDelta::Other),
-                "expected a typed delta for {label}, got Other"
-            );
-        }
-    }
-
-    #[test]
-    fn stream_event_deserializes_message_delta_with_cumulative_usage() {
-        let event: AnthropicStreamEvent = serde_json::from_str(
-            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}"#,
-        )
-        .unwrap();
-        let AnthropicStreamEvent::MessageDelta { delta, usage } = event else {
-            panic!("expected MessageDelta");
-        };
-        assert_eq!(delta.stop_reason.as_deref(), Some("end_turn"));
-        assert_eq!(usage.unwrap().output_tokens, Some(42));
-    }
-
-    #[test]
-    fn stream_event_deserializes_error() {
-        let event: AnthropicStreamEvent =
-            serde_json::from_str(r#"{"type":"error","error":{"message":"overloaded"}}"#).unwrap();
-        let AnthropicStreamEvent::Error { error } = event else {
-            panic!("expected Error");
-        };
-        assert_eq!(error.message.as_deref(), Some("overloaded"));
-    }
-
-    #[test]
-    fn stream_event_unknown_type_falls_back_to_other() {
-        // `ping` (and anything future) must not fail deserialization, or one
-        // unrecognized event would fail the whole stream.
-        for json in [r#"{"type":"ping"}"#, r#"{"type":"future_event"}"#] {
-            let event: AnthropicStreamEvent = serde_json::from_str(json).unwrap();
-            assert!(matches!(event, AnthropicStreamEvent::Other));
-        }
-    }
-
-    /// Feeds `payloads` through a fresh `AnthropicStream` as if they were
-    /// the whole response body.
     fn parse_stream(payloads: &[&str]) -> Result<Choice> {
         let (chunk_tx, _chunk_rx) = mpsc::unbounded_channel();
         let mut stream = AnthropicStream::default();
@@ -1028,46 +680,18 @@ mod tests {
         stream.finish()
     }
 
-    const TOOL_REPLY: &[&str] = &[
-        r#"{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}"#,
-        r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
-        r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Reading."}}"#,
-        r#"{"type":"content_block_stop","index":0}"#,
-        r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file"}}"#,
-        r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a.txt\"}"}}"#,
-        r#"{"type":"content_block_stop","index":1}"#,
-        r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":20}}"#,
-        r#"{"type":"message_stop"}"#,
-    ];
-
     #[test]
-    fn complete_stream_becomes_a_choice() {
-        let choice = parse_stream(TOOL_REPLY).unwrap();
-        assert_eq!(
-            choice.message.content,
-            [
-                ContentBlock::from("Reading."),
-                ContentBlock::tool_use("toolu_1", "read_file", r#"{"path":"a.txt"}"#),
-            ]
-        );
-        assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
-        assert_eq!(choice.usage.unwrap().output_tokens, 20);
+    fn consecutive_tool_results_merge_into_one_user_message() {
+        let messages = vec![
+            Message::tool_result("call_1", "read_file", "content1", false),
+            Message::tool_result("call_2", "write_file", "content2", false),
+        ];
+        let result = convert_messages(&messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "user");
+        assert_eq!(result[0].content.len(), 2);
     }
 
-    // A connection that closes early is an incomplete reply (here: missing
-    // its tool call), not a complete one that ends the turn.
-    #[test]
-    fn stream_cut_off_before_message_stop_is_an_incomplete_response() {
-        for cut in [3, TOOL_REPLY.len() - 1] {
-            let err = parse_stream(&TOOL_REPLY[..cut]).unwrap_err();
-            assert!(matches!(err, Error::IncompleteResponse(_)), "{err}");
-            assert!(err.is_retryable());
-        }
-    }
-
-    // Each thinking block keeps its own signature, redacted thinking is
-    // kept, and blocks stay in stored order: Anthropic rejects a turn sent
-    // back any other way.
     #[test]
     fn interleaved_blocks_keep_their_order_and_own_signatures() {
         let choice = parse_stream(&[
@@ -1123,9 +747,11 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_without_streamed_input_gets_empty_object_arguments() {
+    fn tool_call_without_streamed_input_and_junk_payloads() {
         let choice = parse_stream(&[
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"list_dir","input":{}}}"#,
+            "{not json",
+            r#"{"type":"ping"}"#,
             r#"{"type":"content_block_stop","index":0}"#,
             r#"{"type":"message_stop"}"#,
         ])
@@ -1134,12 +760,5 @@ mod tests {
             choice.message.content,
             [ContentBlock::tool_use("toolu_1", "list_dir", "{}")]
         );
-    }
-
-    #[test]
-    fn unparseable_payload_is_skipped_not_fatal() {
-        let mut payloads = TOOL_REPLY.to_vec();
-        payloads.insert(1, "{not json");
-        assert!(parse_stream(&payloads).is_ok());
     }
 }
