@@ -33,7 +33,7 @@ use super::{
     permission::AcpPermissionGate,
     util::{
         EFFORT_CONFIG_ID, MODEL_CONFIG_ID, conversation_metas_to_session_info, map_stop_reason,
-        replay_history_messages, session_config_options, session_mode_state,
+        parse_model_option_id, replay_history_messages, session_config_options, session_mode_state,
         stream_event_to_session_update,
     },
 };
@@ -141,6 +141,7 @@ pub(crate) async fn serve_state(
                         NewSessionResponse::new(session_key)
                             .config_options(session_config_options(
                                 &state_session.app_config,
+                                &settings.provider,
                                 &settings.model,
                                 settings.effort,
                             ))
@@ -265,6 +266,7 @@ pub(crate) async fn serve_state(
                             LoadSessionResponse::new()
                                 .config_options(session_config_options(
                                     &state_load.app_config,
+                                    &loaded.provider,
                                     &loaded.model,
                                     loaded.effort,
                                 ))
@@ -300,7 +302,14 @@ pub(crate) async fn serve_state(
                 let state = &state_set_config;
                 let updated = async {
                     if config_id == MODEL_CONFIG_ID {
-                        state.set_session_model(&session_id, value).await?;
+                        // A bare model name, as clients sent before option
+                        // ids named the provider, still resolves.
+                        match parse_model_option_id(&state.app_config, value) {
+                            Some((provider, model)) => {
+                                state.switch_model(&session_id, provider, model).await?
+                            }
+                            None => state.set_session_model(&session_id, value).await?,
+                        };
                     } else {
                         let effort = Effort::parse(value)?;
                         state.set_session_effort(&session_id, effort).await?;
@@ -310,7 +319,12 @@ pub(crate) async fn serve_state(
                 match updated.await {
                     // The response carries every option, not only the one set.
                     Ok(settings) => responder.respond(SetSessionConfigOptionResponse::new(
-                        session_config_options(&state.app_config, &settings.model, settings.effort),
+                        session_config_options(
+                            &state.app_config,
+                            &settings.provider,
+                            &settings.model,
+                            settings.effort,
+                        ),
                     )),
                     Err(e) => responder.respond_with_error(to_acp_error(&e)),
                 }
