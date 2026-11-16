@@ -603,7 +603,8 @@ pub enum StreamEvent {
     /// The next request replaces the output of `omitted` older tool results
     /// in the turn in progress with a placeholder, to fit the model's
     /// context window when the turn alone doesn't. Sent when that number
-    /// changes during a turn. The stored history keeps the outputs.
+    /// changes during a turn, including back to 0. The stored history keeps
+    /// the outputs.
     #[serde(rename = "tool_outputs_omitted")]
     ToolOutputsOmitted { omitted: usize },
     /// The agent has finished; `final_response` is the complete answer.

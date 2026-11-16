@@ -272,8 +272,9 @@ where
                     dropped: reported_dropped,
                 });
             }
+            // Back to 0 too: a recalibrated estimate can fit them all again.
             let omitted = request.fitted.omitted_outputs;
-            if omitted > 0 && omitted != reported_omitted {
+            if omitted != reported_omitted {
                 reported_omitted = omitted;
                 callback(StreamEvent::ToolOutputsOmitted { omitted });
             }
@@ -1690,6 +1691,46 @@ mod tests {
         assert_eq!(omitted, [1]);
         // The stored history keeps the output.
         assert_eq!(messages[..5], history);
+    }
+
+    // Usage that shows the estimate was too high lets the next request send
+    // every output again, and that's reported too.
+    #[tokio::test]
+    async fn outputs_back_in_the_request_are_reported() {
+        let big = "x".repeat(4000);
+        let call = |id: &str| Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::tool_use(id, "read_file", "{}")],
+        };
+        let mut messages = vec![
+            Message::user("go"),
+            call("a"),
+            Message::tool_result("a", "read_file", &big, false),
+            call("b"),
+            Message::tool_result("b", "read_file", &big, false),
+        ];
+        // Few tokens for the bytes sent: 8 bytes per token from here on.
+        let mut calibrating = tool_call_choice("read_file", "{}");
+        calibrating.usage = Some(Usage {
+            input_tokens: 100,
+            ..Usage::default()
+        });
+        let llm = MockLlm::new(vec![calibrating, text_choice("done")]);
+        let mut harness = Harness::new();
+        // About 5.4 KB at the default 4 bytes per token: room for one output.
+        harness.config.context_window = Some(1500);
+        let mut omitted = Vec::new();
+
+        harness
+            .run(&llm, &MockToolExecutor::new("ok"), &mut messages, |event| {
+                if let StreamEvent::ToolOutputsOmitted { omitted: n } = event {
+                    omitted.push(n);
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(omitted, [1, 0]);
     }
 
     #[test]
