@@ -3,12 +3,14 @@ mod public;
 mod resolve;
 mod types;
 
+#[cfg(feature = "rag")]
+pub(crate) use client::build_http_client_for;
 pub(crate) use client::{HttpClients, client_for_config, same_client};
 pub use client::{build_http_client, create_client};
 pub use public::{
     PublicConfig, PublicMcpServerConfig, PublicMemoryConfig, PublicProviderConfig, PublicTuiConfig,
 };
-pub(crate) use resolve::is_insecure_remote_http;
+pub(crate) use resolve::{is_insecure_remote_http, is_loopback_url};
 pub use types::{
     AgentConfig, AppConfig, EmbeddingConfig, McpServerConfig, MemoryConfig, ModelsInfo,
     ProviderConfig, ProviderKind, ProviderModels, TuiConfig,

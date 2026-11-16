@@ -1,28 +1,34 @@
 use super::types::{AgentConfig, AppConfig, EmbeddingConfig, ProviderConfig, ProviderKind};
 use crate::error::{Error, Result};
 
-/// Whether `url` is plain `http://` to a host off this machine, where
-/// credentials would cross the network unencrypted. Loopback (`localhost`,
-/// `127.0.0.0/8`, `::1`) never leaves the machine, so a key may go there
-/// over `http://`, as local model servers and proxies expect. The host is
-/// judged as written, without a DNS lookup.
-pub(crate) fn is_insecure_remote_http(url: &str) -> bool {
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        return url.starts_with("http://");
-    };
-    if parsed.scheme() != "http" {
+/// Whether `url`'s host is this machine: `localhost`, `127.0.0.0/8` or
+/// `::1`, judged as written, without a DNS lookup. Requests there are sent
+/// directly, never through a proxy (see `config::client`), so they don't
+/// leave the machine.
+pub(crate) fn is_loopback_url(url: &str) -> bool {
+    let Some(host) = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+    else {
         return false;
-    }
-    let Some(host) = parsed.host_str() else {
-        return true;
     };
     // IPv6 literals come bracketed: `[::1]`.
     let host = host.trim_start_matches('[').trim_end_matches(']');
-    let loopback = host.eq_ignore_ascii_case("localhost")
+    host.eq_ignore_ascii_case("localhost")
         || host
             .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback());
-    !loopback
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Whether `url` is plain `http://` to a host off this machine, where
+/// credentials would cross the network unencrypted. Loopback
+/// ([`is_loopback_url`]) never leaves the machine, so a key may go there
+/// over `http://`, as local model servers and proxies expect.
+pub(crate) fn is_insecure_remote_http(url: &str) -> bool {
+    match reqwest::Url::parse(url) {
+        Ok(parsed) => parsed.scheme() == "http" && !is_loopback_url(url),
+        Err(_) => url.starts_with("http://"),
+    }
 }
 
 fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<()> {

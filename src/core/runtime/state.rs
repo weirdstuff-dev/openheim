@@ -94,7 +94,7 @@ impl AgentState {
         #[cfg(feature = "rag")] long_term_memory: Option<crate::rag::LongTermMemory>,
     ) -> Result<Self> {
         let http = Arc::new(HttpClients::default());
-        let llm = create_client(&config, &http.get(config.timeout_secs)?);
+        let llm = create_client(&config, &http.get(config.timeout_secs, &config.api_base)?);
         let allow_shell = app_config.allow_shell;
         let work_dir = match app_config.work_dir.clone() {
             Some(wd) => wd,
@@ -178,7 +178,7 @@ impl AgentState {
         if same_client(config, &self.config) {
             return Ok(None);
         }
-        let http_client = self.http.get(config.timeout_secs)?;
+        let http_client = self.http.get(config.timeout_secs, &config.api_base)?;
         Ok(Some(create_client(config, &http_client)))
     }
 

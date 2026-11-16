@@ -17,7 +17,7 @@ use rmcp::{
 use tokio::sync::Mutex;
 
 use crate::{
-    config::{McpServerConfig, is_insecure_remote_http},
+    config::{McpServerConfig, is_insecure_remote_http, is_loopback_url},
     error::{Error, Result},
 };
 
@@ -185,6 +185,38 @@ fn tool_timeout(name: &str, config: &McpServerConfig) -> Result<Duration> {
     }
 }
 
+/// The HTTP client for an MCP server on this machine: rmcp's default
+/// (no idle pooling, only same-origin `307`/`308` redirects), but reaching
+/// it directly, ignoring any proxy the environment sets, so its headers
+/// don't leave the machine.
+fn direct_http_client(name: &str) -> Result<reqwest::Client> {
+    let same_origin = reqwest::redirect::Policy::custom(|attempt| {
+        let preserves_body = matches!(
+            attempt.status(),
+            reqwest::StatusCode::TEMPORARY_REDIRECT | reqwest::StatusCode::PERMANENT_REDIRECT
+        );
+        let same_origin = attempt
+            .previous()
+            .first()
+            .is_some_and(|original| original.origin() == attempt.url().origin());
+        if preserves_body && same_origin && attempt.previous().len() <= 10 {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    });
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(0)
+        .redirect(same_origin)
+        .no_proxy()
+        .build()
+        .map_err(|e| {
+            Error::Other(format!(
+                "MCP server '{name}': failed to build HTTP client: {e}"
+            ))
+        })
+}
+
 /// Opens a connection to server `name` as `config` describes.
 async fn open(name: &str, config: &McpServerConfig) -> Result<Service> {
     if let Some(ref url) = config.url {
@@ -216,7 +248,11 @@ async fn open(name: &str, config: &McpServerConfig) -> Result<Service> {
             }
             http_config = http_config.custom_headers(custom_headers);
         }
-        let transport = StreamableHttpClientTransport::from_config(http_config);
+        let transport = if is_loopback_url(url) {
+            StreamableHttpClientTransport::with_client(direct_http_client(name)?, http_config)
+        } else {
+            StreamableHttpClientTransport::from_config(http_config)
+        };
         ().serve(transport)
             .await
             .map_err(|e| Error::Other(format!("MCP HTTP connect to '{}' failed: {}", name, e)))

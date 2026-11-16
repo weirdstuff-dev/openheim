@@ -40,7 +40,7 @@ mod tool;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::config::{AppConfig, build_http_client};
+use crate::config::{AppConfig, build_http_client_for};
 use crate::error::Result;
 
 pub use embedding::{EmbeddingClient, GeminiEmbeddingClient, OpenAiEmbeddingClient};
@@ -121,7 +121,7 @@ impl LongTermMemory {
         };
         let embedder = match config.resolve_embedding()? {
             Some(embedding) => {
-                let http = build_http_client(embedding.timeout_secs)?;
+                let http = build_http_client_for(embedding.timeout_secs, &embedding.api_base)?;
                 Some(embedding::create_embedding_client(&embedding, &http))
             }
             None => None,
