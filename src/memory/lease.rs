@@ -43,6 +43,29 @@ struct LeaseInfo {
     /// leases written by older versions or on platforms without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     start_token: Option<String>,
+    /// The holder's [`pid_namespace`]: its pid only means something to a
+    /// process in the same one. Absent in leases written by older versions
+    /// or where there's none to tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pid_namespace: Option<String>,
+}
+
+impl LeaseInfo {
+    /// Whether the holder's pid can be checked from here: same host and,
+    /// where known, the same PID namespace. Containers that share a
+    /// hostname (host networking) but not a PID namespace see different
+    /// processes under the same pid, so to each other they're another host.
+    /// A lease from an older version, which records no namespace, is judged
+    /// by hostname alone.
+    fn pid_visible_here(&self) -> bool {
+        self.hostname == IDENTITY.0
+            && (self.pid_namespace.is_none() || self.pid_namespace == *OWN_PID_NAMESPACE)
+    }
+
+    /// Whether this process holds the lease: our pid, as seen from here.
+    fn is_ours(&self) -> bool {
+        self.pid == std::process::id() && self.pid_visible_here()
+    }
 }
 
 /// This process's identity, computed once and reused for every lease it
@@ -53,6 +76,22 @@ static IDENTITY: LazyLock<(String, DateTime<Utc>)> =
 /// This process's [`process_start_token`].
 static OWN_START_TOKEN: LazyLock<Option<String>> =
     LazyLock::new(|| process_start_token(std::process::id()));
+
+/// This process's [`pid_namespace`].
+static OWN_PID_NAMESPACE: LazyLock<Option<String>> = LazyLock::new(pid_namespace);
+
+/// The PID namespace this process lives in (`pid:[4026531836]`), which
+/// decides what its pids refer to. `None` where there's none to tell.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn pid_namespace() -> Option<String> {
+    let link = std::fs::read_link("/proc/self/ns/pid").ok()?;
+    Some(link.to_string_lossy().into_owned())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn pid_namespace() -> Option<String> {
+    None
+}
 
 /// The name leases record as their holder's host: the system hostname, or,
 /// on a system without one, [`fallback_host_id`] in the temp directory.
@@ -231,7 +270,7 @@ impl Drop for SessionLease {
         let Ok(info) = serde_json::from_str::<LeaseInfo>(&data) else {
             return;
         };
-        if info.pid == std::process::id() && info.hostname == IDENTITY.0 {
+        if info.is_ours() {
             let _ = std::fs::remove_file(&self.path);
         }
     }
@@ -253,6 +292,7 @@ pub fn acquire(dir: &Path, id: &Uuid) -> Result<SessionLease> {
         acquired_at: Utc::now(),
         process_start: IDENTITY.1,
         start_token: OWN_START_TOKEN.clone(),
+        pid_namespace: OWN_PID_NAMESPACE.clone(),
     };
     let contents = serde_json::to_string_pretty(&info)?;
 
@@ -291,22 +331,24 @@ pub fn acquire(dir: &Path, id: &Uuid) -> Result<SessionLease> {
         };
     };
 
-    if existing.pid == std::process::id() && existing.hostname == IDENTITY.0 {
+    if existing.is_ours() {
         // Idempotent refresh of our own lease; the file already exists, so
         // this always goes through the rename path.
         write_atomic(&path, &contents)?;
         return Ok(SessionLease { path });
     }
 
-    let same_host = existing.hostname == IDENTITY.0;
-    let alive = same_host.then(|| pid_is_alive(existing.pid)).flatten();
+    let alive = existing
+        .pid_visible_here()
+        .then(|| pid_is_alive(existing.pid))
+        .flatten();
     let stale = match alive {
         // A live pid keeps the lease unless it now belongs to another
         // process (after a crash and reboot, say).
         Some(true) => pid_was_reused(&existing),
         Some(false) => true,
-        // Can't confirm liveness (different host, or this platform can't
-        // check): fall back to age.
+        // Can't confirm liveness (different host or PID namespace, or this
+        // platform can't check): fall back to age.
         None => older_than(&path, STALE_TTL),
     };
 
@@ -459,6 +501,7 @@ mod tests {
             acquired_at: Utc::now(),
             process_start: Utc::now(),
             start_token: None,
+            pid_namespace: None,
         };
         write_atomic(&path, &serde_json::to_string_pretty(&info).unwrap()).unwrap();
 
@@ -480,6 +523,7 @@ mod tests {
             acquired_at: Utc::now(),
             process_start: Utc::now(),
             start_token: None,
+            pid_namespace: None,
         };
         write_atomic(&path, &serde_json::to_string_pretty(&info).unwrap()).unwrap();
 
@@ -501,6 +545,7 @@ mod tests {
             acquired_at: Utc::now() - chrono::Duration::hours(2),
             process_start: Utc::now(),
             start_token: None,
+            pid_namespace: None,
         };
         write_atomic(&path, &serde_json::to_string_pretty(&info).unwrap()).unwrap();
         // Back-date the file's mtime past the TTL (write_atomic just set it to now).
@@ -511,6 +556,65 @@ mod tests {
 
         let lease = acquire(dir.path(), &id).unwrap();
         drop(lease);
+    }
+
+    /// A lease on this host but from another PID namespace (a container
+    /// sharing the hostname), held by `pid` and last modified `age` ago.
+    fn write_other_namespace_lease(dir: &Path, id: &Uuid, pid: u32, age: Duration) {
+        let info = LeaseInfo {
+            pid,
+            hostname: IDENTITY.0.clone(),
+            acquired_at: Utc::now(),
+            process_start: Utc::now(),
+            start_token: Some("theirs".to_string()),
+            pid_namespace: Some("pid:[1]".to_string()),
+        };
+        write_lockfile(dir, id, &serde_json::to_string(&info).unwrap(), age);
+    }
+
+    // Its pid means nothing here: neither dead nor reused, so the lease
+    // holds until it's past the TTL, as another host's would.
+    #[cfg(unix)]
+    #[test]
+    fn a_lease_from_another_pid_namespace_is_judged_by_age() {
+        let dir = tempdir().unwrap();
+        for pid in [0x7FFF_FFFE, std::os::unix::process::parent_id()] {
+            let id = Uuid::new_v4();
+            write_other_namespace_lease(dir.path(), &id, pid, Duration::ZERO);
+            let err = acquire(dir.path(), &id).unwrap_err();
+            assert!(
+                matches!(err, Error::SessionLocked { .. }),
+                "pid {pid}: {err}"
+            );
+        }
+
+        let id = Uuid::new_v4();
+        write_other_namespace_lease(dir.path(), &id, 0x7FFF_FFFE, STALE_TTL * 2);
+        drop(acquire(dir.path(), &id).unwrap());
+    }
+
+    // Our pid number in another namespace is another process.
+    #[test]
+    fn a_lease_with_our_pid_from_another_pid_namespace_is_not_ours() {
+        let dir = tempdir().unwrap();
+        let id = Uuid::new_v4();
+        write_other_namespace_lease(dir.path(), &id, std::process::id(), Duration::ZERO);
+
+        let err = acquire(dir.path(), &id).unwrap_err();
+        assert!(matches!(err, Error::SessionLocked { .. }), "{err}");
+        drop(SessionLease {
+            path: lock_path(dir.path(), &id),
+        });
+        assert!(lock_path(dir.path(), &id).exists(), "dropped as if ours");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn the_pid_namespace_is_known_on_linux() {
+        let ns = OWN_PID_NAMESPACE
+            .clone()
+            .expect("readable /proc/self/ns/pid");
+        assert!(ns.starts_with("pid:["), "{ns}");
     }
 
     // A lease written by a version without `start_token` still parses.
@@ -534,6 +638,7 @@ mod tests {
                 acquired_at: Utc::now(),
                 process_start: Utc::now(),
                 start_token,
+                pid_namespace: OWN_PID_NAMESPACE.clone(),
             };
             write_atomic(
                 &lock_path(dir, id),
@@ -629,6 +734,7 @@ mod tests {
             acquired_at: Utc::now(),
             process_start: Utc::now(),
             start_token: None,
+            pid_namespace: None,
         };
         write_atomic(&path, &serde_json::to_string_pretty(&foreign).unwrap()).unwrap();
 
