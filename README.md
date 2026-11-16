@@ -11,7 +11,9 @@
 [![Rust](https://img.shields.io/badge/rust-1.91%2B-orange)](https://www.rust-lang.org)
 </div>
 
-**A fast, multi-provider LLM agent runtime built in Rust.**
+**The same agent, everywhere you run it.**
+
+One open-source runtime for your terminal, your editor, a server or your own Rust app. Bring any model.
 
 <div align="center">
 <table>

@@ -1,6 +1,7 @@
 //! # openheim
 //!
-//! A fast, multi-provider LLM agent runtime written in Rust.
+//! The same agent, everywhere you run it: a multi-provider LLM agent runtime for
+//! the terminal, editors over ACP, a WebSocket server, or embedded in your Rust app.
 //!
 //! ## Quick start
 //!
