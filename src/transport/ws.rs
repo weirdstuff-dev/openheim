@@ -227,8 +227,10 @@ async fn shutdown_signal() {
 
 /// Serves `client` over HTTP and WebSocket until Ctrl-C or SIGTERM, then
 /// shuts down gracefully: stops accepting connections, cancels the turns
-/// in flight and waits briefly for them to end, so their session leases
-/// are released and their shell commands killed.
+/// in flight and waits up to 5 seconds for them to end, so their session
+/// leases are released and their shell commands killed. A turn still
+/// running after that keeps its lease until it ends or the runtime it runs
+/// on is dropped (as `openheim serve` does on returning).
 pub async fn serve(client: OpenheimClient, host: String, port: u16) -> crate::error::Result<()> {
     let state = client.state().clone();
 
