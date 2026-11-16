@@ -1,0 +1,8 @@
+//! Black-box tests: the library and the `openheim` binary against fake LLM
+//! providers and a stub MCP server.
+
+mod agent;
+mod common;
+mod providers;
+mod sessions;
+mod smoke;
