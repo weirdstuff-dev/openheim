@@ -1273,7 +1273,8 @@ A session starts in `execute` mode at its provider's `effort` setting (see [conf
   "sessionId": "550e8400-e29b-41d4-a716-446655440000",
   "modes": { "currentModeId": "execute", "availableModes": [{ "id": "execute", "name": "Execute" }, { "id": "plan", "name": "Plan" }] },
   "configOptions": [
-    { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "gpt-4-turbo", "options": [ … ] },
+    { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "openai/gpt-4-turbo",
+      "options": [{ "value": "openai/gpt-4-turbo", "name": "gpt-4-turbo", "description": "openai", "_meta": { "provider": "openai" } }, …] },
     { "id": "effort", "name": "Effort", "category": "thought_level", "type": "select", "currentValue": "default",
       "options": [{ "value": "default", "name": "Default" }, { "value": "low", "name": "Low" }, { "value": "medium", "name": "Medium" }, { "value": "high", "name": "High" }] }
   ]
@@ -1293,6 +1294,8 @@ A session starts in `execute` mode at its provider's `effort` setting (see [conf
 { "jsonrpc": "2.0", "id": 8, "method": "session/set_config_option",
   "params": { "sessionId": "550e8400-…", "configId": "effort", "value": "high" } }
 ```
+
+Each `model` option's value is `provider/model`, so a model configured under two providers appears once per provider and either can be picked; its `name` is the model and its `description` the provider. Setting the model also accepts a bare model name, which resolves to the first provider (alphabetically) that lists it.
 
 The `session/set_config_option` response's `configOptions` holds both selectors at their new values; switching the model can change the effort level too, when the session never set one. An unknown mode, config option or value is an `-32602` error.
 
