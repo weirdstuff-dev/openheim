@@ -6,9 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **A long tool loop no longer fails with `Error::ContextOverflow` as soon as it outgrows the context window.** When the turn in progress alone doesn't fit, the outputs of its older tool results are replaced with `[tool output omitted to fit the context window]`, oldest first. Each call keeps a result, so providers still get every call paired, and results the model hasn't seen yet are always sent in full. The turn only fails when nothing more can be left out. The stored history keeps every output. A new `StreamEvent::ToolOutputsOmitted { omitted }` reports each change in the count, including back to 0 when a recalibrated estimate fits them all again. The TUI shows it as a notice.
+
 ### Changed
 
 - **Breaking: the `code` and `architect` modes are now `execute` and `plan`.** `AgentMode::Code` is `AgentMode::Execute` and `AgentMode::Architect` is `AgentMode::Plan`. ACP `session/set_mode` takes `modeId` `"execute"` or `"plan"`, `availableModes` lists them as "Execute" and "Plan", and the TUI's `:mode` takes the new names. Conversations saved with `"code"` or `"architect"` still load, in the matching new mode.
+- **ACP model options are qualified by provider.** Each `model` option's value is now `provider/model`, with the model as its `name`, the provider as its `description` and `_meta.provider`. A model configured under two providers appears once for each, and either one can be picked. `session/set_config_option` still accepts a bare model name, which resolves to the first provider (alphabetically) that lists it. See `docs/api.md`.
+- **API keys and MCP `headers` are allowed over `http://` to loopback.** They're still refused over plain `http://` to another machine, but `localhost`, `127.0.0.0/8` and `[::1]` are allowed, e.g. a local proxy or model server that wants a key. Requests to loopback always go out directly and ignore any proxy set in the environment (`HTTP_PROXY` and the like), so the key never leaves the machine.
+- **`execute_command` keeps stderr when a command succeeds.** Warnings and progress a successful command writes to stderr were dropped. They now follow stdout under a `Stderr:` label.
+- **`delete_session` cancels a running turn first.** `OpenheimClient::delete_session` on a session with a turn in flight now cancels the turn and waits up to 10 seconds for it to end, so the turn can't write the session back after it's deleted. If the turn doesn't end in time, the call fails with `Error::SessionBusy` and the session stays. While another `openheim` process runs a turn on it, the call fails with `Error::SessionLocked`.
+
+### Fixed
+
+- **`execute_command` returns when a command starts a background process.** A command like `server &` held the call until the background process exited or the 120-second timeout killed it, because the process kept the output pipes open. The call now returns once the shell exits. The background process keeps running with its later output discarded, and is killed when `openheim` exits, whether or not it closed or redirected its output. Only a process that leaves the command's process group (`setsid`) outlives `openheim`.
+- **`write_file` and `edit_file` write atomically.** A crash or full disk mid-write could leave a truncated file. The new content now goes to a private temp file in the same directory, which is synced and renamed over the original, so the file is either the old one or the new one. An existing file keeps its permissions and, on Unix, its owner and group. A symlink is written through to its target. A file whose owner can't be kept, or that has other hard links, is overwritten in place instead, without the atomicity.
+- **`openheim serve` shuts down gracefully on SIGTERM**, as it already did on SIGINT: it stops accepting connections, cancels the turns in flight and gives them up to 5 seconds to end, releasing their session locks. Docker and systemd stop services with SIGTERM, which used to kill the process mid-turn.
+- **A session's history survives a crash mid-write.** A crash while a message was being appended could leave a partial last line in the history log, and the next message was then appended onto that line, so both were lost. The partial line is now repaired (or dropped, if it doesn't parse) before the next append.
+- **Session locks held by a dead process are taken over when its pid has been reused.** A lease whose holder had died stayed locked for as long as an unrelated process had the same pid. Leases now record the holder's start time as well, so a reused pid is recognised (on Linux and macOS). Leases written by older versions are judged as before.
+- **Session locks work across containers that share a hostname.** Containers with host networking but separate PID namespaces checked each other's pids as if they were their own. A lease from another PID namespace is now judged by age, as one from another host is.
 
 ## [0.18.0] - 2026-11-10
 
