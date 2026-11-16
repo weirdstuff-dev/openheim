@@ -8,6 +8,7 @@ pub use client::{build_http_client, create_client};
 pub use public::{
     PublicConfig, PublicMcpServerConfig, PublicMemoryConfig, PublicProviderConfig, PublicTuiConfig,
 };
+pub(crate) use resolve::is_insecure_remote_http;
 pub use types::{
     AgentConfig, AppConfig, EmbeddingConfig, McpServerConfig, MemoryConfig, ModelsInfo,
     ProviderConfig, ProviderKind, ProviderModels, TuiConfig,

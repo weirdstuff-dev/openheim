@@ -17,7 +17,7 @@ use rmcp::{
 use tokio::sync::Mutex;
 
 use crate::{
-    config::McpServerConfig,
+    config::{McpServerConfig, is_insecure_remote_http},
     error::{Error, Result},
 };
 
@@ -190,11 +190,11 @@ async fn open(name: &str, config: &McpServerConfig) -> Result<Service> {
     if let Some(ref url) = config.url {
         let mut http_config = StreamableHttpClientTransportConfig::with_uri(url.as_str());
         if !config.headers.is_empty() {
-            if url.starts_with("http://") {
+            if is_insecure_remote_http(url) {
                 return Err(Error::ConfigError(format!(
-                    "MCP server '{}' url '{}' uses http:// but has headers configured; \
-                     credentials must not be sent over an unencrypted connection. Use https:// \
-                     or drop the headers for keyless local servers",
+                    "MCP server '{}' url '{}' uses http:// to a non-loopback host but has \
+                     headers configured; credentials must not be sent over an unencrypted \
+                     connection. Use https://, or drop the headers for keyless servers",
                     name, url
                 )));
             }
@@ -291,5 +291,17 @@ mod tests {
         let err = tool_timeout("srv", &server.with_tool_timeout_secs(0)).unwrap_err();
         assert!(matches!(err, Error::ConfigError(_)), "{err}");
         assert!(err.to_string().contains("tool_timeout_secs"), "{err}");
+    }
+
+    // Refused before any connection is attempted.
+    #[tokio::test]
+    async fn headers_over_http_to_a_remote_host_are_refused() {
+        let server =
+            McpServerConfig::http("http://mcp.example.com/mcp").with_header("Authorization", "x");
+        let Err(err) = open("srv", &server).await else {
+            panic!("connected despite headers over http://");
+        };
+        assert!(matches!(err, Error::ConfigError(_)), "{err}");
+        assert!(err.to_string().contains("non-loopback"), "{err}");
     }
 }
