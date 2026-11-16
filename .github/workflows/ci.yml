@@ -22,7 +22,9 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       # Feature matrix: the lib must stay buildable without the CLI/TUI/server deps.
-      - run: cargo clippy --no-default-features -- -D warnings
+      # --all-targets also compiles the unit tests without default features
+      # (the e2e suite is skipped: it requires `cli`).
+      - run: cargo clippy --no-default-features --all-targets -- -D warnings
       - run: cargo clippy --no-default-features --features tui -- -D warnings
       - run: cargo clippy --no-default-features --features server -- -D warnings
       # Doc comments are published on docs.rs — broken/dead intra-doc links
