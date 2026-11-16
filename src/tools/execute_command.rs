@@ -107,8 +107,8 @@ impl RunningGroup {
         }
     }
 
-    /// Whether no process is left in the group (always `false` where groups
-    /// aren't tracked).
+    /// Whether no process is left in the group (always `true` when no group
+    /// is tracked: unlisted, or where groups aren't tracked at all).
     fn is_gone(&self) -> bool {
         #[cfg(target_family = "unix")]
         if let Some(pgid) = self.pgid {
@@ -116,7 +116,17 @@ impl RunningGroup {
             use nix::unistd::Pid;
             return killpg(Pid::from_raw(pgid), None) == Err(nix::errno::Errno::ESRCH);
         }
-        false
+        true
+    }
+
+    /// Sends SIGKILL to the whole group, if it's still listed. Uses the
+    /// pgid recorded at spawn, which stays valid after the shell that led
+    /// the group has been reaped.
+    fn kill(&self) {
+        #[cfg(target_family = "unix")]
+        if let Some(pgid) = self.pgid {
+            kill_group(pgid);
+        }
     }
 
     /// The child has been reaped: its pid may be reused from now on, so the
@@ -134,11 +144,8 @@ impl RunningGroup {
 
 impl Drop for RunningGroup {
     fn drop(&mut self) {
-        #[cfg(target_family = "unix")]
-        if let Some(pgid) = self.pgid {
-            kill_group(pgid);
-            self.reaped();
-        }
+        self.kill();
+        self.reaped();
     }
 }
 
@@ -278,8 +285,10 @@ pub(crate) async fn run_command(command: &str, opts: &RunCommandOptions<'_>) -> 
 
     match outcome {
         Termination::Completed(Ok(status)) => {
+            // Processes still holding the pipes get the note; any left in
+            // the group, holding them or not, stay tracked.
             let background = stdout.is_some() || stderr.is_some();
-            if background {
+            if background || !group.is_gone() {
                 tokio::spawn(drain_background(stdout, stderr, group));
             } else {
                 group.reaped();
@@ -371,13 +380,13 @@ async fn discard<R: AsyncRead + Unpin>(pipe: Option<R>) {
     while matches!(pipe.read(&mut chunk).await, Ok(n) if n > 0) {}
 }
 
-/// Keeps reading, and discarding, the pipes a command's background
-/// processes still hold after its shell exited, so they neither die of
-/// `SIGPIPE` nor block on a full pipe. `group` stays listed meanwhile, so
-/// they're killed with this process ([`kill_running_commands`], or the
-/// group's drop on runtime shutdown). It's unlisted once the pipes close,
-/// or as soon as the group no longer exists, since its id may then be
-/// reused.
+/// Tracks the processes a command left running in the background after its
+/// shell exited. Pipes they still hold are read and discarded, so they
+/// neither die of `SIGPIPE` nor block on a full pipe. `group` stays listed
+/// until no process is left in it, so they're killed with this process
+/// ([`kill_running_commands`], or the group's drop on runtime shutdown),
+/// even if they closed or redirected the pipes. It's unlisted as soon as
+/// the group is gone, since its id may then be reused.
 async fn drain_background<O, E>(stdout: Option<O>, stderr: Option<E>, mut group: RunningGroup)
 where
     O: AsyncRead + Unpin,
@@ -396,8 +405,14 @@ where
         _ = &mut drain => true,
         _ = group_gone => false,
     };
-    group.reaped();
-    if !pipes_closed {
+    if pipes_closed {
+        // Closed pipes don't mean the processes have exited.
+        while !group.is_gone() {
+            tokio::time::sleep(BACKGROUND_GROUP_CHECK_INTERVAL).await;
+        }
+        group.reaped();
+    } else {
+        group.reaped();
         drain.await;
     }
 }
@@ -440,12 +455,10 @@ async fn wait_for_cancel(cancel: Option<&CancellationToken>) {
 /// and reaps it, giving up after [`REAP_TIMEOUT`] rather than hang the turn.
 /// `group` is the child's; it's unlisted once the child is reaped.
 async fn kill_and_reap(child: &mut tokio::process::Child, group: &mut RunningGroup) {
-    // The child leads its own group, so its pid is the pgid. Pid 0 would
-    // signal our own group, hence the `> 0`.
-    #[cfg(target_family = "unix")]
-    if let Some(pgid) = child.id().map(|pid| pid as i32).filter(|&pgid| pgid > 0) {
-        kill_group(pgid);
-    }
+    // From the pgid recorded at spawn, not `child.id()`: that's gone once the
+    // shell has been reaped (a timeout or cancel during the background
+    // output grace), while its background processes may still run.
+    group.kill();
     // Fallback (and the Windows path): direct SIGKILL to the child itself.
     let _ = child.start_kill();
     match tokio::time::timeout(REAP_TIMEOUT, child.wait()).await {
@@ -848,26 +861,65 @@ mod tests {
         }
     }
 
-    // A background process that doesn't hold the pipes changes nothing.
+    // A background process that doesn't hold the pipes gets no note, but
+    // stays tracked until it exits, to be killed with this process.
     #[cfg(target_family = "unix")]
     #[tokio::test]
-    async fn a_redirected_background_process_gets_no_note() {
+    async fn a_redirected_background_process_gets_no_note_but_stays_tracked() {
         let dir = tempfile::tempdir().unwrap();
         let opts = RunCommandOptions {
             cwd: Some(dir.path()),
             ..Default::default()
         };
         let out = run_command(
-            "sleep 30 > /dev/null 2>&1 & echo $! > bg.pid; echo done",
+            "echo $$ > sh.pid; sleep 30 > /dev/null 2>&1 & echo $! > bg.pid; echo done",
             &opts,
         )
         .await
         .unwrap();
         assert_eq!(out, "done\n");
+        let sh = read_pid(&dir.path().join("sh.pid")).await;
         let bg = read_pid(&dir.path().join("bg.pid")).await;
-        let _ = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(bg),
-            nix::sys::signal::Signal::SIGKILL,
+        assert!(running_groups().contains(&sh), "the group stays listed");
+
+        kill_group(sh);
+        assert!(exits_soon(bg).await);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while running_groups().contains(&sh) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the group is unlisted once its processes exit"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    // Cancelled after the shell exited, during the grace that collects its
+    // output: the background processes still die with the group.
+    #[cfg(target_family = "unix")]
+    #[tokio::test]
+    async fn cancelling_during_the_background_grace_kills_the_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = CancellationToken::new();
+        let opts = RunCommandOptions {
+            cwd: Some(dir.path()),
+            cancel: Some(&token),
+            ..Default::default()
+        };
+        let cancel_soon = async {
+            tokio::time::sleep(BACKGROUND_OUTPUT_GRACE / 3).await;
+            token.cancel();
+        };
+        let (result, ()) = tokio::join!(
+            run_command("sleep 30 & echo $! > bg.pid", &opts),
+            cancel_soon
+        );
+
+        assert!(result.is_err(), "{result:?}");
+        let bg = read_pid(&dir.path().join("bg.pid")).await;
+        assert!(
+            exits_soon(bg).await,
+            "background `sleep 30` (pid {bg}) survived"
         );
     }
 
