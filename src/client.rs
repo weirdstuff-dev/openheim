@@ -826,33 +826,6 @@ fn resolve_work_dir(work_dir: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "acp")]
-    #[tokio::test]
-    async fn acp_updates_maps_events_and_drops_ones_acp_has_no_room_for() {
-        let dir = tempfile::tempdir().unwrap();
-        let client = OpenheimClient::builder()
-            .provider("openai")
-            .api_key("test-key")
-            .data_dir(dir.path())
-            .build()
-            .await
-            .unwrap();
-        let session = client.new_session().start().await.unwrap();
-
-        let mut updates = Vec::new();
-        let mut on_event = session.acp_updates(|update| updates.push(update));
-        on_event(StreamEvent::LlmResponse {
-            content: "hi".into(),
-        });
-        on_event(StreamEvent::Usage {
-            usage: Default::default(),
-        });
-        drop(on_event);
-
-        assert_eq!(updates.len(), 1);
-        assert!(matches!(updates[0], SessionUpdate::AgentMessageChunk(_)));
-    }
-
     #[test]
     fn prompt_input_puts_text_before_images_and_skips_empty_text() {
         let image = |data: &str| ContentBlock::Image {

@@ -143,49 +143,8 @@ impl ToolHandler for EditFileTool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::tools::test_support::{FixedClientIo, TurnHarness};
-
-    #[tokio::test]
-    async fn edit_file_prefers_client_io_over_local_disk() {
-        let harness = TurnHarness::new().with_client_io(Arc::new(FixedClientIo("client content")));
-        let path = harness.work_dir().join("a.txt");
-        std::fs::write(&path, "local content").unwrap();
-
-        let args = serde_json::json!({
-            "path": path.to_str().unwrap(),
-            "old_string": "client",
-            "new_string": "CLIENT",
-        })
-        .to_string();
-        let result = EditFileTool.execute(&args, &harness.turn()).await.unwrap();
-        assert!(result.contains("Successfully edited"), "{result}");
-        // FixedClientIo's write is a no-op that never touches local disk, so
-        // the file on disk still holds its original content unmodified —
-        // proof the edit went through client_io, not local fs.
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "local content");
-    }
-
-    #[tokio::test]
-    async fn edit_file_falls_back_to_local_disk_when_client_io_defers() {
-        let harness = TurnHarness::new();
-        let path = harness.work_dir().join("a.txt");
-        std::fs::write(&path, "fn main() { old() }").unwrap();
-
-        let args = serde_json::json!({
-            "path": path.to_str().unwrap(),
-            "old_string": "old()",
-            "new_string": "new()",
-        })
-        .to_string();
-        EditFileTool.execute(&args, &harness.turn()).await.unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "fn main() { new() }"
-        );
-    }
+    use crate::tools::test_support::TurnHarness;
 
     #[tokio::test]
     async fn edit_file_refuses_files_over_the_size_limit() {

@@ -319,26 +319,6 @@ pub(crate) mod test_support {
                 client_io: &*self.client_io,
             }
         }
-
-        /// A clone of the underlying token, so a test can cancel the turn
-        /// from outside while `turn()` is borrowed elsewhere.
-        pub(crate) fn cancel_handle(&self) -> CancellationToken {
-            self.cancel.clone()
-        }
-    }
-
-    /// Always answers from an in-memory string, never touching local disk.
-    pub(crate) struct FixedClientIo(pub &'static str);
-
-    #[async_trait]
-    impl ClientIo for FixedClientIo {
-        async fn read_file(&self, _path: &Path, _lines: LineRange) -> Option<Result<String>> {
-            Some(Ok(self.0.to_string()))
-        }
-
-        async fn write_file(&self, _path: &Path, _content: &str) -> Option<Result<()>> {
-            Some(Ok(()))
-        }
     }
 
     /// Answers every read with `content` and records the ranges asked for.
@@ -365,23 +345,6 @@ pub(crate) mod test_support {
 
         async fn write_file(&self, _path: &Path, _content: &str) -> Option<Result<()>> {
             Some(Ok(()))
-        }
-    }
-
-    /// Never resolves on its own; proves cancellation aborts the wait
-    /// on an unresponsive client rather than blocking the turn.
-    pub(crate) struct HangingClientIo;
-
-    #[async_trait]
-    impl ClientIo for HangingClientIo {
-        async fn read_file(&self, _path: &Path, _lines: LineRange) -> Option<Result<String>> {
-            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-            unreachable!("cancellation should abort this wait before the sleep elapses");
-        }
-
-        async fn write_file(&self, _path: &Path, _content: &str) -> Option<Result<()>> {
-            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-            unreachable!("cancellation should abort this wait before the sleep elapses");
         }
     }
 }

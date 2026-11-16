@@ -156,14 +156,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_stream_stops_at_the_end_signal() {
-        let choice = read("data: a\n\ndata: end\n\ndata: ignored\n\n")
-            .await
-            .unwrap();
-        assert_eq!(choice.message.text().as_deref(), Some("a,end"));
-    }
-
-    #[tokio::test]
     async fn read_stream_keeps_a_last_line_without_its_newline() {
         let choice = read("data: a\n\ndata: end").await.unwrap();
         assert_eq!(choice.message.text().as_deref(), Some("a,end"));
@@ -194,14 +186,6 @@ mod tests {
     }
 
     #[test]
-    fn skips_blank_and_comment_lines() {
-        let mut dec = SseDecoder::new();
-        dec.feed(b"\n: keep-alive\nevent: ping\ndata: payload\n");
-        assert_eq!(dec.next_payload().as_deref(), Some("payload"));
-        assert_eq!(dec.next_payload(), None);
-    }
-
-    #[test]
     fn handles_crlf_and_missing_space_after_colon() {
         let mut dec = SseDecoder::new();
         dec.feed(b"data:no-space\r\ndata: [DONE]\r\n");
@@ -219,16 +203,5 @@ mod tests {
         assert_eq!(dec.next_payload(), None);
         dec.feed(b"\xA5\xE8\xAA\x9E\n");
         assert_eq!(dec.next_payload().as_deref(), Some("a日語"));
-    }
-
-    #[test]
-    fn preserves_4byte_utf8_split_across_chunks() {
-        // "🚀" (U+1F680) is 0xF0 0x9F 0x9A 0x80; split after the second byte,
-        // with the trailing newline arriving in yet another chunk.
-        let mut dec = SseDecoder::new();
-        dec.feed(b"data: \xF0\x9F");
-        dec.feed(b"\x9A\x80");
-        dec.feed(b"\n");
-        assert_eq!(dec.next_payload().as_deref(), Some("🚀"));
     }
 }

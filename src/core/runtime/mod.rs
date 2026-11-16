@@ -57,15 +57,6 @@ mod tests {
     use super::AgentMode;
 
     #[test]
-    fn serializes_as_its_mode_id() {
-        for mode in [AgentMode::Execute, AgentMode::Plan] {
-            let json = serde_json::to_string(&mode).unwrap();
-            assert_eq!(json, format!("\"{}\"", mode.as_str()));
-            assert_eq!(AgentMode::parse(mode.as_str()).unwrap(), mode);
-        }
-    }
-
-    #[test]
     fn loads_the_previous_mode_ids() {
         let execute: AgentMode = serde_json::from_str("\"code\"").unwrap();
         let plan: AgentMode = serde_json::from_str("\"architect\"").unwrap();

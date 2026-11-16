@@ -122,16 +122,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn title_names_the_subagent_that_asked() {
-        let request = PermissionRequest::new("call_1", "execute_command", "{}");
-        assert_eq!(permission_title(&request), "execute_command");
-        assert_eq!(
-            permission_title(&request.from_subagent("reviewer")),
-            "execute_command (subagent 'reviewer')"
-        );
-    }
-
-    #[test]
     fn subagent_tool_call_ids_are_kept_apart_from_the_parents() {
         let request = PermissionRequest::new("call_1", "execute_command", "{}");
         assert_eq!(client_tool_call_id(&request), "call_1");

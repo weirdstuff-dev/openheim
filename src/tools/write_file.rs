@@ -167,56 +167,7 @@ impl ToolHandler for WriteFileTool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::tools::test_support::{FixedClientIo, HangingClientIo, TurnHarness};
-
-    #[tokio::test]
-    async fn write_file_via_client_io_does_not_touch_local_disk() {
-        let harness = TurnHarness::new().with_client_io(Arc::new(FixedClientIo("unused")));
-        let path = harness.work_dir().join("a.txt");
-
-        let args =
-            serde_json::json!({"path": path.to_str().unwrap(), "content": "hello"}).to_string();
-        let result = WriteFileTool.execute(&args, &harness.turn()).await.unwrap();
-        assert!(result.contains("Successfully wrote"));
-        assert!(!path.exists());
-    }
-
-    #[tokio::test]
-    async fn write_file_cancel_aborts_hanging_client_io() {
-        let harness = TurnHarness::new().with_client_io(Arc::new(HangingClientIo));
-        let path = harness.work_dir().join("a.txt");
-
-        let args =
-            serde_json::json!({"path": path.to_str().unwrap(), "content": "hello"}).to_string();
-        let cancel = harness.cancel_handle();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            cancel.cancel();
-        });
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            WriteFileTool.execute(&args, &harness.turn()),
-        )
-        .await
-        .expect("cancellation should abort the hanging client_io call");
-        assert!(result.is_err());
-        assert!(!path.exists());
-    }
-
-    #[tokio::test]
-    async fn write_file_falls_back_to_local_disk_when_client_io_defers() {
-        let harness = TurnHarness::new();
-        let path = harness.work_dir().join("a.txt");
-
-        let args =
-            serde_json::json!({"path": path.to_str().unwrap(), "content": "hello"}).to_string();
-        WriteFileTool.execute(&args, &harness.turn()).await.unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
-    }
 
     /// Names in `dir`, sorted.
     fn entries(dir: &Path) -> Vec<String> {

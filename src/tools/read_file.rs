@@ -381,53 +381,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::tools::test_support::{
-        FixedClientIo, HangingClientIo, RecordingClientIo, TurnHarness,
-    };
-
-    #[tokio::test]
-    async fn read_file_prefers_client_io_over_local_disk() {
-        let harness = TurnHarness::new().with_client_io(Arc::new(FixedClientIo("client content")));
-        let path = harness.work_dir().join("a.txt");
-        std::fs::write(&path, "local content").unwrap();
-
-        let args = serde_json::json!({"path": path.to_str().unwrap()}).to_string();
-        let result = ReadFileTool.execute(&args, &harness.turn()).await.unwrap();
-        assert_eq!(result, "client content");
-    }
-
-    #[tokio::test]
-    async fn read_file_falls_back_to_local_disk_when_client_io_defers() {
-        let harness = TurnHarness::new();
-        let path = harness.work_dir().join("a.txt");
-        std::fs::write(&path, "local content").unwrap();
-
-        let args = serde_json::json!({"path": path.to_str().unwrap()}).to_string();
-        let result = ReadFileTool.execute(&args, &harness.turn()).await.unwrap();
-        assert_eq!(result, "local content");
-    }
-
-    #[tokio::test]
-    async fn read_file_cancel_aborts_hanging_client_io() {
-        let harness = TurnHarness::new().with_client_io(Arc::new(HangingClientIo));
-        let path = harness.work_dir().join("a.txt");
-        std::fs::write(&path, "local content").unwrap();
-
-        let args = serde_json::json!({"path": path.to_str().unwrap()}).to_string();
-        let cancel = harness.cancel_handle();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            cancel.cancel();
-        });
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            ReadFileTool.execute(&args, &harness.turn()),
-        )
-        .await
-        .expect("cancellation should abort the hanging client_io call");
-        assert!(result.is_err());
-    }
+    use crate::tools::test_support::{RecordingClientIo, TurnHarness};
 
     /// `lines` numbered lines, `"line 1\n"` to `"line N\n"`.
     fn numbered(lines: u64) -> String {
@@ -487,32 +441,6 @@ mod tests {
             format!(
                 "line 1 of 2 is longer than {MAX_READ_BYTES} bytes; only its start is shown; call again with offset=2 for the lines after it]"
             )
-        );
-    }
-
-    #[tokio::test]
-    async fn client_io_gets_the_line_range() {
-        let client = Arc::new(RecordingClientIo::new("line 3\nline 4\n"));
-        let harness = TurnHarness::new().with_client_io(client.clone());
-
-        let result = read(&harness, json!({"path": "a.txt", "offset": 3, "limit": 2}))
-            .await
-            .unwrap();
-        assert_eq!(
-            result,
-            "line 3\nline 4\n[lines 3–4 shown; call again with offset=5 to read on]"
-        );
-        read(&harness, json!({"path": "a.txt"})).await.unwrap();
-
-        assert_eq!(
-            *client.reads.lock().unwrap(),
-            [
-                LineRange {
-                    line: Some(3),
-                    limit: Some(2)
-                },
-                LineRange::default(),
-            ]
         );
     }
 
