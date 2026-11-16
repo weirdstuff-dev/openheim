@@ -272,3 +272,39 @@ async fn web_fetch_refuses_local_and_private_addresses() {
         env.err("web_fetch", json!({"url": url})).await;
     }
 }
+
+/// Models send `null` for an optional argument they leave unset.
+#[tokio::test]
+async fn optional_arguments_accept_null() {
+    let env = Env::with(Kind::OpenAi, SHELL).await;
+    env.file("a.txt", "abc");
+    for (tool_name, args) in [
+        (
+            "read_file",
+            json!({"path": "a.txt", "offset": null, "limit": null}),
+        ),
+        ("list_dir", json!({"path": null})),
+        (
+            "search",
+            json!({"pattern": "abc", "path": null, "case_insensitive": null}),
+        ),
+        (
+            "edit_file",
+            json!({"path": "a.txt", "old_string": "abc", "new_string": "abd", "replace_all": null}),
+        ),
+        ("search_memory", json!({"query": "x", "top_k": null})),
+    ] {
+        env.ok(tool_name, args).await;
+    }
+    env.script([
+        tool(
+            "delegate_task",
+            json!({"agent": null, "system_prompt": "Sub.", "tools": null, "model": null,
+                   "provider": null, "max_iterations": null, "task": "t"}),
+        ),
+        text("sub done"),
+        text("ok"),
+    ]);
+    let turn = env.session().await.say("x").await;
+    assert!(turn.ok_result().contains("sub done"));
+}

@@ -4,6 +4,7 @@
 mod agent;
 mod common;
 mod providers;
+mod rag;
 mod sessions;
 mod smoke;
 mod subagents;

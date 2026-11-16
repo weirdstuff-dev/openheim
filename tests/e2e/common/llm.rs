@@ -3,6 +3,7 @@
 //! [`Kind`], and records every request it receives.
 
 use std::collections::VecDeque;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -137,6 +138,9 @@ pub struct Request {
 struct Shared {
     script: Mutex<VecDeque<Reply>>,
     requests: Mutex<Vec<Request>>,
+    /// Texts embedded so far, and whether `/embeddings` answers 503.
+    embedded: Mutex<Vec<String>>,
+    embeddings_down: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone)]
@@ -183,6 +187,15 @@ impl FakeLlm {
             .clone()
     }
 
+    /// Every text sent to `/embeddings` so far.
+    pub fn embedded(&self) -> Vec<String> {
+        self.shared.embedded.lock().unwrap().clone()
+    }
+
+    pub fn set_embeddings_down(&self, down: bool) {
+        self.shared.embeddings_down.store(down, Ordering::SeqCst);
+    }
+
     /// Waits until `n` requests have arrived.
     pub async fn wait_for(&self, n: usize) {
         for _ in 0..1000 {
@@ -202,6 +215,9 @@ async fn handle(
     body: Bytes,
 ) -> Response {
     let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    if uri.path().ends_with("/embeddings") {
+        return embeddings(&shared, &body);
+    }
     let call = {
         let mut requests = shared.requests.lock().unwrap();
         requests.push(Request {
@@ -237,6 +253,35 @@ async fn handle(
             sse(encode(kind, call, &turn, false))
         }
     }
+}
+
+/// OpenAI's embeddings endpoint. A text's vector counts its letters, so
+/// texts spelled alike are near each other.
+fn embeddings(shared: &Shared, body: &Value) -> Response {
+    if shared.embeddings_down.load(Ordering::SeqCst) {
+        return (StatusCode::BAD_REQUEST, "embeddings down").into_response();
+    }
+    let inputs: Vec<String> = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap().to_string())
+        .collect();
+    let data: Vec<Value> = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let mut v = [0f32; 26];
+            for b in text.to_lowercase().bytes().filter(u8::is_ascii_lowercase) {
+                v[(b - b'a') as usize] += 1.0;
+            }
+            let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1.0);
+            let v: Vec<f32> = v.iter().map(|x| x / norm).collect();
+            json!({"object": "embedding", "index": index, "embedding": v})
+        })
+        .collect();
+    shared.embedded.lock().unwrap().extend(inputs);
+    axum::Json(json!({"object": "list", "data": data})).into_response()
 }
 
 fn sse(events: Vec<Value>) -> Response {
