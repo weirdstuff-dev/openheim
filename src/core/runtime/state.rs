@@ -254,33 +254,43 @@ impl AgentState {
     /// saved history. A turn in flight in this process is cancelled first,
     /// and the delete waits up to `grace` for it to end, so it can't write
     /// the session back afterwards. Fails with [`Error::SessionBusy`] if it
-    /// doesn't end in time (the session is then left on disk), with
+    /// doesn't end in time (the session is then left as it was, live and on
+    /// disk, and a retry cancels and waits again), with
     /// [`Error::SessionLocked`] if another process is running a turn on it,
     /// and with [`Error::NotFound`] if it was never saved.
     pub async fn delete_session(&self, session_id: &str, grace: Duration) -> Result<()> {
         let uuid = Uuid::parse_str(session_id)
             .map_err(|_| Error::InvalidArgument("invalid session id".to_string()))?;
-        // Out of the map first, so no new turn can start on it.
-        let live = self.sessions.write().await.remove(session_id);
-        if let Some(live) = live {
-            live.cancel.cancel();
-            // A turn holds this lock until it has ended, lease released.
-            if tokio::time::timeout(grace, live.prompt_lock.lock_owned())
-                .await
-                .is_err()
-            {
-                return Err(Error::SessionBusy {
-                    session_id: session_id.to_string(),
-                });
-            }
-        }
+        // The session stays in the map until its turn has ended, so a retry
+        // after a timeout cancels and waits again.
+        let prompt_lock = self.sessions.read().await.get(session_id).map(|s| {
+            s.cancel.cancel();
+            s.prompt_lock.clone()
+        });
+        // A turn holds this until it has ended, lease released; holding it
+        // here keeps a new turn from starting.
+        let _no_turn = match prompt_lock {
+            Some(lock) => Some(
+                tokio::time::timeout(grace, lock.lock_owned())
+                    .await
+                    .map_err(|_| Error::SessionBusy {
+                        session_id: session_id.to_string(),
+                    })?,
+            ),
+            None => None,
+        };
+        // Held across the delete, so the session can't be loaded back in
+        // meanwhile.
+        let mut sessions = self.sessions.write().await;
         let history = self.memory.history.clone();
         tokio::task::spawn_blocking(move || {
             // Held across the delete, so another process can't be mid-turn.
             let _lease = history.acquire_lease(&uuid)?;
             history.delete_conversation(&uuid)
         })
-        .await?
+        .await??;
+        sessions.remove(session_id);
+        Ok(())
     }
 
     /// Cancels every turn in flight and waits up to `grace` for them to end,
@@ -1156,20 +1166,31 @@ mod new_session_tests {
             .unwrap();
         run_turn(&state, &session_id).await;
         // Stands in for a turn that ignores cancellation.
-        let _held = state.sessions.read().await[&session_id]
+        let held = state.sessions.read().await[&session_id]
             .prompt_lock
             .clone()
             .lock_owned()
             .await;
+        let [meta, log, _] = session_files(dir.path(), &session_id);
 
-        let err = state
+        // A retry waits for the turn again rather than deleting under it.
+        for _ in 0..2 {
+            let err = state
+                .delete_session(&session_id, Duration::from_millis(50))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::SessionBusy { .. }), "{err}");
+            assert!(meta.exists() && log.exists());
+            assert!(state.sessions.read().await.contains_key(&session_id));
+        }
+
+        drop(held);
+        state
             .delete_session(&session_id, Duration::from_millis(50))
             .await
-            .unwrap_err();
-
-        assert!(matches!(err, Error::SessionBusy { .. }), "{err}");
-        let [meta, log, _] = session_files(dir.path(), &session_id);
-        assert!(meta.exists() && log.exists());
+            .unwrap();
+        assert!(!meta.exists() && !log.exists());
+        assert!(!state.sessions.read().await.contains_key(&session_id));
     }
 
     // Another process running a turn on the session holds its lease.
