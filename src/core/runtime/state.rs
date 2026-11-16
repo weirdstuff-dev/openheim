@@ -250,6 +250,33 @@ impl AgentState {
         }
     }
 
+    /// Cancels every turn in flight and waits up to `grace` for them to end,
+    /// so each releases its write lease and kills its shell commands on the
+    /// way out. Returns early once all have ended; a turn still running
+    /// after `grace` is left to the caller (dropping the runtime drops it,
+    /// which releases its lease too).
+    #[cfg(any(feature = "server", test))]
+    pub(crate) async fn shutdown(&self, grace: std::time::Duration) {
+        let turns: Vec<_> = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .values()
+                .map(|s| {
+                    s.cancel.cancel();
+                    s.prompt_lock.clone()
+                })
+                .collect()
+        };
+        let all_ended = async {
+            for lock in turns {
+                drop(lock.lock_owned().await);
+            }
+        };
+        if tokio::time::timeout(grace, all_ended).await.is_err() {
+            tracing::warn!("turns still running {grace:?} after shutdown was requested");
+        }
+    }
+
     /// Replaces a live session's config and chosen effort level with
     /// what `update` makes of the current ones, along with its client.
     ///
@@ -834,6 +861,8 @@ mod prompt_lease_ordering_tests {
 
 #[cfg(test)]
 mod new_session_tests {
+    use std::time::Duration;
+
     use tempfile::tempdir;
 
     use crate::config::ProviderConfig;
@@ -971,6 +1000,61 @@ mod new_session_tests {
                 usage: None,
             })
         }
+    }
+
+    /// Never answers, so a turn stays in flight until it's cancelled.
+    struct HangingLlm;
+
+    #[async_trait::async_trait]
+    impl LlmClient for HangingLlm {
+        async fn send(
+            &self,
+            _messages: &[Message],
+            _tools: &[crate::core::models::Tool],
+        ) -> Result<crate::core::models::Choice> {
+            std::future::pending().await
+        }
+    }
+
+    // `shutdown` cancels a turn in flight and returns once it has ended,
+    // with its write lease released.
+    #[tokio::test]
+    async fn shutdown_ends_live_turns_and_releases_their_leases() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
+        let mut state = sample_state(dir.path()).await;
+        state.llm = Arc::new(HangingLlm);
+        let state = Arc::new(state);
+        let session_id = state
+            .new_session(None, vec![], dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let lockfile = dir
+            .path()
+            .join("history")
+            .join(format!("{session_id}.lock"));
+
+        let turn = tokio::spawn({
+            let state = state.clone();
+            let session_id = session_id.clone();
+            async move { run_turn(&state, &session_id).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !lockfile.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the turn took its lease");
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            state.shutdown(Duration::from_secs(5)),
+        )
+        .await
+        .expect("shutdown returned once the turn ended");
+        assert!(!lockfile.exists());
+        turn.await.unwrap();
     }
 
     /// Runs one "hi" turn on `session_id`, allowing every tool call.

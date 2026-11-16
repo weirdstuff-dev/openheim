@@ -82,17 +82,17 @@ async fn build_client(
     builder.build().await
 }
 
-/// On SIGTERM and SIGHUP, and on SIGINT when `sigint` is set, kills the
+/// On SIGHUP, and on SIGTERM and SIGINT unless `serve` is set, kills the
 /// shell commands the agent is running and exits: dying of the signal
 /// would leave them running (see `tools::kill_running_commands`). `serve`
-/// passes `false`, since it shuts down gracefully on Ctrl-C by itself.
+/// shuts down gracefully on SIGTERM and Ctrl-C by itself.
 #[cfg(unix)]
-fn exit_on_signal(sigint: bool) {
+fn exit_on_signal(serve: bool) {
     use tokio::signal::unix::{SignalKind, signal};
 
-    let mut kinds = vec![SignalKind::terminate(), SignalKind::hangup()];
-    if sigint {
-        kinds.push(SignalKind::interrupt());
+    let mut kinds = vec![SignalKind::hangup()];
+    if !serve {
+        kinds.extend([SignalKind::terminate(), SignalKind::interrupt()]);
     }
     for kind in kinds {
         let Ok(mut signals) = signal(kind) else {
@@ -108,7 +108,7 @@ fn exit_on_signal(sigint: bool) {
 }
 
 #[cfg(not(unix))]
-fn exit_on_signal(_sigint: bool) {}
+fn exit_on_signal(_serve: bool) {}
 
 /// Prints the error and exits with status 1.
 fn die(e: impl std::fmt::Display) -> ! {
@@ -148,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cli = Cli::parse();
-    exit_on_signal(!matches!(cli.command, Some(Command::Serve { .. })));
+    exit_on_signal(matches!(cli.command, Some(Command::Serve { .. })));
 
     let config = cli
         .config
