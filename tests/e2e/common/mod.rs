@@ -99,6 +99,30 @@ models = ["fake-model", "fake-model-2"]
         Session { client, handle }
     }
 
+    /// Has the model call `tool` with `args` in a fresh session and returns
+    /// `(result, is_error)`.
+    pub async fn call(&self, tool_name: &str, args: serde_json::Value) -> (String, bool) {
+        self.script([tool(tool_name, args), text("ok")]);
+        let results = self.session().await.say("go").await.results();
+        assert_eq!(results.len(), 1, "{results:?}");
+        let (_, result, is_error) = results.into_iter().next().unwrap();
+        (result, is_error)
+    }
+
+    /// [`Self::call`] that must succeed.
+    pub async fn ok(&self, tool_name: &str, args: serde_json::Value) -> String {
+        let (result, is_error) = self.call(tool_name, args).await;
+        assert!(!is_error, "{tool_name} failed: {result}");
+        result
+    }
+
+    /// [`Self::call`] that must fail; returns the error.
+    pub async fn err(&self, tool_name: &str, args: serde_json::Value) -> String {
+        let (result, is_error) = self.call(tool_name, args).await;
+        assert!(is_error, "{tool_name} succeeded: {result}");
+        result
+    }
+
     pub fn path(&self, rel: &str) -> PathBuf {
         self.work.join(rel)
     }
@@ -134,7 +158,7 @@ impl Session {
 
 /// A permission gate answering with scripted decisions (then `AllowOnce`),
 /// or never answering if built with [`Gate::hang`]. Records the tools asked
-/// about.
+/// about, as `subagent:tool` for a subagent's calls.
 #[derive(Default)]
 pub struct Gate {
     decisions: Mutex<VecDeque<PermissionDecision>>,
@@ -165,10 +189,11 @@ impl Gate {
 #[async_trait::async_trait]
 impl PermissionGate for Gate {
     async fn check(&self, request: &PermissionRequest<'_>) -> PermissionDecision {
-        self.asked
-            .lock()
-            .unwrap()
-            .push(request.tool_name.to_string());
+        let asked = match request.subagent {
+            Some(agent) => format!("{agent}:{}", request.tool_name),
+            None => request.tool_name.to_string(),
+        };
+        self.asked.lock().unwrap().push(asked);
         if self.hang {
             std::future::pending::<()>().await;
         }

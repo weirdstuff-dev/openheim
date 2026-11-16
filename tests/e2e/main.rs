@@ -6,3 +6,5 @@ mod common;
 mod providers;
 mod sessions;
 mod smoke;
+mod subagents;
+mod tools;
