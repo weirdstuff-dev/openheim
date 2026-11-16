@@ -164,8 +164,9 @@ impl Default for RunCommandOptions<'_> {
 }
 
 /// Runs `command` via the platform shell (`sh -c` on Unix, `cmd /C` on
-/// Windows), optionally in `cwd`. Returns stdout on success, or an error
-/// carrying stdout and stderr on a non-zero exit.
+/// Windows), optionally in `cwd`. Returns stdout on success (then stderr,
+/// labelled, if there was any), or an error carrying stdout and stderr on
+/// a non-zero exit.
 ///
 /// - **Timeout** — killed after `opts.timeout`; the error carries the output
 ///   collected so far.
@@ -283,18 +284,20 @@ pub(crate) async fn run_command(command: &str, opts: &RunCommandOptions<'_>) -> 
             } else {
                 group.reaped();
             }
-            let mut stdout_s = render_stream(&out_buf, out_truncated, opts.max_output_bytes);
-            if background {
-                stdout_s.push_str(BACKGROUND_NOTE);
-            }
+            let stdout_s = render_stream(&out_buf, out_truncated, opts.max_output_bytes);
             let stderr_s = render_stream(&err_buf, err_truncated, opts.max_output_bytes);
-            if status.success() {
-                Ok(stdout_s)
+            let mut output = if status.success() {
+                with_stderr(stdout_s, &stderr_s)
             } else {
-                Err(Error::ToolExecutionError(format!(
-                    "Command failed:\nStdout: {}\nStderr: {}",
-                    stdout_s, stderr_s
-                )))
+                format!("Command failed:\nStdout: {stdout_s}\nStderr: {stderr_s}")
+            };
+            if background {
+                output.push_str(BACKGROUND_NOTE);
+            }
+            if status.success() {
+                Ok(output)
+            } else {
+                Err(Error::ToolExecutionError(output))
             }
         }
         Termination::Completed(Err(e)) => Err(Error::ToolExecutionError(format!(
@@ -397,6 +400,21 @@ where
     if !pipes_closed {
         drain.await;
     }
+}
+
+/// A successful command's result: its stdout, then its stderr under a
+/// `Stderr:` label if it wrote any (warnings, progress, or tools that
+/// report on stderr), so it isn't lost. Just stdout otherwise.
+fn with_stderr(mut stdout: String, stderr: &str) -> String {
+    if stderr.trim().is_empty() {
+        return stdout;
+    }
+    if !stdout.is_empty() && !stdout.ends_with('\n') {
+        stdout.push('\n');
+    }
+    stdout.push_str("Stderr: ");
+    stdout.push_str(stderr);
+    stdout
 }
 
 /// Decodes a collected stream, appending a truncation marker if the cap
@@ -548,6 +566,33 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Command failed:"));
+    }
+
+    // Warnings and progress a successful command writes to stderr reach the
+    // model too.
+    #[cfg(target_family = "unix")]
+    #[tokio::test]
+    async fn a_successful_command_keeps_its_stderr() {
+        let opts = RunCommandOptions::default();
+        let out = run_command("echo out; echo warn >&2", &opts).await.unwrap();
+        assert_eq!(out, "out\nStderr: warn\n");
+
+        let out = run_command("echo warn >&2", &opts).await.unwrap();
+        assert_eq!(out, "Stderr: warn\n");
+
+        let out = run_command("printf out; echo warn >&2", &opts)
+            .await
+            .unwrap();
+        assert_eq!(out, "out\nStderr: warn\n");
+    }
+
+    #[cfg(target_family = "unix")]
+    #[tokio::test]
+    async fn a_successful_command_without_stderr_returns_just_stdout() {
+        let out = run_command("echo out", &RunCommandOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(out, "out\n");
     }
 
     #[tokio::test]
