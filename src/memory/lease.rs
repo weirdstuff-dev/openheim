@@ -21,7 +21,8 @@ use crate::error::{Error, Result};
 
 /// Age (by file mtime) after which a lease may be taken over when its holder
 /// can't be checked (another host, or no pid check on this platform). On the
-/// same host a live pid always keeps it.
+/// same host a live pid keeps it, unless the pid now belongs to a different
+/// process.
 const STALE_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// Age after which a lockfile that isn't a readable lease is taken over.
@@ -34,16 +35,24 @@ struct LeaseInfo {
     pid: u32,
     hostname: String,
     acquired_at: DateTime<Utc>,
-    /// When the holder process first acquired any lease: with the pid, tells
-    /// the holder apart from an unrelated process that reused its pid. (Not
-    /// the OS process start time, which isn't portable.)
+    /// When the holder process first acquired any lease. Informational only;
+    /// still written because older versions can't read a lease without it.
     process_start: DateTime<Utc>,
+    /// The holder process's [`process_start_token`], which tells it apart
+    /// from an unrelated process that later got the same pid. Absent in
+    /// leases written by older versions or on platforms without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    start_token: Option<String>,
 }
 
 /// This process's identity, computed once and reused for every lease it
 /// acquires.
 static IDENTITY: LazyLock<(String, DateTime<Utc>)> =
     LazyLock::new(|| (current_hostname(), Utc::now()));
+
+/// This process's [`process_start_token`].
+static OWN_START_TOKEN: LazyLock<Option<String>> =
+    LazyLock::new(|| process_start_token(std::process::id()));
 
 /// The name leases record as their holder's host: the system hostname, or,
 /// on a system without one, [`fallback_host_id`] in the temp directory.
@@ -109,6 +118,59 @@ fn pid_is_alive(pid: u32) -> Option<bool> {
 #[cfg(not(unix))]
 fn pid_is_alive(_pid: u32) -> Option<bool> {
     None
+}
+
+/// A value that identifies process `pid` for as long as it runs and differs
+/// for a later process given the same pid: the kernel's boot id plus the
+/// process's start time in ticks since boot. Only compared for equality,
+/// so wall-clock changes don't affect it. `None` if the process doesn't
+/// exist or can't be inspected.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn process_start_token(pid: u32) -> Option<String> {
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Field 22, `starttime`. Field 2, the command name, is parenthesised
+    // and may contain spaces, so fields are counted from after its `)`:
+    // the first one there is field 3.
+    let start_ticks: u64 = stat[stat.rfind(')')? + 1..]
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()?;
+    Some(format!("{}:{start_ticks}", boot_id.trim()))
+}
+
+/// A value that identifies process `pid` for as long as it runs and differs
+/// for a later process given the same pid: its start time to the
+/// microsecond, as the kernel recorded it. `None` if the process doesn't
+/// exist or can't be inspected.
+#[cfg(target_os = "macos")]
+fn process_start_token(pid: u32) -> Option<String> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    // SAFETY: `proc_bsdinfo` is a plain C struct of integers and byte
+    // arrays, for which all zeroes is a valid value.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: `info` is a writable buffer of `size` bytes, the size
+    // PROC_PIDTBSDINFO writes.
+    let written =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+    (written == size).then(|| format!("{}.{:06}", info.pbi_start_tvsec, info.pbi_start_tvusec))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+fn process_start_token(_pid: u32) -> Option<String> {
+    None
+}
+
+/// Whether the live process with `lease.pid` on this host is not the one
+/// that wrote `lease`: both start tokens are known and differ. If either is
+/// unknown, the pid is trusted.
+fn pid_was_reused(lease: &LeaseInfo) -> bool {
+    match (&lease.start_token, process_start_token(lease.pid)) {
+        (Some(recorded), Some(current)) => *recorded != current,
+        _ => false,
+    }
 }
 
 /// Whether `path` was last modified more than `age` ago (`true` if its
@@ -179,8 +241,9 @@ impl Drop for SessionLease {
 /// (a `HistoryManager`'s `history_dir`).
 ///
 /// Succeeds if there's no lease, the lease is already this process's (it's
-/// refreshed), or it's stale: its pid is dead on this host, or, when that
-/// can't be checked, it's older than [`STALE_TTL`] (logged as a warning).
+/// refreshed), or it's stale: its pid is dead on this host or now belongs
+/// to another process, or, when liveness can't be checked, it's older than
+/// [`STALE_TTL`] (logged as a warning).
 /// Otherwise fails with [`Error::SessionLocked`] naming the holder.
 pub fn acquire(dir: &Path, id: &Uuid) -> Result<SessionLease> {
     let path = lock_path(dir, id);
@@ -189,6 +252,7 @@ pub fn acquire(dir: &Path, id: &Uuid) -> Result<SessionLease> {
         hostname: IDENTITY.0.clone(),
         acquired_at: Utc::now(),
         process_start: IDENTITY.1,
+        start_token: OWN_START_TOKEN.clone(),
     };
     let contents = serde_json::to_string_pretty(&info)?;
 
@@ -237,7 +301,9 @@ pub fn acquire(dir: &Path, id: &Uuid) -> Result<SessionLease> {
     let same_host = existing.hostname == IDENTITY.0;
     let alive = same_host.then(|| pid_is_alive(existing.pid)).flatten();
     let stale = match alive {
-        Some(true) => false,
+        // A live pid keeps the lease unless it now belongs to another
+        // process (after a crash and reboot, say).
+        Some(true) => pid_was_reused(&existing),
         Some(false) => true,
         // Can't confirm liveness (different host, or this platform can't
         // check): fall back to age.
@@ -392,6 +458,7 @@ mod tests {
             hostname: "some-other-host".to_string(),
             acquired_at: Utc::now(),
             process_start: Utc::now(),
+            start_token: None,
         };
         write_atomic(&path, &serde_json::to_string_pretty(&info).unwrap()).unwrap();
 
@@ -412,6 +479,7 @@ mod tests {
             hostname: IDENTITY.0.clone(),
             acquired_at: Utc::now(),
             process_start: Utc::now(),
+            start_token: None,
         };
         write_atomic(&path, &serde_json::to_string_pretty(&info).unwrap()).unwrap();
 
@@ -432,6 +500,7 @@ mod tests {
             hostname: "some-other-host".to_string(),
             acquired_at: Utc::now() - chrono::Duration::hours(2),
             process_start: Utc::now(),
+            start_token: None,
         };
         write_atomic(&path, &serde_json::to_string_pretty(&info).unwrap()).unwrap();
         // Back-date the file's mtime past the TTL (write_atomic just set it to now).
@@ -442,6 +511,95 @@ mod tests {
 
         let lease = acquire(dir.path(), &id).unwrap();
         drop(lease);
+    }
+
+    // A lease written by a version without `start_token` still parses.
+    #[test]
+    fn a_lease_without_a_start_token_is_readable() {
+        let data = r#"{"pid":1,"hostname":"h","acquired_at":"2026-01-01T00:00:00Z","process_start":"2026-01-01T00:00:00Z"}"#;
+        let info: LeaseInfo = serde_json::from_str(data).unwrap();
+        assert_eq!(info.start_token, None);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    mod pid_reuse {
+        use super::*;
+
+        /// Writes a lease on this host held by our parent process, a live
+        /// pid that isn't ours, carrying `start_token`.
+        fn write_parent_lease(dir: &Path, id: &Uuid, start_token: Option<String>) {
+            let info = LeaseInfo {
+                pid: std::os::unix::process::parent_id(),
+                hostname: IDENTITY.0.clone(),
+                acquired_at: Utc::now(),
+                process_start: Utc::now(),
+                start_token,
+            };
+            write_atomic(
+                &lock_path(dir, id),
+                &serde_json::to_string_pretty(&info).unwrap(),
+            )
+            .unwrap();
+        }
+
+        #[test]
+        fn start_tokens_tell_processes_apart() {
+            let own = process_start_token(std::process::id()).expect("own token");
+            assert_eq!(process_start_token(std::process::id()), Some(own.clone()));
+            let parent =
+                process_start_token(std::os::unix::process::parent_id()).expect("parent token");
+            assert_ne!(own, parent);
+            assert_eq!(process_start_token(0x7FFF_FFFE), None);
+        }
+
+        #[test]
+        fn acquire_records_our_start_token() {
+            let dir = tempdir().unwrap();
+            let id = Uuid::new_v4();
+            let _lease = acquire(dir.path(), &id).unwrap();
+            let data = std::fs::read_to_string(lock_path(dir.path(), &id)).unwrap();
+            let info: LeaseInfo = serde_json::from_str(&data).unwrap();
+            assert_eq!(info.start_token, *OWN_START_TOKEN);
+            assert!(info.start_token.is_some());
+        }
+
+        // The lease's pid is alive, but its process started at a different
+        // time than the holder: the pid was reused, so the lease is stale.
+        #[test]
+        fn a_live_pid_with_another_start_token_is_taken_over() {
+            let dir = tempdir().unwrap();
+            let id = Uuid::new_v4();
+            write_parent_lease(dir.path(), &id, Some("not-the-parent".to_string()));
+
+            let lease = acquire(dir.path(), &id).unwrap();
+            let data = std::fs::read_to_string(lock_path(dir.path(), &id)).unwrap();
+            let info: LeaseInfo = serde_json::from_str(&data).unwrap();
+            assert_eq!(info.pid, std::process::id());
+            drop(lease);
+        }
+
+        #[test]
+        fn a_live_pid_with_its_own_start_token_keeps_the_lease() {
+            let dir = tempdir().unwrap();
+            let id = Uuid::new_v4();
+            let parent = std::os::unix::process::parent_id();
+            write_parent_lease(dir.path(), &id, process_start_token(parent));
+
+            let err = acquire(dir.path(), &id).unwrap_err();
+            assert!(matches!(err, Error::SessionLocked { pid, .. } if pid == parent));
+        }
+
+        // A lease from an older version has no token to compare, so a live
+        // pid keeps it.
+        #[test]
+        fn a_live_pid_without_a_start_token_keeps_the_lease() {
+            let dir = tempdir().unwrap();
+            let id = Uuid::new_v4();
+            write_parent_lease(dir.path(), &id, None);
+
+            let err = acquire(dir.path(), &id).unwrap_err();
+            assert!(matches!(err, Error::SessionLocked { .. }), "{err}");
+        }
     }
 
     #[test]
@@ -470,6 +628,7 @@ mod tests {
             hostname: "someone-elses-host".to_string(),
             acquired_at: Utc::now(),
             process_start: Utc::now(),
+            start_token: None,
         };
         write_atomic(&path, &serde_json::to_string_pretty(&foreign).unwrap()).unwrap();
 
