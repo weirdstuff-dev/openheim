@@ -9,7 +9,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use tokio::sync::{Mutex, RwLock};
@@ -250,13 +250,46 @@ impl AgentState {
         }
     }
 
+    /// Permanently deletes session `session_id`: its live state and its
+    /// saved history. A turn in flight in this process is cancelled first,
+    /// and the delete waits up to `grace` for it to end, so it can't write
+    /// the session back afterwards. Fails with [`Error::SessionBusy`] if it
+    /// doesn't end in time (the session is then left on disk), with
+    /// [`Error::SessionLocked`] if another process is running a turn on it,
+    /// and with [`Error::NotFound`] if it was never saved.
+    pub async fn delete_session(&self, session_id: &str, grace: Duration) -> Result<()> {
+        let uuid = Uuid::parse_str(session_id)
+            .map_err(|_| Error::InvalidArgument("invalid session id".to_string()))?;
+        // Out of the map first, so no new turn can start on it.
+        let live = self.sessions.write().await.remove(session_id);
+        if let Some(live) = live {
+            live.cancel.cancel();
+            // A turn holds this lock until it has ended, lease released.
+            if tokio::time::timeout(grace, live.prompt_lock.lock_owned())
+                .await
+                .is_err()
+            {
+                return Err(Error::SessionBusy {
+                    session_id: session_id.to_string(),
+                });
+            }
+        }
+        let history = self.memory.history.clone();
+        tokio::task::spawn_blocking(move || {
+            // Held across the delete, so another process can't be mid-turn.
+            let _lease = history.acquire_lease(&uuid)?;
+            history.delete_conversation(&uuid)
+        })
+        .await?
+    }
+
     /// Cancels every turn in flight and waits up to `grace` for them to end,
     /// so each releases its write lease and kills its shell commands on the
     /// way out. Returns early once all have ended; a turn still running
     /// after `grace` is left to the caller (dropping the runtime drops it,
     /// which releases its lease too).
     #[cfg(any(feature = "server", test))]
-    pub(crate) async fn shutdown(&self, grace: std::time::Duration) {
+    pub(crate) async fn shutdown(&self, grace: Duration) {
         let turns: Vec<_> = {
             let sessions = self.sessions.read().await;
             sessions
@@ -861,8 +894,6 @@ mod prompt_lease_ordering_tests {
 
 #[cfg(test)]
 mod new_session_tests {
-    use std::time::Duration;
-
     use tempfile::tempdir;
 
     use crate::config::ProviderConfig;
@@ -1055,6 +1086,120 @@ mod new_session_tests {
         .expect("shutdown returned once the turn ended");
         assert!(!lockfile.exists());
         turn.await.unwrap();
+    }
+
+    /// The session's meta file, message log and lockfile under `dir`.
+    fn session_files(dir: &std::path::Path, session_id: &str) -> [std::path::PathBuf; 3] {
+        let history = dir.join("history");
+        ["json", "jsonl", "lock"].map(|ext| history.join(format!("{session_id}.{ext}")))
+    }
+
+    // Deleting a session mid-turn cancels the turn, and nothing writes the
+    // session back once it's gone.
+    #[tokio::test]
+    async fn delete_session_cancels_a_live_turn_and_removes_everything() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
+        let mut state = sample_state(dir.path()).await;
+        state.llm = Arc::new(HangingLlm);
+        let state = Arc::new(state);
+        let session_id = state
+            .new_session(None, vec![], dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let [meta, log, lockfile] = session_files(dir.path(), &session_id);
+
+        let turn = tokio::spawn({
+            let state = state.clone();
+            let session_id = session_id.clone();
+            async move { run_turn(&state, &session_id).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !lockfile.exists() || !log.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the turn started");
+
+        state
+            .delete_session(&session_id, Duration::from_secs(5))
+            .await
+            .unwrap();
+        turn.await.unwrap();
+
+        for path in [&meta, &log, &lockfile] {
+            assert!(!path.exists(), "{} survived", path.display());
+        }
+        let again = state
+            .prompt(
+                &session_id,
+                vec![ContentBlock::from("hi")],
+                Arc::new(crate::core::permission::AllowAll),
+                Arc::new(crate::core::client_io::NoClientIo),
+                |_| {},
+            )
+            .await;
+        assert!(matches!(again, Err(Error::NotFound(_))), "{again:?}");
+    }
+
+    // A turn that doesn't end within the grace leaves the session on disk.
+    #[tokio::test]
+    async fn delete_session_is_busy_if_the_turn_does_not_end_in_time() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
+        let mut state = sample_state(dir.path()).await;
+        state.llm = Arc::new(EndTurnLlm);
+        let session_id = state
+            .new_session(None, vec![], dir.path().to_path_buf())
+            .await
+            .unwrap();
+        run_turn(&state, &session_id).await;
+        // Stands in for a turn that ignores cancellation.
+        let _held = state.sessions.read().await[&session_id]
+            .prompt_lock
+            .clone()
+            .lock_owned()
+            .await;
+
+        let err = state
+            .delete_session(&session_id, Duration::from_millis(50))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::SessionBusy { .. }), "{err}");
+        let [meta, log, _] = session_files(dir.path(), &session_id);
+        assert!(meta.exists() && log.exists());
+    }
+
+    // Another process running a turn on the session holds its lease.
+    #[tokio::test]
+    async fn delete_session_refuses_while_another_process_holds_the_lease() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
+        let mut state = sample_state(dir.path()).await;
+        state.llm = Arc::new(EndTurnLlm);
+        let session_id = state
+            .new_session(None, vec![], dir.path().to_path_buf())
+            .await
+            .unwrap();
+        run_turn(&state, &session_id).await;
+        let [meta, log, lockfile] = session_files(dir.path(), &session_id);
+        let foreign = serde_json::json!({
+            "pid": 1,
+            "hostname": "some-other-host",
+            "acquired_at": chrono::Utc::now(),
+            "process_start": chrono::Utc::now(),
+        });
+        std::fs::write(&lockfile, foreign.to_string()).unwrap();
+
+        let err = state
+            .delete_session(&session_id, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::SessionLocked { .. }), "{err}");
+        assert!(meta.exists() && log.exists() && lockfile.exists());
     }
 
     /// Runs one "hi" turn on `session_id`, allowing every tool call.

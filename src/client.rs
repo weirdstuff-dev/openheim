@@ -27,6 +27,10 @@ use crate::{
     tools::ToolHandler,
 };
 
+/// How long [`OpenheimClient::delete_session`] waits for a cancelled turn
+/// on the session to end.
+const DELETE_SESSION_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The main entry point for embedding openheim in your application.
 ///
 /// Exposes all agent capabilities: sessions, history, RAG, MCP servers,
@@ -106,12 +110,15 @@ impl OpenheimClient {
         tokio::task::spawn_blocking(move || history.load_conversation(&uuid)).await?
     }
 
-    /// Permanently delete a persisted session.
+    /// Permanently delete a persisted session. A turn running on it is
+    /// cancelled first; the delete waits up to 10 seconds for it to end,
+    /// then fails with `Error::SessionBusy`, leaving the session in place.
+    /// Fails with `Error::SessionLocked` while another process runs a turn
+    /// on it.
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
-        let uuid = Uuid::parse_str(session_id)
-            .map_err(|_| crate::error::Error::InvalidArgument("invalid session id".to_string()))?;
-        let history = self.state.memory.history.clone();
-        tokio::task::spawn_blocking(move || history.delete_conversation(&uuid)).await?
+        self.state
+            .delete_session(session_id, DELETE_SESSION_GRACE)
+            .await
     }
 
     /// Switch a live session to another model mid-conversation; the same as
