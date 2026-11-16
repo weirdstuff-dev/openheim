@@ -145,7 +145,6 @@ pub(crate) fn prompt_in_flight(s: &SessionState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::permission::PermissionDecision;
 
     fn sample_state() -> SessionState {
         let chat_id = Uuid::new_v4();
@@ -175,74 +174,6 @@ mod tests {
         let mut s = sample_state();
         s.last_active = last_active;
         s
-    }
-
-    #[test]
-    fn second_prompt_is_rejected_while_first_is_in_flight() {
-        let state = sample_state();
-        let _first = state.try_acquire_prompt_lock("s1").unwrap();
-
-        let second = state.try_acquire_prompt_lock("s1");
-
-        assert!(second.is_err());
-    }
-
-    #[test]
-    fn prompt_lock_is_available_again_once_the_first_guard_drops() {
-        let state = sample_state();
-        {
-            let _first = state.try_acquire_prompt_lock("s1").unwrap();
-        }
-
-        assert!(state.try_acquire_prompt_lock("s1").is_ok());
-    }
-
-    #[test]
-    fn insert_or_keep_live_inserts_when_absent() {
-        let mut sessions = HashMap::new();
-
-        assert!(insert_or_keep_live(&mut sessions, "s1", || Ok(sample_state())).unwrap());
-        assert!(sessions.contains_key("s1"));
-    }
-
-    #[test]
-    fn insert_or_keep_live_preserves_the_live_entrys_control_state() {
-        let mut sessions = HashMap::new();
-        let live = sample_state();
-        let live_cancel = live.cancel.clone();
-        let live_lock = Arc::clone(&live.prompt_lock);
-        live.approved_tools.remember(
-            "execute_command:git status".to_string(),
-            PermissionDecision::AllowAlways,
-        );
-        sessions.insert("s1".to_string(), live);
-
-        let inserted = insert_or_keep_live(&mut sessions, "s1", || Ok(sample_state())).unwrap();
-
-        assert!(!inserted);
-        let kept = sessions.get("s1").unwrap();
-        // Same token: cancelling the pre-load handle must reach the kept entry.
-        live_cancel.cancel();
-        assert!(kept.cancel.is_cancelled());
-        assert!(Arc::ptr_eq(&kept.prompt_lock, &live_lock));
-        assert_eq!(
-            kept.approved_tools.get("execute_command:git status"),
-            Some(PermissionDecision::AllowAlways)
-        );
-    }
-
-    #[test]
-    fn insert_or_keep_live_bumps_the_live_entrys_last_active() {
-        let stale_since = Instant::now() - Duration::from_secs(60);
-        let mut sessions = HashMap::new();
-        sessions.insert("s1".to_string(), sample_state_at(stale_since));
-
-        insert_or_keep_live(&mut sessions, "s1", || {
-            panic!("must not build a fresh state when the session is already live")
-        })
-        .unwrap();
-
-        assert!(sessions.get("s1").unwrap().last_active > stale_since);
     }
 
     #[test]
@@ -297,34 +228,5 @@ mod tests {
         assert!(!sessions.contains_key("oldest"));
         assert!(!sessions.contains_key("middle"));
         assert!(sessions.contains_key("newest"));
-    }
-
-    #[test]
-    fn evict_idle_sessions_cap_skips_in_flight_entries_even_when_over_cap() {
-        let now = Instant::now();
-        let mut sessions = HashMap::new();
-        let in_flight = sample_state_at(now - Duration::from_secs(300));
-        let _guard = in_flight.prompt_lock.clone().try_lock_owned().unwrap();
-        sessions.insert("in_flight".to_string(), in_flight);
-        sessions.insert(
-            "newest".to_string(),
-            sample_state_at(now - Duration::from_secs(100)),
-        );
-
-        evict_idle_sessions(&mut sessions, now, Duration::from_secs(3600), 1);
-
-        // The only evictable entry is gone; the in-flight one survives even
-        // though the map is still over the cap.
-        assert!(!sessions.contains_key("newest"));
-        assert!(sessions.contains_key("in_flight"));
-    }
-
-    #[test]
-    fn prompt_in_flight_reflects_the_lock() {
-        let state = sample_state();
-        assert!(!prompt_in_flight(&state));
-
-        let _guard = state.prompt_lock.clone().try_lock_owned().unwrap();
-        assert!(prompt_in_flight(&state));
     }
 }

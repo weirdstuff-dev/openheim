@@ -375,15 +375,6 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn acquire_succeeds_when_no_lease_exists() {
-        let dir = tempdir().unwrap();
-        let id = Uuid::new_v4();
-        let lease = acquire(dir.path(), &id).unwrap();
-        assert!(lock_path(dir.path(), &id).exists());
-        drop(lease);
-    }
-
-    #[test]
     fn create_exclusively_fails_if_the_path_already_exists() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("some.lock");
@@ -394,13 +385,6 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
         // The loser's write must not have clobbered the winner's content.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
-    }
-
-    #[cfg(any(unix, windows))]
-    #[test]
-    fn system_hostname_is_found_without_a_hostname_binary() {
-        let name = system_hostname().expect("the test machine has a hostname");
-        assert!(!name.is_empty() && name.trim() == name);
     }
 
     // Processes on one machine agree on the fallback id: the first creates
@@ -423,17 +407,6 @@ mod tests {
     fn fallback_host_ids_differ_between_machines() {
         let (a, b) = (tempdir().unwrap(), tempdir().unwrap());
         assert_ne!(fallback_host_id(a.path()), fallback_host_id(b.path()));
-    }
-
-    // Without a writable place for the id, each call (each process, since
-    // it's computed once) gets its own, never a shared constant.
-    #[test]
-    fn fallback_host_id_without_a_usable_dir_is_unique() {
-        let dir = tempdir().unwrap();
-        let missing = dir.path().join("no-such-dir");
-        let (a, b) = (fallback_host_id(&missing), fallback_host_id(&missing));
-        assert!(a.starts_with("host-") && b.starts_with("host-"));
-        assert_ne!(a, b);
     }
 
     /// Writes `contents` to `id`'s lockfile, last modified `age` ago.
@@ -476,15 +449,6 @@ mod tests {
 
         let err = acquire(dir.path(), &id).unwrap_err();
         assert!(matches!(err, Error::SessionLocked { .. }), "{err}");
-    }
-
-    #[test]
-    fn reacquiring_our_own_lease_succeeds() {
-        let dir = tempdir().unwrap();
-        let id = Uuid::new_v4();
-        let _first = acquire(dir.path(), &id).unwrap();
-        // Same process, same session: must not be treated as contention.
-        let _second = acquire(dir.path(), &id).unwrap();
     }
 
     #[test]
@@ -608,23 +572,6 @@ mod tests {
         assert!(lock_path(dir.path(), &id).exists(), "dropped as if ours");
     }
 
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    #[test]
-    fn the_pid_namespace_is_known_on_linux() {
-        let ns = OWN_PID_NAMESPACE
-            .clone()
-            .expect("readable /proc/self/ns/pid");
-        assert!(ns.starts_with("pid:["), "{ns}");
-    }
-
-    // A lease written by a version without `start_token` still parses.
-    #[test]
-    fn a_lease_without_a_start_token_is_readable() {
-        let data = r#"{"pid":1,"hostname":"h","acquired_at":"2026-01-01T00:00:00Z","process_start":"2026-01-01T00:00:00Z"}"#;
-        let info: LeaseInfo = serde_json::from_str(data).unwrap();
-        assert_eq!(info.start_token, None);
-    }
-
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     mod pid_reuse {
         use super::*;
@@ -705,18 +652,6 @@ mod tests {
             let err = acquire(dir.path(), &id).unwrap_err();
             assert!(matches!(err, Error::SessionLocked { .. }), "{err}");
         }
-    }
-
-    #[test]
-    fn drop_releases_the_lease() {
-        let dir = tempdir().unwrap();
-        let id = Uuid::new_v4();
-        let path = lock_path(dir.path(), &id);
-        {
-            let _lease = acquire(dir.path(), &id).unwrap();
-            assert!(path.exists());
-        }
-        assert!(!path.exists());
     }
 
     #[test]

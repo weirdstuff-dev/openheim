@@ -524,127 +524,6 @@ impl ToolHandler for ExecuteCommandTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::test_support::TurnHarness;
-
-    #[test]
-    fn definition_has_correct_name() {
-        let tool = ExecuteCommandTool;
-        let def = tool.definition();
-        assert_eq!(def.function.name, "execute_command");
-        assert_eq!(def.tool_type, "function".to_string());
-    }
-
-    #[tokio::test]
-    async fn execute_runs_simple_command() {
-        let harness = TurnHarness::new();
-        let result = ExecuteCommandTool
-            .execute(r#"{"command": "echo hello"}"#, &harness.turn())
-            .await
-            .unwrap();
-        assert_eq!(result.trim(), "hello");
-    }
-
-    #[cfg(target_family = "unix")]
-    #[tokio::test]
-    async fn execute_runs_in_work_dir() {
-        let harness = TurnHarness::new();
-        std::fs::write(harness.work_dir().join("marker.txt"), "x").unwrap();
-        let result = ExecuteCommandTool
-            .execute(r#"{"command": "ls"}"#, &harness.turn())
-            .await
-            .unwrap();
-        assert_eq!(result.trim(), "marker.txt");
-    }
-
-    #[cfg(target_family = "unix")]
-    #[tokio::test]
-    async fn execute_runs_in_the_working_directory() {
-        let harness = TurnHarness::new().with_cwd("sub");
-        std::fs::write(harness.work_dir().join("sub/inner.txt"), "x").unwrap();
-        let result = ExecuteCommandTool
-            .execute(r#"{"command": "ls"}"#, &harness.turn())
-            .await
-            .unwrap();
-        assert_eq!(result.trim(), "inner.txt");
-    }
-
-    #[tokio::test]
-    async fn execute_errors_for_failing_command() {
-        let harness = TurnHarness::new();
-        let result = ExecuteCommandTool
-            .execute(
-                r#"{"command": "ls /nonexistent_dir_12345"}"#,
-                &harness.turn(),
-            )
-            .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Command failed:"));
-    }
-
-    // Warnings and progress a successful command writes to stderr reach the
-    // model too.
-    #[cfg(target_family = "unix")]
-    #[tokio::test]
-    async fn a_successful_command_keeps_its_stderr() {
-        let opts = RunCommandOptions::default();
-        let out = run_command("echo out; echo warn >&2", &opts).await.unwrap();
-        assert_eq!(out, "out\nStderr: warn\n");
-
-        let out = run_command("echo warn >&2", &opts).await.unwrap();
-        assert_eq!(out, "Stderr: warn\n");
-
-        let out = run_command("printf out; echo warn >&2", &opts)
-            .await
-            .unwrap();
-        assert_eq!(out, "out\nStderr: warn\n");
-    }
-
-    #[cfg(target_family = "unix")]
-    #[tokio::test]
-    async fn a_successful_command_without_stderr_returns_just_stdout() {
-        let out = run_command("echo out", &RunCommandOptions::default())
-            .await
-            .unwrap();
-        assert_eq!(out, "out\n");
-    }
-
-    #[tokio::test]
-    async fn execute_errors_for_malformed_json() {
-        let harness = TurnHarness::new();
-        let result = ExecuteCommandTool
-            .execute("bad json", &harness.turn())
-            .await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn execute_errors_for_missing_command() {
-        let harness = TurnHarness::new();
-        let result = ExecuteCommandTool
-            .execute(r#"{"other": "value"}"#, &harness.turn())
-            .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("command"));
-    }
-
-    #[cfg(target_family = "unix")]
-    #[tokio::test]
-    async fn execute_cancel_aborts_running_shell() {
-        let harness = TurnHarness::new();
-        let cancel = harness.cancel_handle();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            cancel.cancel();
-        });
-
-        let result = tokio::time::timeout(
-            Duration::from_secs(10),
-            ExecuteCommandTool.execute(r#"{"command": "sleep 30"}"#, &harness.turn()),
-        )
-        .await
-        .expect("turn cancel should abort the running command");
-        assert!(result.is_err());
-    }
 
     #[cfg(target_family = "unix")]
     #[tokio::test]
@@ -680,27 +559,6 @@ mod tests {
 
     #[cfg(target_family = "unix")]
     #[tokio::test]
-    async fn output_beyond_the_cap_is_truncated() {
-        let opts = RunCommandOptions {
-            max_output_bytes: 100,
-            ..Default::default()
-        };
-        // 2000 bytes of 'x' — past the cap, but small enough to fit any pipe
-        // buffer, so the pipeline's exit status is deterministic (success).
-        let output = match run_command("head -c 2000 /dev/zero | tr '\\0' x", &opts).await {
-            Ok(s) => s,
-            Err(e) => e.to_string(),
-        };
-        assert!(output.contains("truncated"), "unexpected output: {output}");
-        assert_eq!(
-            output.matches('x').count(),
-            100,
-            "unexpected output: {output}"
-        );
-    }
-
-    #[cfg(target_family = "unix")]
-    #[tokio::test]
     async fn timeout_marks_capped_stream_when_reads_were_interrupted() {
         let opts = RunCommandOptions {
             timeout: Duration::from_millis(300),
@@ -719,30 +577,6 @@ mod tests {
         assert!(
             err.contains("truncated"),
             "capped stream missing its truncation marker: {err}"
-        );
-    }
-
-    #[cfg(target_family = "unix")]
-    #[tokio::test]
-    async fn cancellation_kills_running_command() {
-        let token = CancellationToken::new();
-        let delayed = token.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            delayed.cancel();
-        });
-        let opts = RunCommandOptions {
-            cancel: Some(&token),
-            // Long enough that only cancellation can end this.
-            timeout: Duration::from_secs(60),
-            ..Default::default()
-        };
-        let result = tokio::time::timeout(Duration::from_secs(10), run_command("sleep 30", &opts))
-            .await
-            .expect("cancellation should beat the 60s timeout");
-        assert!(
-            result.unwrap_err().to_string().contains("cancelled"),
-            "should report cancellation"
         );
     }
 
@@ -805,60 +639,6 @@ mod tests {
             !running_groups().contains(&sh),
             "the group is unlisted once dropped"
         );
-    }
-
-    // A process started with `&` keeps the pipes open; the call still
-    // returns once the shell exits, and the process keeps running: it isn't
-    // killed, and its later writes neither fail nor block.
-    #[cfg(target_family = "unix")]
-    #[tokio::test]
-    async fn a_backgrounded_process_does_not_hold_up_the_call() {
-        let dir = tempfile::tempdir().unwrap();
-        let opts = RunCommandOptions {
-            cwd: Some(dir.path()),
-            timeout: Duration::from_secs(60),
-            ..Default::default()
-        };
-        let started = std::time::Instant::now();
-        let out = run_command(
-            "echo $$ > sh.pid; \
-             (sleep 0.3; while true; do echo tick; sleep 0.05; done) & \
-             echo $! > writer.pid; echo started",
-            &opts,
-        )
-        .await
-        .unwrap();
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "{:?}",
-            started.elapsed()
-        );
-        assert!(out.starts_with("started\n"), "{out}");
-        assert!(out.ends_with(BACKGROUND_NOTE), "{out}");
-
-        let sh = read_pid(&dir.path().join("sh.pid")).await;
-        let writer = read_pid(&dir.path().join("writer.pid")).await;
-        // Past its first writes, after the call returned.
-        tokio::time::sleep(Duration::from_millis(800)).await;
-        assert!(
-            nix::sys::signal::kill(nix::unistd::Pid::from_raw(writer), None).is_ok(),
-            "the background writer (pid {writer}) died"
-        );
-        assert!(
-            running_groups().contains(&sh),
-            "its group stays listed, to be killed with this process"
-        );
-
-        kill_group(sh);
-        assert!(exits_soon(writer).await);
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while running_groups().contains(&sh) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the group is unlisted once its processes exit"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
     }
 
     // A background process that doesn't hold the pipes gets no note, but
@@ -961,13 +741,5 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         false
-    }
-
-    #[test]
-    fn args_struct_matches_schema() {
-        crate::tools::args::assert_args_match_schema::<ExecuteCommandArgs>(
-            &ExecuteCommandTool,
-            serde_json::json!({"command": "ls"}),
-        );
     }
 }

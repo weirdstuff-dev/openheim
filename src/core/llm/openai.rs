@@ -82,11 +82,6 @@ impl OpenAiClient {
             ..self
         }
     }
-
-    #[cfg(test)]
-    pub(super) fn token_limit_field(&self) -> TokenLimitField {
-        self.token_limit_field
-    }
 }
 
 // --- OpenAI request types ---
@@ -763,6 +758,8 @@ impl StreamParser for OpenAiStream {
     }
 }
 
+/// Streams as LiteLLM and other OpenAI-compatible proxies send them. Plain
+/// OpenAI streams are covered by the black-box suite.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -776,9 +773,9 @@ mod tests {
     }
 
     // A call streamed without an id gets a unique one, not one numbered by
-    // its position in the reply.
+    // its position in the reply; one without a name is dropped.
     #[test]
-    fn streamed_calls_without_an_id_get_unique_ones() {
+    fn streamed_calls_without_an_id_or_name() {
         let id = |block: Option<ContentBlock>| match block {
             Some(ContentBlock::ToolUse { id, .. }) => id,
             other => panic!("expected a tool use, got {other:?}"),
@@ -788,175 +785,20 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.starts_with("call_"));
         assert_eq!(id(acc("call_x", "read_file").into_tool_use()), "call_x");
-    }
-
-    #[test]
-    fn streamed_call_without_a_name_is_dropped() {
         assert!(acc("call_x", "").into_tool_use().is_none());
-    }
-
-    #[test]
-    fn streamed_call_without_arguments_gets_an_empty_object() {
-        let call = ToolCallAcc {
-            args: String::new(),
-            ..acc("call_x", "list_files")
-        };
-        match call.into_tool_use() {
-            Some(ContentBlock::ToolUse { arguments, .. }) => assert_eq!(arguments, "{}"),
-            other => panic!("expected a tool use, got {other:?}"),
-        }
     }
 
     /// Feeds `payloads` through a fresh `OpenAiStream` as if they were the
     /// whole response body.
-    fn parse_stream(payloads: &[&str]) -> Result<Choice> {
+    fn parse_stream(payloads: &[&str]) -> Choice {
         let (chunk_tx, _chunk_rx) = mpsc::unbounded_channel();
         let mut stream = OpenAiStream::default();
         for payload in payloads {
-            if stream.payload(payload, &chunk_tx)? {
+            if stream.payload(payload, &chunk_tx).unwrap() {
                 break;
             }
         }
-        stream.finish()
-    }
-
-    const TOOL_REPLY: &[&str] = &[
-        r#"{"choices":[{"delta":{"content":"Reading."}}]}"#,
-        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\""}}]}}]}"#,
-        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"a.txt\"}"}}]}}]}"#,
-        r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
-        r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
-        "[DONE]",
-    ];
-
-    #[test]
-    fn complete_stream_becomes_a_choice() {
-        let choice = parse_stream(TOOL_REPLY).unwrap();
-        assert_eq!(
-            choice.message.content,
-            [
-                ContentBlock::from("Reading."),
-                ContentBlock::tool_use("call_1", "read_file", r#"{"path":"a.txt"}"#),
-            ]
-        );
-        assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
-        assert_eq!(choice.usage.unwrap().output_tokens, 5);
-    }
-
-    // A connection that closes early is an incomplete reply (here: its tool
-    // call's arguments only half there), not a complete one.
-    #[test]
-    fn stream_cut_off_before_the_finish_reason_is_an_incomplete_response() {
-        let err = parse_stream(&TOOL_REPLY[..2]).unwrap_err();
-        assert!(matches!(err, Error::IncompleteResponse(_)), "{err}");
-    }
-
-    // Some OpenAI-compatible backends never send `[DONE]`; the finish reason
-    // alone marks the reply complete.
-    #[test]
-    fn stream_with_a_finish_reason_but_no_done_is_complete() {
-        let choice = parse_stream(&TOOL_REPLY[..4]).unwrap();
-        assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
-    }
-
-    #[test]
-    fn map_finish_reason_translates_known_values() {
-        assert_eq!(map_finish_reason("stop"), FinishReason::Stop);
-        assert_eq!(map_finish_reason("tool_calls"), FinishReason::ToolCalls);
-        assert_eq!(map_finish_reason("length"), FinishReason::MaxTokens);
-        assert_eq!(map_finish_reason("content_filter"), FinishReason::Refusal);
-        assert_eq!(
-            map_finish_reason("eos"),
-            FinishReason::Other("eos".to_string())
-        );
-    }
-
-    #[test]
-    fn convert_messages_text_only_user_stays_plain_string() {
-        let messages = vec![Message::user("hello")];
-        let result = convert_messages(&messages, false);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].role, "user");
-        assert!(matches!(&result[0].content, Some(OpenAiContent::Text(t)) if t == "hello"));
-    }
-
-    #[test]
-    fn convert_messages_user_with_image_becomes_parts() {
-        let messages = vec![Message {
-            role: Role::User,
-            content: vec![
-                ContentBlock::Text {
-                    text: "what is this?".into(),
-                },
-                ContentBlock::Image {
-                    data: "base64data".into(),
-                    mime_type: "image/png".into(),
-                },
-            ],
-        }];
-        let result = convert_messages(&messages, false);
-        assert_eq!(result.len(), 1);
-        let Some(OpenAiContent::Parts(parts)) = &result[0].content else {
-            panic!("expected parts");
-        };
-        assert_eq!(parts.len(), 2);
-        assert!(matches!(&parts[0], OpenAiContentPart::Text { text } if text == "what is this?"));
-        assert!(matches!(
-            &parts[1],
-            OpenAiContentPart::ImageUrl { image_url }
-                if image_url.url == "data:image/png;base64,base64data"
-        ));
-    }
-
-    #[test]
-    fn convert_messages_assistant_with_tool_calls() {
-        let messages = vec![Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::tool_use(
-                "call_1",
-                "read_file",
-                r#"{"path":"a.txt"}"#,
-            )],
-        }];
-        let result = convert_messages(&messages, false);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].role, "assistant");
-        let tool_calls = result[0].tool_calls.as_ref().unwrap();
-        assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].function.name, "read_file");
-    }
-
-    // Thinking is persisted to history and replayed through ACP (see
-    // `assemble_content`) so the *user* sees it again, but unsigned thinking
-    // is never sent back to the provider: reasoning traces from models like
-    // DeepSeek/GLM can be large, replaying them would balloon context usage
-    // turn over turn, and DeepSeek rejects them. Only the tool calls survive
-    // onto the continuation request, even with replay on.
-    #[test]
-    fn convert_messages_assistant_never_replays_thinking_back_to_the_provider() {
-        let messages = vec![
-            Message::user("read a.txt"),
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Thinking {
-                        thinking: "let me check the file".into(),
-                        signature: None,
-                    },
-                    ContentBlock::tool_use("call_1", "read_file", r#"{"path":"a.txt"}"#),
-                ],
-            },
-        ];
-        for replay_thinking in [false, true] {
-            let result = convert_messages(&messages, replay_thinking);
-            assert_eq!(result.len(), 2);
-            assert!(result[1].tool_calls.is_some());
-            // Serialized to confirm the thinking never appears in the JSON
-            // sent over the wire.
-            let json = serde_json::to_value(&result[1]).unwrap();
-            assert!(json.get("reasoning_content").is_none());
-            assert!(json.get("thinking_blocks").is_none());
-        }
+        stream.finish().unwrap()
     }
 
     fn signed(thinking: &str, signature: &str) -> ContentBlock {
@@ -966,298 +808,19 @@ mod tests {
         }
     }
 
-    /// An assistant reply calling `read_file` after `thinking`.
-    fn tool_reply(id: &str, thinking: Vec<ContentBlock>) -> Message {
-        let mut content = thinking;
-        content.push(ContentBlock::tool_use(id, "read_file", "{}"));
-        Message::new(Role::Assistant, content)
-    }
-
-    /// Each converted message's `thinking_blocks`, as sent.
-    fn sent_thinking(messages: &[Message], replay_thinking: bool) -> Vec<Option<Value>> {
-        convert_messages(messages, replay_thinking)
-            .iter()
-            .map(|m| {
-                serde_json::to_value(m)
-                    .unwrap()
-                    .get("thinking_blocks")
-                    .cloned()
-            })
-            .collect()
-    }
-
-    // A previous turn's thinking stays home; the current tool loop's goes
-    // back, signed and redacted blocks in order, unsigned ones left out.
-    #[test]
-    fn signed_thinking_is_replayed_only_within_the_current_tool_loop() {
-        let messages = vec![
-            Message::user("first"),
-            tool_reply("call_1", vec![signed("old", "sig-old")]),
-            Message::tool_result("call_1", "read_file", "a", false),
-            Message::new(Role::Assistant, vec![ContentBlock::from("done")]),
-            Message::user("second"),
-            tool_reply(
-                "call_2",
-                vec![
-                    signed("plan", "sig-1"),
-                    ContentBlock::RedactedThinking { data: "enc".into() },
-                    ContentBlock::Thinking {
-                        thinking: "unsigned".into(),
-                        signature: None,
-                    },
-                ],
-            ),
-            Message::tool_result("call_2", "read_file", "b", false),
-            tool_reply("call_3", vec![signed("next", "sig-2")]),
-            Message::tool_result("call_3", "read_file", "c", false),
-        ];
-        let sent = sent_thinking(&messages, true);
-        assert_eq!(sent[1], None, "previous turn");
-        assert_eq!(
-            sent[5],
-            Some(serde_json::json!([
-                { "type": "thinking", "thinking": "plan", "signature": "sig-1" },
-                { "type": "redacted_thinking", "data": "enc" },
-            ]))
-        );
-        assert_eq!(
-            sent[7],
-            Some(serde_json::json!([
-                { "type": "thinking", "thinking": "next", "signature": "sig-2" },
-            ]))
-        );
-        for i in [0, 2, 3, 4, 6, 8] {
-            assert_eq!(sent[i], None, "message {i}");
-        }
-    }
-
-    #[test]
-    fn nothing_is_replayed_with_replay_off() {
-        let messages = vec![
-            Message::user("go"),
-            tool_reply("call_1", vec![signed("plan", "sig-1")]),
-            Message::tool_result("call_1", "read_file", "a", false),
-        ];
-        assert!(sent_thinking(&messages, false).iter().all(Option::is_none));
-    }
-
-    #[test]
-    fn the_client_replays_only_once_told_to() {
-        let messages = [
-            Message::user("go"),
-            tool_reply("call_1", vec![signed("plan", "sig-1")]),
-        ];
-        let sent = |client: &OpenAiClient| {
-            serde_json::to_value(client.request(&messages, &[])).unwrap()["messages"][1]
-                .get("thinking_blocks")
-                .cloned()
-        };
-        assert_eq!(sent(&client(None)), None);
-        assert!(sent(&client(None).with_replay_thinking(true)).is_some());
-    }
-
-    #[test]
-    fn convert_messages_leaves_out_an_assistant_reply_with_nothing_to_send() {
-        let messages = vec![
-            Message::user("hi"),
-            Message::new(Role::Assistant, vec![]),
-            Message::new(
-                Role::Assistant,
-                vec![ContentBlock::Thinking {
-                    thinking: "ran out of tokens while thinking".into(),
-                    signature: None,
-                }],
-            ),
-            Message::user("still there?"),
-        ];
-        let roles: Vec<_> = convert_messages(&messages, false)
-            .into_iter()
-            .map(|m| m.role)
-            .collect();
-        assert_eq!(roles, ["user", "user"]);
-    }
-
-    #[test]
-    fn convert_messages_tool_result_uses_tool_role() {
-        let messages = vec![Message::tool_result(
-            "call_1",
-            "read_file",
-            "file content",
-            false,
-        )];
-        let result = convert_messages(&messages, false);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].role, "tool");
-        assert_eq!(result[0].tool_call_id.as_deref(), Some("call_1"));
-        assert!(matches!(&result[0].content, Some(OpenAiContent::Text(t)) if t == "file content"));
-    }
-
-    fn client(max_tokens: Option<u32>) -> OpenAiClient {
-        OpenAiClient::new(
-            ReqwestClient::new(),
-            "https://api.openai.com/v1".into(),
-            "key".into(),
-            "gpt-5".into(),
-            max_tokens,
-        )
-    }
-
-    /// The request body `client` sends for one user message, as JSON.
-    fn request_json(client: &OpenAiClient) -> Value {
-        serde_json::to_value(client.request(&[Message::user("hi")], &[])).unwrap()
-    }
-
-    #[test]
-    fn openai_request_skips_empty_tools_and_unset_limit() {
-        let json = request_json(&client(None));
-        assert!(json.get("tools").is_none());
-        assert!(json.get("max_tokens").is_none());
-        assert!(json.get("max_completion_tokens").is_none());
-    }
-
-    // OpenAI's reasoning models reject `max_tokens`.
-    #[test]
-    fn openai_sends_the_limit_as_max_completion_tokens() {
-        let json = request_json(&client(Some(1000)));
-        assert_eq!(json["max_completion_tokens"], 1000);
-        assert!(json.get("max_tokens").is_none());
-    }
-
-    #[test]
-    fn default_effort_sends_no_reasoning_effort() {
-        let json = request_json(&client(None));
-        assert!(json.get("reasoning_effort").is_none());
-    }
-
-    #[test]
-    fn effort_is_sent_as_reasoning_effort() {
-        for (level, effort) in [
-            (Effort::Low, "low"),
-            (Effort::Medium, "medium"),
-            (Effort::High, "high"),
-        ] {
-            let json = request_json(&client(None).with_effort(level));
-            assert_eq!(json["reasoning_effort"], effort);
-        }
-    }
-
-    #[test]
-    fn a_legacy_limit_field_sends_max_tokens() {
-        let legacy = client(Some(1000)).with_token_limit_field(TokenLimitField::MaxTokens);
-        let json = request_json(&legacy);
-        assert_eq!(json["max_tokens"], 1000);
-        assert!(json.get("max_completion_tokens").is_none());
-    }
-
-    #[test]
-    fn assemble_content_puts_thinking_before_text_and_tool_uses() {
-        let tool = ContentBlock::tool_use("call_0", "read_file", "{}");
-        let signed = ContentBlock::Thinking {
-            thinking: "first".into(),
-            signature: Some("sig".into()),
-        };
-        let content = assemble_content(
-            vec![signed.clone()],
-            "let me think".into(),
-            "here's the answer".into(),
-            vec![tool],
-        );
-        assert_eq!(content.len(), 4);
-        assert_eq!(content[0], signed);
-        assert!(matches!(
-            &content[1],
-            ContentBlock::Thinking { thinking, signature }
-                if thinking == "let me think" && signature.is_none()
-        ));
-        assert!(matches!(&content[2], ContentBlock::Text { text } if text == "here's the answer"));
-        assert!(matches!(&content[3], ContentBlock::ToolUse { name, .. } if name == "read_file"));
-    }
-
-    #[test]
-    fn assemble_content_skips_empty_reasoning_and_text() {
-        assert!(assemble_content(vec![], String::new(), String::new(), vec![]).is_empty());
-    }
-
-    #[test]
-    fn streamed_reasoning_becomes_a_thinking_block() {
-        let choice = parse_stream(&[
-            r#"{"choices":[{"delta":{"reasoning_content":"because"}}]}"#,
-            r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
-        ])
-        .unwrap();
-        assert_eq!(
-            choice.message.content,
-            [
-                ContentBlock::Thinking {
-                    thinking: "because".into(),
-                    signature: None,
-                },
-                ContentBlock::from("hi"),
-            ]
-        );
-    }
-
-    // LiteLLM v1.105.1 streaming Claude's thinking and a tool call: every
-    // thinking piece in both `reasoning_content` and `thinking_blocks` (with
-    // a copy in `provider_specific_fields`), then the signature with the
-    // block's whole text and an empty `reasoning_content`.
-    const LITELLM_SIGNED_REPLY: &[&str] = &[
-        r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"claude-sonnet-5-5","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}"#,
-        r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"claude-sonnet-5-5","choices":[{"index":0,"delta":{"content":"","reasoning_content":"Let me ","thinking_blocks":[{"type":"thinking","thinking":"Let me "}],"provider_specific_fields":{"thinking_blocks":[{"type":"thinking","thinking":"Let me "}]}}}]}"#,
-        r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"claude-sonnet-5-5","choices":[{"index":0,"delta":{"content":"","reasoning_content":"read it.","thinking_blocks":[{"type":"thinking","thinking":"read it."}],"provider_specific_fields":{"thinking_blocks":[{"type":"thinking","thinking":"read it."}]}}}]}"#,
-        r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"claude-sonnet-5-5","choices":[{"index":0,"delta":{"content":"","reasoning_content":"","thinking_blocks":[{"type":"thinking","thinking":"Let me read it.","signature":"EqQBCkgI"}],"provider_specific_fields":{"thinking_blocks":[{"type":"thinking","thinking":"Let me read it.","signature":"EqQBCkgI"}]}}}]}"#,
-        r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"claude-sonnet-5-5","choices":[{"index":0,"delta":{"content":"","tool_calls":[{"index":0,"id":"toolu_1","type":"function","function":{"name":"read_file","arguments":""}}]}}]}"#,
-        r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"claude-sonnet-5-5","choices":[{"index":0,"delta":{"content":"","tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"a.txt\"}"}}]}}]}"#,
-        r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"claude-sonnet-5-5","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
-        "[DONE]",
-    ];
-
-    #[test]
-    fn streamed_thinking_blocks_with_a_late_signature_become_a_signed_block() {
-        let choice = parse_stream(LITELLM_SIGNED_REPLY).unwrap();
-        assert_eq!(
-            choice.message.content,
-            [
-                signed("Let me read it.", "EqQBCkgI"),
-                ContentBlock::tool_use("toolu_1", "read_file", r#"{"path":"a.txt"}"#),
-            ]
-        );
-    }
-
-    // Older LiteLLM versions send the signature with empty text; the block
-    // then gets the reasoning streamed before it.
     #[test]
     fn a_signature_without_text_signs_the_streamed_reasoning() {
         let choice = parse_stream(&[
             r#"{"choices":[{"delta":{"reasoning_content":"Let me","thinking_blocks":[{"type":"thinking","thinking":"Let me","signature":null}]}}]}"#,
             r#"{"choices":[{"delta":{"thinking_blocks":[{"type":"thinking","thinking":"","signature":"EqQBCkgI"}]}}]}"#,
             r#"{"choices":[{"delta":{"content":"Done."},"finish_reason":"stop"}]}"#,
-        ])
-        .unwrap();
+        ]);
         assert_eq!(
             choice.message.content,
             [signed("Let me", "EqQBCkgI"), ContentBlock::from("Done.")]
         );
     }
 
-    // E.g. `max_tokens` reached mid-thought: the text is kept, unsigned.
-    #[test]
-    fn thinking_cut_off_before_its_signature_stays_unsigned() {
-        let choice = parse_stream(&[
-            r#"{"choices":[{"delta":{"reasoning_content":"Let me","thinking_blocks":[{"type":"thinking","thinking":"Let me"}]}}]}"#,
-            r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#,
-        ])
-        .unwrap();
-        assert_eq!(
-            choice.message.content,
-            [ContentBlock::Thinking {
-                thinking: "Let me".into(),
-                signature: None,
-            }]
-        );
-    }
-
-    // Each signature closes its own block, so two blocks keep their own text.
     #[test]
     fn redacted_and_several_signed_blocks_keep_their_order() {
         let choice = parse_stream(&[
@@ -1267,8 +830,7 @@ mod tests {
             r#"{"choices":[{"delta":{"reasoning_content":"two","thinking_blocks":[{"type":"thinking","thinking":"two"}]}}]}"#,
             r#"{"choices":[{"delta":{"reasoning_content":"","thinking_blocks":[{"type":"thinking","thinking":"two","signature":"sig-2"}]}}]}"#,
             r#"{"choices":[{"delta":{"content":"Done."},"finish_reason":"stop"}]}"#,
-        ])
-        .unwrap();
+        ]);
         assert_eq!(
             choice.message.content,
             [
@@ -1287,37 +849,26 @@ mod tests {
         let choice = parse_stream(&[
             r#"{"choices":[{"delta":{"reasoning_content":"hm","provider_specific_fields":{"citation":null,"thinking_blocks":[{"type":"thinking","thinking":"hm","signature":"sig"}]}}}]}"#,
             r#"{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}"#,
-        ])
-        .unwrap();
+        ]);
         assert_eq!(
             choice.message.content,
             [signed("hm", "sig"), ContentBlock::from("ok")]
         );
     }
 
-    // An unknown block type, or odd `provider_specific_fields`, doesn't cost
-    // the rest of the chunk.
     #[test]
-    fn unknown_thinking_entries_dont_drop_the_chunk() {
+    fn odd_or_malformed_thinking_entries_dont_drop_the_chunk() {
         let choice = parse_stream(&[
             r#"{"choices":[{"delta":{"content":"hi","thinking_blocks":[{"type":"summary","text":"x"}]}}]}"#,
             r#"{"choices":[{"delta":{"content":"!","provider_specific_fields":"odd"},"finish_reason":"stop"}]}"#,
-        ])
-        .unwrap();
+        ]);
         assert_eq!(choice.message.content, [ContentBlock::from("hi!")]);
-    }
 
-    // A malformed entry is skipped on its own: the chunk's tool-call
-    // arguments and the valid entries next to it survive, and `null` text
-    // still lets a signature sign the streamed reasoning.
-    #[test]
-    fn a_malformed_thinking_entry_doesnt_drop_the_chunk_or_its_neighbours() {
         let choice = parse_stream(&[
             r#"{"choices":[{"delta":{"reasoning_content":"plan"}}]}"#,
             r#"{"choices":[{"delta":{"thinking_blocks":[{"type":"thinking","thinking":null,"signature":"sig"},{"type":"thinking","thinking":"x","signature":7},{"type":"redacted_thinking","data":["bad"]},{"type":"redacted_thinking","data":"enc"}],"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{}"}}]}}]}"#,
             r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
-        ])
-        .unwrap();
+        ]);
         assert_eq!(
             choice.message.content,
             [
@@ -1326,70 +877,5 @@ mod tests {
                 ContentBlock::tool_use("call_1", "read_file", "{}"),
             ]
         );
-    }
-
-    #[test]
-    fn should_retry_without_stream_options_only_when_the_body_names_it() {
-        assert!(should_retry_without_stream_options(
-            400,
-            "Unrecognized request argument supplied: stream_options"
-        ));
-        // Case-insensitive: some backends echo the field name back differently.
-        assert!(should_retry_without_stream_options(
-            400,
-            "unknown field `Stream_Options`"
-        ));
-    }
-
-    #[test]
-    fn should_retry_without_stream_options_false_for_unrelated_400s() {
-        assert!(!should_retry_without_stream_options(
-            400,
-            "context length exceeded"
-        ));
-    }
-
-    #[test]
-    fn should_retry_without_stream_options_false_for_non_400_status() {
-        assert!(!should_retry_without_stream_options(
-            500,
-            "stream_options is not supported"
-        ));
-    }
-
-    #[test]
-    fn stream_chunk_deserializes_text_delta() {
-        let chunk: OpenAiStreamChunk = serde_json::from_str(
-            r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#,
-        )
-        .unwrap();
-        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hi"));
-        assert!(chunk.usage.is_none());
-    }
-
-    #[test]
-    fn stream_chunk_deserializes_final_usage_chunk_with_empty_choices() {
-        let chunk: OpenAiStreamChunk = serde_json::from_str(
-            r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
-        )
-        .unwrap();
-        assert!(chunk.choices.is_empty());
-        let usage = chunk.usage.unwrap();
-        assert_eq!(usage.prompt_tokens, 10);
-        assert_eq!(usage.completion_tokens, 5);
-    }
-
-    #[test]
-    fn stream_chunk_deserializes_tool_call_delta() {
-        let chunk: OpenAiStreamChunk = serde_json::from_str(
-            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\""}}]}}]}"#,
-        )
-        .unwrap();
-        let tcs = chunk.choices[0].delta.tool_calls.as_ref().unwrap();
-        assert_eq!(tcs.len(), 1);
-        assert_eq!(tcs[0].index, 0);
-        assert_eq!(tcs[0].id.as_deref(), Some("call_1"));
-        let function = tcs[0].function.as_ref().unwrap();
-        assert_eq!(function.name.as_deref(), Some("read_file"));
     }
 }

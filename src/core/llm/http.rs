@@ -71,48 +71,50 @@ pub(super) async fn post_json(
 mod tests {
     use super::*;
 
+    // Real error bodies from each provider and common compatible backends.
     #[test]
-    fn openai_overflow_is_recognised() {
-        let body = r#"{"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 130512 tokens. Please reduce the length of the messages.","type":"invalid_request_error","param":"messages","code":"context_length_exceeded"}}"#;
-        assert!(is_context_overflow(400, body));
-    }
-
-    #[test]
-    fn anthropic_overflow_is_recognised() {
-        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 208310 tokens > 200000 maximum"}}"#;
-        assert!(is_context_overflow(400, body));
-        let too_large = r#"{"type":"error","error":{"type":"request_too_large","message":"Request exceeds the maximum allowed number of bytes."}}"#;
-        assert!(is_context_overflow(413, too_large));
-    }
-
-    #[test]
-    fn gemini_overflow_is_recognised() {
-        let body = r#"{"error":{"code":400,"message":"The input token count (1200000) exceeds the maximum number of tokens allowed (1048576).","status":"INVALID_ARGUMENT"}}"#;
-        assert!(is_context_overflow(400, body));
-    }
-
-    #[test]
-    fn openai_compatible_overflows_are_recognised() {
-        for body in [
-            // vLLM / OpenRouter
-            "This endpoint's maximum context length is 32768 tokens. However, you requested about 40000 tokens.",
-            // Mistral
-            "Prompt contains 40000 tokens and 0 draft tokens, too large for model with 32768 maximum context length",
-            // llama.cpp
-            r#"{"error":{"code":400,"message":"the request exceeds the available context size, try increasing it","type":"exceed_context_size_error"}}"#,
-        ] {
-            assert!(is_context_overflow(400, body), "{body}");
+    fn overflows_are_recognised_by_provider_message() {
+        let overflows = [
+            (
+                400,
+                r#"{"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 130512 tokens. Please reduce the length of the messages.","code":"context_length_exceeded"}}"#,
+            ),
+            (
+                400,
+                r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 208310 tokens > 200000 maximum"}}"#,
+            ),
+            (
+                413,
+                r#"{"type":"error","error":{"type":"request_too_large","message":"Request exceeds the maximum allowed number of bytes."}}"#,
+            ),
+            (
+                400,
+                r#"{"error":{"code":400,"message":"The input token count (1200000) exceeds the maximum number of tokens allowed (1048576).","status":"INVALID_ARGUMENT"}}"#,
+            ),
+            (
+                400,
+                "This endpoint's maximum context length is 32768 tokens. However, you requested about 40000 tokens.",
+            ),
+            (
+                400,
+                "Prompt contains 40000 tokens and 0 draft tokens, too large for model with 32768 maximum context length",
+            ),
+            (
+                400,
+                r#"{"error":{"code":400,"message":"the request exceeds the available context size, try increasing it"}}"#,
+            ),
+        ];
+        for (status, body) in overflows {
+            assert!(is_context_overflow(status, body), "{body}");
         }
-    }
-
-    #[test]
-    fn other_errors_are_not_overflows() {
-        assert!(!is_context_overflow(
-            400,
-            r#"{"error":{"message":"Invalid 'tools[0].name'"}}"#
-        ));
-        assert!(!is_context_overflow(401, "prompt is too long"));
-        assert!(!is_context_overflow(429, "rate limited"));
-        assert!(!is_context_overflow(500, "maximum context length"));
+        let others = [
+            (400, r#"{"error":{"message":"Invalid 'tools[0].name'"}}"#),
+            (401, "prompt is too long"),
+            (429, "rate limited"),
+            (500, "maximum context length"),
+        ];
+        for (status, body) in others {
+            assert!(!is_context_overflow(status, body), "{status} {body}");
+        }
     }
 }

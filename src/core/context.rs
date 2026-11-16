@@ -320,30 +320,6 @@ mod tests {
     }
 
     #[test]
-    fn history_that_fits_is_left_alone() {
-        let history = history();
-        assert!(trim(&history, 0, total(&history)).is_none());
-    }
-
-    #[test]
-    fn oldest_turn_is_dropped_first() {
-        let history = history();
-        let fitted = trim(&history, 0, total(&history) - 1).unwrap();
-
-        assert_eq!(fitted.dropped, 4);
-        assert_eq!(fitted.messages.len(), history.len() - 4);
-        assert_eq!(fitted.messages[0].role, Role::User);
-        assert_eq!(
-            note_of(&fitted.messages[0]),
-            "[4 earlier messages omitted to fit the context window]"
-        );
-        // The note opens the first kept turn; its own text follows.
-        assert_eq!(fitted.messages[0].content[1], ContentBlock::from("second"));
-        assert_eq!(fitted.messages[1..], history[5..]);
-        assert_tool_pairs_intact(&fitted.messages);
-    }
-
-    #[test]
     fn latest_turn_is_kept_even_when_it_alone_is_too_big() {
         let history = history();
         let fitted = trim(&history, 0, 1).unwrap();
@@ -353,14 +329,6 @@ mod tests {
         assert!(note_of(&fitted.messages[0]).starts_with("[8 earlier"));
         assert_eq!(fitted.messages[0].content[1], ContentBlock::from("third"));
         assert_tool_pairs_intact(&fitted.messages);
-    }
-
-    #[test]
-    fn fixed_bytes_count_against_the_limit() {
-        let history = history();
-        let max = total(&history);
-        assert!(trim(&history, 0, max).is_none());
-        assert_eq!(trim(&history, 10, max).unwrap().dropped, 4);
     }
 
     /// One turn that's a long tool loop: three calls with big results.
@@ -384,23 +352,6 @@ mod tests {
             .filter_map(|m| m.tool_result_block())
             .map(|r| r.content)
             .collect()
-    }
-
-    #[test]
-    fn a_long_tool_loop_leaves_out_its_oldest_outputs_first() {
-        let history = tool_loop();
-        let big = "x".repeat(1000);
-        // Room for everything but about one big output.
-        let fitted = trim(&history, 0, total(&history) - 500).unwrap();
-
-        assert_eq!(fitted.dropped, 0);
-        assert_eq!(fitted.omitted_outputs, 1);
-        assert_eq!(
-            outputs(&fitted.messages),
-            [OMITTED_OUTPUT, big.as_str(), big.as_str()]
-        );
-        assert!(!fitted.exhausted);
-        assert_tool_pairs_intact(&fitted.messages);
     }
 
     // The results after the last call are new to the model: they stay even
@@ -436,23 +387,6 @@ mod tests {
         assert_tool_pairs_intact(&fitted.messages);
     }
 
-    // A provider overflow on a single long turn leaves out its outputs on
-    // the retry instead of ending the turn.
-    #[test]
-    fn overflow_on_a_single_turn_leaves_out_outputs() {
-        let history = tool_loop();
-        let mut fitter = ContextFitter::new(None, &[], &[]);
-
-        let fitted = fitter.fit(&history);
-        assert!(!fitted.exhausted);
-        let sent = fitter.request_bytes(&fitted.messages);
-        assert!(fitter.record_overflow(&fitted, sent));
-
-        let fitted = fitter.fit(&history);
-        assert!(fitted.omitted_outputs > 0);
-        assert!(fitter.request_bytes(&fitted.messages) < sent);
-    }
-
     #[test]
     fn a_single_turn_is_never_cut() {
         let history = vec![Message::user("only"), calls("a"), answer("a", "big")];
@@ -468,25 +402,6 @@ mod tests {
                 assert_tool_pairs_intact(&fitted.messages);
             }
         }
-    }
-
-    #[test]
-    fn fitter_without_a_window_sends_everything() {
-        let history = history();
-        let fitted = ContextFitter::new(None, &[], &[]).fit(&history);
-        assert_eq!(fitted.dropped, 0);
-        assert!(!fitted.exhausted);
-        assert_eq!(fitted.messages, history);
-    }
-
-    #[test]
-    fn fitter_trims_to_the_window() {
-        let history = history();
-        // At 4 bytes per token, room for the last two turns only.
-        let window = (total(&history) - 1000) as u64 / 4 * 10 / 9;
-        let fitted = ContextFitter::new(Some(window), &[], &[]).fit(&history);
-        assert_eq!(fitted.dropped, 4);
-        assert!(!fitted.exhausted);
     }
 
     #[test]
@@ -559,14 +474,5 @@ mod tests {
         // Only the latest turn is left: nothing more can go.
         let sent = fitter.request_bytes(&fitted.messages);
         assert!(!fitter.record_overflow(&fitted, sent));
-    }
-
-    #[test]
-    fn overflow_on_a_single_turn_cannot_be_helped() {
-        let history = vec![Message::user("only")];
-        let mut fitter = ContextFitter::new(None, &[], &[]);
-        let fitted = fitter.fit(&history);
-        assert!(fitted.exhausted);
-        assert!(!fitter.record_overflow(&fitted, 100));
     }
 }

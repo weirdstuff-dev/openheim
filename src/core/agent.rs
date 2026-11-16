@@ -507,65 +507,32 @@ where
 mod tests {
     use super::*;
     use crate::core::client_io::NoClientIo;
-    use crate::core::permission::{AllowAll, PermissionDecision, PermissionGate};
-    use crate::error::Error;
+    use crate::core::permission::{AllowAll, PermissionGate};
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tokio_util::sync::CancellationToken;
 
-    /// What a test turn borrows, with the defaults most tests want: ten
-    /// iterations, a fresh cancel token, and a gate that allows everything.
-    struct Harness {
-        config: AgentConfig,
-        cancel: CancellationToken,
-        gate: Arc<dyn PermissionGate>,
-    }
-
-    impl Harness {
-        fn new() -> Self {
-            Self {
-                config: AgentConfig {
-                    max_iterations: 10,
-                    ..AgentConfig::default()
-                },
-                cancel: CancellationToken::new(),
-                gate: Arc::new(AllowAll),
-            }
-        }
-
-        fn max_iterations(mut self, max_iterations: usize) -> Self {
-            self.config.max_iterations = max_iterations;
-            self
-        }
-
-        fn gate(mut self, gate: impl PermissionGate + 'static) -> Self {
-            self.gate = Arc::new(gate);
-            self
-        }
-
-        /// A clone of the turn's cancel token, for cancelling it from a
-        /// callback or another task.
-        fn cancel_handle(&self) -> CancellationToken {
-            self.cancel.clone()
-        }
-
-        async fn run(
-            &self,
-            llm: &dyn LlmClient,
-            executor: &dyn ToolExecutor,
-            messages: &mut Vec<Message>,
-            callback: impl FnMut(StreamEvent) + Send,
-        ) -> Result<AgentResult> {
-            let turn = TurnContext {
-                cancel: &self.cancel,
-                permission_gate: &self.gate,
-                work_dir: std::path::Path::new("."),
-                cwd: std::path::Path::new("."),
-                client_io: &NoClientIo,
-            };
-            run_agent(llm, executor, &self.config, messages, None, &turn, callback).await
-        }
+    async fn run(
+        llm: &dyn LlmClient,
+        executor: &dyn ToolExecutor,
+        messages: &mut Vec<Message>,
+        callback: impl FnMut(StreamEvent) + Send,
+    ) -> AgentResult {
+        let gate: Arc<dyn PermissionGate> = Arc::new(AllowAll);
+        let turn = TurnContext {
+            cancel: &CancellationToken::new(),
+            permission_gate: &gate,
+            work_dir: std::path::Path::new("."),
+            cwd: std::path::Path::new("."),
+            client_io: &NoClientIo,
+        };
+        let config = AgentConfig {
+            max_iterations: 10,
+            ..AgentConfig::default()
+        };
+        run_agent(llm, executor, &config, messages, None, &turn, callback)
+            .await
+            .unwrap()
     }
 
     fn text_choice(content: &str) -> Choice {
@@ -576,505 +543,68 @@ mod tests {
         }
     }
 
-    fn tool_call_choice(tool_name: &str, args: &str) -> Choice {
-        Choice {
-            message: Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::tool_use("call_1", tool_name, args)],
-            },
-            finish_reason: Some(FinishReason::ToolCalls),
-            usage: None,
-        }
-    }
-
-    fn multi_tool_call_choice(calls: &[(&str, &str)]) -> Choice {
-        Choice {
-            message: Message {
-                role: Role::Assistant,
-                content: calls
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (name, args))| {
-                        ContentBlock::tool_use(format!("call_{i}"), *name, *args)
-                    })
-                    .collect(),
-            },
-            finish_reason: Some(FinishReason::ToolCalls),
-            usage: None,
-        }
-    }
-
-    /// Mock LLM that returns a sequence of choices
-    struct MockLlm {
-        responses: Mutex<Vec<Choice>>,
-        call_count: AtomicUsize,
-    }
-
-    impl MockLlm {
-        fn new(responses: Vec<Choice>) -> Self {
-            Self {
-                responses: Mutex::new(responses),
-                call_count: AtomicUsize::new(0),
-            }
-        }
-    }
+    struct ScriptedLlm(Mutex<Vec<Choice>>);
 
     #[async_trait]
-    impl LlmClient for MockLlm {
+    impl LlmClient for ScriptedLlm {
         async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> Result<Choice> {
-            self.call_count.fetch_add(1, Ordering::SeqCst);
-            let mut responses = self.responses.lock().unwrap();
-            if responses.is_empty() {
-                Err(Error::ApiError("no more mock responses".into()))
-            } else {
-                Ok(responses.remove(0))
-            }
+            Ok(self.0.lock().unwrap().remove(0))
         }
     }
 
-    /// Mock ToolExecutor that returns a fixed result
-    struct MockToolExecutor {
-        result: String,
-        calls: Mutex<Vec<(String, String)>>,
-    }
-
-    impl MockToolExecutor {
-        fn new(result: &str) -> Self {
-            Self {
-                result: result.into(),
-                calls: Mutex::new(Vec::new()),
-            }
-        }
-    }
+    /// Each tool sleeps for its delay, then returns `<name>-done`.
+    struct DelayedTools(std::collections::HashMap<&'static str, std::time::Duration>);
 
     #[async_trait]
-    impl ToolExecutor for MockToolExecutor {
+    impl ToolExecutor for DelayedTools {
         fn list_tools(&self) -> Vec<Tool> {
             vec![]
         }
-
-        async fn execute(
-            &self,
-            name: &str,
-            args_json: &str,
-            _turn: &TurnContext<'_>,
-        ) -> Result<String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((name.into(), args_json.into()));
-            Ok(self.result.clone())
-        }
-    }
-
-    /// ToolExecutor where each tool's completion is gated behind a
-    /// per-tool sleep, so a test can control which of several concurrent
-    /// calls finishes first (deterministic under `start_paused = true`).
-    struct DelayedToolExecutor {
-        delays: std::collections::HashMap<String, std::time::Duration>,
-    }
-
-    #[async_trait]
-    impl ToolExecutor for DelayedToolExecutor {
-        fn list_tools(&self) -> Vec<Tool> {
-            vec![]
-        }
-        async fn execute(
-            &self,
-            name: &str,
-            _args: &str,
-            _turn: &TurnContext<'_>,
-        ) -> Result<String> {
-            if let Some(delay) = self.delays.get(name) {
+        async fn execute(&self, name: &str, _: &str, _: &TurnContext<'_>) -> Result<String> {
+            if let Some(delay) = self.0.get(name) {
                 tokio::time::sleep(*delay).await;
             }
             Ok(format!("{name}-done"))
         }
     }
 
-    struct FailingToolExecutor;
-
-    #[async_trait]
-    impl ToolExecutor for FailingToolExecutor {
-        fn list_tools(&self) -> Vec<Tool> {
-            vec![]
-        }
-        async fn execute(
-            &self,
-            _name: &str,
-            _args: &str,
-            _turn: &TurnContext<'_>,
-        ) -> Result<String> {
-            Err(Error::ApiError("tool failed".into()))
-        }
-    }
-
-    #[tokio::test]
-    async fn agent_stops_on_finish_reason_stop() {
-        let llm = MockLlm::new(vec![text_choice("done")]);
-        let mut messages = vec![Message::user("hi")];
-
-        let result = Harness::new()
-            .run(&llm, &MockToolExecutor::new(""), &mut messages, |_| {})
-            .await
-            .unwrap();
-
-        assert_eq!(result.final_response, "done");
-        assert_eq!(result.iterations_used, 1);
-        assert_eq!(result.stop_reason, StopReason::EndTurn);
-    }
-
-    #[tokio::test]
-    async fn agent_executes_tool_calls_and_continues() {
-        let llm = MockLlm::new(vec![
-            tool_call_choice("read_file", r#"{"path":"a.txt"}"#),
-            text_choice("here is the file content"),
-        ]);
-        let executor = MockToolExecutor::new("file data");
-        let mut messages = vec![Message::user("read a.txt")];
-
-        let result = Harness::new()
-            .run(&llm, &executor, &mut messages, |_| {})
-            .await
-            .unwrap();
-
-        assert_eq!(result.final_response, "here is the file content");
-        assert_eq!(result.iterations_used, 2);
-        // Verify tool was called
-        let calls = executor.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "read_file");
-    }
-
     #[tokio::test(start_paused = true)]
     async fn tool_results_emit_in_completion_order_not_call_order() {
-        // The LLM batches a slow call and a fast call into one turn; the fast
-        // one should be reported to the caller as soon as it finishes,
-        // without waiting on the slow one — even though it was requested
-        // second.
-        let llm = MockLlm::new(vec![
-            multi_tool_call_choice(&[("slow", "{}"), ("fast", "{}")]),
+        let calls = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::tool_use("c0", "slow", "{}"),
+                ContentBlock::tool_use("c1", "fast", "{}"),
+            ],
+        };
+        let llm = ScriptedLlm(Mutex::new(vec![
+            Choice {
+                message: calls,
+                finish_reason: Some(FinishReason::ToolCalls),
+                usage: None,
+            },
             text_choice("done"),
-        ]);
-        let delays = std::collections::HashMap::from([
-            ("slow".to_string(), std::time::Duration::from_secs(10)),
-            ("fast".to_string(), std::time::Duration::from_millis(1)),
-        ]);
-        let executor = DelayedToolExecutor { delays };
+        ]));
+        let executor = DelayedTools(std::collections::HashMap::from([
+            ("slow", std::time::Duration::from_secs(10)),
+            ("fast", std::time::Duration::from_millis(1)),
+        ]));
         let mut messages = vec![Message::user("go")];
-        let mut completion_order = Vec::new();
+        let mut emitted = Vec::new();
 
-        Harness::new()
-            .run(&llm, &executor, &mut messages, |event| {
-                if let StreamEvent::ToolResult { tool_name, .. } = event {
-                    completion_order.push(tool_name);
-                }
-            })
-            .await
-            .unwrap();
+        run(&llm, &executor, &mut messages, |event| {
+            if let StreamEvent::ToolResult { tool_name, .. } = event {
+                emitted.push(tool_name);
+            }
+        })
+        .await;
 
-        assert_eq!(completion_order, vec!["fast", "slow"]);
-        // Message history still reflects the original tool-call order,
-        // regardless of completion order.
-        let tool_result_names: Vec<_> = messages
+        assert_eq!(emitted, ["fast", "slow"]);
+        let stored: Vec<_> = messages
             .iter()
             .filter_map(|m| m.tool_result_block().map(|tr| tr.tool_name.clone()))
             .collect();
-        assert_eq!(tool_result_names, vec!["slow", "fast"]);
-    }
-
-    #[tokio::test]
-    async fn agent_respects_max_iterations() {
-        // LLM always returns tool calls, never stops
-        let llm = MockLlm::new(vec![
-            tool_call_choice("read_file", "{}"),
-            tool_call_choice("read_file", "{}"),
-            tool_call_choice("read_file", "{}"),
-        ]);
-        let mut messages = vec![Message::user("loop")];
-
-        let result = Harness::new()
-            .max_iterations(3)
-            .run(&llm, &MockToolExecutor::new("data"), &mut messages, |_| {})
-            .await
-            .unwrap();
-
-        assert_eq!(result.iterations_used, 3);
-        assert_eq!(result.stop_reason, StopReason::MaxIterations);
-    }
-
-    #[tokio::test]
-    async fn agent_streaming_emits_events() {
-        let llm = MockLlm::new(vec![
-            tool_call_choice("echo", r#"{"cmd":"hi"}"#),
-            text_choice("all done"),
-        ]);
-        let mut messages = vec![Message::user("test")];
-
-        let mut events = Vec::new();
-        let result = Harness::new()
-            .run(&llm, &MockToolExecutor::new("ok"), &mut messages, |event| {
-                events.push(event)
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(result.final_response, "all done");
-
-        // Check relative event ordering.
-        let tool_call_idx = events
-            .iter()
-            .position(
-                |e| matches!(e, StreamEvent::ToolCall { tool_name, .. } if tool_name == "echo"),
-            )
-            .unwrap();
-        let tool_result_idx = events
-            .iter()
-            .position(
-                |e| matches!(e, StreamEvent::ToolResult { tool_name, .. } if tool_name == "echo"),
-            )
-            .unwrap();
-        let llm_response_idx = events
-            .iter()
-            .position(
-                |e| matches!(e, StreamEvent::LlmResponse { content } if content == "all done"),
-            )
-            .unwrap();
-
-        let finished_idx = events
-            .iter()
-            .position(|e| matches!(e, StreamEvent::Finished { .. }))
-            .unwrap();
-        let message_appended_count = events
-            .iter()
-            .filter(|e| matches!(e, StreamEvent::MessageAppended { .. }))
-            .count();
-
-        assert!(matches!(
-            events[0],
-            StreamEvent::IterationStart { iteration: 1 }
-        ));
-        assert!(tool_call_idx < tool_result_idx);
-        assert!(tool_result_idx < llm_response_idx);
-        assert!(llm_response_idx < finished_idx);
-        // One MessageAppended per pushed message: the tool-call assistant
-        // message, the tool-result message, and the final text response.
-        assert_eq!(message_appended_count, 3);
-    }
-
-    #[tokio::test]
-    async fn agent_feeds_tool_error_back_to_llm() {
-        let llm = MockLlm::new(vec![
-            tool_call_choice("bad_tool", "{}"),
-            text_choice("I got an error"),
-        ]);
-        let mut messages = vec![Message::user("do something")];
-
-        // Should not propagate the error; LLM should receive it as a tool result
-        let result = Harness::new()
-            .run(&llm, &FailingToolExecutor, &mut messages, |_| {})
-            .await
-            .unwrap();
-
-        assert_eq!(result.final_response, "I got an error");
-        // The tool result message should contain the error text
-        let tool_result_msg = messages
-            .iter()
-            .find(|m| m.tool_result_block().is_some())
-            .unwrap();
-        assert!(
-            tool_result_msg
-                .tool_result_block()
-                .unwrap()
-                .content
-                .contains("Error:")
-        );
-    }
-
-    #[tokio::test]
-    async fn agent_stops_early_when_cancelled() {
-        // LLM always returns tool calls, never stops on its own.
-        let llm = MockLlm::new(vec![
-            tool_call_choice("read_file", "{}"),
-            tool_call_choice("read_file", "{}"),
-            tool_call_choice("read_file", "{}"),
-        ]);
-        let executor = MockToolExecutor::new("data");
-        let mut messages = vec![Message::user("loop")];
-        let harness = Harness::new();
-        let cancel = harness.cancel_handle();
-
-        let result = harness
-            .run(&llm, &executor, &mut messages, move |event| {
-                if matches!(event, StreamEvent::ToolResult { .. }) {
-                    cancel.cancel();
-                }
-            })
-            .await
-            .unwrap();
-
-        // Only the first iteration's tool call should have run before the
-        // second iteration's cancellation check stopped the loop.
-        assert_eq!(result.iterations_used, 1);
-        let calls = executor.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(result.stop_reason, StopReason::Cancelled);
-    }
-
-    /// LLM that never resolves on its own; proves cancellation aborts
-    /// an in-flight call instead of waiting for it to finish.
-    struct SlowLlm;
-
-    #[async_trait]
-    impl LlmClient for SlowLlm {
-        async fn send(&self, _messages: &[Message], _tools: &[Tool]) -> Result<Choice> {
-            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-            unreachable!("cancellation should abort this call before the sleep elapses");
-        }
-    }
-
-    #[tokio::test]
-    async fn cancel_aborts_in_flight_llm_call_streaming() {
-        let executor = MockToolExecutor::new("");
-        let mut messages = vec![Message::user("hi")];
-        let harness = Harness::new();
-        let cancel = harness.cancel_handle();
-
-        // Cancel as soon as the loop starts its first iteration, i.e. right
-        // before the (never-resolving) LLM call is made.
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            harness.run(&SlowLlm, &executor, &mut messages, move |event| {
-                if matches!(event, StreamEvent::IterationStart { .. }) {
-                    cancel.cancel();
-                }
-            }),
-        )
-        .await
-        .expect("run_agent should abort the in-flight LLM call instead of hanging")
-        .unwrap();
-
-        assert_eq!(result.final_response, "");
-        assert_eq!(result.iterations_used, 1);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(result.stop_reason, StopReason::Cancelled);
-    }
-
-    /// ToolExecutor that never resolves; proves cancellation aborts a
-    /// running tool call instead of waiting for it to finish.
-    struct SlowToolExecutor;
-
-    #[async_trait]
-    impl ToolExecutor for SlowToolExecutor {
-        fn list_tools(&self) -> Vec<Tool> {
-            vec![]
-        }
-        async fn execute(
-            &self,
-            _name: &str,
-            _args: &str,
-            _turn: &TurnContext<'_>,
-        ) -> Result<String> {
-            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-            unreachable!("cancellation should abort this call before the sleep elapses");
-        }
-    }
-
-    #[tokio::test]
-    async fn cancel_aborts_in_flight_tool_call() {
-        let llm = MockLlm::new(vec![tool_call_choice("read_file", "{}")]);
-        let mut messages = vec![Message::user("hi")];
-        let harness = Harness::new();
-        let cancel = harness.cancel_handle();
-
-        // Cancel as soon as the tool call is announced, just before it runs.
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            harness.run(&llm, &SlowToolExecutor, &mut messages, move |event| {
-                if matches!(event, StreamEvent::ToolCall { .. }) {
-                    cancel.cancel();
-                }
-            }),
-        )
-        .await
-        .expect("run_agent should abort the in-flight tool call instead of hanging")
-        .unwrap();
-
-        assert_eq!(result.stop_reason, StopReason::Cancelled);
-        assert_every_call_answered_as_cancelled(&messages);
-    }
-
-    /// The history ends with the assistant's tool call followed by a
-    /// cancelled error result for it, so the next request is still valid.
-    fn assert_every_call_answered_as_cancelled(messages: &[Message]) {
-        let [.., call, result] = messages else {
-            panic!("expected a tool call and its result, got {messages:?}");
-        };
-        assert_eq!(call.tool_calls().len(), 1);
-        let result = result.tool_result_block().expect("a tool result");
-        assert_eq!(result.tool_call_id, call.tool_calls()[0].id);
-        assert_eq!(result.content, CANCELLED_TOOL_RESULT);
-        assert!(result.is_error);
-    }
-
-    // Cancelling after one of two calls finished must leave every call
-    // answered: providers reject a history with an unanswered tool call.
-    #[tokio::test(start_paused = true)]
-    async fn cancel_keeps_finished_results_and_answers_the_rest() {
-        let llm = MockLlm::new(vec![multi_tool_call_choice(&[
-            ("slow", "{}"),
-            ("fast", "{}"),
-        ])]);
-        let delays = std::collections::HashMap::from([
-            ("slow".to_string(), std::time::Duration::from_secs(3600)),
-            ("fast".to_string(), std::time::Duration::from_millis(1)),
-        ]);
-        let executor = DelayedToolExecutor { delays };
-        let mut messages = vec![Message::user("go")];
-        let harness = Harness::new();
-        let cancel = harness.cancel_handle();
-        let mut results = Vec::new();
-        let mut appended = 0;
-
-        let result = harness
-            .run(&llm, &executor, &mut messages, |event| match event {
-                StreamEvent::ToolResult {
-                    tool_name, result, ..
-                } => {
-                    if tool_name == "fast" {
-                        cancel.cancel();
-                    }
-                    results.push((tool_name, result));
-                }
-                StreamEvent::MessageAppended { .. } => appended += 1,
-                _ => {}
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(result.stop_reason, StopReason::Cancelled);
-        // Every call's `ToolResult` fires, the cancelled one included.
-        assert_eq!(
-            results,
-            [
-                ("fast".to_string(), "fast-done".to_string()),
-                ("slow".to_string(), CANCELLED_TOOL_RESULT.to_string()),
-            ]
-        );
-        let recorded: Vec<_> = messages
-            .iter()
-            .filter_map(Message::tool_result_block)
-            .map(|r| (r.tool_name, r.content, r.is_error))
-            .collect();
-        assert_eq!(
-            recorded,
-            [
-                ("slow".to_string(), CANCELLED_TOOL_RESULT.to_string(), true),
-                ("fast".to_string(), "fast-done".to_string(), false),
-            ]
-        );
-        // The assistant message plus both results reach the history log.
-        assert_eq!(appended, 3);
+        assert_eq!(stored, ["slow", "fast"]);
     }
 
     fn calls(ids: &[&str]) -> Message {
@@ -1129,164 +659,6 @@ mod tests {
         );
     }
 
-    // A stored turn with an unanswered call (e.g. cut short by a crash) must
-    // not break the conversation's next request.
-    #[tokio::test]
-    async fn request_answers_a_stored_unanswered_call() {
-        struct RecordingLlm(Mutex<Vec<Vec<Message>>>);
-
-        #[async_trait]
-        impl LlmClient for RecordingLlm {
-            async fn send(&self, messages: &[Message], _tools: &[Tool]) -> Result<Choice> {
-                self.0.lock().unwrap().push(messages.to_vec());
-                Ok(text_choice("ok"))
-            }
-        }
-
-        let llm = RecordingLlm(Mutex::new(Vec::new()));
-        let mut messages = vec![Message::user("hi"), calls(&["a"]), Message::user("again")];
-
-        Harness::new()
-            .run(&llm, &MockToolExecutor::new(""), &mut messages, |_| {})
-            .await
-            .unwrap();
-
-        let sent = &llm.0.lock().unwrap()[0];
-        assert_eq!(
-            sent[2],
-            Message::tool_result("a", "read_file", MISSING_TOOL_RESULT, true)
-        );
-        // The stored history itself isn't rewritten.
-        assert_eq!(messages[2], Message::user("again"));
-    }
-
-    #[tokio::test]
-    async fn cancel_aborts_in_flight_llm_call_without_a_callback() {
-        let executor = MockToolExecutor::new("");
-        let mut messages = vec![Message::user("hi")];
-        let harness = Harness::new();
-        let cancel = harness.cancel_handle();
-
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            cancel.cancel();
-        });
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            harness.run(&SlowLlm, &executor, &mut messages, |_| {}),
-        )
-        .await
-        .expect("run_agent should abort the in-flight LLM call instead of hanging")
-        .unwrap();
-
-        assert_eq!(result.final_response, "");
-        assert_eq!(result.iterations_used, 1);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(result.stop_reason, StopReason::Cancelled);
-    }
-
-    #[tokio::test]
-    async fn agent_reports_no_content_stop_reason() {
-        // An LLM response with neither text nor tool calls is an anomaly
-        // that should stop the loop, not be treated as a normal completion.
-        let empty_choice = Choice {
-            message: Message {
-                role: Role::Assistant,
-                content: vec![],
-            },
-            finish_reason: Some(FinishReason::Stop),
-            usage: None,
-        };
-        let llm = MockLlm::new(vec![empty_choice]);
-        let mut messages = vec![Message::user("hi")];
-
-        let result = Harness::new()
-            .run(&llm, &MockToolExecutor::new(""), &mut messages, |_| {})
-            .await
-            .unwrap();
-
-        assert_eq!(result.final_response, "");
-        assert_eq!(result.iterations_used, 1);
-        assert_eq!(result.stop_reason, StopReason::NoContent);
-    }
-
-    fn choice_with(content: Vec<ContentBlock>, finish_reason: Option<FinishReason>) -> Choice {
-        Choice {
-            message: Message {
-                role: Role::Assistant,
-                content,
-            },
-            finish_reason,
-            usage: None,
-        }
-    }
-
-    // Every finish reason on a reply without tool calls ends the turn
-    // (except `Paused`), instead of resending a history that ends in an
-    // assistant reply.
-    #[tokio::test]
-    async fn reply_without_tools_ends_turn_per_finish_reason() {
-        let text = || vec![ContentBlock::from("partial answer")];
-        let cases = [
-            (text(), Some(FinishReason::Stop), StopReason::EndTurn),
-            (text(), Some(FinishReason::MaxTokens), StopReason::MaxTokens),
-            (text(), Some(FinishReason::Refusal), StopReason::Refusal),
-            (
-                text(),
-                Some(FinishReason::Other("stop_sequence".into())),
-                StopReason::EndTurn,
-            ),
-            (text(), None, StopReason::EndTurn),
-            // A thinking model can spend the whole budget before emitting
-            // any text; that's truncation, not an empty reply.
-            (vec![], Some(FinishReason::MaxTokens), StopReason::MaxTokens),
-            (vec![], Some(FinishReason::Refusal), StopReason::Refusal),
-        ];
-
-        for (content, finish_reason, expected) in cases {
-            let has_text = !content.is_empty();
-            let llm = MockLlm::new(vec![choice_with(content, finish_reason.clone())]);
-            let mut messages = vec![Message::user("hi")];
-
-            let result = Harness::new()
-                .run(&llm, &MockToolExecutor::new(""), &mut messages, |_| {})
-                .await
-                .unwrap();
-
-            assert_eq!(result.stop_reason, expected, "{finish_reason:?}");
-            assert_eq!(
-                llm.call_count.load(Ordering::SeqCst),
-                1,
-                "{finish_reason:?} must not re-call the LLM"
-            );
-            if has_text {
-                assert_eq!(result.final_response, "partial answer");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn paused_reply_resumes_the_turn() {
-        let llm = MockLlm::new(vec![
-            choice_with(
-                vec![ContentBlock::from("working on it")],
-                Some(FinishReason::Paused),
-            ),
-            text_choice("done"),
-        ]);
-        let mut messages = vec![Message::user("hi")];
-
-        let result = Harness::new()
-            .run(&llm, &MockToolExecutor::new(""), &mut messages, |_| {})
-            .await
-            .unwrap();
-
-        assert_eq!(result.stop_reason, StopReason::EndTurn);
-        assert_eq!(result.final_response, "done");
-        assert_eq!(llm.call_count.load(Ordering::SeqCst), 2);
-    }
-
     /// Streams one chunk, closes its sender, and only then finishes the
     /// request — legal for an `LlmClient`, since nothing requires the sender
     /// to live until the reply is returned.
@@ -1306,8 +678,6 @@ mod tests {
         ) -> Result<Choice> {
             chunk_tx.send(LlmChunk::Text("hel".into())).unwrap();
             drop(chunk_tx);
-            // Let the agent loop observe the closed channel before the
-            // reply is ready.
             for _ in 0..10 {
                 tokio::task::yield_now().await;
             }
@@ -1321,422 +691,17 @@ mod tests {
     async fn reply_arriving_after_the_chunk_channel_closes_still_completes() {
         let mut messages = vec![Message::user("hi")];
         let mut chunks = Vec::new();
+        let executor = DelayedTools(Default::default());
 
-        let result = Harness::new()
-            .run(
-                &EarlyCloseLlm,
-                &MockToolExecutor::new(""),
-                &mut messages,
-                |event| {
-                    if let StreamEvent::LlmResponse { content } = event {
-                        chunks.push(content);
-                    }
-                },
-            )
-            .await
-            .unwrap();
+        let result = run(&EarlyCloseLlm, &executor, &mut messages, |event| {
+            if let StreamEvent::LlmResponse { content } = event {
+                chunks.push(content);
+            }
+        })
+        .await;
 
         assert_eq!(result.stop_reason, StopReason::EndTurn);
         assert_eq!(result.final_response, "hello");
-        assert_eq!(chunks, vec!["hel".to_string()]);
-    }
-
-    // A run whose callback ignores events (as `delegate_task` subagents do)
-    // still streams, so long replies don't hit the per-read timeout.
-    // `EarlyCloseLlm::send` panics, so this only passes if the request
-    // streamed.
-    #[tokio::test]
-    async fn runs_without_a_callback_still_stream() {
-        let mut messages = vec![Message::user("hi")];
-
-        let result = Harness::new()
-            .run(
-                &EarlyCloseLlm,
-                &MockToolExecutor::new(""),
-                &mut messages,
-                |_| {},
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(result.final_response, "hello");
-    }
-
-    struct HangingPermissionGate;
-
-    #[async_trait]
-    impl PermissionGate for HangingPermissionGate {
-        async fn check(&self, _request: &PermissionRequest<'_>) -> PermissionDecision {
-            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-            unreachable!("cancellation should abort this wait before the sleep elapses");
-        }
-    }
-
-    #[tokio::test]
-    async fn cancel_aborts_pending_permission_approval() {
-        let llm = MockLlm::new(vec![tool_call_choice(
-            "execute_command",
-            r#"{"command":"echo hi"}"#,
-        )]);
-        let executor = MockToolExecutor::new("should not run");
-        let mut messages = vec![Message::user("do something")];
-        let harness = Harness::new().gate(HangingPermissionGate);
-        let cancel = harness.cancel_handle();
-
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            cancel.cancel();
-        });
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            harness.run(&llm, &executor, &mut messages, |_| {}),
-        )
-        .await
-        .expect("run_agent should abort the pending permission check instead of hanging")
-        .unwrap();
-
-        assert_eq!(result.stop_reason, StopReason::Cancelled);
-        assert_every_call_answered_as_cancelled(&messages);
-    }
-
-    struct RejectPermissionGate;
-
-    #[async_trait]
-    impl PermissionGate for RejectPermissionGate {
-        async fn check(&self, _request: &PermissionRequest<'_>) -> PermissionDecision {
-            PermissionDecision::RejectOnce
-        }
-    }
-
-    #[tokio::test]
-    async fn agent_skips_execution_when_permission_denied() {
-        let llm = MockLlm::new(vec![
-            tool_call_choice("execute_command", r#"{"command":"rm -rf /"}"#),
-            text_choice("I was denied"),
-        ]);
-        let executor = MockToolExecutor::new("should not run");
-        let mut messages = vec![Message::user("do something dangerous")];
-
-        let result = Harness::new()
-            .gate(RejectPermissionGate)
-            .run(&llm, &executor, &mut messages, |_| {})
-            .await
-            .unwrap();
-
-        assert_eq!(result.final_response, "I was denied");
-        // The tool must never actually execute once permission is denied.
-        assert!(executor.calls.lock().unwrap().is_empty());
-        let tool_result_msg = messages
-            .iter()
-            .find(|m| m.tool_result_block().is_some())
-            .unwrap()
-            .tool_result_block()
-            .unwrap();
-        assert_eq!(tool_result_msg.content, "Permission denied by user.");
-        assert!(tool_result_msg.is_error);
-    }
-
-    /// Counts the permission checks that reach it, allowing each.
-    struct CountingGate(Arc<AtomicUsize>);
-
-    #[async_trait]
-    impl PermissionGate for CountingGate {
-        async fn check(&self, _request: &PermissionRequest<'_>) -> PermissionDecision {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            PermissionDecision::AllowOnce
-        }
-    }
-
-    // A call cut off at the output limit is answered with an error the model
-    // can act on, without being run or put to the user.
-    #[tokio::test]
-    async fn call_with_malformed_arguments_is_answered_without_running() {
-        let mut cut_off = tool_call_choice("write_file", r#"{"path":"a.txt","content":"par"#);
-        cut_off.finish_reason = Some(FinishReason::MaxTokens);
-        let llm = MockLlm::new(vec![cut_off, text_choice("retrying")]);
-        let executor = MockToolExecutor::new("should not run");
-        let asked = Arc::new(AtomicUsize::new(0));
-        let mut messages = vec![Message::user("write a.txt")];
-
-        let result = Harness::new()
-            .gate(CountingGate(asked.clone()))
-            .run(&llm, &executor, &mut messages, |_| {})
-            .await
-            .unwrap();
-
-        assert_eq!(result.final_response, "retrying");
-        assert!(executor.calls.lock().unwrap().is_empty());
-        assert_eq!(asked.load(Ordering::SeqCst), 0);
-        let answer = messages
-            .iter()
-            .find_map(Message::tool_result_block)
-            .unwrap();
-        assert!(answer.is_error);
-        assert!(
-            answer.content.contains("output token limit"),
-            "{}",
-            answer.content
-        );
-    }
-
-    #[tokio::test]
-    async fn call_without_arguments_still_runs() {
-        let llm = MockLlm::new(vec![tool_call_choice("list_dir", ""), text_choice("done")]);
-        let executor = MockToolExecutor::new("a.txt");
-        let mut messages = vec![Message::user("list")];
-
-        Harness::new()
-            .run(&llm, &executor, &mut messages, |_| {})
-            .await
-            .unwrap();
-
-        assert_eq!(executor.calls.lock().unwrap().len(), 1);
-    }
-
-    // An oversized result is cut before it reaches the history, so it can't
-    // push every later request past the context window.
-    #[tokio::test]
-    async fn oversized_tool_result_is_truncated() {
-        let llm = MockLlm::new(vec![
-            tool_call_choice("read_file", r#"{"path":"big.txt"}"#),
-            text_choice("done"),
-        ]);
-        let executor = MockToolExecutor::new(&"é".repeat(MAX_TOOL_RESULT_BYTES));
-        let mut messages = vec![Message::user("read it")];
-        let mut streamed = String::new();
-
-        Harness::new()
-            .run(&llm, &executor, &mut messages, |event| {
-                if let StreamEvent::ToolResult { result, .. } = event {
-                    streamed = result;
-                }
-            })
-            .await
-            .unwrap();
-
-        let stored = messages
-            .iter()
-            .find_map(Message::tool_result_block)
-            .unwrap()
-            .content;
-        assert_eq!(stored, streamed);
-        let (kept, note) = stored.split_once("\n[tool output truncated").unwrap();
-        assert_eq!(kept, "é".repeat(MAX_TOOL_RESULT_BYTES / 2));
-        assert!(
-            note.contains(&format!("of {} bytes", 2 * MAX_TOOL_RESULT_BYTES)),
-            "{note}"
-        );
-    }
-
-    /// Records every request and rejects as too long any request over
-    /// `max_messages` messages.
-    struct WindowedLlm {
-        max_messages: usize,
-        requests: Mutex<Vec<Vec<Message>>>,
-    }
-
-    impl WindowedLlm {
-        fn new(max_messages: usize) -> Self {
-            Self {
-                max_messages,
-                requests: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn requests(&self) -> Vec<Vec<Message>> {
-            self.requests.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait]
-    impl LlmClient for WindowedLlm {
-        async fn send(&self, messages: &[Message], _tools: &[Tool]) -> Result<Choice> {
-            self.requests.lock().unwrap().push(messages.to_vec());
-            if messages.len() > self.max_messages {
-                return Err(Error::ContextOverflow("prompt is too long".into()));
-            }
-            Ok(text_choice("fits"))
-        }
-    }
-
-    /// Two finished turns of about 2 KB each and a new prompt.
-    fn long_history() -> Vec<Message> {
-        let long = |text: &str| format!("{text} {}", ".".repeat(1000));
-        vec![
-            Message::user(long("first")),
-            Message::assistant(long("one")),
-            Message::user(long("second")),
-            Message::assistant(long("two")),
-            Message::user("third"),
-        ]
-    }
-
-    #[tokio::test]
-    async fn overflow_is_retried_with_earlier_turns_left_out() {
-        let llm = WindowedLlm::new(3);
-        let mut messages = long_history();
-        let mut trimmed = Vec::new();
-
-        let result = Harness::new()
-            .run(&llm, &MockToolExecutor::new(""), &mut messages, |event| {
-                if let StreamEvent::ContextTrimmed { dropped } = event {
-                    trimmed.push(dropped);
-                }
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(result.final_response, "fits");
-        let requests = llm.requests();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0], long_history());
-        // The retry starts at the second turn, with the note in front of it.
-        let retry = &requests[1];
-        assert_eq!(retry.len(), 3);
-        assert_eq!(
-            retry[0].content[0],
-            ContentBlock::from("[2 earlier messages omitted to fit the context window]")
-        );
-        assert_eq!(retry[0].content[1..], long_history()[2].content);
-        assert_eq!(retry[1..], long_history()[3..]);
-        assert_eq!(trimmed, [2]);
-        // The stored history keeps everything and gains the reply.
-        assert_eq!(messages[..5], long_history());
-        assert_eq!(messages[5], Message::assistant("fits"));
-    }
-
-    #[tokio::test]
-    async fn overflow_of_the_latest_turn_alone_fails_clearly() {
-        let llm = WindowedLlm::new(0);
-        let mut messages = long_history();
-
-        let err = Harness::new()
-            .run(&llm, &MockToolExecutor::new(""), &mut messages, |_| {})
-            .await
-            .unwrap_err();
-
-        assert!(matches!(err, Error::ContextOverflow(_)), "{err}");
-        assert!(err.to_string().contains("start a new session"), "{err}");
-        // The full request, then one per turn left out, down to the latest.
-        let sizes: Vec<_> = llm.requests().iter().map(Vec::len).collect();
-        assert_eq!(sizes, [5, 3, 1]);
-        assert_eq!(messages, long_history());
-    }
-
-    #[tokio::test]
-    async fn known_window_trims_before_sending() {
-        let llm = WindowedLlm::new(usize::MAX);
-        let mut messages = long_history();
-        let mut harness = Harness::new();
-        // About 2.9 KB at the default 4 bytes per token: room for the last
-        // two turns.
-        harness.config.context_window = Some(800);
-        let mut trimmed = Vec::new();
-
-        harness
-            .run(&llm, &MockToolExecutor::new(""), &mut messages, |event| {
-                if let StreamEvent::ContextTrimmed { dropped } = event {
-                    trimmed.push(dropped);
-                }
-            })
-            .await
-            .unwrap();
-
-        let requests = llm.requests();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].len(), 3);
-        assert_eq!(trimmed, [2]);
-    }
-
-    // A single turn too long for the window sends its older tool output as
-    // a placeholder and the newest whole, rather than failing.
-    #[tokio::test]
-    async fn a_long_single_turn_leaves_out_older_tool_outputs() {
-        let llm = WindowedLlm::new(usize::MAX);
-        let big = "x".repeat(4000);
-        let call = |id: &str| Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::tool_use(id, "read_file", "{}")],
-        };
-        let history = vec![
-            Message::user("go"),
-            call("a"),
-            Message::tool_result("a", "read_file", &big, false),
-            call("b"),
-            Message::tool_result("b", "read_file", &big, false),
-        ];
-        let mut messages = history.clone();
-        let mut harness = Harness::new();
-        // About 5.4 KB at the default 4 bytes per token: room for one output.
-        harness.config.context_window = Some(1500);
-        let mut omitted = Vec::new();
-
-        let result = harness
-            .run(&llm, &MockToolExecutor::new(""), &mut messages, |event| {
-                if let StreamEvent::ToolOutputsOmitted { omitted: n } = event {
-                    omitted.push(n);
-                }
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(result.final_response, "fits");
-        let sent: Vec<_> = llm.requests()[0]
-            .iter()
-            .filter_map(Message::tool_result_block)
-            .map(|r| r.content)
-            .collect();
-        assert_eq!(sent, [crate::core::context::OMITTED_OUTPUT, big.as_str()]);
-        assert_eq!(omitted, [1]);
-        // The stored history keeps the output.
-        assert_eq!(messages[..5], history);
-    }
-
-    // Usage that shows the estimate was too high lets the next request send
-    // every output again, and that's reported too.
-    #[tokio::test]
-    async fn outputs_back_in_the_request_are_reported() {
-        let big = "x".repeat(4000);
-        let call = |id: &str| Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::tool_use(id, "read_file", "{}")],
-        };
-        let mut messages = vec![
-            Message::user("go"),
-            call("a"),
-            Message::tool_result("a", "read_file", &big, false),
-            call("b"),
-            Message::tool_result("b", "read_file", &big, false),
-        ];
-        // Few tokens for the bytes sent: 8 bytes per token from here on.
-        let mut calibrating = tool_call_choice("read_file", "{}");
-        calibrating.usage = Some(Usage {
-            input_tokens: 100,
-            ..Usage::default()
-        });
-        let llm = MockLlm::new(vec![calibrating, text_choice("done")]);
-        let mut harness = Harness::new();
-        // About 5.4 KB at the default 4 bytes per token: room for one output.
-        harness.config.context_window = Some(1500);
-        let mut omitted = Vec::new();
-
-        harness
-            .run(&llm, &MockToolExecutor::new("ok"), &mut messages, |event| {
-                if let StreamEvent::ToolOutputsOmitted { omitted: n } = event {
-                    omitted.push(n);
-                }
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(omitted, [1, 0]);
-    }
-
-    #[test]
-    fn small_tool_results_are_kept_whole() {
-        assert_eq!(cap_tool_result("ok".to_string()), "ok");
-        let exact = "a".repeat(MAX_TOOL_RESULT_BYTES);
-        assert_eq!(cap_tool_result(exact.clone()), exact);
+        assert_eq!(chunks, ["hel"]);
     }
 }

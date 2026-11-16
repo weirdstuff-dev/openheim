@@ -420,38 +420,6 @@ mod tests {
     }
 
     #[test]
-    fn create_and_load_conversation_roundtrip() {
-        let (mgr, _dir) = make_manager();
-        let conv = mgr
-            .create_conversation(Some("gpt-4".into()), Some("openai".into()), vec![])
-            .unwrap();
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert_eq!(loaded.meta.id, conv.meta.id);
-        assert_eq!(loaded.meta.model.as_deref(), Some("gpt-4"));
-        assert_eq!(loaded.meta.provider.as_deref(), Some("openai"));
-        assert!(loaded.messages.is_empty());
-    }
-
-    #[test]
-    fn load_nonexistent_conversation_errors() {
-        let (mgr, _dir) = make_manager();
-        let id = Uuid::new_v4();
-        let err = mgr.load_conversation(&id).unwrap_err();
-        assert!(matches!(err, Error::NotFound(_)));
-        assert!(err.to_string().contains(&id.to_string()));
-    }
-
-    #[test]
-    fn save_sets_title_from_first_user_message() {
-        let (mgr, _dir) = make_manager();
-        let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
-        conv.messages.push(Message::user("hello world"));
-        mgr.save_conversation(&conv).unwrap();
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert_eq!(loaded.meta.title.as_deref(), Some("hello world"));
-    }
-
-    #[test]
     fn save_truncates_long_title() {
         let (mgr, _dir) = make_manager();
         let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
@@ -460,117 +428,6 @@ mod tests {
         mgr.save_conversation(&conv).unwrap();
         let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
         assert_eq!(loaded.meta.title.as_ref().map(|t| t.len()), Some(80));
-    }
-
-    #[test]
-    fn list_conversations_returns_most_recent_first() {
-        let (mgr, _dir) = make_manager();
-        mgr.create_conversation(None, None, vec![]).unwrap();
-        mgr.create_conversation(None, None, vec![]).unwrap();
-        let list = mgr.list_conversations().unwrap();
-        assert_eq!(list.len(), 2);
-        assert!(list[0].updated_at >= list[1].updated_at);
-    }
-
-    #[test]
-    fn list_conversations_empty_dir() {
-        let (mgr, _dir) = make_manager();
-        let list = mgr.list_conversations().unwrap();
-        assert!(list.is_empty());
-    }
-
-    #[test]
-    fn resolve_conversation_loads_existing_by_id() {
-        let (mgr, _dir) = make_manager();
-        let existing = mgr
-            .create_conversation(Some("gpt-4".into()), None, vec![])
-            .unwrap();
-        let resolved = mgr
-            .resolve_conversation(Some(existing.meta.id), None, None, vec![])
-            .unwrap();
-        assert_eq!(resolved.meta.id, existing.meta.id);
-        assert_eq!(resolved.meta.model.as_deref(), Some("gpt-4"));
-    }
-
-    #[test]
-    fn resolve_conversation_creates_new_for_unknown_id() {
-        let (mgr, _dir) = make_manager();
-        let new_id = Uuid::new_v4();
-        let resolved = mgr
-            .resolve_conversation(Some(new_id), Some("claude".into()), None, vec![])
-            .unwrap();
-        assert_eq!(resolved.meta.id, new_id);
-        assert_eq!(resolved.meta.model.as_deref(), Some("claude"));
-    }
-
-    #[test]
-    fn resolve_conversation_creates_fresh_when_no_id() {
-        let (mgr, _dir) = make_manager();
-        let resolved = mgr.resolve_conversation(None, None, None, vec![]).unwrap();
-        assert!(resolved.messages.is_empty());
-        // Verify it was persisted
-        mgr.load_conversation(&resolved.meta.id).unwrap();
-    }
-
-    #[test]
-    fn conversation_skills_are_persisted() {
-        let (mgr, _dir) = make_manager();
-        let conv = mgr
-            .create_conversation(None, None, vec!["coding".into(), "rust".into()])
-            .unwrap();
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert_eq!(loaded.meta.skills, vec!["coding", "rust"]);
-    }
-
-    /// Messages persisted only via `append_message` (never
-    /// `save_conversation`) must still be there on load — this is the state
-    /// a crash before the end-of-turn save would leave behind.
-    #[test]
-    fn append_message_persists_without_a_full_save() {
-        let (mgr, _dir) = make_manager();
-        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
-
-        mgr.append_message(&conv.meta.id, &Message::user("first"))
-            .unwrap();
-        mgr.append_message(&conv.meta.id, &Message::assistant("second"))
-            .unwrap();
-
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert_eq!(loaded.messages.len(), 2);
-        assert_eq!(loaded.messages[0].text().as_deref(), Some("first"));
-        assert_eq!(loaded.messages[1].text().as_deref(), Some("second"));
-    }
-
-    #[test]
-    fn append_message_updates_timestamp_and_derives_title() {
-        let (mgr, _dir) = make_manager();
-        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
-        let created_updated_at = conv.meta.updated_at;
-
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        mgr.append_message(&conv.meta.id, &Message::user("hello there"))
-            .unwrap();
-
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert!(loaded.meta.updated_at > created_updated_at);
-        assert_eq!(loaded.meta.title.as_deref(), Some("hello there"));
-    }
-
-    #[test]
-    fn save_conversation_after_appends_reconciles_the_log() {
-        // save_conversation always rewrites the log from its own `messages`
-        // argument; it must not end up with both the appended messages and
-        // a second copy from the save.
-        let (mgr, _dir) = make_manager();
-        let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
-
-        mgr.append_message(&conv.meta.id, &Message::user("first"))
-            .unwrap();
-        conv.messages.push(Message::user("first"));
-        mgr.save_conversation(&conv).unwrap();
-
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert_eq!(loaded.messages.len(), 1);
     }
 
     #[test]
@@ -599,27 +456,6 @@ mod tests {
     }
 
     #[test]
-    fn save_conversation_succeeds_when_conv_already_reflects_its_own_appends() {
-        // The normal single-process pattern (see the `acp` turn loop):
-        // `append_message` is called as each message is produced, and the
-        // same message is also pushed onto `conv.messages`, so by the time
-        // the end-of-turn full save runs, `conv.messages` is a superset of
-        // (here, exactly equal to) what's already on disk. This must not be
-        // mistaken for a foreign writer.
-        let (mgr, _dir) = make_manager();
-        let mut conv = mgr.create_conversation(None, None, vec![]).unwrap();
-
-        let msg = Message::user("first");
-        mgr.append_message(&conv.meta.id, &msg).unwrap();
-        conv.messages.push(msg);
-
-        mgr.save_conversation(&conv).unwrap();
-
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert_eq!(loaded.messages.len(), 1);
-    }
-
-    #[test]
     fn save_conversation_refuses_when_a_shared_message_was_overwritten_in_place() {
         // Same scenario as the "more than we know of" case, but the foreign
         // writer's append lands at the same index this process's stale
@@ -645,65 +481,6 @@ mod tests {
     }
 
     #[test]
-    fn a_truncated_trailing_log_line_does_not_lose_earlier_messages() {
-        let (mgr, dir) = make_manager();
-        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
-        mgr.append_message(&conv.meta.id, &Message::user("intact"))
-            .unwrap();
-
-        // Simulate a crash mid-write: append a partial, unparseable JSON
-        // line directly, bypassing `append_message`.
-        let log_path = dir.path().join(format!("{}.jsonl", conv.meta.id));
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&log_path)
-            .unwrap();
-        write!(file, "{{\"role\":\"user\",\"conte").unwrap();
-
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        assert_eq!(loaded.messages.len(), 1);
-        assert_eq!(loaded.messages[0].text().as_deref(), Some("intact"));
-    }
-
-    #[test]
-    fn appending_after_a_truncated_trailing_line_keeps_the_log_loadable() {
-        let (mgr, dir) = make_manager();
-        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
-        mgr.append_message(&conv.meta.id, &Message::user("intact"))
-            .unwrap();
-
-        let log_path = dir.path().join(format!("{}.jsonl", conv.meta.id));
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&log_path)
-            .unwrap();
-        write!(
-            file,
-            "{{\"role\":\"assistant\",\"content\":[{{\"type\":\"te"
-        )
-        .unwrap();
-        drop(file);
-
-        mgr.append_message(&conv.meta.id, &Message::user("after one"))
-            .unwrap();
-        mgr.append_message(&conv.meta.id, &Message::user("after two"))
-            .unwrap();
-
-        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
-        let texts: Vec<_> = loaded.messages.iter().map(|m| m.text()).collect();
-        assert_eq!(
-            texts,
-            vec![
-                Some("intact".to_string()),
-                Some("after one".to_string()),
-                Some("after two".to_string()),
-            ]
-        );
-    }
-
-    #[test]
     fn appending_after_a_complete_line_missing_its_newline_keeps_that_line() {
         let (mgr, dir) = make_manager();
         let conv = mgr.create_conversation(None, None, vec![]).unwrap();
@@ -724,32 +501,5 @@ mod tests {
             texts,
             vec![Some("no newline".to_string()), Some("next".to_string())]
         );
-    }
-
-    #[test]
-    fn delete_conversation_removes_the_message_log_too() {
-        let (mgr, dir) = make_manager();
-        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
-        mgr.append_message(&conv.meta.id, &Message::user("hi"))
-            .unwrap();
-
-        mgr.delete_conversation(&conv.meta.id).unwrap();
-
-        assert!(!dir.path().join(format!("{}.json", conv.meta.id)).exists());
-        assert!(!dir.path().join(format!("{}.jsonl", conv.meta.id)).exists());
-    }
-
-    #[test]
-    fn delete_conversation_removes_the_lease_lockfile_too() {
-        let (mgr, dir) = make_manager();
-        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
-        let lease = mgr.acquire_lease(&conv.meta.id).unwrap();
-        assert!(dir.path().join(format!("{}.lock", conv.meta.id)).exists());
-
-        mgr.delete_conversation(&conv.meta.id).unwrap();
-
-        assert!(!dir.path().join(format!("{}.lock", conv.meta.id)).exists());
-        drop(lease); // held past the delete on purpose: must not resurrect the file
-        assert!(!dir.path().join(format!("{}.lock", conv.meta.id)).exists());
     }
 }

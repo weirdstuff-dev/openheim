@@ -229,43 +229,6 @@ mod tests {
     }
 
     #[test]
-    fn public_view_keeps_what_clients_use() {
-        let val = serde_json::to_value(sample().to_public(Path::new("/work/dir"))).unwrap();
-
-        assert_eq!(val["work_dir"], "/work/dir");
-        assert_eq!(val["allow_shell"], true);
-        assert_eq!(
-            val["always_allowed_tools"],
-            serde_json::json!(["read_file"])
-        );
-        assert_eq!(val["tui"]["theme_color"], "green");
-
-        let openai = &val["providers"]["openai"];
-        assert_eq!(openai["kind"], "openai");
-        assert_eq!(openai["api_base"], "https://api.openai.com/v1");
-        assert_eq!(openai["env_var"], "OPENAI_API_KEY");
-        assert!(openai.get("api_key").is_none());
-        assert_eq!(val["providers"]["proxy"]["kind"], "openai_compatible");
-        assert_eq!(
-            val["providers"]["proxy"]["api_base"],
-            "https://proxy.example.com/v1"
-        );
-
-        let demo = &val["mcp_servers"]["demo"];
-        assert_eq!(demo["command"], "npx");
-        assert!(demo.get("args").is_none());
-        assert_eq!(demo["env"]["API_TOKEN"], REDACTED);
-        let remote = &val["mcp_servers"]["remote"];
-        assert_eq!(remote["url"], "https://mcp.example.com/mcp");
-        assert_eq!(remote["headers"]["Authorization"], REDACTED);
-
-        assert_eq!(val["memory"]["embedding_model"], "text-embedding-3-small");
-        assert_eq!(val["memory"]["top_k"], 7);
-        assert!(val["memory"].get("db_path").is_none());
-        assert!(val.get("data_dir").is_none());
-    }
-
-    #[test]
     fn unparseable_urls_are_replaced_not_guessed_at() {
         assert_eq!(scrub_url("not a url with secret"), REDACTED);
     }

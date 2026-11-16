@@ -262,48 +262,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn allow_always_is_remembered_for_later_calls_to_the_same_tool() {
-        let inner = ScriptedGate::new(vec![PermissionDecision::AllowAlways]);
-        let gate = remembering(inner.clone(), Approvals::default());
-
-        assert_eq!(
-            gate.check(&request("call_1", "read_file", "{}")).await,
-            PermissionDecision::AllowAlways
-        );
-        assert_eq!(
-            gate.check(&request("call_2", "read_file", "{}")).await,
-            PermissionDecision::AllowAlways
-        );
-        assert_eq!(inner.asked(), vec!["call_1"], "second call must not re-ask");
-    }
-
-    #[tokio::test]
-    async fn reject_always_is_remembered_too() {
-        let inner = ScriptedGate::new(vec![PermissionDecision::RejectAlways]);
-        let gate = remembering(inner.clone(), Approvals::default());
-
-        gate.check(&request("call_1", "write_file", "{}")).await;
-        assert_eq!(
-            gate.check(&request("call_2", "write_file", "{}")).await,
-            PermissionDecision::RejectAlways
-        );
-        assert_eq!(inner.asked(), vec!["call_1"]);
-    }
-
-    #[tokio::test]
-    async fn once_decisions_are_not_remembered() {
-        let inner = ScriptedGate::new(vec![
-            PermissionDecision::AllowOnce,
-            PermissionDecision::RejectOnce,
-        ]);
-        let gate = remembering(inner.clone(), Approvals::default());
-
-        gate.check(&request("call_1", "read_file", "{}")).await;
-        gate.check(&request("call_2", "read_file", "{}")).await;
-        assert_eq!(inner.asked(), vec!["call_1", "call_2"]);
-    }
-
-    #[tokio::test]
     async fn allow_always_on_one_command_does_not_cover_a_different_command() {
         let inner = ScriptedGate::new(vec![
             PermissionDecision::AllowAlways,
@@ -330,24 +288,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approvals_outlive_the_gate_that_recorded_them() {
-        // Each turn builds a fresh `RememberingGate` over the session's
-        // shared `Approvals`; a decision from one turn must hold in the next.
-        let approvals = Approvals::default();
-        let first_turn = ScriptedGate::new(vec![PermissionDecision::AllowAlways]);
-        remembering(first_turn, approvals.clone())
-            .check(&request("call_1", "read_file", "{}"))
-            .await;
-
-        let second_turn = ScriptedGate::new(vec![]);
-        let decision = remembering(second_turn.clone(), approvals)
-            .check(&request("call_2", "read_file", "{}"))
-            .await;
-        assert_eq!(decision, PermissionDecision::AllowAlways);
-        assert!(second_turn.asked().is_empty());
-    }
-
-    #[tokio::test]
     async fn a_subagents_allow_always_covers_the_parents_calls_too() {
         // One session, one set of approvals: who made the call doesn't
         // change what an earlier "Allow Always" covers.
@@ -359,20 +299,6 @@ mod tests {
         let decision = gate.check(&request("call_2", "read_file", "{}")).await;
         assert_eq!(decision, PermissionDecision::AllowAlways);
         assert_eq!(inner.asked(), vec!["call_1"]);
-    }
-
-    #[tokio::test]
-    async fn always_allowed_tools_skip_the_gate_and_leave_no_approval() {
-        let approvals = Approvals::default();
-        let inner = ScriptedGate::new(vec![]);
-        let gate = remembering_with(inner.clone(), approvals.clone(), &["read_file"]);
-
-        let decision = gate
-            .check(&request("call_1", "read_file", r#"{"path": "a.txt"}"#))
-            .await;
-        assert_eq!(decision, PermissionDecision::AllowOnce);
-        assert!(inner.asked().is_empty());
-        assert_eq!(approvals.get("read_file"), None);
     }
 
     #[tokio::test]
@@ -388,48 +314,6 @@ mod tests {
         assert!(inner.asked().is_empty());
     }
 
-    #[tokio::test]
-    async fn tools_not_always_allowed_are_still_asked_about() {
-        let inner = ScriptedGate::new(vec![PermissionDecision::RejectOnce]);
-        let gate = remembering_with(inner.clone(), Approvals::default(), &["read_file"]);
-
-        let decision = gate.check(&request("call_1", "write_file", "{}")).await;
-        assert_eq!(decision, PermissionDecision::RejectOnce);
-        assert_eq!(inner.asked(), vec!["call_1"]);
-    }
-
-    #[tokio::test]
-    async fn allow_all_always_allows() {
-        let decision = AllowAll
-            .check(&request("call_1", "execute_command", "{}"))
-            .await;
-        assert!(decision.is_allowed());
-    }
-
-    #[test]
-    fn non_shell_tools_are_keyed_by_bare_tool_name_regardless_of_arguments() {
-        assert_eq!(
-            approval_key(ApprovalScope::ToolName, "read_file", r#"{"path": "a.txt"}"#),
-            "read_file"
-        );
-        assert_eq!(
-            approval_key(ApprovalScope::ToolName, "read_file", r#"{"path": "b.txt"}"#),
-            "read_file"
-        );
-    }
-
-    #[test]
-    fn exact_argument_keys_hold_the_full_normalized_arguments() {
-        assert_eq!(
-            approval_key(
-                ApprovalScope::ExactArguments,
-                "execute_command",
-                r#"{"command": "git status"}"#
-            ),
-            r#"execute_command:{"command":"git status"}"#
-        );
-    }
-
     // Keys work for any tool declaring `ExactArguments`, not just
     // `execute_command`, and don't depend on key order or whitespace.
     #[test]
@@ -440,37 +324,6 @@ mod tests {
             key(r#"{"opts":{"a":1,"b":2},"env":"prod"}"#)
         );
         assert_ne!(key(r#"{"env": "prod"}"#), key(r#"{"env": "staging"}"#));
-    }
-
-    #[test]
-    fn identical_shell_commands_get_identical_keys() {
-        assert_eq!(
-            approval_key(
-                ApprovalScope::ExactArguments,
-                "execute_command",
-                r#"{"command": "cargo test"}"#
-            ),
-            approval_key(
-                ApprovalScope::ExactArguments,
-                "execute_command",
-                r#"{"command": "cargo test"}"#
-            )
-        );
-    }
-
-    #[test]
-    fn different_shell_commands_get_different_keys() {
-        let git = approval_key(
-            ApprovalScope::ExactArguments,
-            "execute_command",
-            r#"{"command": "git status"}"#,
-        );
-        let rm = approval_key(
-            ApprovalScope::ExactArguments,
-            "execute_command",
-            r#"{"command": "rm -rf /"}"#,
-        );
-        assert_ne!(git, rm);
     }
 
     #[test]

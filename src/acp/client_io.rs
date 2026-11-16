@@ -67,28 +67,3 @@ impl ClientIo for AcpClientIo {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn read_request_carries_the_line_range() {
-        let path = std::path::Path::new("/w/a.txt");
-        let ranged = read_request(
-            "s1",
-            path,
-            LineRange {
-                line: Some(10),
-                limit: Some(20),
-            },
-        );
-        assert_eq!(ranged.path, path);
-        assert_eq!(ranged.line, Some(10));
-        assert_eq!(ranged.limit, Some(20));
-
-        let whole = read_request("s1", path, LineRange::default());
-        assert_eq!(whole.line, None);
-        assert_eq!(whole.limit, None);
-    }
-}

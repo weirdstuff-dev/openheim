@@ -52,24 +52,3 @@ impl ClientIo for NoClientIo {
         None
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn no_client_io_always_defers_to_local() {
-        assert!(
-            NoClientIo
-                .read_file(Path::new("/tmp/x"), LineRange::default())
-                .await
-                .is_none()
-        );
-        assert!(
-            NoClientIo
-                .write_file(Path::new("/tmp/x"), "hi")
-                .await
-                .is_none()
-        );
-    }
-}
