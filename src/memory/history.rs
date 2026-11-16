@@ -161,6 +161,56 @@ impl HistoryManager {
         Ok(messages)
     }
 
+    /// Makes the log at `path` end on a line boundary so an append starts a
+    /// new line. A trailing line without a newline (what a crash mid-append
+    /// leaves) is cut off if it doesn't parse, matching what
+    /// [`Self::read_message_log`] drops; if it parses, its newline is added.
+    /// A missing or empty log, or one already ending in a newline, is left
+    /// alone.
+    fn repair_log_tail(path: &std::path::Path) -> Result<()> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let mut file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let len = file.metadata()?.len();
+        if len == 0 {
+            return Ok(());
+        }
+        let mut last = [0u8; 1];
+        file.seek(SeekFrom::Start(len - 1))?;
+        file.read_exact(&mut last)?;
+        if last[0] == b'\n' {
+            return Ok(());
+        }
+
+        let mut data = Vec::new();
+        file.seek(SeekFrom::Start(0))?;
+        file.read_to_end(&mut data)?;
+        let tail_start = data.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+        let tail = &data[tail_start..];
+        let tail_parses = std::str::from_utf8(tail)
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .is_some_and(|s| serde_json::from_str::<Message>(s).is_ok());
+        if tail_parses {
+            file.seek(SeekFrom::End(0))?;
+            file.write_all(b"\n")?;
+        } else {
+            tracing::warn!(
+                "truncating unparseable trailing line in {} before append",
+                path.display()
+            );
+            file.set_len(tail_start as u64)?;
+        }
+        Ok(())
+    }
+
     /// Rewrites a conversation's whole message log, for
     /// [`Self::save_conversation`].
     fn write_message_log(&self, id: &Uuid, messages: &[Message]) -> Result<()> {
@@ -268,10 +318,12 @@ impl HistoryManager {
     /// missing meta file is skipped; the message is still appended.
     pub fn append_message(&self, id: &Uuid, message: &Message) -> Result<()> {
         let line = format!("{}\n", serde_json::to_string(message)?);
+        let path = self.log_path(id);
+        Self::repair_log_tail(&path)?;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(self.log_path(id))?;
+            .open(&path)?;
         use std::io::Write;
         file.write_all(line.as_bytes())?;
 
@@ -612,6 +664,66 @@ mod tests {
         let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
         assert_eq!(loaded.messages.len(), 1);
         assert_eq!(loaded.messages[0].text().as_deref(), Some("intact"));
+    }
+
+    #[test]
+    fn appending_after_a_truncated_trailing_line_keeps_the_log_loadable() {
+        let (mgr, dir) = make_manager();
+        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
+        mgr.append_message(&conv.meta.id, &Message::user("intact"))
+            .unwrap();
+
+        let log_path = dir.path().join(format!("{}.jsonl", conv.meta.id));
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .unwrap();
+        write!(
+            file,
+            "{{\"role\":\"assistant\",\"content\":[{{\"type\":\"te"
+        )
+        .unwrap();
+        drop(file);
+
+        mgr.append_message(&conv.meta.id, &Message::user("after one"))
+            .unwrap();
+        mgr.append_message(&conv.meta.id, &Message::user("after two"))
+            .unwrap();
+
+        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
+        let texts: Vec<_> = loaded.messages.iter().map(|m| m.text()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                Some("intact".to_string()),
+                Some("after one".to_string()),
+                Some("after two".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn appending_after_a_complete_line_missing_its_newline_keeps_that_line() {
+        let (mgr, dir) = make_manager();
+        let conv = mgr.create_conversation(None, None, vec![]).unwrap();
+
+        let log_path = dir.path().join(format!("{}.jsonl", conv.meta.id));
+        std::fs::write(
+            &log_path,
+            serde_json::to_string(&Message::user("no newline")).unwrap(),
+        )
+        .unwrap();
+
+        mgr.append_message(&conv.meta.id, &Message::user("next"))
+            .unwrap();
+
+        let loaded = mgr.load_conversation(&conv.meta.id).unwrap();
+        let texts: Vec<_> = loaded.messages.iter().map(|m| m.text()).collect();
+        assert_eq!(
+            texts,
+            vec![Some("no newline".to_string()), Some("next".to_string())]
+        );
     }
 
     #[test]
