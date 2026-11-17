@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-17
+
 ### Added
 
 - When the turn in progress alone overflows the context window, its older tool outputs are left out (oldest first) instead of the turn failing with `Error::ContextOverflow`. New `StreamEvent::ToolOutputsOmitted { omitted }`, shown as a notice in the TUI.
@@ -493,7 +495,8 @@ First public release.
 - Terminal UI.
 - Library API for embedding openheim in a Rust application.
 
-[Unreleased]: https://github.com/weirdstuff-dev/openheim/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/weirdstuff-dev/openheim/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/weirdstuff-dev/openheim/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/weirdstuff-dev/openheim/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/weirdstuff-dev/openheim/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/weirdstuff-dev/openheim/compare/v0.16.0...v0.17.0
