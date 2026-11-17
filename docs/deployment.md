@@ -34,7 +34,7 @@ Running `openheim` with no subcommand opens the interactive terminal UI. Type a 
 | `:models` | Open model picker (arrow keys + Enter to switch mid-session) |
 | `:models <name>` | Switch to a model directly without opening the picker |
 | `:mode` | Show the session's mode |
-| `:mode <name>` | Switch mode: `code` (every tool) or `architect` (read-only tools) |
+| `:mode <name>` | Switch mode: `execute` (every tool) or `plan` (read-only tools) |
 | `:effort` | Show the session's effort level |
 | `:effort <level>` | Set the effort level: `default` (the provider's own default), `low`, `medium` or `high`. Kept through model switches. |
 | `:mcp` | Show MCP server statuses |

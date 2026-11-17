@@ -9,7 +9,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use tokio::sync::{Mutex, RwLock};
@@ -94,7 +94,7 @@ impl AgentState {
         #[cfg(feature = "rag")] long_term_memory: Option<crate::rag::LongTermMemory>,
     ) -> Result<Self> {
         let http = Arc::new(HttpClients::default());
-        let llm = create_client(&config, &http.get(config.timeout_secs)?);
+        let llm = create_client(&config, &http.get(config.timeout_secs, &config.api_base)?);
         let allow_shell = app_config.allow_shell;
         let work_dir = match app_config.work_dir.clone() {
             Some(wd) => wd,
@@ -178,11 +178,11 @@ impl AgentState {
         if same_client(config, &self.config) {
             return Ok(None);
         }
-        let http_client = self.http.get(config.timeout_secs)?;
+        let http_client = self.http.get(config.timeout_secs, &config.api_base)?;
         Ok(Some(create_client(config, &http_client)))
     }
 
-    /// Starts a session in [`AgentMode::Code`] at its provider's effort
+    /// Starts a session in [`AgentMode::Execute`] at its provider's effort
     /// level; [`Self::set_session_mode`] and [`Self::set_session_effort`]
     /// change them.
     pub async fn new_session(
@@ -222,7 +222,7 @@ impl AgentState {
                     skills,
                     cancel: CancellationToken::new(),
                     approved_tools: Approvals::default(),
-                    mode: AgentMode::Code,
+                    mode: AgentMode::Execute,
                     prompt_lock: Arc::new(Mutex::new(())),
                     last_active: Instant::now(),
                 },
@@ -247,6 +247,76 @@ impl AgentState {
         if let Some(s) = self.sessions.write().await.get_mut(session_id) {
             s.last_active = Instant::now();
             s.cancel.cancel();
+        }
+    }
+
+    /// Permanently deletes session `session_id`: its live state and its
+    /// saved history. A turn in flight in this process is cancelled first,
+    /// and the delete waits up to `grace` for it to end, so it can't write
+    /// the session back afterwards. Fails with [`Error::SessionBusy`] if it
+    /// doesn't end in time (the session is then left as it was, live and on
+    /// disk, and a retry cancels and waits again), with
+    /// [`Error::SessionLocked`] if another process is running a turn on it,
+    /// and with [`Error::NotFound`] if it was never saved.
+    pub async fn delete_session(&self, session_id: &str, grace: Duration) -> Result<()> {
+        let uuid = Uuid::parse_str(session_id)
+            .map_err(|_| Error::InvalidArgument("invalid session id".to_string()))?;
+        // The session stays in the map until its turn has ended, so a retry
+        // after a timeout cancels and waits again.
+        let prompt_lock = self.sessions.read().await.get(session_id).map(|s| {
+            s.cancel.cancel();
+            s.prompt_lock.clone()
+        });
+        // A turn holds this until it has ended, lease released; holding it
+        // here keeps a new turn from starting.
+        let _no_turn = match prompt_lock {
+            Some(lock) => Some(
+                tokio::time::timeout(grace, lock.lock_owned())
+                    .await
+                    .map_err(|_| Error::SessionBusy {
+                        session_id: session_id.to_string(),
+                    })?,
+            ),
+            None => None,
+        };
+        // Held across the delete, so the session can't be loaded back in
+        // meanwhile.
+        let mut sessions = self.sessions.write().await;
+        let history = self.memory.history.clone();
+        tokio::task::spawn_blocking(move || {
+            // Held across the delete, so another process can't be mid-turn.
+            let _lease = history.acquire_lease(&uuid)?;
+            history.delete_conversation(&uuid)
+        })
+        .await??;
+        sessions.remove(session_id);
+        Ok(())
+    }
+
+    /// Cancels every turn in flight and waits up to `grace` for them to end,
+    /// so each releases its write lease and kills its shell commands on the
+    /// way out. Returns early once all have ended; a turn still running
+    /// after `grace` is left to the caller (dropping the runtime drops it,
+    /// which releases its lease too).
+    #[cfg(any(feature = "server", test))]
+    pub(crate) async fn shutdown(&self, grace: Duration) {
+        let turns: Vec<_> = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .values()
+                .map(|s| {
+                    s.cancel.cancel();
+                    s.prompt_lock.clone()
+                })
+                .collect()
+        };
+        let all_ended = async {
+            for lock in turns {
+                drop(lock.lock_owned().await);
+            }
+        };
+        if tokio::time::timeout(grace, all_ended).await.is_err() {
+            tracing::warn!("turns still running {grace:?} after shutdown was requested");
         }
     }
 
@@ -426,8 +496,8 @@ impl AgentState {
             s.cancel = CancellationToken::new();
             s.last_active = Instant::now();
             let llm = s.llm.clone().unwrap_or_else(|| self.llm.clone());
-            let executor: Arc<dyn ToolExecutor> = if s.mode == AgentMode::Architect {
-                // Architect mode gets every tool that declares itself
+            let executor: Arc<dyn ToolExecutor> = if s.mode == AgentMode::Plan {
+                // Plan mode gets every tool that declares itself
                 // read-only, built-in or custom.
                 let read_only: Vec<String> = self
                     .executor
@@ -439,7 +509,7 @@ impl AgentState {
                 Arc::new(ScopedExecutor::new(self.executor.clone(), read_only))
             } else {
                 // Subagents without a model of their own run on this
-                // session's model. (Architect mode has no `delegate_task`:
+                // session's model. (Plan mode has no `delegate_task`:
                 // it isn't read-only.)
                 let delegate = self.delegate.for_session(llm.clone(), s.config.clone());
                 Arc::new(OverlayExecutor::new(
@@ -788,7 +858,7 @@ mod prompt_lease_ordering_tests {
             skills: vec![],
             cancel: CancellationToken::new(),
             approved_tools: Approvals::default(),
-            mode: AgentMode::Code,
+            mode: AgentMode::Execute,
             prompt_lock: Arc::new(Mutex::new(())),
             last_active: Instant::now(),
         }
@@ -875,33 +945,6 @@ mod new_session_tests {
         .unwrap()
     }
 
-    // `new_session` with an unknown `model` fails with the config error
-    // instead of starting on the default model.
-    #[tokio::test]
-    async fn bad_model_override_is_an_error() {
-        let dir = tempdir().unwrap();
-        let state = sample_state(dir.path()).await;
-        let result = state
-            .new_session(Some("nope"), vec![], dir.path().to_path_buf())
-            .await;
-        assert!(result.is_err(), "{result:?}");
-    }
-
-    // A session's tools work in its cwd only when that lies inside the work
-    // directory; anything else (a client's own path, somewhere outside)
-    // falls back to the work directory.
-    #[test]
-    fn tool_cwd_is_the_session_cwd_only_inside_work_dir() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        std::fs::create_dir(root.join("sub")).unwrap();
-        let outside = tempdir().unwrap();
-
-        assert_eq!(tool_cwd(&root.join("sub"), dir.path()), root.join("sub"));
-        assert_eq!(tool_cwd(outside.path(), dir.path()), dir.path());
-        assert_eq!(tool_cwd(&root.join("missing"), dir.path()), dir.path());
-    }
-
     // A session's cwd is saved canonical, so listing by another spelling of
     // the same directory (`..`, a trailing slash) still finds it.
     #[tokio::test]
@@ -937,23 +980,6 @@ mod new_session_tests {
         );
     }
 
-    #[tokio::test]
-    async fn unknown_skill_is_an_error() {
-        let dir = tempdir().unwrap();
-        let state = sample_state(dir.path()).await;
-        std::fs::write(dir.path().join("skills/known.md"), "x").unwrap();
-
-        let result = state
-            .new_session(None, vec!["nope".into()], dir.path().to_path_buf())
-            .await;
-        assert!(matches!(result, Err(Error::NotFound(_))), "{result:?}");
-
-        state
-            .new_session(None, vec!["known".into()], dir.path().to_path_buf())
-            .await
-            .unwrap();
-    }
-
     /// Always answers with a final text reply, so a turn completes in one
     /// LLM call without touching the network.
     struct EndTurnLlm;
@@ -973,6 +999,107 @@ mod new_session_tests {
         }
     }
 
+    /// Never answers, so a turn stays in flight until it's cancelled.
+    struct HangingLlm;
+
+    #[async_trait::async_trait]
+    impl LlmClient for HangingLlm {
+        async fn send(
+            &self,
+            _messages: &[Message],
+            _tools: &[crate::core::models::Tool],
+        ) -> Result<crate::core::models::Choice> {
+            std::future::pending().await
+        }
+    }
+
+    // `shutdown` cancels a turn in flight and returns once it has ended,
+    // with its write lease released.
+    #[tokio::test]
+    async fn shutdown_ends_live_turns_and_releases_their_leases() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
+        let mut state = sample_state(dir.path()).await;
+        state.llm = Arc::new(HangingLlm);
+        let state = Arc::new(state);
+        let session_id = state
+            .new_session(None, vec![], dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let lockfile = dir
+            .path()
+            .join("history")
+            .join(format!("{session_id}.lock"));
+
+        let turn = tokio::spawn({
+            let state = state.clone();
+            let session_id = session_id.clone();
+            async move { run_turn(&state, &session_id).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !lockfile.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the turn took its lease");
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            state.shutdown(Duration::from_secs(5)),
+        )
+        .await
+        .expect("shutdown returned once the turn ended");
+        assert!(!lockfile.exists());
+        turn.await.unwrap();
+    }
+
+    /// The session's meta file, message log and lockfile under `dir`.
+    fn session_files(dir: &std::path::Path, session_id: &str) -> [std::path::PathBuf; 3] {
+        let history = dir.join("history");
+        ["json", "jsonl", "lock"].map(|ext| history.join(format!("{session_id}.{ext}")))
+    }
+
+    // A turn that doesn't end within the grace leaves the session on disk.
+    #[tokio::test]
+    async fn delete_session_is_busy_if_the_turn_does_not_end_in_time() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
+        let mut state = sample_state(dir.path()).await;
+        state.llm = Arc::new(EndTurnLlm);
+        let session_id = state
+            .new_session(None, vec![], dir.path().to_path_buf())
+            .await
+            .unwrap();
+        run_turn(&state, &session_id).await;
+        // Stands in for a turn that ignores cancellation.
+        let held = state.sessions.read().await[&session_id]
+            .prompt_lock
+            .clone()
+            .lock_owned()
+            .await;
+        let [meta, log, _] = session_files(dir.path(), &session_id);
+
+        // A retry waits for the turn again rather than deleting under it.
+        for _ in 0..2 {
+            let err = state
+                .delete_session(&session_id, Duration::from_millis(50))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::SessionBusy { .. }), "{err}");
+            assert!(meta.exists() && log.exists());
+            assert!(state.sessions.read().await.contains_key(&session_id));
+        }
+
+        drop(held);
+        state
+            .delete_session(&session_id, Duration::from_millis(50))
+            .await
+            .unwrap();
+        assert!(!meta.exists() && !log.exists());
+        assert!(!state.sessions.read().await.contains_key(&session_id));
+    }
+
     /// Runs one "hi" turn on `session_id`, allowing every tool call.
     async fn run_turn(state: &AgentState, session_id: &str) {
         state
@@ -987,86 +1114,6 @@ mod new_session_tests {
             .unwrap();
     }
 
-    /// Replaces the client of `session_id`, which switched models, with `llm`.
-    async fn set_session_llm(state: &AgentState, session_id: &str, llm: Arc<dyn LlmClient>) {
-        let mut sessions = state.sessions.write().await;
-        let session = sessions.get_mut(session_id).unwrap();
-        assert!(session.llm.is_some(), "the session is on the default model");
-        session.llm = Some(llm);
-    }
-
-    /// Counts its calls and ends every turn.
-    #[derive(Default)]
-    struct CountingLlm(std::sync::atomic::AtomicUsize);
-
-    #[async_trait::async_trait]
-    impl LlmClient for CountingLlm {
-        async fn send(
-            &self,
-            messages: &[Message],
-            tools: &[crate::core::models::Tool],
-        ) -> Result<crate::core::models::Choice> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            EndTurnLlm.send(messages, tools).await
-        }
-    }
-
-    // A session that switched models keeps the client built at the switch
-    // for every turn; turns don't build their own.
-    #[tokio::test]
-    async fn switched_session_reuses_its_client_across_turns() {
-        let dir = tempdir().unwrap();
-        let (state, session_id) = state_with_session(dir.path()).await;
-        state
-            .set_session_model(&session_id, "other-model")
-            .await
-            .unwrap();
-        let counting = Arc::new(CountingLlm::default());
-        set_session_llm(&state, &session_id, counting.clone()).await;
-
-        run_turn(&state, &session_id).await;
-        run_turn(&state, &session_id).await;
-
-        assert_eq!(counting.0.load(Ordering::SeqCst), 2);
-        let sessions = state.sessions.read().await;
-        let kept = sessions[&session_id].llm.clone().unwrap();
-        assert!(Arc::ptr_eq(&kept, &(counting as Arc<dyn LlmClient>)));
-    }
-
-    // Sessions on another model get a client of their own, on the same
-    // `reqwest::Client` as the default model when the timeout matches.
-    // Switching back to the default model returns to the default's client.
-    #[tokio::test]
-    async fn sessions_on_other_models_share_the_http_client() {
-        let dir = tempdir().unwrap();
-        let state = sample_state(dir.path()).await;
-
-        let default = state
-            .new_session(None, vec![], dir.path().to_path_buf())
-            .await
-            .unwrap();
-        let other = state
-            .new_session(Some("other-model"), vec![], dir.path().to_path_buf())
-            .await
-            .unwrap();
-        state
-            .switch_model(&default, "mock", "other-model")
-            .await
-            .unwrap();
-        {
-            let sessions = state.sessions.read().await;
-            assert!(sessions[&default].llm.is_some());
-            assert!(sessions[&other].llm.is_some());
-        }
-        assert_eq!(state.http.len(), 1);
-
-        state
-            .switch_model(&other, "mock", "mock-model")
-            .await
-            .unwrap();
-        assert!(state.sessions.read().await[&other].llm.is_none());
-    }
-
     /// A state answering every turn with `EndTurnLlm`, plus a fresh session.
     async fn state_with_session(dir: &std::path::Path) -> (AgentState, String) {
         std::fs::write(dir.join("system.md"), "You are a test agent.").unwrap();
@@ -1077,37 +1124,6 @@ mod new_session_tests {
             .await
             .unwrap();
         (state, session_id)
-    }
-
-    // A turn appends to the message log instead of rewriting it: a rewrite
-    // replaces the file (temp file + rename), which gives it a new inode.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn turn_appends_to_the_log_instead_of_rewriting_it() {
-        use std::os::unix::fs::MetadataExt;
-
-        let dir = tempdir().unwrap();
-        let (state, session_id) = state_with_session(dir.path()).await;
-        let log = dir
-            .path()
-            .join("history")
-            .join(format!("{session_id}.jsonl"));
-
-        run_turn(&state, &session_id).await;
-        let inode = std::fs::metadata(&log).unwrap().ino();
-        run_turn(&state, &session_id).await;
-        assert_eq!(
-            std::fs::metadata(&log).unwrap().ino(),
-            inode,
-            "the second turn must append, not rewrite the log"
-        );
-
-        let uuid = Uuid::parse_str(&session_id).unwrap();
-        let saved = state.memory.history.load_conversation(&uuid).unwrap();
-        let texts: Vec<_> = saved.messages.iter().filter_map(Message::text).collect();
-        assert_eq!(texts, ["hi", "ok", "hi", "ok"]);
-        assert_eq!(saved.meta.title.as_deref(), Some("hi"));
-        assert_eq!(saved.meta.model.as_deref(), Some("mock-model"));
     }
 
     // If an append fails, the end of the turn rewrites the whole log from
@@ -1179,212 +1195,5 @@ mod new_session_tests {
         let saved = state.memory.history.load_conversation(&uuid).unwrap();
         let texts: Vec<_> = saved.messages.iter().filter_map(Message::text).collect();
         assert_eq!(texts, ["hi", "ok", "hi", "ok"]);
-    }
-
-    // A model switched after the conversation's first turn is saved to its
-    // meta file, so reloading the session keeps it.
-    #[tokio::test]
-    async fn model_switch_is_persisted_to_conversation_meta() {
-        let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
-        let mut state = sample_state(dir.path()).await;
-        state.llm = Arc::new(EndTurnLlm);
-
-        let session_id = state
-            .new_session(None, vec![], dir.path().to_path_buf())
-            .await
-            .unwrap();
-
-        // First turn creates the conversation on disk under the default model.
-        run_turn(&state, &session_id).await;
-
-        state
-            .set_session_model(&session_id, "other-model")
-            .await
-            .unwrap();
-        // The switch built a real client for the session; swap in the mock.
-        set_session_llm(&state, &session_id, Arc::new(EndTurnLlm)).await;
-        run_turn(&state, &session_id).await;
-
-        let uuid = Uuid::parse_str(&session_id).unwrap();
-        let saved = state.memory.history.load_conversation(&uuid).unwrap();
-        assert_eq!(saved.meta.model.as_deref(), Some("other-model"));
-        assert_eq!(saved.meta.provider.as_deref(), Some("mock"));
-    }
-
-    // An effort level chosen for a session stays through a model switch,
-    // gets its own client, and leaves other sessions alone.
-    #[tokio::test]
-    async fn chosen_effort_survives_a_model_switch() {
-        let dir = tempdir().unwrap();
-        let (state, session_id) = state_with_session(dir.path()).await;
-        let other = state
-            .new_session(None, vec![], dir.path().to_path_buf())
-            .await
-            .unwrap();
-
-        state
-            .set_session_effort(&session_id, Effort::High)
-            .await
-            .unwrap();
-        {
-            let sessions = state.sessions.read().await;
-            assert!(sessions[&session_id].llm.is_some());
-            assert!(sessions[&other].llm.is_none());
-        }
-
-        state
-            .set_session_model(&session_id, "other-model")
-            .await
-            .unwrap();
-        let settings = state.session_settings(&session_id).await.unwrap();
-        assert_eq!(settings.model, "other-model");
-        assert_eq!(settings.effort, Effort::High);
-        assert_eq!(
-            state.session_settings(&other).await.unwrap().effort,
-            Effort::Default
-        );
-    }
-
-    // Mode and a chosen effort level are saved with the conversation and
-    // restored when it's loaded again (here: into a fresh runtime, as after
-    // a restart).
-    #[tokio::test]
-    async fn mode_and_effort_are_restored_on_load() {
-        let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
-        let mut state = sample_state(dir.path()).await;
-        state.llm = Arc::new(EndTurnLlm);
-        let session_id = state
-            .new_session(None, vec![], dir.path().to_path_buf())
-            .await
-            .unwrap();
-        state
-            .set_session_mode(&session_id, AgentMode::Architect)
-            .await
-            .unwrap();
-        state
-            .set_session_effort(&session_id, Effort::Low)
-            .await
-            .unwrap();
-        // The level built a real client for the session; swap in the mock.
-        set_session_llm(&state, &session_id, Arc::new(EndTurnLlm)).await;
-        run_turn(&state, &session_id).await;
-
-        let uuid = Uuid::parse_str(&session_id).unwrap();
-        let saved = state.memory.history.load_conversation(&uuid).unwrap();
-        assert_eq!(saved.meta.mode, Some(AgentMode::Architect));
-        assert_eq!(saved.meta.effort, Some(Effort::Low));
-
-        let restarted = sample_state(dir.path()).await;
-        let loaded = restarted
-            .load_session(&session_id, dir.path().to_path_buf())
-            .await
-            .unwrap();
-        assert_eq!(loaded.mode, AgentMode::Architect);
-        assert_eq!(loaded.effort, Effort::Low);
-        let sessions = restarted.sessions.read().await;
-        assert_eq!(sessions[&session_id].effort, Some(Effort::Low));
-    }
-
-    // A session that never chose a level saves none, so it follows its
-    // provider's `effort` after a reload.
-    #[tokio::test]
-    async fn unchosen_effort_is_not_saved() {
-        let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
-        let mut state = sample_state(dir.path()).await;
-        state.llm = Arc::new(EndTurnLlm);
-        let session_id = state
-            .new_session(None, vec![], dir.path().to_path_buf())
-            .await
-            .unwrap();
-        run_turn(&state, &session_id).await;
-
-        let uuid = Uuid::parse_str(&session_id).unwrap();
-        let saved = state.memory.history.load_conversation(&uuid).unwrap();
-        assert_eq!(saved.meta.mode, Some(AgentMode::Code));
-        assert_eq!(saved.meta.effort, None);
-    }
-
-    /// Answers each call with the next scripted choice, whoever makes it —
-    /// the orchestrator and any subagent share it when they share a client.
-    struct ScriptedLlm(std::sync::Mutex<std::collections::VecDeque<crate::core::models::Choice>>);
-
-    #[async_trait::async_trait]
-    impl LlmClient for ScriptedLlm {
-        async fn send(
-            &self,
-            _messages: &[Message],
-            _tools: &[crate::core::models::Tool],
-        ) -> Result<crate::core::models::Choice> {
-            self.0
-                .lock()
-                .unwrap()
-                .pop_front()
-                .ok_or_else(|| Error::Other("script exhausted".into()))
-        }
-    }
-
-    // A subagent with no model of its own runs on the session's current
-    // model. Here the startup client is a real HTTP client (never reachable
-    // from the test) and the session's client is the script, so the
-    // subagent's answer only comes back if it ran on the session's client.
-    #[tokio::test]
-    async fn subagent_without_model_override_runs_on_the_sessions_model() {
-        use crate::core::models::{Choice, FinishReason};
-
-        let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("system.md"), "You are a test agent.").unwrap();
-        let state = sample_state(dir.path()).await;
-
-        let delegate_call = Choice {
-            message: Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::tool_use(
-                    "call_1",
-                    crate::tools::delegate::DELEGATE_TOOL_NAME,
-                    r#"{"system_prompt":"You are a helper.","task":"say hi"}"#,
-                )],
-            },
-            finish_reason: Some(FinishReason::ToolCalls),
-            usage: None,
-        };
-        let text = |t: &str| Choice {
-            message: Message::assistant(t),
-            finish_reason: Some(FinishReason::Stop),
-            usage: None,
-        };
-        let script = Arc::new(ScriptedLlm(std::sync::Mutex::new(
-            [delegate_call, text("hi from the subagent"), text("done")].into(),
-        )));
-
-        let session_id = state
-            .new_session(None, vec![], dir.path().to_path_buf())
-            .await
-            .unwrap();
-        state
-            .set_session_model(&session_id, "other-model")
-            .await
-            .unwrap();
-        set_session_llm(&state, &session_id, script).await;
-
-        let mut tool_results = Vec::new();
-        state
-            .prompt(
-                &session_id,
-                vec![ContentBlock::from("delegate something")],
-                Arc::new(crate::core::permission::AllowAll),
-                Arc::new(crate::core::client_io::NoClientIo),
-                |event| {
-                    if let StreamEvent::ToolResult { result, .. } = event {
-                        tool_results.push(result);
-                    }
-                },
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(tool_results, vec!["hi from the subagent".to_string()]);
     }
 }

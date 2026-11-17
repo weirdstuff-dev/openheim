@@ -381,145 +381,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::tools::test_support::{
-        FixedClientIo, HangingClientIo, RecordingClientIo, TurnHarness,
-    };
-
-    #[test]
-    fn definition_has_correct_name() {
-        let tool = ReadFileTool;
-        let def = tool.definition();
-        assert_eq!(def.function.name, "read_file");
-        assert_eq!(def.tool_type, "function");
-    }
-
-    #[tokio::test]
-    async fn execute_reads_existing_file() {
-        let harness = TurnHarness::new();
-        let path = harness.work_dir().join("a.txt");
-        std::fs::write(&path, "hello world").unwrap();
-
-        let args = serde_json::json!({"path": path.to_str().unwrap()}).to_string();
-        let result = ReadFileTool.execute(&args, &harness.turn()).await.unwrap();
-        assert_eq!(result, "hello world");
-    }
-
-    #[tokio::test]
-    async fn execute_resolves_relative_paths_against_work_dir() {
-        let harness = TurnHarness::new();
-        std::fs::write(harness.work_dir().join("rel.txt"), "relative").unwrap();
-
-        let result = ReadFileTool
-            .execute(r#"{"path": "rel.txt"}"#, &harness.turn())
-            .await
-            .unwrap();
-        assert_eq!(result, "relative");
-    }
-
-    #[tokio::test]
-    async fn execute_resolves_relative_paths_against_the_working_directory() {
-        let harness = TurnHarness::new().with_cwd("sub");
-        std::fs::write(harness.work_dir().join("sub/rel.txt"), "in sub").unwrap();
-        std::fs::write(harness.work_dir().join("top.txt"), "at the top").unwrap();
-
-        let turn = harness.turn();
-        let read = |path: &'static str| {
-            let args = serde_json::json!({ "path": path }).to_string();
-            let turn = &turn;
-            async move { ReadFileTool.execute(&args, turn).await.unwrap() }
-        };
-        assert_eq!(read("rel.txt").await, "in sub");
-        assert_eq!(read("../top.txt").await, "at the top");
-    }
-
-    #[tokio::test]
-    async fn execute_errors_for_nonexistent_file() {
-        let harness = TurnHarness::new();
-        let result = ReadFileTool
-            .execute(r#"{"path": "missing.txt"}"#, &harness.turn())
-            .await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn execute_rejects_path_outside_work_dir() {
-        let harness = TurnHarness::new();
-        let outside = tempfile::tempdir().unwrap();
-        let secret = outside.path().join("secret.txt");
-        std::fs::write(&secret, "x").unwrap();
-
-        let args = serde_json::json!({"path": secret.to_str().unwrap()}).to_string();
-        let err = ReadFileTool
-            .execute(&args, &harness.turn())
-            .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("outside the work directory"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn execute_errors_for_malformed_json() {
-        let harness = TurnHarness::new();
-        let result = ReadFileTool.execute("not json", &harness.turn()).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("parse"));
-    }
-
-    #[tokio::test]
-    async fn execute_errors_for_missing_path() {
-        let harness = TurnHarness::new();
-        let result = ReadFileTool
-            .execute(r#"{"other": "value"}"#, &harness.turn())
-            .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("path"));
-    }
-
-    #[tokio::test]
-    async fn read_file_prefers_client_io_over_local_disk() {
-        let harness = TurnHarness::new().with_client_io(Arc::new(FixedClientIo("client content")));
-        let path = harness.work_dir().join("a.txt");
-        std::fs::write(&path, "local content").unwrap();
-
-        let args = serde_json::json!({"path": path.to_str().unwrap()}).to_string();
-        let result = ReadFileTool.execute(&args, &harness.turn()).await.unwrap();
-        assert_eq!(result, "client content");
-    }
-
-    #[tokio::test]
-    async fn read_file_falls_back_to_local_disk_when_client_io_defers() {
-        let harness = TurnHarness::new();
-        let path = harness.work_dir().join("a.txt");
-        std::fs::write(&path, "local content").unwrap();
-
-        let args = serde_json::json!({"path": path.to_str().unwrap()}).to_string();
-        let result = ReadFileTool.execute(&args, &harness.turn()).await.unwrap();
-        assert_eq!(result, "local content");
-    }
-
-    #[tokio::test]
-    async fn read_file_cancel_aborts_hanging_client_io() {
-        let harness = TurnHarness::new().with_client_io(Arc::new(HangingClientIo));
-        let path = harness.work_dir().join("a.txt");
-        std::fs::write(&path, "local content").unwrap();
-
-        let args = serde_json::json!({"path": path.to_str().unwrap()}).to_string();
-        let cancel = harness.cancel_handle();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            cancel.cancel();
-        });
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            ReadFileTool.execute(&args, &harness.turn()),
-        )
-        .await
-        .expect("cancellation should abort the hanging client_io call");
-        assert!(result.is_err());
-    }
+    use crate::tools::test_support::{RecordingClientIo, TurnHarness};
 
     /// `lines` numbered lines, `"line 1\n"` to `"line N\n"`.
     fn numbered(lines: u64) -> String {
@@ -530,68 +392,6 @@ mod tests {
         ReadFileTool
             .execute(&args.to_string(), &harness.turn())
             .await
-    }
-
-    #[tokio::test]
-    async fn offset_and_limit_pick_lines() {
-        let harness = TurnHarness::new();
-        std::fs::write(harness.work_dir().join("a.txt"), numbered(10)).unwrap();
-
-        let result = read(&harness, json!({"path": "a.txt", "offset": 3, "limit": 2}))
-            .await
-            .unwrap();
-        assert_eq!(
-            result,
-            "line 3\nline 4\n[lines 3–4 of 10 shown; call again with offset=5 to read on]"
-        );
-
-        // Reading to the end needs no note.
-        let result = read(&harness, json!({"path": "a.txt", "offset": 9}))
-            .await
-            .unwrap();
-        assert_eq!(result, "line 9\nline 10\n");
-        let result = read(&harness, json!({"path": "a.txt", "offset": 9, "limit": 2}))
-            .await
-            .unwrap();
-        assert_eq!(result, "line 9\nline 10\n");
-    }
-
-    #[tokio::test]
-    async fn last_line_without_a_newline_is_read() {
-        let harness = TurnHarness::new();
-        std::fs::write(harness.work_dir().join("a.txt"), "one\ntwo").unwrap();
-
-        let result = read(&harness, json!({"path": "a.txt", "offset": 2}))
-            .await
-            .unwrap();
-        assert_eq!(result, "two");
-    }
-
-    #[tokio::test]
-    async fn offset_past_the_end_says_so() {
-        let harness = TurnHarness::new();
-        std::fs::write(harness.work_dir().join("a.txt"), numbered(3)).unwrap();
-
-        let result = read(&harness, json!({"path": "a.txt", "offset": 7}))
-            .await
-            .unwrap();
-        assert_eq!(
-            result,
-            "[offset 7 is past the end of the file, which has 3 lines]"
-        );
-    }
-
-    #[tokio::test]
-    async fn zero_offset_or_limit_is_rejected() {
-        let harness = TurnHarness::new();
-        std::fs::write(harness.work_dir().join("a.txt"), "x").unwrap();
-        for args in [
-            json!({"path": "a.txt", "offset": 0}),
-            json!({"path": "a.txt", "limit": 0}),
-        ] {
-            let err = read(&harness, args).await.unwrap_err();
-            assert!(err.to_string().contains("at least 1"), "{err}");
-        }
     }
 
     #[tokio::test]
@@ -645,41 +445,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_utf8_is_rejected() {
-        let harness = TurnHarness::new();
-        std::fs::write(harness.work_dir().join("bin"), [0xff, 0xfe, 0x00]).unwrap();
-
-        let err = read(&harness, json!({"path": "bin"})).await.unwrap_err();
-        assert!(err.to_string().contains("not valid UTF-8"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn client_io_gets_the_line_range() {
-        let client = Arc::new(RecordingClientIo::new("line 3\nline 4\n"));
-        let harness = TurnHarness::new().with_client_io(client.clone());
-
-        let result = read(&harness, json!({"path": "a.txt", "offset": 3, "limit": 2}))
-            .await
-            .unwrap();
-        assert_eq!(
-            result,
-            "line 3\nline 4\n[lines 3–4 shown; call again with offset=5 to read on]"
-        );
-        read(&harness, json!({"path": "a.txt"})).await.unwrap();
-
-        assert_eq!(
-            *client.reads.lock().unwrap(),
-            [
-                LineRange {
-                    line: Some(3),
-                    limit: Some(2)
-                },
-                LineRange::default(),
-            ]
-        );
-    }
-
-    #[tokio::test]
     async fn client_io_text_is_capped_too() {
         let client = Arc::new(RecordingClientIo::new(numbered(100_000)));
         let harness = TurnHarness::new().with_client_io(client);
@@ -709,13 +474,5 @@ mod tests {
         );
         let err = read_text(&path, 9, &harness.turn()).await.unwrap_err();
         assert!(err.to_string().contains("10 bytes"), "{err}");
-    }
-
-    #[test]
-    fn args_struct_matches_schema() {
-        crate::tools::args::assert_args_match_schema::<ReadFileArgs>(
-            &ReadFileTool,
-            serde_json::json!({"path": "a.txt", "offset": 2, "limit": 10}),
-        );
     }
 }

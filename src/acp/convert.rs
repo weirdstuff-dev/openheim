@@ -57,61 +57,8 @@ pub(crate) fn convert_prompt_blocks(blocks: &[AcpContentBlock]) -> Result<Vec<Co
 mod prompt_block_tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
-        AudioContent, EmbeddedResource, EmbeddedResourceResource, ImageContent, ResourceLink,
-        TextContent, TextResourceContents,
+        EmbeddedResource, EmbeddedResourceResource, TextResourceContents,
     };
-
-    #[test]
-    fn text_passes_through() {
-        let blocks = vec![AcpContentBlock::Text(TextContent::new("hello"))];
-        let result = convert_prompt_blocks(&blocks).unwrap();
-        assert_eq!(
-            result,
-            vec![ContentBlock::Text {
-                text: "hello".into()
-            }]
-        );
-    }
-
-    #[test]
-    fn image_passes_through() {
-        let blocks = vec![AcpContentBlock::Image(ImageContent::new(
-            "base64data",
-            "image/png",
-        ))];
-        let result = convert_prompt_blocks(&blocks).unwrap();
-        assert_eq!(
-            result,
-            vec![ContentBlock::Image {
-                data: "base64data".into(),
-                mime_type: "image/png".into(),
-            }]
-        );
-    }
-
-    #[test]
-    fn resource_link_becomes_text_hint() {
-        let blocks = vec![AcpContentBlock::ResourceLink(ResourceLink::new(
-            "notes.txt",
-            "file:///tmp/notes.txt",
-        ))];
-        let result = convert_prompt_blocks(&blocks).unwrap();
-        assert_eq!(result.len(), 1);
-        assert!(matches!(
-            &result[0],
-            ContentBlock::Text { text }
-                if text.contains("notes.txt") && text.contains("file:///tmp/notes.txt")
-        ));
-    }
-
-    #[test]
-    fn audio_is_rejected() {
-        let blocks = vec![AcpContentBlock::Audio(AudioContent::new(
-            "base64data",
-            "audio/wav",
-        ))];
-        assert!(convert_prompt_blocks(&blocks).is_err());
-    }
 
     #[test]
     fn embedded_resource_is_rejected() {

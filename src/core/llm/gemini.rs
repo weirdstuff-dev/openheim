@@ -526,116 +526,11 @@ impl StreamParser for GeminiStream {
     }
 }
 
+/// Streams and histories the black-box suite's fake provider doesn't
+/// produce.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn convert_messages_user() {
-        let messages = vec![Message::user("hello")];
-        let result = convert_messages(&messages);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].role, "user");
-        assert_eq!(result[0].parts[0].text.as_deref(), Some("hello"));
-    }
-
-    #[test]
-    fn convert_messages_user_with_image() {
-        let messages = vec![Message {
-            role: Role::User,
-            content: vec![
-                ContentBlock::Text {
-                    text: "what is this?".into(),
-                },
-                ContentBlock::Image {
-                    data: "base64data".into(),
-                    mime_type: "image/png".into(),
-                },
-            ],
-        }];
-        let result = convert_messages(&messages);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].parts.len(), 2);
-        let inline = result[0].parts[1].inline_data.as_ref().unwrap();
-        assert_eq!(inline.mime_type, "image/png");
-        assert_eq!(inline.data, "base64data");
-    }
-
-    #[test]
-    fn convert_messages_assistant_becomes_model() {
-        let messages = vec![Message::assistant("response")];
-        let result = convert_messages(&messages);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].role, "model");
-        assert_eq!(result[0].parts[0].text.as_deref(), Some("response"));
-    }
-
-    #[test]
-    fn convert_messages_assistant_with_tool_calls() {
-        let messages = vec![Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::tool_use(
-                "call_1",
-                "read_file",
-                r#"{"path":"a.txt"}"#,
-            )],
-        }];
-        let result = convert_messages(&messages);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].role, "model");
-        assert!(result[0].parts[0].function_call.is_some());
-        assert_eq!(
-            result[0].parts[0].function_call.as_ref().unwrap().name,
-            "read_file"
-        );
-    }
-
-    // A stored call with malformed arguments (e.g. cut off at the output
-    // limit) must not fail every later request in the conversation.
-    #[test]
-    fn convert_messages_sends_malformed_tool_arguments_as_an_empty_object() {
-        for arguments in [r#"{"path":"a.t"#, "[1]", ""] {
-            let messages = vec![Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::tool_use("call_1", "read_file", arguments)],
-            }];
-            let result = convert_messages(&messages);
-            let call = result[0].parts[0].function_call.as_ref().unwrap();
-            assert_eq!(call.args, json!({}), "{arguments:?}");
-        }
-    }
-
-    #[test]
-    fn convert_messages_tool_result_as_function_response() {
-        let messages = vec![Message::tool_result(
-            "call_1",
-            "read_file",
-            "file content",
-            false,
-        )];
-        let result = convert_messages(&messages);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].role, "user");
-        let fr = result[0].parts[0].function_response.as_ref().unwrap();
-        assert_eq!(fr.name, "read_file");
-    }
-
-    #[test]
-    fn convert_messages_merges_tool_results_into_user() {
-        let messages = vec![
-            Message::tool_result("call_1", "read_file", "a", false),
-            Message::tool_result("call_2", "write_file", "b", false),
-        ];
-        let result = convert_messages(&messages);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].role, "user");
-        assert_eq!(result[0].parts.len(), 2);
-    }
-
-    fn streamed_call(json: &str) -> ContentBlock {
-        tool_use_block(serde_json::from_str(json).unwrap(), None).unwrap()
-    }
 
     fn id_of(block: &ContentBlock) -> &str {
         match block {
@@ -648,8 +543,11 @@ mod tests {
     // ACP clients merge different calls into one.
     #[test]
     fn calls_without_an_id_get_unique_ones() {
-        let call = r#"{"name":"read_file","args":{"path":"a.txt"}}"#;
-        let (first, second) = (streamed_call(call), streamed_call(call));
+        let call = || {
+            let json = r#"{"name":"read_file","args":{"path":"a.txt"}}"#;
+            tool_use_block(serde_json::from_str(json).unwrap(), None).unwrap()
+        };
+        let (first, second) = (call(), call());
         assert_ne!(id_of(&first), id_of(&second));
         assert!(id_of(&first).starts_with("call_"));
         assert_eq!(
@@ -658,226 +556,44 @@ mod tests {
         );
     }
 
-    /// The model turn and tool-result turn `convert_messages` sends for
-    /// `calls` and one result per call, as JSON.
-    fn sent_turns(calls: Vec<ContentBlock>) -> (Value, Value) {
-        let results: Vec<Message> = calls
-            .iter()
-            .map(|call| match call {
-                ContentBlock::ToolUse { id, name, .. } => {
-                    Message::tool_result(id.as_str(), name.as_str(), "ok", false)
-                }
-                other => panic!("expected a tool use, got {other:?}"),
-            })
-            .collect();
-        let mut messages = vec![Message {
-            role: Role::Assistant,
-            content: calls,
-        }];
-        messages.extend(results);
-        let request = convert_messages(&messages);
-        (
-            serde_json::to_value(&request[0]).unwrap(),
-            serde_json::to_value(&request[1]).unwrap(),
-        )
-    }
-
     // Gemini 3 rejects a request whose function call lacks its
-    // `thoughtSignature` ("Function call … is missing a thought_signature").
+    // `thoughtSignature`; calls from another provider get the stand-in, on
+    // the first call only, and their results are merged into one turn.
     #[test]
-    fn signatures_and_ids_from_gemini_are_sent_back_as_received() {
-        // Parallel calls: only the first carries a signature.
-        let reply = r#"{"candidates":[{"content":{"role":"model","parts":[
-            {"functionCall":{"id":"fc_1","name":"read_file","args":{"path":"a"}},"thoughtSignature":"sig_1"},
-            {"functionCall":{"id":"fc_2","name":"read_file","args":{"path":"b"}}}
-        ]},"finishReason":"STOP"}]}"#
-            .replace('\n', "");
-        let calls = parse_stream(&[&reply]).unwrap().message.content;
+    fn calls_from_another_provider_get_the_stand_in_signature() {
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::tool_use("toolu_1", "read_file", "{}"),
+                    ContentBlock::tool_use("toolu_2", "read_file", "{}"),
+                ],
+            },
+            Message::tool_result("toolu_1", "read_file", "a", false),
+            Message::tool_result("toolu_2", "read_file", "b", false),
+        ];
+        let request = serde_json::to_value(convert_messages(&messages)).unwrap();
 
-        let (model, results) = sent_turns(calls);
-        assert_eq!(
-            model["parts"],
-            json!([
-                {"functionCall": {"id": "fc_1", "name": "read_file", "args": {"path": "a"}}, "thoughtSignature": "sig_1"},
-                {"functionCall": {"id": "fc_2", "name": "read_file", "args": {"path": "b"}}},
-            ])
-        );
-        // Gemini 3.x matches each response to its call by id.
-        assert_eq!(results["parts"][0]["functionResponse"]["id"], "fc_1");
-        assert_eq!(results["parts"][1]["functionResponse"]["id"], "fc_2");
-    }
-
-    // Calls without a signature (e.g. another provider's) get the stand-in
-    // on the first one only, so Gemini 3 doesn't reject the request.
-    #[test]
-    fn unsigned_calls_get_the_stand_in_signature_on_the_first_only() {
-        let (model, results) = sent_turns(vec![
-            ContentBlock::tool_use("toolu_1", "read_file", "{}"),
-            ContentBlock::tool_use("toolu_2", "read_file", "{}"),
-        ]);
+        let (model, results) = (&request[0], &request[1]);
+        assert_eq!(request.as_array().unwrap().len(), 2);
         assert_eq!(
             model["parts"][0]["thoughtSignature"],
             SKIP_SIGNATURE_VALIDATION
         );
         assert!(model["parts"][1].get("thoughtSignature").is_none());
         assert_eq!(model["parts"][0]["functionCall"]["id"], "toolu_1");
-        assert_eq!(results["parts"][0]["functionResponse"]["id"], "toolu_1");
+        assert_eq!(results["role"], "user");
+        assert_eq!(results["parts"][1]["functionResponse"]["id"], "toolu_2");
     }
 
-    #[test]
-    fn convert_tools_wraps_in_declaration() {
-        let tools = vec![Tool::function(
-            "test_tool",
-            "A test tool",
-            json!({"type": "object"}),
-        )];
-        let result = convert_tools(&tools);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].function_declarations.len(), 1);
-        assert_eq!(result[0].function_declarations[0].name, "test_tool");
-    }
-
-    // An MCP tool's schema goes out as JSON Schema, keeping keys Gemini's own
-    // `Schema` type would reject.
-    #[test]
-    fn convert_tools_sends_parameters_as_json_schema() {
-        let tools = vec![Tool::function(
-            "fs__read",
-            "Read a file",
-            json!({
-                "$schema": "http://json-schema.org/draft-07/schema#",
-                "type": "object",
-                "properties": { "path": { "type": "string" } },
-                "required": ["path"],
-                "additionalProperties": false
-            }),
-        )];
-        let declaration =
-            &serde_json::to_value(convert_tools(&tools)).unwrap()[0]["functionDeclarations"][0];
-        assert!(declaration.get("parameters").is_none(), "{declaration}");
-        assert_eq!(
-            declaration["parametersJsonSchema"],
-            json!({
-                "type": "object",
-                "properties": { "path": { "type": "string" } },
-                "required": ["path"],
-                "additionalProperties": false
-            })
-        );
-    }
-
-    #[test]
-    fn convert_tools_empty_returns_empty() {
-        let result = convert_tools(&[]);
-        assert!(result.is_empty());
-    }
-
-    /// Feeds `payloads` through a fresh `GeminiStream` as if they were the
-    /// whole response body.
-    fn parse_stream(payloads: &[&str]) -> Result<Choice> {
-        let (chunk_tx, _chunk_rx) = mpsc::unbounded_channel();
-        let mut stream = GeminiStream::default();
-        for payload in payloads {
-            if stream.payload(payload, &chunk_tx)? {
-                break;
-            }
-        }
-        stream.finish()
-    }
-
-    const TOOL_REPLY: &[&str] = &[
-        r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Reading."}]}}]}"#,
-        r#"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"fc_1","name":"read_file","args":{"path":"a.txt"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}"#,
-    ];
-
-    #[test]
-    fn complete_stream_becomes_a_choice() {
-        let choice = parse_stream(TOOL_REPLY).unwrap();
-        assert_eq!(
-            choice.message.content,
-            [
-                ContentBlock::from("Reading."),
-                ContentBlock::tool_use("fc_1", "read_file", r#"{"path":"a.txt"}"#),
-            ]
-        );
-        assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
-        assert_eq!(choice.usage.unwrap().output_tokens, 5);
-    }
-
-    // A connection that closes early is an incomplete reply (here: missing
-    // its tool call), not a complete one.
-    #[test]
-    fn stream_cut_off_before_the_finish_reason_is_an_incomplete_response() {
-        let err = parse_stream(&TOOL_REPLY[..1]).unwrap_err();
-        assert!(matches!(err, Error::IncompleteResponse(_)), "{err}");
-    }
-
-    // A blocked reply's last chunk has a finish reason but no content; it
-    // must still parse, or the refusal would look like a cut-off stream.
     #[test]
     fn finish_without_content_still_ends_the_stream() {
-        let choice = parse_stream(&[r#"{"candidates":[{"finishReason":"SAFETY"}]}"#]).unwrap();
+        let (chunk_tx, _chunk_rx) = mpsc::unbounded_channel();
+        let mut stream = GeminiStream::default();
+        let payload = r#"{"candidates":[{"finishReason":"SAFETY"}]}"#;
+        stream.payload(payload, &chunk_tx).unwrap();
+        let choice = stream.finish().unwrap();
         assert_eq!(choice.finish_reason, Some(FinishReason::Refusal));
         assert!(choice.message.content.is_empty());
-    }
-
-    #[test]
-    fn map_finish_reason_translates_known_values() {
-        assert_eq!(map_finish_reason("STOP"), FinishReason::Stop);
-        assert_eq!(map_finish_reason("MAX_TOKENS"), FinishReason::MaxTokens);
-        assert_eq!(map_finish_reason("SAFETY"), FinishReason::Refusal);
-        assert_eq!(map_finish_reason("RECITATION"), FinishReason::Refusal);
-    }
-
-    #[test]
-    fn map_finish_reason_lowercases_unknown_values() {
-        assert_eq!(
-            map_finish_reason("MALFORMED_FUNCTION_CALL"),
-            FinishReason::Other("malformed_function_call".to_string())
-        );
-    }
-
-    fn client(max_tokens: Option<u32>) -> GeminiClient {
-        GeminiClient::new(
-            ReqwestClient::new(),
-            "https://generativelanguage.googleapis.com/v1beta".into(),
-            "key".into(),
-            "gemini-3-flash".into(),
-            max_tokens,
-        )
-    }
-
-    fn request_json(client: &GeminiClient) -> Value {
-        serde_json::to_value(client.build_request(&[Message::user("hi")], &[])).unwrap()
-    }
-
-    #[test]
-    fn default_effort_and_no_limit_send_no_generation_config() {
-        assert!(
-            request_json(&client(None))
-                .get("generationConfig")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn default_effort_sends_only_the_limit() {
-        let json = request_json(&client(Some(1000)));
-        assert_eq!(json["generationConfig"], json!({ "maxOutputTokens": 1000 }));
-    }
-
-    #[test]
-    fn effort_level_is_sent_as_thinking_level() {
-        for (level, thinking_level) in [
-            (Effort::Low, "low"),
-            (Effort::Medium, "medium"),
-            (Effort::High, "high"),
-        ] {
-            let json = request_json(&client(None).with_effort(level));
-            assert_eq!(
-                json["generationConfig"],
-                json!({ "thinkingConfig": { "thinkingLevel": thinking_level } })
-            );
-        }
     }
 }

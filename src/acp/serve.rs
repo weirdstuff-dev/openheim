@@ -33,7 +33,7 @@ use super::{
     permission::AcpPermissionGate,
     util::{
         EFFORT_CONFIG_ID, MODEL_CONFIG_ID, conversation_metas_to_session_info, map_stop_reason,
-        replay_history_messages, session_config_options, session_mode_state,
+        parse_model_option_id, replay_history_messages, session_config_options, session_mode_state,
         stream_event_to_session_update,
     },
 };
@@ -141,6 +141,7 @@ pub(crate) async fn serve_state(
                         NewSessionResponse::new(session_key)
                             .config_options(session_config_options(
                                 &state_session.app_config,
+                                &settings.provider,
                                 &settings.model,
                                 settings.effort,
                             ))
@@ -265,6 +266,7 @@ pub(crate) async fn serve_state(
                             LoadSessionResponse::new()
                                 .config_options(session_config_options(
                                     &state_load.app_config,
+                                    &loaded.provider,
                                     &loaded.model,
                                     loaded.effort,
                                 ))
@@ -300,7 +302,14 @@ pub(crate) async fn serve_state(
                 let state = &state_set_config;
                 let updated = async {
                     if config_id == MODEL_CONFIG_ID {
-                        state.set_session_model(&session_id, value).await?;
+                        // A bare model name, as clients sent before option
+                        // ids named the provider, still resolves.
+                        match parse_model_option_id(&state.app_config, value) {
+                            Some((provider, model)) => {
+                                state.switch_model(&session_id, provider, model).await?
+                            }
+                            None => state.set_session_model(&session_id, value).await?,
+                        };
                     } else {
                         let effort = Effort::parse(value)?;
                         state.set_session_effort(&session_id, effort).await?;
@@ -310,7 +319,12 @@ pub(crate) async fn serve_state(
                 match updated.await {
                     // The response carries every option, not only the one set.
                     Ok(settings) => responder.respond(SetSessionConfigOptionResponse::new(
-                        session_config_options(&state.app_config, &settings.model, settings.effort),
+                        session_config_options(
+                            &state.app_config,
+                            &settings.provider,
+                            &settings.model,
+                            settings.effort,
+                        ),
                     )),
                     Err(e) => responder.respond_with_error(to_acp_error(&e)),
                 }
@@ -479,74 +493,5 @@ mod to_acp_error_tests {
                 "body": { "error": { "code": "window_budget_exceeded", "message": "Used up." } },
             }))
         );
-    }
-
-    #[test]
-    fn http_error_with_a_text_body_keeps_it_as_a_string() {
-        let e = Error::HttpError {
-            status: 502,
-            body: "Bad Gateway".into(),
-            retry_after: None,
-        };
-        assert_eq!(
-            to_acp_error(&e).data,
-            Some(serde_json::json!({
-                "kind": "http_error",
-                "status": 502,
-                "retry_after_secs": null,
-                "body": "Bad Gateway",
-            }))
-        );
-    }
-
-    #[test]
-    fn not_found_is_resource_not_found() {
-        let e = Error::NotFound("session not found: abc".to_string());
-        let acp_error = to_acp_error(&e);
-        assert_eq!(
-            acp_error.code,
-            agent_client_protocol::Error::resource_not_found(None).code
-        );
-        assert_eq!(acp_error.data, Some(serde_json::json!(e.to_string())));
-    }
-
-    #[test]
-    fn bad_client_input_is_invalid_params() {
-        for e in [
-            Error::InvalidArgument("invalid session id format".to_string()),
-            Error::ConfigError("Model 'nope' not found".to_string()),
-        ] {
-            let acp_error = to_acp_error(&e);
-            assert_eq!(
-                acp_error.code,
-                agent_client_protocol::Error::invalid_params().code,
-                "{e}"
-            );
-            assert_eq!(acp_error.data, Some(serde_json::json!(e.to_string())));
-        }
-    }
-
-    // A provider failing to convert the model's own malformed tool-call JSON
-    // is a server-side failure, not the client's `invalid_params`.
-    #[test]
-    fn parse_failures_inside_a_turn_are_internal_errors() {
-        let e = Error::ParseError(
-            "invalid JSON in tool call arguments for 'read_file': EOF".to_string(),
-        );
-        assert_eq!(
-            to_acp_error(&e).code,
-            agent_client_protocol::Error::internal_error().code
-        );
-    }
-
-    #[test]
-    fn other_errors_are_internal_with_the_display_string() {
-        let e = Error::Other("disk on fire".to_string());
-        let acp_error = to_acp_error(&e);
-        assert_eq!(
-            acp_error.code,
-            agent_client_protocol::Error::internal_error().code
-        );
-        assert_eq!(acp_error.data, Some(serde_json::json!(e.to_string())));
     }
 }

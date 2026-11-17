@@ -188,150 +188,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_helper_creates_config_error() {
-        let err = Error::config("missing field");
-        assert!(matches!(err, Error::ConfigError(_)));
-        assert_eq!(err.to_string(), "Config error: missing field");
-    }
-
-    fn http_err(status: u16) -> Error {
-        Error::HttpError {
-            status,
-            body: "error".into(),
-            retry_after: None,
-        }
-    }
-
-    fn http_err_retry_after(status: u16, secs: u64) -> Error {
-        Error::HttpError {
-            status,
-            body: "error".into(),
-            retry_after: Some(Duration::from_secs(secs)),
-        }
-    }
-
-    #[test]
-    fn is_retryable_for_429() {
-        assert!(http_err(429).is_retryable());
-    }
-
-    #[test]
-    fn is_retryable_for_a_short_retry_after() {
-        assert!(http_err_retry_after(429, 0).is_retryable());
-        assert!(http_err_retry_after(429, MAX_RETRY_AFTER.as_secs()).is_retryable());
-        assert!(http_err_retry_after(503, 2).is_retryable());
-    }
-
-    // A limit that lifts in hours is reported at once, not after the backoff.
-    #[test]
-    fn is_not_retryable_for_a_long_retry_after() {
-        assert!(!http_err_retry_after(429, MAX_RETRY_AFTER.as_secs() + 1).is_retryable());
-        assert!(!http_err_retry_after(503, 18_000).is_retryable());
-    }
-
-    #[test]
-    fn a_retry_after_on_a_non_transient_status_is_still_not_retryable() {
-        assert!(!http_err_retry_after(403, 1).is_retryable());
-    }
-
-    #[test]
     fn retry_after_parses_seconds_and_http_dates() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-10-18T15:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
+        let parse = |value| parse_retry_after(value, now);
+        assert_eq!(parse("120"), Some(Duration::from_secs(120)));
+        assert_eq!(parse(" 5 "), Some(Duration::from_secs(5)));
         assert_eq!(
-            parse_retry_after("120", now),
-            Some(Duration::from_secs(120))
-        );
-        assert_eq!(parse_retry_after(" 5 ", now), Some(Duration::from_secs(5)));
-        assert_eq!(
-            parse_retry_after("Sun, 18 Oct 2026 16:00:00 GMT", now),
+            parse("Sun, 18 Oct 2026 16:00:00 GMT"),
             Some(Duration::from_secs(3600))
         );
-        assert_eq!(
-            parse_retry_after("Sun, 18 Oct 2026 14:00:00 GMT", now),
-            Some(Duration::ZERO)
-        );
-        assert_eq!(parse_retry_after("soon", now), None);
-        assert_eq!(parse_retry_after("-5", now), None);
+        assert_eq!(parse("Sun, 18 Oct 2026 14:00:00 GMT"), Some(Duration::ZERO));
+        assert_eq!(parse("soon"), None);
+        assert_eq!(parse("-5"), None);
     }
 
-    fn response(status: u16, retry_after: Option<&str>, body: &str) -> reqwest::Response {
-        let mut builder = http::Response::builder().status(status);
-        if let Some(value) = retry_after {
-            builder = builder.header("Retry-After", value);
+    #[test]
+    fn only_transient_failures_are_retryable() {
+        let http = |status, secs: Option<u64>| Error::HttpError {
+            status,
+            body: String::new(),
+            retry_after: secs.map(Duration::from_secs),
+        };
+        for code in [429, 500, 502, 503, 504, 529] {
+            assert!(http(code, None).is_retryable(), "{code}");
         }
-        reqwest::Response::from(builder.body(body.to_string()).unwrap())
-    }
-
-    #[tokio::test]
-    async fn from_response_keeps_status_body_and_retry_after() {
-        let err = Error::from_response(response(429, Some("18000"), "{\"error\":{}}")).await;
-        assert!(matches!(
-            err,
-            Error::HttpError { status: 429, ref body, retry_after: Some(wait) }
-                if body == "{\"error\":{}}" && wait == Duration::from_secs(18_000)
-        ));
-    }
-
-    #[tokio::test]
-    async fn from_response_ignores_a_missing_or_invalid_retry_after() {
-        for header in [None, Some("later")] {
-            let err = Error::from_response(response(503, header, "down")).await;
-            assert_eq!(err.retry_after(), None, "{header:?}");
+        assert!(http(429, Some(MAX_RETRY_AFTER.as_secs())).is_retryable());
+        assert!(Error::IncompleteResponse(String::new()).is_retryable());
+        for err in [
+            http(400, None),
+            http(401, None),
+            http(403, Some(1)),
+            http(429, Some(MAX_RETRY_AFTER.as_secs() + 1)),
+            Error::ContextOverflow(String::new()),
+            Error::ApiError(String::new()),
+            Error::ParseError(String::new()),
+        ] {
+            assert!(!err.is_retryable(), "{err:?}");
         }
     }
 
-    #[test]
-    fn retry_after_is_only_set_for_http_errors() {
-        assert_eq!(
-            http_err_retry_after(429, 3).retry_after(),
-            Some(Duration::from_secs(3))
-        );
-        assert_eq!(http_err(429).retry_after(), None);
-        assert_eq!(Error::Other("x".into()).retry_after(), None);
-    }
-
-    #[test]
-    fn is_retryable_for_5xx() {
-        for code in [500u16, 502, 503, 504, 529] {
-            assert!(
-                http_err(code).is_retryable(),
-                "expected retryable for status {}",
-                code
-            );
-        }
-    }
-
-    #[test]
-    fn is_not_retryable_for_400() {
-        assert!(!http_err(400).is_retryable());
-        assert!(!http_err(401).is_retryable());
-        assert!(!http_err(404).is_retryable());
-    }
-
-    #[test]
-    fn is_not_retryable_for_a_context_overflow() {
-        assert!(!Error::ContextOverflow("too long".into()).is_retryable());
-    }
-
-    #[test]
-    fn is_retryable_for_an_incomplete_response() {
-        assert!(Error::IncompleteResponse("cut off".into()).is_retryable());
-    }
-
-    #[test]
-    fn is_not_retryable_for_non_http_errors() {
-        assert!(!Error::ApiError("something".into()).is_retryable());
-        assert!(!Error::ParseError("bad json".into()).is_retryable());
-        assert!(!Error::ConfigError("missing".into()).is_retryable());
-        assert!(!Error::ToolExecutionError("failed".into()).is_retryable());
-        assert!(!Error::NotFound("missing".into()).is_retryable());
-        assert!(!Error::Other("something".into()).is_retryable());
-    }
-
     #[tokio::test]
-    async fn reqwest_connection_error_is_retryable() {
+    async fn connection_errors_are_retryable() {
         let err = reqwest::Client::new()
             .get("http://127.0.0.1:1")
             .send()

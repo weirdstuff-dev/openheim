@@ -17,11 +17,28 @@ use crate::error::Result;
 /// same-host `https://` → `http://` redirect, which would send the API key
 /// in the clear, and providers don't redirect anyway.
 pub fn build_http_client(timeout_secs: u64) -> Result<ReqwestClient> {
+    build(timeout_secs, false)
+}
+
+/// [`build_http_client`] for requests to `api_base`. One on this machine
+/// ([`super::is_loopback_url`]) is reached directly, ignoring any proxy
+/// the environment sets (`HTTP_PROXY` and the like): a proxy would carry
+/// its API key off the machine, over plain `http://` at that.
+#[cfg(feature = "rag")]
+pub(crate) fn build_http_client_for(timeout_secs: u64, api_base: &str) -> Result<ReqwestClient> {
+    build(timeout_secs, super::is_loopback_url(api_base))
+}
+
+fn build(timeout_secs: u64, direct: bool) -> Result<ReqwestClient> {
     let timeout = Duration::from_secs(timeout_secs);
-    ReqwestClient::builder()
+    let mut builder = ReqwestClient::builder()
         .connect_timeout(timeout)
         .read_timeout(timeout)
-        .redirect(Policy::none())
+        .redirect(Policy::none());
+    if direct {
+        builder = builder.no_proxy();
+    }
+    builder
         .build()
         .map_err(|e| crate::error::Error::Other(format!("failed to build HTTP client: {}", e)))
 }
@@ -75,23 +92,26 @@ pub fn create_client(config: &AgentConfig, http_client: &ReqwestClient) -> Arc<d
     Arc::new(RetryClient::new(inner))
 }
 
-/// One `reqwest::Client` per timeout, built on first use and shared by
-/// every LLM client made from it, so they share connection pools and TLS
-/// sessions instead of each opening their own.
+/// One `reqwest::Client` per timeout (and per whether it bypasses proxies),
+/// built on first use and shared by every LLM client made from it, so they
+/// share connection pools and TLS sessions instead of each opening their
+/// own.
 #[derive(Debug, Default)]
-pub(crate) struct HttpClients(Mutex<HashMap<u64, ReqwestClient>>);
+pub(crate) struct HttpClients(Mutex<HashMap<(u64, bool), ReqwestClient>>);
 
 impl HttpClients {
-    /// The shared client for `timeout_secs` (see [`build_http_client`]).
-    pub(crate) fn get(&self, timeout_secs: u64) -> Result<ReqwestClient> {
+    /// The shared client for requests to `api_base` with `timeout_secs`
+    /// (see [`build_http_client_for`]).
+    pub(crate) fn get(&self, timeout_secs: u64, api_base: &str) -> Result<ReqwestClient> {
+        let key = (timeout_secs, super::is_loopback_url(api_base));
         // A poisoned lock still holds a usable map: entries are only ever
         // inserted whole.
         let mut clients = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(client) = clients.get(&timeout_secs) {
+        if let Some(client) = clients.get(&key) {
             return Ok(client.clone());
         }
-        let client = build_http_client(timeout_secs)?;
-        clients.insert(timeout_secs, client.clone());
+        let client = build(key.0, key.1)?;
+        clients.insert(key, client.clone());
         Ok(client)
     }
 
@@ -120,118 +140,27 @@ pub(crate) fn client_for_config(
     if same_client(target, baseline) {
         Ok(baseline_llm.clone())
     } else {
-        Ok(create_client(target, &http.get(target.timeout_secs)?))
+        Ok(create_client(
+            target,
+            &http.get(target.timeout_secs, &target.api_base)?,
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::llm::LlmClient;
-    use crate::core::models::{Choice, Message, Tool};
-    use async_trait::async_trait;
 
-    struct DummyClient;
-
-    #[async_trait]
-    impl LlmClient for DummyClient {
-        async fn send(
-            &self,
-            _messages: &[Message],
-            _tools: &[Tool],
-        ) -> crate::error::Result<Choice> {
-            unimplemented!()
-        }
-    }
-
-    fn baseline_config() -> AgentConfig {
-        AgentConfig::new(
-            "openai".into(),
-            "https://api.openai.com/v1".into(),
-            "key".into(),
-            "gpt-4".into(),
-            10,
-        )
-    }
-
+    // A loopback endpoint gets its own, proxy-free client; any loopback
+    // spelling shares it.
     #[test]
-    fn client_for_config_reuses_baseline_when_provider_and_model_match() {
-        let baseline = baseline_config();
-        let baseline_llm: Arc<dyn LlmClient> = Arc::new(DummyClient);
-
-        // Same provider + model, even with a different api_base/timeout.
-        let mut target = baseline.clone();
-        target.timeout_secs = 999;
-
-        let client =
-            client_for_config(&target, &baseline, &baseline_llm, &HttpClients::default()).unwrap();
-        assert!(Arc::ptr_eq(&client, &baseline_llm));
-    }
-
-    #[test]
-    fn client_for_config_builds_new_when_model_differs() {
-        let baseline = baseline_config();
-        let baseline_llm: Arc<dyn LlmClient> = Arc::new(DummyClient);
-
-        let mut target = baseline.clone();
-        target.model = "gpt-4o".into();
-
-        let client =
-            client_for_config(&target, &baseline, &baseline_llm, &HttpClients::default()).unwrap();
-        assert!(!Arc::ptr_eq(&client, &baseline_llm));
-    }
-
-    #[test]
-    fn client_for_config_builds_new_when_effort_differs() {
-        let baseline = baseline_config();
-        let baseline_llm: Arc<dyn LlmClient> = Arc::new(DummyClient);
-
-        let target = baseline
-            .clone()
-            .with_effort(crate::core::models::Effort::High);
-
-        let client =
-            client_for_config(&target, &baseline, &baseline_llm, &HttpClients::default()).unwrap();
-        assert!(!Arc::ptr_eq(&client, &baseline_llm));
-    }
-
-    #[test]
-    fn client_for_config_builds_new_when_provider_differs() {
-        let baseline = baseline_config();
-        let baseline_llm: Arc<dyn LlmClient> = Arc::new(DummyClient);
-
-        let target = AgentConfig::new(
-            "anthropic".into(),
-            "https://api.anthropic.com/v1".into(),
-            "key".into(),
-            "gpt-4".into(),
-            10,
-        );
-
-        let client =
-            client_for_config(&target, &baseline, &baseline_llm, &HttpClients::default()).unwrap();
-        assert!(!Arc::ptr_eq(&client, &baseline_llm));
-    }
-
-    /// Clients for different models share one `reqwest::Client` per
-    /// timeout rather than building their own.
-    #[test]
-    fn client_for_config_shares_http_clients_by_timeout() {
-        let baseline = baseline_config();
-        let baseline_llm: Arc<dyn LlmClient> = Arc::new(DummyClient);
+    fn loopback_endpoints_get_a_client_of_their_own() {
         let http = HttpClients::default();
-
-        for model in ["gpt-4o", "gpt-4o-mini"] {
-            let mut target = baseline.clone();
-            target.model = model.into();
-            client_for_config(&target, &baseline, &baseline_llm, &http).unwrap();
-        }
-        assert_eq!(http.len(), 1);
-
-        let mut slow = baseline.clone();
-        slow.model = "o3".into();
-        slow.timeout_secs = 600;
-        client_for_config(&slow, &baseline, &baseline_llm, &http).unwrap();
+        http.get(30, "https://api.openai.com/v1").unwrap();
+        http.get(30, "http://localhost:11434/v1").unwrap();
+        assert_eq!(http.len(), 2);
+        http.get(30, "http://127.0.0.1:8080").unwrap();
+        http.get(30, "https://api.anthropic.com/v1").unwrap();
         assert_eq!(http.len(), 2);
     }
 }

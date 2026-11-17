@@ -33,7 +33,7 @@ const HELP_TEXT: &str = ":help                show this\n\
                          :models              list available models\n\
                          :models <name>       switch to model mid-session\n\
                          :mode                current mode\n\
-                         :mode <name>         switch mode (code, architect)\n\
+                         :mode <name>         switch mode (execute, plan)\n\
                          :effort           current effort level\n\
                          :effort <level>   set effort (default, low, medium, high)\n\
                          :mcp                 MCP servers\n\
@@ -133,7 +133,7 @@ impl App {
             overlay: None,
             permissions: PermissionQueue::default(),
             agent_config,
-            mode: AgentMode::Code,
+            mode: AgentMode::Execute,
             app_config,
             paths,
             skills,
@@ -153,7 +153,7 @@ impl App {
         if self.agent_config.effort != Effort::Default {
             parts.push(format!("effort: {}", self.agent_config.effort));
         }
-        if self.mode != AgentMode::Code {
+        if self.mode != AgentMode::Execute {
             parts.push(self.mode.as_str().to_string());
         }
         if let Some(usage) = &self.context_usage {
@@ -256,6 +256,12 @@ impl App {
             StreamEvent::ContextTrimmed { dropped } => {
                 self.push(ChatItem::SystemInfo(format!(
                     "{dropped} earlier messages left out of the request to fit the context window"
+                )));
+            }
+            StreamEvent::ToolOutputsOmitted { omitted: 0 } => {}
+            StreamEvent::ToolOutputsOmitted { omitted } => {
+                self.push(ChatItem::SystemInfo(format!(
+                    "{omitted} older tool outputs left out of the request to fit the context window"
                 )));
             }
             StreamEvent::Finished { .. } => {
@@ -534,7 +540,7 @@ impl App {
             "mode" => {
                 if arg.is_empty() {
                     self.push(ChatItem::SystemInfo(format!(
-                        "mode: {} (code, architect)",
+                        "mode: {} (execute, plan)",
                         self.mode.as_str()
                     )));
                 } else {

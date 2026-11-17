@@ -1,6 +1,7 @@
 //! Fitting a request into the model's context window by leaving out the
-//! oldest whole turns. Only the request changes; the stored history is sent
-//! in full again whenever it fits.
+//! oldest whole turns, then, if the turn in progress alone is still too
+//! long, the outputs of its older tool results. Only the request changes;
+//! the stored history is sent in full again whenever it fits.
 
 use crate::core::models::{ContentBlock, Message, Role, Tool, Usage};
 
@@ -76,31 +77,59 @@ fn latest_turn_start(messages: &[Message]) -> usize {
         .unwrap_or(0)
 }
 
+/// What a tool result's content is replaced with when it's left out.
+pub(crate) const OMITTED_OUTPUT: &str = "[tool output omitted to fit the context window]";
+
 /// A request's history after fitting.
 #[derive(Debug)]
 pub(crate) struct Fitted {
     pub(crate) messages: Vec<Message>,
     /// How many history messages were left out.
     pub(crate) dropped: usize,
-    /// Whether everything before the latest turn is already left out, so
-    /// no smaller request can be built.
+    /// How many tool results in the latest turn had their output left out.
+    pub(crate) omitted_outputs: usize,
+    /// Whether nothing more can be left out: every earlier turn is, and so
+    /// is every tool output in the latest turn that may be.
     pub(crate) exhausted: bool,
+}
+
+/// Index of the last assistant message in `turn`: tool results from there
+/// on are new to the model, so their output is never left out. 0 if none.
+fn unseen_from(turn: &[Message]) -> usize {
+    turn.iter()
+        .rposition(|m| m.role == Role::Assistant)
+        .unwrap_or(0)
+}
+
+/// Whether `turn` (the latest one) still has a tool result whose output
+/// may be left out.
+fn has_omittable_output(turn: &[Message]) -> bool {
+    turn[..unseen_from(turn)]
+        .iter()
+        .flat_map(|m| &m.content)
+        .any(|block| {
+            matches!(block, ContentBlock::ToolResult { content, .. }
+                if content.len() > OMITTED_OUTPUT.len())
+        })
 }
 
 /// `history` cut to fit `max_bytes` (with `fixed_bytes` of system prompt and
 /// tools on top), or `None` if it fits whole or nothing can be left out.
 ///
-/// Cuts only just before a user message, so a tool call and its results stay
-/// together, and never after the latest one. The first kept user message
-/// gets a note saying how many messages were left out. If even the latest
-/// turn alone is over the limit, everything before it is left out.
+/// First leaves out the oldest turns. It cuts only just before a user
+/// message, so a tool call and its results stay together, and never after
+/// the latest one; the first kept user message gets a note saying how many
+/// messages were left out. If the latest turn alone is still over the
+/// limit, its tool results' outputs are replaced with [`OMITTED_OUTPUT`],
+/// oldest first, each call keeping its (now short) result. Results after
+/// the turn's last assistant message are kept: the model hasn't seen them.
 fn trim(history: &[Message], fixed_bytes: usize, max_bytes: usize) -> Option<Fitted> {
     let sizes: Vec<usize> = history.iter().map(message_bytes).collect();
     let total: usize = fixed_bytes + sizes.iter().sum::<usize>();
-    let latest = latest_turn_start(history);
-    if total <= max_bytes || latest == 0 {
+    if total <= max_bytes {
         return None;
     }
+    let latest = latest_turn_start(history);
 
     let mut remaining = total;
     let mut cut = latest;
@@ -113,13 +142,41 @@ fn trim(history: &[Message], fixed_bytes: usize, max_bytes: usize) -> Option<Fit
     }
 
     let mut messages = history[cut..].to_vec();
-    messages[0]
-        .content
-        .insert(0, ContentBlock::from(omitted_note(cut)));
+    let mut size = fixed_bytes + sizes[cut..].iter().sum::<usize>();
+    if cut > 0 {
+        let note = omitted_note(cut);
+        size += note.len();
+        messages[0].content.insert(0, ContentBlock::from(note));
+    }
+
+    // Still over the limit only if even the latest turn alone is.
+    let unseen = unseen_from(&messages);
+    let mut omitted_outputs = 0;
+    for block in messages[..unseen]
+        .iter_mut()
+        .flat_map(|m| m.content.iter_mut())
+    {
+        if size <= max_bytes {
+            break;
+        }
+        if let ContentBlock::ToolResult { content, .. } = block
+            && content.len() > OMITTED_OUTPUT.len()
+        {
+            size -= content.len() - OMITTED_OUTPUT.len();
+            *content = OMITTED_OUTPUT.to_string();
+            omitted_outputs += 1;
+        }
+    }
+
+    if cut == 0 && omitted_outputs == 0 {
+        return None;
+    }
+    let exhausted = cut == latest && !has_omittable_output(&messages);
     Some(Fitted {
         messages,
         dropped: cut,
-        exhausted: cut == latest,
+        omitted_outputs,
+        exhausted,
     })
 }
 
@@ -169,7 +226,8 @@ impl ContextFitter {
             .unwrap_or_else(|| Fitted {
                 messages: history.to_vec(),
                 dropped: 0,
-                exhausted: latest_turn_start(history) == 0,
+                omitted_outputs: 0,
+                exhausted: latest_turn_start(history) == 0 && !has_omittable_output(history),
             })
     }
 
@@ -189,8 +247,8 @@ impl ContextFitter {
     }
 
     /// Notes that the request `sent` (of `sent_bytes`) was too long, and
-    /// returns whether a smaller one can still be built: `false` once only
-    /// the latest turn was left.
+    /// returns whether a smaller one can still be built: `false` once
+    /// nothing more could be left out of it.
     pub(crate) fn record_overflow(&mut self, sent: &Fitted, sent_bytes: usize) -> bool {
         if sent.exhausted {
             return false;
@@ -262,30 +320,6 @@ mod tests {
     }
 
     #[test]
-    fn history_that_fits_is_left_alone() {
-        let history = history();
-        assert!(trim(&history, 0, total(&history)).is_none());
-    }
-
-    #[test]
-    fn oldest_turn_is_dropped_first() {
-        let history = history();
-        let fitted = trim(&history, 0, total(&history) - 1).unwrap();
-
-        assert_eq!(fitted.dropped, 4);
-        assert_eq!(fitted.messages.len(), history.len() - 4);
-        assert_eq!(fitted.messages[0].role, Role::User);
-        assert_eq!(
-            note_of(&fitted.messages[0]),
-            "[4 earlier messages omitted to fit the context window]"
-        );
-        // The note opens the first kept turn; its own text follows.
-        assert_eq!(fitted.messages[0].content[1], ContentBlock::from("second"));
-        assert_eq!(fitted.messages[1..], history[5..]);
-        assert_tool_pairs_intact(&fitted.messages);
-    }
-
-    #[test]
     fn latest_turn_is_kept_even_when_it_alone_is_too_big() {
         let history = history();
         let fitted = trim(&history, 0, 1).unwrap();
@@ -297,12 +331,60 @@ mod tests {
         assert_tool_pairs_intact(&fitted.messages);
     }
 
+    /// One turn that's a long tool loop: three calls with big results.
+    fn tool_loop() -> Vec<Message> {
+        let big = "x".repeat(1000);
+        vec![
+            Message::user("go"),
+            calls("a"),
+            answer("a", &big),
+            calls("b"),
+            answer("b", &big),
+            calls("c"),
+            answer("c", &big),
+        ]
+    }
+
+    /// The output of every tool result in `messages`, in order.
+    fn outputs(messages: &[Message]) -> Vec<String> {
+        messages
+            .iter()
+            .filter_map(|m| m.tool_result_block())
+            .map(|r| r.content)
+            .collect()
+    }
+
+    // The results after the last call are new to the model: they stay even
+    // when nothing else is left to leave out.
     #[test]
-    fn fixed_bytes_count_against_the_limit() {
-        let history = history();
-        let max = total(&history);
-        assert!(trim(&history, 0, max).is_none());
-        assert_eq!(trim(&history, 10, max).unwrap().dropped, 4);
+    fn the_newest_outputs_are_kept_and_then_it_is_exhausted() {
+        let history = tool_loop();
+        let big = "x".repeat(1000);
+        let fitted = trim(&history, 0, 1).unwrap();
+
+        assert_eq!(fitted.omitted_outputs, 2);
+        assert_eq!(
+            outputs(&fitted.messages),
+            [OMITTED_OUTPUT, OMITTED_OUTPUT, big.as_str()]
+        );
+        assert!(fitted.exhausted);
+        assert_tool_pairs_intact(&fitted.messages);
+    }
+
+    // Earlier turns go first; only then the latest turn's outputs.
+    #[test]
+    fn outputs_are_left_out_only_once_earlier_turns_are() {
+        let mut history = history();
+        history.truncate(8);
+        history.extend(tool_loop());
+
+        let fitted = trim(&history, 0, total(&history) - 500).unwrap();
+        assert_eq!((fitted.dropped, fitted.omitted_outputs), (4, 0));
+
+        let fitted = trim(&history, 0, 1).unwrap();
+        assert_eq!((fitted.dropped, fitted.omitted_outputs), (8, 2));
+        assert!(fitted.exhausted);
+        assert_tool_pairs_intact(&fitted.messages);
     }
 
     #[test]
@@ -320,25 +402,6 @@ mod tests {
                 assert_tool_pairs_intact(&fitted.messages);
             }
         }
-    }
-
-    #[test]
-    fn fitter_without_a_window_sends_everything() {
-        let history = history();
-        let fitted = ContextFitter::new(None, &[], &[]).fit(&history);
-        assert_eq!(fitted.dropped, 0);
-        assert!(!fitted.exhausted);
-        assert_eq!(fitted.messages, history);
-    }
-
-    #[test]
-    fn fitter_trims_to_the_window() {
-        let history = history();
-        // At 4 bytes per token, room for the last two turns only.
-        let window = (total(&history) - 1000) as u64 / 4 * 10 / 9;
-        let fitted = ContextFitter::new(Some(window), &[], &[]).fit(&history);
-        assert_eq!(fitted.dropped, 4);
-        assert!(!fitted.exhausted);
     }
 
     #[test]
@@ -411,14 +474,5 @@ mod tests {
         // Only the latest turn is left: nothing more can go.
         let sent = fitter.request_bytes(&fitted.messages);
         assert!(!fitter.record_overflow(&fitted, sent));
-    }
-
-    #[test]
-    fn overflow_on_a_single_turn_cannot_be_helped() {
-        let history = vec![Message::user("only")];
-        let mut fitter = ContextFitter::new(None, &[], &[]);
-        let fitted = fitter.fit(&history);
-        assert!(fitted.exhausted);
-        assert!(!fitter.record_overflow(&fitted, 100));
     }
 }

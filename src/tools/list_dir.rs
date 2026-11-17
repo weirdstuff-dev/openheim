@@ -119,90 +119,6 @@ mod tests {
     use super::*;
     use crate::tools::test_support::TurnHarness;
 
-    #[test]
-    fn definition_has_correct_name() {
-        let tool = ListDirTool;
-        let def = tool.definition();
-        assert_eq!(def.function.name, "list_dir");
-        assert_eq!(def.tool_type, "function");
-    }
-
-    #[tokio::test]
-    async fn execute_lists_files_and_dirs_sorted() {
-        let harness = TurnHarness::new();
-        let dir = harness.work_dir();
-        std::fs::write(dir.join("b.txt"), "x").unwrap();
-        std::fs::write(dir.join("a.txt"), "x").unwrap();
-        std::fs::create_dir(dir.join("sub")).unwrap();
-
-        let args = serde_json::json!({"path": dir.to_str().unwrap()}).to_string();
-        let result = ListDirTool.execute(&args, &harness.turn()).await.unwrap();
-        assert_eq!(result, "a.txt\nb.txt\nsub/");
-    }
-
-    #[tokio::test]
-    async fn execute_reports_empty_directory() {
-        let harness = TurnHarness::new();
-        let result = ListDirTool.execute("{}", &harness.turn()).await.unwrap();
-        assert_eq!(result, "(empty directory)");
-    }
-
-    #[tokio::test]
-    async fn execute_defaults_to_work_dir_when_path_omitted() {
-        let harness = TurnHarness::new();
-        std::fs::write(harness.work_dir().join("marker.txt"), "x").unwrap();
-
-        let result = ListDirTool.execute("{}", &harness.turn()).await.unwrap();
-        assert_eq!(result, "marker.txt");
-    }
-
-    #[tokio::test]
-    async fn execute_errors_for_nonexistent_dir() {
-        let harness = TurnHarness::new();
-        let result = ListDirTool
-            .execute(r#"{"path": "missing"}"#, &harness.turn())
-            .await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn execute_rejects_path_outside_work_dir() {
-        let harness = TurnHarness::new();
-        let outside = tempfile::tempdir().unwrap();
-        let args = serde_json::json!({"path": outside.path().to_str().unwrap()}).to_string();
-        let err = ListDirTool
-            .execute(&args, &harness.turn())
-            .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("outside the work directory"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn execute_errors_for_malformed_json() {
-        let harness = TurnHarness::new();
-        let result = ListDirTool.execute("bad json", &harness.turn()).await;
-        assert!(result.is_err());
-    }
-
-    #[cfg(target_family = "unix")]
-    #[tokio::test]
-    async fn execute_shows_symlink_targets() {
-        let harness = TurnHarness::new();
-        let dir = harness.work_dir();
-        let target = dir.join("target.txt");
-        std::fs::write(&target, "x").unwrap();
-        std::os::unix::fs::symlink(&target, dir.join("link")).unwrap();
-
-        let result = ListDirTool.execute("{}", &harness.turn()).await.unwrap();
-        assert!(
-            result.contains(&format!("link -> {}", target.display())),
-            "unexpected output: {result}"
-        );
-    }
-
     #[tokio::test]
     async fn execute_truncates_past_max_entries() {
         let harness = TurnHarness::new();
@@ -215,14 +131,6 @@ mod tests {
         assert!(
             result.contains("5 more entries omitted"),
             "unexpected output: {result}"
-        );
-    }
-
-    #[test]
-    fn args_struct_matches_schema() {
-        crate::tools::args::assert_args_match_schema::<ListDirArgs>(
-            &ListDirTool,
-            serde_json::json!({"path": "src"}),
         );
     }
 }

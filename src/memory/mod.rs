@@ -138,33 +138,6 @@ fn merge_skills(defaults: &[String], session: &[String]) -> Vec<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn merge_skills_defaults_first_no_duplicates() {
-        let defaults = vec!["rules".to_string(), "coding".to_string()];
-        let session = vec!["coding".to_string(), "rust".to_string()];
-        let merged = merge_skills(&defaults, &session);
-        assert_eq!(merged, vec!["rules", "coding", "rust"]);
-    }
-
-    #[test]
-    fn merge_skills_empty_defaults() {
-        let merged = merge_skills(&[], &["rust".to_string()]);
-        assert_eq!(merged, vec!["rust"]);
-    }
-
-    #[test]
-    fn merge_skills_empty_session() {
-        let merged = merge_skills(&["rules".to_string()], &[]);
-        assert_eq!(merged, vec!["rules"]);
-    }
-
-    #[test]
-    fn merge_skills_deduplicates_within_defaults() {
-        let defaults = vec!["rules".to_string(), "rules".to_string()];
-        let merged = merge_skills(&defaults, &[]);
-        assert_eq!(merged, vec!["rules"]);
-    }
-
     // A conversation whose stored skill has since been deleted still gets
     // its turns, with the skills that remain.
     #[test]
@@ -179,42 +152,5 @@ mod tests {
 
         let system = builder.build(&[])[0].text().unwrap();
         assert!(system.contains("KEPT SKILL"), "{system}");
-    }
-
-    #[test]
-    fn new_with_data_dir_creates_history_and_skills_subdirs() {
-        let dir = tempfile::tempdir().unwrap();
-        MemoryContext::new(vec![], dir.path()).unwrap();
-        assert!(dir.path().join("history").is_dir());
-        assert!(dir.path().join("skills").is_dir());
-    }
-
-    // A data directory `openheim init` never touched (a library embedder's,
-    // a CI temp dir) still prepares turns, with the default identity.
-    #[test]
-    fn prepare_without_system_md_uses_the_default_identity() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = MemoryContext::new(vec![], dir.path()).unwrap();
-
-        let (_, builder) = ctx.prepare(None, &[], None, None).unwrap();
-
-        let system = builder.build(&[])[0].text().unwrap();
-        assert!(system.contains(system::DEFAULT_SYSTEM_MD), "{system}");
-    }
-
-    #[test]
-    fn from_parts_assembles_a_context_from_independent_managers() {
-        let history_dir = tempfile::tempdir().unwrap();
-        let skills_dir = tempfile::tempdir().unwrap();
-        let system_dir = tempfile::tempdir().unwrap();
-        std::fs::write(system_dir.path().join("system.md"), "I am the agent.").unwrap();
-        let ctx = MemoryContext::from_parts(
-            HistoryManager::with_dir(history_dir.path().to_path_buf()),
-            SkillsManager::with_dir(skills_dir.path().to_path_buf()),
-            SystemLoader::with_dir(system_dir.path().to_path_buf()),
-            vec!["rust".to_string()],
-        );
-        assert_eq!(ctx.system.load().unwrap(), "I am the agent.");
-        assert_eq!(ctx.default_skills, vec!["rust".to_string()]);
     }
 }

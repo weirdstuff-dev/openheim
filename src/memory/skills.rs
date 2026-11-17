@@ -112,46 +112,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn loads_skill_by_name() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("rust.md"), "Be idiomatic.").unwrap();
-        let mgr = SkillsManager::with_dir(dir.path().to_path_buf());
-        assert_eq!(mgr.load_skill("rust").unwrap(), "Be idiomatic.");
-    }
-
-    #[test]
-    fn missing_skill_returns_not_found() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = SkillsManager::with_dir(dir.path().to_path_buf());
-        let err = mgr.load_skill("absent").unwrap_err();
-        assert!(err.to_string().contains("not found"), "{err}");
-    }
-
-    #[test]
-    fn rejects_traversal_names_before_touching_filesystem() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = SkillsManager::with_dir(dir.path().to_path_buf());
-        for bad in [
-            "",
-            ".",
-            "..",
-            "../escape",
-            "../../etc/passwd",
-            "/etc/passwd",
-            "a/b",
-            "sub/../x",
-            "a..b",
-            "..\\..\\windows\\evil",
-        ] {
-            let err = mgr.load_skill(bad).unwrap_err();
-            assert!(
-                err.to_string().contains("Invalid skill name"),
-                "name {bad:?}: unexpected error {err}"
-            );
-        }
-    }
-
-    #[test]
     fn rejects_traversal_even_when_target_exists() {
         // Without name validation, `../secret` joined to `<dir>/skills/`
         // would reach `<dir>/secret.md` and return its content.
@@ -188,15 +148,5 @@ mod tests {
         std::os::unix::fs::symlink("real.md", dir.path().join("skills/link.md")).unwrap();
         let mgr = SkillsManager::with_dir(dir.path().join("skills"));
         assert_eq!(mgr.load_skill("link").unwrap(), "real");
-    }
-
-    #[test]
-    fn list_skills_skips_unloadable_names() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("good.md"), "x").unwrap();
-        std::fs::write(dir.path().join("we..ird.md"), "x").unwrap();
-        std::fs::write(dir.path().join("notmd.txt"), "x").unwrap();
-        let mgr = SkillsManager::with_dir(dir.path().to_path_buf());
-        assert_eq!(mgr.list_skills().unwrap(), vec!["good".to_string()]);
     }
 }

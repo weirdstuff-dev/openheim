@@ -1,6 +1,36 @@
 use super::types::{AgentConfig, AppConfig, EmbeddingConfig, ProviderConfig, ProviderKind};
 use crate::error::{Error, Result};
 
+/// Whether `url`'s host is this machine: `localhost`, `127.0.0.0/8` or
+/// `::1`, judged as written, without a DNS lookup. Requests there are sent
+/// directly, never through a proxy (see `config::client`), so they don't
+/// leave the machine.
+pub(crate) fn is_loopback_url(url: &str) -> bool {
+    let Some(host) = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+    else {
+        return false;
+    };
+    // IPv6 literals come bracketed: `[::1]`.
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Whether `url` is plain `http://` to a host off this machine, where
+/// credentials would cross the network unencrypted. Loopback
+/// ([`is_loopback_url`]) never leaves the machine, so a key may go there
+/// over `http://`, as local model servers and proxies expect.
+pub(crate) fn is_insecure_remote_http(url: &str) -> bool {
+    match reqwest::Url::parse(url) {
+        Ok(parsed) => parsed.scheme() == "http" && !is_loopback_url(url),
+        Err(_) => url.starts_with("http://"),
+    }
+}
+
 fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<()> {
     if provider.api_base.is_empty() {
         return Err(Error::config(format!(
@@ -14,11 +44,11 @@ fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<()> {
             name, provider.api_base
         )));
     }
-    if provider.api_base.starts_with("http://") && !provider.resolve_api_key().is_empty() {
+    if is_insecure_remote_http(&provider.api_base) && !provider.resolve_api_key().is_empty() {
         return Err(Error::config(format!(
-            "Provider '{}' api_base '{}' uses http:// but has an API key configured; \
-             credentials must not be sent over an unencrypted connection. Use https:// \
-             or drop the API key for keyless local endpoints",
+            "Provider '{}' api_base '{}' uses http:// to a non-loopback host but has an API \
+             key configured; credentials must not be sent over an unencrypted connection. \
+             Use https://, or drop the API key for keyless endpoints",
             name, provider.api_base
         )));
     }
@@ -170,7 +200,6 @@ impl AppConfig {
 mod tests {
     use super::*;
     use crate::config::ProviderConfig;
-    use crate::core::models::Effort;
 
     fn sample_config() -> AppConfig {
         let mut config = AppConfig::new("openai");
@@ -197,167 +226,45 @@ mod tests {
         config
     }
 
-    #[test]
-    fn resolve_none_returns_default_provider() {
-        let config = sample_config();
-        let agent = config.resolve(None).unwrap();
-        assert_eq!(agent.provider_name, "openai");
-        assert_eq!(agent.model, "gpt-4");
-        assert_eq!(agent.api_key, "test-key");
-        assert_eq!(agent.max_iterations, 5);
-        assert_eq!(agent.timeout_secs, 60);
-        assert_eq!(agent.max_tokens, Some(4096));
-    }
-
-    #[test]
-    fn resolve_specific_model_finds_correct_provider() {
-        let config = sample_config();
-        let agent = config.resolve(Some("claude-3")).unwrap();
-        assert_eq!(agent.provider_name, "anthropic");
-        assert_eq!(agent.model, "claude-3");
-        assert_eq!(agent.api_key, "anthropic-key");
-        assert_eq!(agent.timeout_secs, 120); // default when None
-    }
-
-    #[test]
-    fn resolve_unknown_model_returns_error() {
-        let config = sample_config();
-        let err = config.resolve(Some("unknown-model")).unwrap_err();
-        assert!(err.to_string().contains("unknown-model"));
-    }
-
-    #[test]
-    fn resolve_default_errors_when_provider_missing() {
-        let config = AppConfig::new("nonexistent");
-        let err = config.resolve(None).unwrap_err();
-        assert!(err.to_string().contains("nonexistent"));
-    }
-
     fn provider_with_base(api_base: &str) -> ProviderConfig {
         ProviderConfig::for_tests(api_base, &["gpt-4"])
     }
 
+    // A key sent to this machine over http:// never crosses the network,
+    // as with a local proxy or model server that wants one.
     #[test]
-    fn validate_rejects_empty_api_base() {
-        let p = provider_with_base("");
-        let err = validate_provider("test", &p).unwrap_err();
-        assert!(err.to_string().contains("empty api_base"));
+    fn validate_allows_http_api_base_with_api_key_on_loopback() {
+        for base in [
+            "http://localhost:8080/v1",
+            "http://LOCALHOST/v1",
+            "http://127.0.0.1:4000",
+            "http://127.1.2.3/v1",
+            "http://[::1]:8080/v1",
+        ] {
+            let p = provider_with_base(base);
+            assert!(validate_provider("test", &p).is_ok(), "{base}");
+        }
     }
 
     #[test]
-    fn validate_rejects_non_http_api_base() {
-        let p = provider_with_base("ftp://example.com");
-        let err = validate_provider("test", &p).unwrap_err();
-        assert!(err.to_string().contains("http://") || err.to_string().contains("https://"));
-    }
-
-    #[test]
-    fn validate_rejects_http_api_base_with_api_key() {
-        let p = provider_with_base("http://example.com/v1");
-        let err = validate_provider("test", &p).unwrap_err();
-        assert!(err.to_string().contains("http://"));
-        assert!(err.to_string().contains("API key"));
-    }
-
-    #[test]
-    fn validate_allows_http_api_base_without_api_key() {
-        // Keyless local endpoints (e.g. Ollama) have nothing to leak, so
-        // plain http:// is fine as long as no credential is configured.
-        let mut p = provider_with_base("http://localhost:11434/v1");
-        p.api_key = None;
-        assert!(validate_provider("test", &p).is_ok());
-    }
-
-    #[test]
-    fn validate_rejects_default_model_not_in_models() {
-        let mut p = provider_with_base("https://api.example.com");
-        p.default_model = "gpt-5".into();
-        let err = validate_provider("test", &p).unwrap_err();
-        assert!(err.to_string().contains("gpt-5"));
-    }
-
-    #[test]
-    fn validate_rejects_a_zero_context_window() {
-        let mut p = provider_with_base("https://api.example.com");
-        p.context_window = Some(0);
-        let err = validate_provider("test", &p).unwrap_err();
-        assert!(err.to_string().contains("context_window"));
-    }
-
-    #[test]
-    fn context_window_is_carried_into_the_agent_config() {
-        let mut config = sample_config();
-        config.providers.get_mut("openai").unwrap().context_window = Some(128_000);
-        assert_eq!(config.resolve(None).unwrap().context_window, Some(128_000));
-        assert_eq!(
-            config.resolve(Some("claude-3")).unwrap().context_window,
-            None
-        );
-    }
-
-    #[test]
-    fn validate_accepts_valid_provider() {
-        let p = provider_with_base("https://api.example.com");
-        assert!(validate_provider("test", &p).is_ok());
-    }
-
-    #[test]
-    fn resolve_provider_default_uses_providers_default_model() {
-        let config = sample_config();
-        let agent = config.resolve_provider_default("anthropic").unwrap();
-        assert_eq!(agent.provider_name, "anthropic");
-        assert_eq!(agent.model, "claude-3");
-        assert_eq!(agent.timeout_secs, 120); // default when None
-    }
-
-    #[test]
-    fn resolve_provider_default_errors_on_unknown_provider() {
-        let config = sample_config();
-        let err = config.resolve_provider_default("nope").unwrap_err();
-        assert!(err.to_string().contains("nope"));
-    }
-
-    #[test]
-    fn resolve_with_provider_rejects_unlisted_model() {
-        let config = sample_config();
-        let err = config
-            .resolve_with_provider("openai", "gpt-99")
-            .unwrap_err();
-        assert!(err.to_string().contains("gpt-99"));
-        assert!(err.to_string().contains("openai"));
-    }
-
-    #[test]
-    fn resolve_with_provider_accepts_listed_model() {
-        let config = sample_config();
-        let agent = config
-            .resolve_with_provider("openai", "gpt-3.5-turbo")
-            .unwrap();
-        assert_eq!(agent.model, "gpt-3.5-turbo");
-    }
-
-    #[test]
-    fn resolve_embedding_none_without_provider() {
-        let mut config = sample_config();
-        assert!(config.resolve_embedding().unwrap().is_none());
-        config.memory = Some(crate::config::MemoryConfig::default());
-        assert!(config.resolve_embedding().unwrap().is_none());
-    }
-
-    #[test]
-    fn resolve_embedding_uses_named_provider_credentials() {
-        let mut config = sample_config();
-        config.memory = Some(crate::config::MemoryConfig {
-            embedding_provider: Some("openai".into()),
-            embedding_model: Some("text-embedding-3-small".into()),
-            ..Default::default()
-        });
-        let emb = config.resolve_embedding().unwrap().unwrap();
-        assert_eq!(emb.provider_name, "openai");
-        assert_eq!(emb.api_key, "test-key");
-        assert_eq!(emb.api_base, "https://api.openai.com/v1");
-        assert_eq!(emb.model, "text-embedding-3-small");
-        assert_eq!(emb.timeout_secs, 60);
+    fn only_plain_http_off_this_machine_is_insecure() {
+        for url in [
+            "http://example.com",
+            "http://192.168.1.10:8080",
+            "http://localhost.example.com",
+            "http://[::2]",
+            "http://0.0.0.0:8080",
+        ] {
+            assert!(is_insecure_remote_http(url), "{url}");
+        }
+        for url in [
+            "https://example.com",
+            "http://localhost",
+            "http://127.0.0.1",
+            "http://[::1]",
+        ] {
+            assert!(!is_insecure_remote_http(url), "{url}");
+        }
     }
 
     #[test]
@@ -404,129 +311,6 @@ mod tests {
 
     fn config_from_toml(providers: &str) -> AppConfig {
         toml::from_str(&format!("default_provider = \"x\"\n{providers}")).unwrap()
-    }
-
-    // The client follows `kind`, not the provider's name, so an Anthropic
-    // endpoint can be registered under any name.
-    #[test]
-    fn explicit_kind_wins_over_the_provider_name() {
-        let config = config_from_toml(
-            r#"
-            [providers.claude-work]
-            kind = "anthropic"
-            api_base = "https://api.anthropic.com/v1"
-            default_model = "claude-sonnet-4-6"
-            models = ["claude-sonnet-4-6"]
-
-            [providers.work-openai]
-            kind = "openai"
-            api_base = "https://api.openai.com/v1"
-            default_model = "gpt-4o"
-            models = ["gpt-4o"]
-            "#,
-        );
-
-        let claude = config.resolve_provider_default("claude-work").unwrap();
-        assert_eq!(claude.kind, ProviderKind::Anthropic);
-        assert_eq!(claude.provider_name, "claude-work");
-
-        let openai = config.resolve_provider_default("work-openai").unwrap();
-        assert_eq!(openai.kind, ProviderKind::OpenAi);
-    }
-
-    #[test]
-    fn replay_thinking_is_off_unless_set() {
-        let config = config_from_toml(
-            r#"
-            [providers.proxy]
-            api_base = "http://localhost:4000/v1"
-            default_model = "claude-sonnet-5-5"
-            models = ["claude-sonnet-5-5"]
-            replay_thinking = true
-
-            [providers.ollama]
-            api_base = "http://localhost:11434/v1"
-            default_model = "llama3"
-            models = ["llama3"]
-            "#,
-        );
-
-        assert!(
-            config
-                .resolve_provider_default("proxy")
-                .unwrap()
-                .replay_thinking
-        );
-        assert!(
-            !config
-                .resolve_provider_default("ollama")
-                .unwrap()
-                .replay_thinking
-        );
-    }
-
-    #[test]
-    fn effort_is_default_unless_set() {
-        let config = config_from_toml(
-            r#"
-            [providers.anthropic]
-            api_base = "https://api.anthropic.com/v1"
-            default_model = "claude-sonnet-5-5"
-            models = ["claude-sonnet-5-5"]
-            effort = "high"
-
-            [providers.ollama]
-            api_base = "http://localhost:11434/v1"
-            default_model = "llama3"
-            models = ["llama3"]
-            "#,
-        );
-
-        let effort = |name| config.resolve_provider_default(name).unwrap().effort;
-        assert_eq!(effort("anthropic"), Effort::High);
-        assert_eq!(effort("ollama"), Effort::Default);
-    }
-
-    #[test]
-    fn kind_is_inferred_from_the_name_when_unset() {
-        let config = config_from_toml(
-            r#"
-            [providers.anthropic]
-            api_base = "https://api.anthropic.com/v1"
-            default_model = "claude-sonnet-4-6"
-            models = ["claude-sonnet-4-6"]
-
-            [providers.gemini]
-            api_base = "https://generativelanguage.googleapis.com/v1beta"
-            default_model = "gemini-3.8-flash"
-            models = ["gemini-3.8-flash"]
-
-            [providers.ollama]
-            api_base = "http://localhost:11434/v1"
-            default_model = "llama3"
-            models = ["llama3"]
-            "#,
-        );
-
-        let kind = |name: &str| config.resolve_provider_default(name).unwrap().kind;
-        assert_eq!(kind("anthropic"), ProviderKind::Anthropic);
-        assert_eq!(kind("gemini"), ProviderKind::Gemini);
-        assert_eq!(kind("ollama"), ProviderKind::OpenAiCompatible);
-    }
-
-    #[test]
-    fn unknown_kind_is_a_parse_error() {
-        let result: std::result::Result<AppConfig, _> = toml::from_str(
-            r#"
-            default_provider = "x"
-            [providers.x]
-            kind = "claude"
-            api_base = "https://example.com"
-            default_model = "m"
-            models = ["m"]
-            "#,
-        );
-        assert!(result.is_err());
     }
 
     #[test]

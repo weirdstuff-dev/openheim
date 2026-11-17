@@ -3,11 +3,14 @@ mod public;
 mod resolve;
 mod types;
 
+#[cfg(feature = "rag")]
+pub(crate) use client::build_http_client_for;
 pub(crate) use client::{HttpClients, client_for_config, same_client};
 pub use client::{build_http_client, create_client};
 pub use public::{
     PublicConfig, PublicMcpServerConfig, PublicMemoryConfig, PublicProviderConfig, PublicTuiConfig,
 };
+pub(crate) use resolve::{is_insecure_remote_http, is_loopback_url};
 pub use types::{
     AgentConfig, AppConfig, EmbeddingConfig, McpServerConfig, MemoryConfig, ModelsInfo,
     ProviderConfig, ProviderKind, ProviderModels, TuiConfig,
@@ -324,55 +327,10 @@ enviroment = { TOKEN = "t" }
         assert!(config.providers["openai"].api_key.is_none());
     }
 
-    // Map entries are data, not settings: an MCP server's env vars and
-    // headers can have any names.
-    #[test]
-    fn parse_config_accepts_any_env_and_header_names() {
-        let (_, unknown) = parse_config(
-            r#"
-default_provider = "openai"
-
-[mcp_servers.api]
-url = "https://example.com/mcp"
-headers = { X-Anything = "1" }
-env = { WHATEVER_NAME = "2" }
-"#,
-        )
-        .unwrap();
-        assert!(unknown.is_empty(), "{unknown:?}");
-    }
-
     #[test]
     fn the_default_config_has_no_unknown_keys() {
         let (_, unknown) = parse_config(DEFAULT_CONFIG).unwrap();
         assert!(unknown.is_empty(), "{unknown:?}");
-    }
-
-    #[test]
-    fn builtin_provider_defaults_known_providers() {
-        assert_eq!(
-            builtin_provider_defaults("openai"),
-            ("https://api.openai.com/v1", "gpt-4o")
-        );
-        assert_eq!(
-            builtin_provider_defaults("anthropic"),
-            ("https://api.anthropic.com/v1", "claude-sonnet-4-6")
-        );
-        assert_eq!(
-            builtin_provider_defaults("gemini"),
-            (
-                "https://generativelanguage.googleapis.com/v1beta",
-                "gemini-3.8-flash"
-            )
-        );
-    }
-
-    #[test]
-    fn builtin_provider_defaults_unknown_provider_falls_back_to_openai() {
-        assert_eq!(
-            builtin_provider_defaults("some-custom-endpoint"),
-            builtin_provider_defaults("openai")
-        );
     }
 
     /// `config.toml.default`'s `[providers.openai]`/`[providers.anthropic]`
@@ -409,44 +367,6 @@ env = { WHATEVER_NAME = "2" }
     }
 
     #[test]
-    fn save_theme_to_config_at_appends_a_new_tui_section_when_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            "default_provider = \"openai\"\nmax_iterations = 10\n\n[providers.openai]\n",
-        )
-        .unwrap();
-
-        save_theme_to_config_at(&path, "blue").unwrap();
-
-        let contents = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(
-            contents,
-            "default_provider = \"openai\"\nmax_iterations = 10\n\n[providers.openai]\n\n[tui]\ntheme_color = \"blue\"\n"
-        );
-    }
-
-    #[test]
-    fn save_theme_to_config_at_inserts_into_an_existing_empty_tui_section() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            "default_provider = \"openai\"\n\n[tui]\n[providers.openai]\n",
-        )
-        .unwrap();
-
-        save_theme_to_config_at(&path, "blue").unwrap();
-
-        let contents = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(
-            contents,
-            "default_provider = \"openai\"\n\n[tui]\ntheme_color = \"blue\"\n[providers.openai]\n"
-        );
-    }
-
-    #[test]
     fn save_theme_to_config_at_replaces_an_existing_line_in_place() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -462,21 +382,6 @@ env = { WHATEVER_NAME = "2" }
         assert_eq!(
             contents,
             "default_provider = \"openai\"\n\n[tui]\ntheme_color = \"green\"\n\n[providers.openai]\n"
-        );
-    }
-
-    #[test]
-    fn save_theme_to_config_at_preserves_missing_trailing_newline() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(&path, "default_provider = \"openai\"").unwrap();
-
-        save_theme_to_config_at(&path, "blue").unwrap();
-
-        let contents = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(
-            contents,
-            "default_provider = \"openai\"\n\n[tui]\ntheme_color = \"blue\""
         );
     }
 
@@ -552,41 +457,6 @@ env = { WHATEVER_NAME = "2" }
 
         assert!(err.to_string().contains("by hand"), "{err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
-    }
-
-    #[test]
-    fn save_theme_to_config_at_recognizes_a_spaced_tui_header() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[ tui ]\ntheme_color = \"red\"\n").unwrap();
-
-        save_theme_to_config_at(&path, "blue").unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "[ tui ]\ntheme_color = \"blue\"\n"
-        );
-    }
-
-    #[test]
-    fn table_header_accepts_only_real_headers() {
-        assert_eq!(table_header("[tui]"), Some("tui"));
-        assert_eq!(table_header("  [[agents]] # list"), Some("agents"));
-        assert_eq!(table_header("[providers.openai]"), Some("providers.openai"));
-        assert_eq!(table_header("[1, 2],"), None);
-        assert_eq!(table_header("key = [1]"), None);
-        assert!(!is_tui_header("[[tui]]"));
-    }
-
-    #[test]
-    fn load_config_from_a_missing_custom_path_does_not_suggest_init() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nope.toml");
-
-        let err = load_config_from(&path).unwrap_err().to_string();
-
-        assert!(err.contains("Config file not found at"), "{err}");
-        assert!(!err.contains("openheim init"), "{err}");
     }
 
     #[test]

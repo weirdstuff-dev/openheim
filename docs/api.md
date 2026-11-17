@@ -484,7 +484,7 @@ Returns a list of all persisted conversation sessions, sorted newest-first by `u
 | `skills` | `string[]` | Skills loaded for this session |
 | `cwd` | `string \| null` | Working directory — populated after the first prompt in the session |
 | `context_usage` | `Usage \| undefined` | Snapshot of the most recent turn's context size (the last LLM call's token usage) — how full the context window is *right now*, not a running total. Omitted until the first turn completes. See `Usage` in [§4 TypeScript Interfaces](#4-typescript-interfaces). |
-| `mode` | `"code" \| "architect" \| undefined` | The session's mode as of its last turn; see [§3.2.7](#327-mode-and-effort-level) |
+| `mode` | `"execute" \| "plan" \| undefined` | The session's mode as of its last turn; see [§3.2.7](#327-mode-and-effort-level) |
 | `effort` | `string \| undefined` | The effort level the session set (`default`/`low`/`medium`/`high`); omitted when it runs at its provider's |
 
 > Sessions are persisted to `~/.openheim/history/{uuid}.json` (metadata) and `~/.openheim/history/{uuid}.jsonl` (messages, appended incrementally as the conversation grows) and survive server restarts.
@@ -1256,24 +1256,25 @@ Each session has a **mode** and an **effort level**, set independently of each o
 
 | Mode | Tools offered |
 |---|---|
-| `code` (default) | Every tool, each call through the permission prompt |
-| `architect` | Only read-only tools (`read_file`, `list_dir`, `search`, `web_fetch`, `search_memory`, and custom tools that declare `read_only`) |
+| `execute` (default) | Every tool, each call through the permission prompt |
+| `plan` | Only read-only tools (`read_file`, `list_dir`, `search`, `web_fetch`, `search_memory`, and custom tools that declare `read_only`) |
 
 | Effort level | What is sent to the provider |
 |---|---|
 | `default` | Nothing: the provider's own default applies. For Claude models that don't think by default, that means no thinking. |
 | `low` / `medium` / `high` | Anthropic: adaptive thinking with `output_config.effort`. OpenAI and OpenAI-compatible: `reasoning_effort`. Gemini: `thinkingConfig.thinkingLevel`. |
 
-A session starts in `code` mode at its provider's `effort` setting (see [configuration](configuration.md#providersname)). A level set on a session stays through later model switches; a session that never set one follows the provider of whichever model it's on.
+A session starts in `execute` mode at its provider's `effort` setting (see [configuration](configuration.md#providersname)). A level set on a session stays through later model switches; a session that never set one follows the provider of whichever model it's on.
 
 `session/new` and `session/load` responses describe both: `modes` lists the modes with `currentModeId`, and `configOptions` holds the `model` selector and the `effort` selector (category `thought_level`):
 
 ```json
 {
   "sessionId": "550e8400-e29b-41d4-a716-446655440000",
-  "modes": { "currentModeId": "code", "availableModes": [{ "id": "code", "name": "Code" }, { "id": "architect", "name": "Architect" }] },
+  "modes": { "currentModeId": "execute", "availableModes": [{ "id": "execute", "name": "Execute" }, { "id": "plan", "name": "Plan" }] },
   "configOptions": [
-    { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "gpt-4-turbo", "options": [ … ] },
+    { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "openai/gpt-4-turbo",
+      "options": [{ "value": "openai/gpt-4-turbo", "name": "gpt-4-turbo", "description": "openai", "_meta": { "provider": "openai" } }, …] },
     { "id": "effort", "name": "Effort", "category": "thought_level", "type": "select", "currentValue": "default",
       "options": [{ "value": "default", "name": "Default" }, { "value": "low", "name": "Low" }, { "value": "medium", "name": "Medium" }, { "value": "high", "name": "High" }] }
   ]
@@ -1284,7 +1285,7 @@ A session starts in `code` mode at its provider's `effort` setting (see [configu
 
 ```json
 { "jsonrpc": "2.0", "id": 7, "method": "session/set_mode",
-  "params": { "sessionId": "550e8400-…", "modeId": "architect" } }
+  "params": { "sessionId": "550e8400-…", "modeId": "plan" } }
 ```
 
 **Set the effort level** (or, with `configId: "model"`, the model):
@@ -1293,6 +1294,8 @@ A session starts in `code` mode at its provider's `effort` setting (see [configu
 { "jsonrpc": "2.0", "id": 8, "method": "session/set_config_option",
   "params": { "sessionId": "550e8400-…", "configId": "effort", "value": "high" } }
 ```
+
+Each `model` option's value is `provider/model`, so a model configured under two providers appears once per provider and either can be picked; its `name` is the model and its `description` the provider. Setting the model also accepts a bare model name, which resolves to the first provider (alphabetically) that lists it. A value that is also a `provider/model` id for a configured provider is read as that id: with provider `anthropic` listing `claude` and provider `router` listing `anthropic/claude`, `anthropic/claude` selects `anthropic`, and `router`'s model is selected with `router/anthropic/claude`.
 
 The `session/set_config_option` response's `configOptions` holds both selectors at their new values; switching the model can change the effort level too, when the session never set one. An unknown mode, config option or value is an `-32602` error.
 
@@ -1746,7 +1749,7 @@ interface ConversationMeta {
   skills: string[];
   cwd?: string | null;  // populated after first prompt in the session
   context_usage?: Usage; // omitted until the first turn completes
-  mode?: "code" | "architect";  // as of the last turn
+  mode?: "execute" | "plan";  // as of the last turn
   effort?: Effort;   // omitted unless the session set one
 }
 
@@ -2185,7 +2188,7 @@ Except for `session_busy` / `session_locked` / `http_error`, `data` is a human-r
 ### Connection Lifecycle
 
 - The WebSocket stays open until the client disconnects or sends a `Close` frame.
-- If the server shuts down (SIGINT), it drains gracefully.
+- On SIGINT or SIGTERM the server shuts down gracefully: it stops accepting connections, cancels the turns in flight and gives them up to 5 seconds to end. A turn that ends in time releases its session lock. In `openheim serve`, a turn still running after that is dropped as the process exits, which releases its lock too; an embedder calling `transport::ws::serve` keeps such a turn, and its lock, until the turn ends or its runtime is dropped.
 - If the connection drops, the client should reconnect and re-initialize (call `initialize`, then either `session/new` for a fresh session or `session/load` to resume an existing one).
 - Conversation history is persisted to disk — sessions survive WebSocket reconnections and server restarts.
 
@@ -2218,7 +2221,7 @@ Except for `session_busy` / `session_locked` / `http_error`, `data` is a human-r
 | `agent` | `session/list` | List persisted sessions (ACP native) |
 | `agent` | `session/load` | Resume a persisted session + replay history |
 | `agent` | `session/prompt` | Send a message in the active session |
-| `agent` | `session/set_mode` | Switch a session between `code` and `architect` |
+| `agent` | `session/set_mode` | Switch a session between `execute` and `plan` |
 | `agent` | `session/set_config_option` | Set a session's `model` or `effort` level |
 | `fs` | `watch` | Start watching directory |
 | `fs` | `unwatch` | Stop watching |

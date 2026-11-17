@@ -11,7 +11,9 @@
 [![Rust](https://img.shields.io/badge/rust-1.91%2B-orange)](https://www.rust-lang.org)
 </div>
 
-**A fast, multi-provider LLM agent runtime built in Rust.**
+**The same agent, everywhere you run it.**
+
+One open-source runtime for your terminal, your editor, a server or your own Rust app. Bring any model.
 
 <div align="center">
 <table>
@@ -395,6 +397,8 @@ cargo test
 cargo fmt --check
 cargo clippy
 ```
+
+Most behaviour is covered by the black-box suite in `tests/e2e` (`cargo test --test e2e`). It drives the library and the `openheim` binary (`run`, `acp`, `serve`) against an in-process fake LLM provider that speaks the OpenAI, Anthropic and Gemini wire formats, and a stub MCP server. A scenario scripts the model's replies, runs a prompt, and checks what can be seen from outside: events, files in the workspace, saved sessions and the requests sent to the provider. The fixtures are in `tests/e2e/common`. Unit tests are kept for logic that is hard to reach from outside, such as stream parsing quirks, lease and path checks, and context fitting.
 
 ---
 

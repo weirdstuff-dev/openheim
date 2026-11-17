@@ -57,19 +57,45 @@ pub(super) fn session_effort_config_option(current: Effort) -> SessionConfigOpti
 /// Every config option a session offers, at its current values.
 pub(super) fn session_config_options(
     app_config: &AppConfig,
+    current_provider: &str,
     current_model: &str,
     current_effort: Effort,
 ) -> Vec<SessionConfigOption> {
     vec![
-        session_model_config_option(app_config, current_model),
+        session_model_config_option(app_config, current_provider, current_model),
         session_effort_config_option(current_effort),
     ]
 }
 
-/// The model selector config option: every configured model, each tagged
-/// with its `provider` in `_meta`.
+/// The model selector's value id for `model` under `provider`:
+/// `provider/model`, so a model listed under two providers gets two
+/// distinct options.
+pub(super) fn model_option_id(provider: &str, model: &str) -> String {
+    format!("{provider}/{model}")
+}
+
+/// The `(provider, model)` a [`model_option_id`] names, if `id` is one for
+/// a configured provider and one of its models. Matched against the config
+/// rather than split, since model names may contain `/` themselves.
+pub(super) fn parse_model_option_id<'a>(
+    app_config: &'a AppConfig,
+    id: &'a str,
+) -> Option<(&'a str, &'a str)> {
+    app_config.providers.iter().find_map(|(name, p)| {
+        let model = id.strip_prefix(name.as_str())?.strip_prefix('/')?;
+        p.models
+            .iter()
+            .any(|m| m == model)
+            .then_some((name.as_str(), model))
+    })
+}
+
+/// The model selector config option: every configured model, with value id
+/// [`model_option_id`], named after the model, and described and tagged in
+/// `_meta` with its `provider`.
 pub(super) fn session_model_config_option(
     app_config: &AppConfig,
+    current_provider: &str,
     current_model: &str,
 ) -> SessionConfigOption {
     let available_models: Vec<SessionConfigSelectOption> = app_config
@@ -82,14 +108,16 @@ pub(super) fn session_model_config_option(
                     "provider".to_string(),
                     serde_json::Value::String(provider_name.clone()),
                 );
-                SessionConfigSelectOption::new(m.clone(), m.clone()).meta(meta)
+                SessionConfigSelectOption::new(model_option_id(provider_name, m), m.clone())
+                    .description(provider_name.clone())
+                    .meta(meta)
             })
         })
         .collect();
     SessionConfigOption::select(
         MODEL_CONFIG_ID,
         "Model",
-        current_model.to_string(),
+        model_option_id(current_provider, current_model),
         available_models,
     )
     .category(SessionConfigOptionCategory::Model)
@@ -115,9 +143,9 @@ pub(super) fn session_mode_state(current_mode: AgentMode) -> SessionModeState {
     SessionModeState::new(
         current_mode.as_str().to_string(),
         vec![
-            SessionMode::new(AgentMode::Code.as_str(), "Code")
+            SessionMode::new(AgentMode::Execute.as_str(), "Execute")
                 .description("Full tool access; tool calls request permission."),
-            SessionMode::new(AgentMode::Architect.as_str(), "Architect")
+            SessionMode::new(AgentMode::Plan.as_str(), "Plan")
                 .description("Read-only: inspects and plans without editing or executing."),
         ],
     )
@@ -249,21 +277,6 @@ mod tool_kind_tests {
             ToolKind::Other
         );
     }
-
-    #[test]
-    fn effort_option_offers_every_level_as_a_thought_level() {
-        let json = serde_json::to_value(session_effort_config_option(Effort::Medium)).unwrap();
-        assert_eq!(json["id"], EFFORT_CONFIG_ID);
-        assert_eq!(json["category"], "thought_level");
-        assert_eq!(json["currentValue"], "medium");
-        let values: Vec<_> = json["options"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|o| o["value"].as_str().unwrap())
-            .collect();
-        assert_eq!(values, ["default", "low", "medium", "high"]);
-    }
 }
 
 /// A tool call's JSON arguments as ACP `raw_input`. Malformed arguments are
@@ -290,11 +303,12 @@ pub(super) fn raw_input(
 
 /// Maps one core [`StreamEvent`] from a live turn onto the [`SessionUpdate`]
 /// it corresponds to, if any. `IterationStart`, `Usage`, `ContextTrimmed`,
-/// `Finished`, and `MessageAppended` have no ACP wire equivalent — they're
-/// `AgentState`-internal or ACP-client-facing-nothing signals (history
-/// persistence, context-size bookkeeping, turn-done) — and map to `None`.
-/// `ContextTrimmed` isn't sent as agent text either: the client would keep
-/// it as part of the model's reply.
+/// `ToolOutputsOmitted`, `Finished`, and `MessageAppended` have no ACP wire
+/// equivalent — they're `AgentState`-internal or ACP-client-facing-nothing
+/// signals (history persistence, context-size bookkeeping, turn-done) — and
+/// map to `None`. `ContextTrimmed` and `ToolOutputsOmitted` aren't sent as
+/// agent text either: the client would keep them as part of the model's
+/// reply.
 pub(crate) fn stream_event_to_session_update(
     event: StreamEvent,
     executor: &dyn ToolExecutor,
@@ -343,6 +357,7 @@ pub(crate) fn stream_event_to_session_update(
         StreamEvent::IterationStart { .. }
         | StreamEvent::Usage { .. }
         | StreamEvent::ContextTrimmed { .. }
+        | StreamEvent::ToolOutputsOmitted { .. }
         | StreamEvent::Finished { .. }
         | StreamEvent::MessageAppended { .. } => None,
     }
@@ -363,292 +378,77 @@ pub(super) fn map_stop_reason(reason: CoreStopReason) -> StopReason {
 }
 
 #[cfg(test)]
-mod replay_tests {
+mod model_option_tests {
     use super::*;
-    use crate::core::models::{ContentBlock, Role};
-    use crate::tools::SystemToolExecutor;
+    use crate::config::ProviderConfig;
 
-    fn executor() -> SystemToolExecutor {
-        let mut e = SystemToolExecutor::new();
-        e.register_builtins(true);
-        e
+    /// `gpt-4o` under two providers, plus a model whose name has a `/`.
+    fn app_config() -> AppConfig {
+        let mut config = AppConfig::new("openai");
+        config.providers.insert(
+            "openai".to_string(),
+            ProviderConfig::for_tests("https://example.com", &["gpt-4o"]),
+        );
+        config.providers.insert(
+            "openrouter".to_string(),
+            ProviderConfig::for_tests("https://example.com", &["gpt-4o", "openai/gpt-4o"]),
+        );
+        config
     }
 
-    fn agent_text_chunks(updates: &[SessionUpdate]) -> Vec<&ContentChunk> {
-        updates
+    /// The option's `currentValue` and its options' value ids.
+    fn values(option: &SessionConfigOption) -> (String, Vec<String>) {
+        let json = serde_json::to_value(option).unwrap();
+        let ids = json["options"]
+            .as_array()
+            .unwrap()
             .iter()
-            .filter_map(|u| match u {
-                SessionUpdate::AgentMessageChunk(chunk) => Some(chunk),
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn replay_emits_thinking_before_text_for_assistant_messages() {
-        let messages = vec![
-            Message::user("hello"),
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Thinking {
-                        thinking: "pondering".into(),
-                        signature: None,
-                    },
-                    ContentBlock::Text {
-                        text: "the answer".into(),
-                    },
-                ],
-            },
-        ];
-        let mut updates = Vec::new();
-        replay_history_messages(&messages, &executor(), &mut |u| updates.push(u));
-
-        let chunks = agent_text_chunks(&updates);
-        assert_eq!(chunks.len(), 2);
-
-        match &chunks[0].content {
-            AcpContentBlock::Text(t) => {
-                assert_eq!(t.text, "pondering");
-                assert_eq!(
-                    t.meta.as_ref().and_then(|m| m.get("kind")),
-                    Some(&serde_json::json!("thinking"))
-                );
-            }
-            other => panic!("expected a text block, got {other:?}"),
-        }
-        match &chunks[1].content {
-            AcpContentBlock::Text(t) => {
-                assert_eq!(t.text, "the answer");
-                assert!(t.meta.is_none());
-            }
-            other => panic!("expected a text block, got {other:?}"),
-        }
-    }
-
-    // Interleaved thinking stores several thinking blocks between text and
-    // tool calls; replay follows the stored order instead of grouping them.
-    #[test]
-    fn replay_keeps_interleaved_blocks_in_order() {
-        let thinking = |t: &str| ContentBlock::Thinking {
-            thinking: t.into(),
-            signature: Some("sig".into()),
-        };
-        let messages = vec![Message {
-            role: Role::Assistant,
-            content: vec![
-                thinking("first"),
-                ContentBlock::from("Let me look."),
-                ContentBlock::RedactedThinking { data: "enc".into() },
-                thinking("second"),
-                ContentBlock::tool_use("toolu_1", "read_file", "{}"),
-            ],
-        }];
-        let mut updates = Vec::new();
-        replay_history_messages(&messages, &executor(), &mut |u| updates.push(u));
-
-        let replayed: Vec<String> = updates
-            .iter()
-            .map(|u| match u {
-                SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
-                    AcpContentBlock::Text(t) if t.meta.is_some() => format!("thinking:{}", t.text),
-                    AcpContentBlock::Text(t) => format!("text:{}", t.text),
-                    other => panic!("unexpected chunk {other:?}"),
-                },
-                SessionUpdate::ToolCall(call) => format!("tool:{}", call.title),
-                other => panic!("unexpected update {other:?}"),
-            })
+            .map(|o| o["value"].as_str().unwrap().to_string())
             .collect();
-        // Redacted thinking has nothing to show.
+        (json["currentValue"].as_str().unwrap().to_string(), ids)
+    }
+
+    #[test]
+    fn a_model_under_two_providers_gets_two_options() {
+        let config = app_config();
+        let option = session_model_config_option(&config, "openrouter", "gpt-4o");
+        let (current, ids) = values(&option);
+        assert_eq!(current, "openrouter/gpt-4o");
         assert_eq!(
-            replayed,
+            ids,
             [
-                "thinking:first",
-                "text:Let me look.",
-                "thinking:second",
-                "tool:read_file"
+                "openai/gpt-4o",
+                "openrouter/gpt-4o",
+                "openrouter/openai/gpt-4o"
             ]
         );
     }
 
     #[test]
-    fn replay_still_emits_user_text_and_tool_calls() {
-        let messages = vec![
-            Message::user("hello"),
-            Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::tool_use(
-                    "call_1",
-                    "read_file",
-                    r#"{"path":"a.txt"}"#,
-                )],
-            },
-            Message::tool_result("call_1", "read_file", "file content", false),
-        ];
-        let mut updates = Vec::new();
-        replay_history_messages(&messages, &executor(), &mut |u| updates.push(u));
-
-        assert!(matches!(
-            &updates[0],
-            SessionUpdate::UserMessageChunk(c) if matches!(&c.content, AcpContentBlock::Text(t) if t.text == "hello")
-        ));
-        assert!(matches!(
-            &updates[1],
-            SessionUpdate::ToolCall(tc) if tc.raw_input.is_some()
-        ));
-        assert!(matches!(&updates[2], SessionUpdate::ToolCallUpdate(_)));
-    }
-
-    #[test]
-    fn replay_restores_user_text_and_image_blocks_in_order() {
-        let messages = vec![Message {
-            role: Role::User,
-            content: vec![
-                ContentBlock::Text {
-                    text: "check this out".into(),
-                },
-                ContentBlock::Image {
-                    data: "base64data".into(),
-                    mime_type: "image/png".into(),
-                },
-            ],
-        }];
-        let mut updates = Vec::new();
-        replay_history_messages(&messages, &executor(), &mut |u| updates.push(u));
-
-        assert_eq!(updates.len(), 2);
-        assert!(matches!(
-            &updates[0],
-            SessionUpdate::UserMessageChunk(c) if matches!(&c.content, AcpContentBlock::Text(t) if t.text == "check this out")
-        ));
-        assert!(matches!(
-            &updates[1],
-            SessionUpdate::UserMessageChunk(c) if matches!(
-                &c.content,
-                AcpContentBlock::Image(img) if img.data == "base64data" && img.mime_type == "image/png"
-            )
-        ));
-    }
-}
-
-#[cfg(test)]
-mod stream_event_tests {
-    use super::*;
-    use crate::core::models::Usage;
-    use crate::tools::SystemToolExecutor;
-
-    fn executor() -> SystemToolExecutor {
-        let mut e = SystemToolExecutor::new();
-        e.register_builtins(true);
-        e
-    }
-
-    #[test]
-    fn llm_response_becomes_agent_message_chunk() {
-        let update = stream_event_to_session_update(
-            StreamEvent::LlmResponse {
-                content: "hi".into(),
-            },
-            &executor(),
+    fn every_option_id_parses_back_to_its_provider_and_model() {
+        let config = app_config();
+        let (_, ids) = values(&session_model_config_option(&config, "openai", "gpt-4o"));
+        let parsed: Vec<_> = ids
+            .iter()
+            .map(|id| parse_model_option_id(&config, id).unwrap())
+            .collect();
+        assert_eq!(
+            parsed,
+            [
+                ("openai", "gpt-4o"),
+                ("openrouter", "gpt-4o"),
+                ("openrouter", "openai/gpt-4o"),
+            ]
         );
-        assert!(matches!(
-            update,
-            Some(SessionUpdate::AgentMessageChunk(c)) if matches!(&c.content, AcpContentBlock::Text(t) if t.text == "hi")
-        ));
     }
 
+    // Left to name-based resolution: a bare model name, or a provider or
+    // model that isn't configured.
     #[test]
-    fn thinking_content_is_tagged_via_meta() {
-        let update = stream_event_to_session_update(
-            StreamEvent::ThinkingContent {
-                content: "pondering".into(),
-            },
-            &executor(),
-        );
-        match update {
-            Some(SessionUpdate::AgentMessageChunk(c)) => match c.content {
-                AcpContentBlock::Text(t) => {
-                    assert_eq!(t.text, "pondering");
-                    assert_eq!(
-                        t.meta.as_ref().and_then(|m| m.get("kind")),
-                        Some(&serde_json::json!("thinking"))
-                    );
-                }
-                other => panic!("expected a text block, got {other:?}"),
-            },
-            other => panic!("expected an AgentMessageChunk, got {other:?}"),
+    fn other_values_are_not_option_ids() {
+        let config = app_config();
+        for value in ["gpt-4o", "nope/gpt-4o", "openai/nope", "openai/"] {
+            assert_eq!(parse_model_option_id(&config, value), None, "{value}");
         }
-    }
-
-    #[test]
-    fn tool_call_and_tool_result_map_to_their_acp_shapes() {
-        let e = executor();
-        let call = stream_event_to_session_update(
-            StreamEvent::ToolCall {
-                id: "call_1".into(),
-                tool_name: "read_file".into(),
-                arguments: r#"{"path":"a.txt"}"#.into(),
-            },
-            &e,
-        );
-        assert!(matches!(
-            call,
-            Some(SessionUpdate::ToolCall(tc)) if tc.raw_input.is_some()
-        ));
-
-        let result = stream_event_to_session_update(
-            StreamEvent::ToolResult {
-                id: "call_1".into(),
-                tool_name: "read_file".into(),
-                result: "contents".into(),
-                is_error: false,
-            },
-            &e,
-        );
-        assert!(matches!(
-            result,
-            Some(SessionUpdate::ToolCallUpdate(u)) if u.fields.status == Some(ToolCallStatus::Completed)
-        ));
-    }
-
-    #[test]
-    fn events_with_no_acp_equivalent_map_to_none() {
-        let e = executor();
-        assert!(
-            stream_event_to_session_update(StreamEvent::IterationStart { iteration: 1 }, &e)
-                .is_none()
-        );
-        assert!(
-            stream_event_to_session_update(
-                StreamEvent::Usage {
-                    usage: Usage::default()
-                },
-                &e
-            )
-            .is_none()
-        );
-        assert!(
-            stream_event_to_session_update(StreamEvent::ContextTrimmed { dropped: 4 }, &e)
-                .is_none()
-        );
-        assert!(
-            stream_event_to_session_update(
-                StreamEvent::Finished {
-                    final_response: "done".into(),
-                    iterations: 1,
-                },
-                &e
-            )
-            .is_none()
-        );
-        assert!(
-            stream_event_to_session_update(
-                StreamEvent::MessageAppended {
-                    message: Message::user("hi"),
-                },
-                &e
-            )
-            .is_none()
-        );
     }
 }

@@ -2,7 +2,7 @@
 name = "openheim"
 version = "0.18.0"
 edition = "2024"
-description = "A fast, multi-provider LLM agent runtime written in Rust"
+description = "Multi-provider LLM agent runtime: terminal, ACP for editors, WebSocket server, or embed it in your Rust app"
 license = "MIT"
 repository = "https://github.com/weirdstuff-dev/openheim"
 homepage = "https://openheim.io"
@@ -37,7 +37,7 @@ tui = ["dep:crossterm", "dep:ratatui", "dep:unicode-width", "dep:unicode-segment
 # Agent Client Protocol (`openheim::acp`, `openheim::transport::{run,stdio,ws}`).
 acp = ["dep:agent-client-protocol"]
 # WebSocket/REST server (`openheim::transport::ws`). `tokio/signal` backs the
-# ctrl-c shutdown handler; nothing outside this feature needs it.
+# Ctrl-C/SIGTERM shutdown handler; nothing outside this feature needs it.
 server = ["dep:axum", "dep:notify", "dep:tower-http", "dep:walkdir", "acp", "tokio/signal"]
 # Tool-driven long-term memory (`openheim::rag`: `remember`, `search_memory`,
 # `forget`): bundled SQLite with FTS5 + the sqlite-vec extension.
@@ -79,6 +79,19 @@ sqlite-vec = { version = "0.1.9", optional = true }
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal", "hostname"] }
 
+# `proc_pidinfo`, for a session lease holder's process start time.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["test-util", "macros"] }
+rmcp = { version = "3.4", default-features = false, features = ["server", "transport-streamable-http-server"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
+
+# Black-box suite: drives the library and the `openheim` binary against
+# in-process fake LLM providers and MCP servers.
+[[test]]
+name = "e2e"
+path = "tests/e2e/main.rs"
+required-features = ["cli"]

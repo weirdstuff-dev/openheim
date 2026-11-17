@@ -47,7 +47,7 @@ work_dir = "/home/user/projects/myproject"
 
 ### Security notes
 
-**`work_dir`** is enforced at the application layer for `read_file`, `write_file`, `edit_file`, `list_dir`, and `search`, and for the `/ws` filesystem sidecar (all `fs`-channel operations are validated against the same boundary). Within it, each session's tools work in the session's `cwd` (ACP `session/new`, `SessionBuilder::cwd`, or the directory openheim was started from) when that is inside `work_dir`: relative paths resolve there and `execute_command` runs there. A `cwd` outside `work_dir` is ignored and `work_dir` is used instead; it never widens what's reachable. Symlinks are followed and canonicalized so they cannot be used to escape the boundary. Shell commands (`execute_command`) are launched with `work_dir` as their working directory so relative paths resolve correctly, but absolute paths inside a shell command are not blocked — OS-level sandboxing (chroot, containers) is required for full shell isolation. Shell commands are additionally bounded: each runs in its own process group, is killed after a 120-second timeout (or on turn cancellation, or when the `openheim` process gets SIGINT, SIGTERM or SIGHUP), and has stdout/stderr capped at 64 KiB per stream with a truncation marker.
+**`work_dir`** is enforced at the application layer for `read_file`, `write_file`, `edit_file`, `list_dir`, and `search`, and for the `/ws` filesystem sidecar (all `fs`-channel operations are validated against the same boundary). Within it, each session's tools work in the session's `cwd` (ACP `session/new`, `SessionBuilder::cwd`, or the directory openheim was started from) when that is inside `work_dir`: relative paths resolve there and `execute_command` runs there. A `cwd` outside `work_dir` is ignored and `work_dir` is used instead; it never widens what's reachable. Symlinks are followed and canonicalized so they cannot be used to escape the boundary. Shell commands (`execute_command`) are launched with `work_dir` as their working directory so relative paths resolve correctly, but absolute paths inside a shell command are not blocked — OS-level sandboxing (chroot, containers) is required for full shell isolation. Shell commands are additionally bounded: each runs in its own process group, is killed after a 120-second timeout (or on turn cancellation, or when the `openheim` process gets SIGINT, SIGTERM or SIGHUP), and has stdout/stderr capped at 64 KiB per stream with a truncation marker. A process a command starts in the background (`server &`) doesn't hold up the call: it returns once the shell exits, and the process keeps running with its later output discarded until it exits or `openheim` does. That holds whether or not it redirects its output; only a process that leaves the command's process group (`setsid`) outlives `openheim`.
 
 Every tool result, built-in, MCP or custom, is cut to 128 KiB (with a note saying how much was left out) before it goes into the conversation, since the history is resent with every request.
 
@@ -80,6 +80,8 @@ Each key under `[providers]` defines a provider. The key name is the provider id
 | `replay_thinking` | boolean | `false` | For an OpenAI-compatible endpoint in front of Anthropic models, such as a LiteLLM proxy. Such an endpoint streams Claude's thinking with signatures (LiteLLM's `thinking_blocks`), and Anthropic needs the signed thinking sent back with tool results to keep thinking through a tool loop. With this on, the replies since the last user message send theirs back as `thinking_blocks`. Older turns, and thinking without a signature (DeepSeek, GLM, …), are never sent. Only the `openai` and `openai_compatible` kinds read it. Leave it off for endpoints that don't send signatures: they don't need it, and a strict one may reject the field. |
 
 Key resolution order: `env_var` (if set and non-empty) → `api_key` → empty string (for keyless providers like Ollama).
+
+A key is refused with a plain `http://` `api_base` to another machine, so it never crosses the network unencrypted. Loopback (`localhost`, `127.0.0.0/8`, `[::1]`) is allowed over `http://`, e.g. a local proxy or model server that wants a key. Requests to loopback are always sent directly, ignoring any proxy set in the environment (`HTTP_PROXY` and the like), so the key doesn't leave the machine.
 
 ### Examples
 
@@ -158,7 +160,7 @@ url = "https://api.firecrawl.dev/mcp"
 headers = { Authorization = "Bearer my-key" }
 ```
 
-`headers` is rejected over a plain `http://` URL — credentials must not be sent unencrypted; use `https://` or drop the headers for a keyless local server.
+`headers` is rejected over a plain `http://` URL to another machine — credentials must not cross the network unencrypted; use `https://` or drop the headers. Loopback (`localhost`, `127.0.0.0/8`, `[::1]`) is allowed over `http://`, since it never leaves the machine: requests there ignore any proxy set in the environment.
 
 The `name` key is sanitized when building tool names: anything but ASCII letters, digits and underscores (hyphens and spaces included) becomes an underscore. So `my-db` → `my_db__query_table`. The tool's own name keeps hyphens but is sanitized the same way otherwise, so `fs.read` is exposed as `files__fs_read`. A full name starting with a digit gets a leading `_`, and one longer than 64 characters is shortened and ends in a hash of the original, so every provider accepts it.
 
@@ -187,7 +189,7 @@ Notes are capped at 4000 characters each. Enabling embeddings later back-fills v
 
 Memory keeps working when the embeddings provider doesn't. Rate limits (429), server errors (500, 502, 503, 504, 529), timeouts and failed connections are retried twice with a short backoff, or after the provider's `Retry-After` when it's 10 seconds or less (a longer one isn't retried). If embedding still fails, `remember` and `edit_memory` save the note without a vector (it's keyword-searchable at once and embedded by a later back-fill), and `search_memory` falls back to keyword search and says so in its result, even when nothing matched. A failing back-fill is logged and retried on a later call. A note the provider refuses outright (not a transient error) is skipped by the back-fill until openheim restarts, so it can't hold up the others; it stays keyword-searchable.
 
-In `architect` mode only `search_memory` is available; `remember`, `edit_memory`, and `forget` are treated as writes.
+In `plan` mode only `search_memory` is available; `remember`, `edit_memory`, and `forget` are treated as writes.
 
 ---
 

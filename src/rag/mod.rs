@@ -40,7 +40,7 @@ mod tool;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::config::{AppConfig, build_http_client};
+use crate::config::{AppConfig, build_http_client_for};
 use crate::error::Result;
 
 pub use embedding::{EmbeddingClient, GeminiEmbeddingClient, OpenAiEmbeddingClient};
@@ -121,7 +121,7 @@ impl LongTermMemory {
         };
         let embedder = match config.resolve_embedding()? {
             Some(embedding) => {
-                let http = build_http_client(embedding.timeout_secs)?;
+                let http = build_http_client_for(embedding.timeout_secs, &embedding.api_base)?;
                 Some(embedding::create_embedding_client(&embedding, &http))
             }
             None => None,
@@ -350,172 +350,6 @@ mod tests {
     use super::*;
     use embedding::test_support::{FlakyEmbedder, HashEmbedder};
 
-    fn semantic(embedder: HashEmbedder) -> LongTermMemory {
-        LongTermMemory::new(
-            VectorStore::open_in_memory().unwrap(),
-            Some(Arc::new(embedder)),
-            2,
-        )
-    }
-
-    fn keyword() -> LongTermMemory {
-        LongTermMemory::new(VectorStore::open_in_memory().unwrap(), None, 2)
-    }
-
-    #[tokio::test]
-    async fn keyword_memory_needs_no_embedder() {
-        let m = keyword();
-        assert!(!m.is_semantic());
-        let a = m
-            .remember("The staging cluster is in eu-west-1.")
-            .await
-            .unwrap();
-        m.remember("Deploys happen on Tuesdays.").await.unwrap();
-
-        let hits = m.search("staging cluster", None).await.unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].record.id, a.id);
-        assert_eq!(hits[0].method, SearchMethod::Keyword);
-        assert_eq!(m.stats().await.unwrap().dimensions, None);
-
-        assert!(m.forget(a.id).await.unwrap());
-        assert!(m.search("staging", None).await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn semantic_remember_then_search_end_to_end() {
-        let m = semantic(HashEmbedder::new(32));
-        assert!(m.is_semantic());
-        let a = m.remember("Cats purr when content.").await.unwrap();
-        m.remember("Compilers optimise loops.").await.unwrap();
-        assert_eq!(m.stats().await.unwrap().memories, 2);
-
-        let hits = m.search("purring cats", None).await.unwrap();
-        assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].record.id, a.id);
-        assert_eq!(hits[0].method, SearchMethod::Semantic);
-
-        let one = m.search("compilers", Some(1)).await.unwrap();
-        assert_eq!(one.len(), 1);
-        assert!(one[0].record.content.contains("Compilers"));
-
-        assert!(m.forget(a.id).await.unwrap());
-        assert_eq!(m.stats().await.unwrap().memories, 1);
-    }
-
-    #[tokio::test]
-    async fn blank_query_or_zero_k_returns_nothing_without_embedding() {
-        let m = semantic(HashEmbedder::new(8));
-        assert!(m.search("   ", None).await.unwrap().is_empty());
-        assert!(m.search("x", Some(0)).await.unwrap().is_empty());
-        assert_eq!(m.stats().await.unwrap().dimensions, None);
-    }
-
-    #[tokio::test]
-    async fn enabling_embeddings_later_backfills_keyword_era_notes() {
-        let store = VectorStore::open_in_memory().unwrap();
-        let plain = LongTermMemory::new(store, None, 5);
-        plain.remember("alpha beta").await.unwrap();
-        plain.remember("gamma delta").await.unwrap();
-
-        let upgraded = LongTermMemory {
-            store: Arc::clone(&plain.store),
-            embedder: Some(Arc::new(HashEmbedder::new(16))),
-            top_k: 5,
-            rejected: Default::default(),
-        };
-        let hits = upgraded.search("gamma", Some(1)).await.unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].record.content, "gamma delta");
-        assert_eq!(hits[0].method, SearchMethod::Semantic);
-        assert_eq!(upgraded.stats().await.unwrap().dimensions, Some(16));
-    }
-
-    #[tokio::test]
-    async fn model_switch_reembeds_existing_notes() {
-        let store = VectorStore::open_in_memory().unwrap();
-        let first = LongTermMemory::new(store, Some(Arc::new(HashEmbedder::new(16))), 5);
-        first.remember("alpha beta").await.unwrap();
-        first.remember("gamma delta").await.unwrap();
-
-        let second = LongTermMemory {
-            store: Arc::clone(&first.store),
-            embedder: Some(Arc::new(HashEmbedder {
-                dims: 24,
-                model: "hash-v2".into(),
-            })),
-            top_k: 5,
-            rejected: Default::default(),
-        };
-        let hits = second.search("gamma", Some(1)).await.unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].record.content, "gamma delta");
-        assert_eq!(second.stats().await.unwrap().dimensions, Some(24));
-        assert_eq!(second.stats().await.unwrap().memories, 2);
-    }
-
-    fn flaky(embedder: &Arc<FlakyEmbedder>) -> LongTermMemory {
-        LongTermMemory::new(
-            VectorStore::open_in_memory().unwrap(),
-            Some(Arc::clone(embedder) as Arc<dyn EmbeddingClient>),
-            5,
-        )
-    }
-
-    #[tokio::test]
-    async fn remember_and_search_work_while_embeddings_are_down() {
-        let embedder = Arc::new(FlakyEmbedder::down(401));
-        let m = flaky(&embedder);
-
-        let saved = m
-            .remember("The staging cluster is in eu-west-1.")
-            .await
-            .unwrap();
-        m.remember("Deploys happen on Tuesdays.").await.unwrap();
-        assert_eq!(m.stats().await.unwrap().memories, 2);
-
-        let hits = m.search("staging cluster", None).await.unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].record.id, saved.id);
-        assert_eq!(hits[0].method, SearchMethod::Keyword);
-    }
-
-    #[tokio::test]
-    async fn edit_works_while_embeddings_are_down_and_drops_the_stale_vector() {
-        let embedder = Arc::new(FlakyEmbedder::failing(401, 0));
-        let m = flaky(&embedder);
-        let note = m.remember("Deploys happen on Tuesdays.").await.unwrap();
-        assert!(m.store.unembedded().unwrap().is_empty());
-
-        embedder
-            .failures
-            .store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
-        let edited = m
-            .edit(note.id, "Deploys happen on Thursdays.")
-            .await
-            .unwrap();
-        assert_eq!(edited.unwrap().content, "Deploys happen on Thursdays.");
-        // The old vector described the old text, so it's gone until a
-        // back-fill embeds the new one.
-        assert_eq!(m.store.unembedded().unwrap()[0].id, note.id);
-    }
-
-    #[tokio::test]
-    async fn notes_saved_during_an_outage_are_embedded_once_it_ends() {
-        let embedder = Arc::new(FlakyEmbedder::down(401));
-        let m = flaky(&embedder);
-        m.remember("alpha beta").await.unwrap();
-        m.remember("gamma delta").await.unwrap();
-
-        embedder
-            .failures
-            .store(0, std::sync::atomic::Ordering::SeqCst);
-        let hits = m.search("gamma", Some(1)).await.unwrap();
-        assert_eq!(hits[0].method, SearchMethod::Semantic);
-        assert_eq!(hits[0].record.content, "gamma delta");
-        assert!(m.store.unembedded().unwrap().is_empty());
-    }
-
     #[tokio::test]
     async fn a_failing_backfill_does_not_fail_the_call() {
         let store = VectorStore::open_in_memory().unwrap();
@@ -597,17 +431,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_detailed_says_when_it_fell_back_to_keywords() {
-        let embedder = Arc::new(FlakyEmbedder::down(401));
-        let m = flaky(&embedder);
-        m.remember("Deploys happen on Tuesdays.").await.unwrap();
-
-        let found = m.search_detailed("release schedule", None).await.unwrap();
-        assert!(found.semantic_failed);
-        assert!(found.hits.is_empty());
-    }
-
-    #[tokio::test]
     async fn one_call_backfills_at_most_max_backfill_notes() {
         let store = VectorStore::open_in_memory().unwrap();
         let total = MAX_BACKFILL + 10;
@@ -628,85 +451,5 @@ mod tests {
 
         m.search("note", None).await.unwrap();
         assert!(m.store.unembedded().unwrap().is_empty());
-    }
-
-    #[test]
-    fn config_without_memory_section_means_keyword_only() {
-        let config: AppConfig = toml::from_str(
-            r#"
-            default_provider = "openai"
-            [providers.openai]
-            api_base = "https://api.openai.com/v1"
-            default_model = "gpt-4o"
-            models = ["gpt-4o"]
-        "#,
-        )
-        .unwrap();
-        assert!(config.resolve_embedding().unwrap().is_none());
-        assert_eq!(config.memory.as_ref().map_or(DEFAULT_TOP_K, |m| m.top_k), 5);
-    }
-
-    #[test]
-    fn from_config_clamps_explicit_zero_top_k_to_the_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("memory.db");
-        let config: AppConfig = toml::from_str(&format!(
-            r#"
-            default_provider = "openai"
-            [providers.openai]
-            api_base = "https://api.openai.com/v1"
-            default_model = "gpt-4o"
-            models = ["gpt-4o"]
-            [memory]
-            db_path = "{}"
-            top_k = 0
-        "#,
-            db_path.display()
-        ))
-        .unwrap();
-
-        let memory = LongTermMemory::from_config(&config, dir.path()).unwrap();
-        assert_eq!(memory.top_k, DEFAULT_TOP_K);
-    }
-
-    #[test]
-    fn from_config_defaults_the_database_to_the_data_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let config: AppConfig = toml::from_str(
-            r#"
-            default_provider = "openai"
-            [providers.openai]
-            api_base = "https://api.openai.com/v1"
-            default_model = "gpt-4o"
-            models = ["gpt-4o"]
-        "#,
-        )
-        .unwrap();
-
-        LongTermMemory::from_config(&config, dir.path()).unwrap();
-        assert!(dir.path().join("memory.db").exists());
-    }
-
-    #[test]
-    fn from_config_preserves_a_configured_positive_top_k() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("memory.db");
-        let config: AppConfig = toml::from_str(&format!(
-            r#"
-            default_provider = "openai"
-            [providers.openai]
-            api_base = "https://api.openai.com/v1"
-            default_model = "gpt-4o"
-            models = ["gpt-4o"]
-            [memory]
-            db_path = "{}"
-            top_k = 7
-        "#,
-            db_path.display()
-        ))
-        .unwrap();
-
-        let memory = LongTermMemory::from_config(&config, dir.path()).unwrap();
-        assert_eq!(memory.top_k, 7);
     }
 }

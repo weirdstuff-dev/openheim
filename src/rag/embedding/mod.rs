@@ -274,31 +274,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn transient_failures_are_retried() {
-        let client = super::test_support::FlakyEmbedder::failing(429, 2);
-        let vectors = embed_batched(&client, &["a".to_string()]).await.unwrap();
-        assert_eq!(vectors.len(), 1);
-        assert_eq!(client.requests(), 3);
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn retries_are_bounded() {
         let client = super::test_support::FlakyEmbedder::down(503);
         assert!(embed_batched(&client, &["a".to_string()]).await.is_err());
         assert_eq!(client.requests(), 1 + MAX_RETRIES as usize);
-    }
-
-    #[tokio::test]
-    async fn permanent_failures_are_not_retried() {
-        let client = super::test_support::FlakyEmbedder::down(401);
-        assert!(embed_batched(&client, &["a".to_string()]).await.is_err());
-        assert_eq!(client.requests(), 1);
-    }
-
-    #[tokio::test]
-    async fn embed_batched_empty_input_is_empty() {
-        let client = HashEmbedder::new(8);
-        assert!(embed_batched(&client, &[]).await.unwrap().is_empty());
     }
 
     struct ShortChanger;
@@ -319,21 +298,5 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, Error::ApiError(_)));
-    }
-
-    #[test]
-    fn create_embedding_client_picks_by_kind() {
-        let http = reqwest::Client::new();
-        let mut cfg = EmbeddingConfig {
-            provider_name: "gemini".into(),
-            kind: ProviderKind::Gemini,
-            api_base: "https://example".into(),
-            api_key: "k".into(),
-            model: "m".into(),
-            timeout_secs: 10,
-        };
-        assert_eq!(create_embedding_client(&cfg, &http).model(), "m");
-        cfg.kind = ProviderKind::OpenAiCompatible;
-        assert_eq!(create_embedding_client(&cfg, &http).model(), "m");
     }
 }

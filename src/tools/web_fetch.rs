@@ -386,86 +386,6 @@ impl ToolHandler for WebFetchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::test_support::TurnHarness;
-
-    #[test]
-    fn definition_has_correct_name() {
-        let tool = WebFetchTool;
-        let def = tool.definition();
-        assert_eq!(def.function.name, "web_fetch");
-        assert_eq!(def.tool_type, "function");
-    }
-
-    #[tokio::test]
-    async fn execute_errors_for_malformed_json() {
-        let harness = TurnHarness::new();
-        let result = WebFetchTool.execute("not json", &harness.turn()).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn execute_errors_for_missing_url() {
-        let harness = TurnHarness::new();
-        let result = WebFetchTool
-            .execute(r#"{"other": "value"}"#, &harness.turn())
-            .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("url"));
-    }
-
-    #[tokio::test]
-    async fn rejects_non_http_scheme() {
-        let err = fetch_url("file:///etc/passwd")
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("scheme"), "unexpected error: {err}");
-    }
-
-    #[tokio::test]
-    async fn rejects_loopback_host() {
-        let err = fetch_url("http://127.0.0.1/")
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("not publicly routable"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn rejects_localhost_hostname() {
-        let err = fetch_url("http://localhost/")
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("non-public address"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn rejects_cloud_metadata_address() {
-        let err = fetch_url("http://169.254.169.254/latest/meta-data/")
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("not publicly routable"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn rejects_private_ip_range() {
-        let err = fetch_url("http://10.0.0.1/").await.unwrap_err().to_string();
-        assert!(
-            err.contains("not publicly routable"),
-            "unexpected error: {err}"
-        );
-    }
 
     #[test]
     fn html_to_text_strips_tags_and_scripts() {
@@ -607,14 +527,6 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
-        );
-    }
-
-    #[test]
-    fn args_struct_matches_schema() {
-        crate::tools::args::assert_args_match_schema::<WebFetchArgs>(
-            &WebFetchTool,
-            serde_json::json!({"url": "https://example.com"}),
         );
     }
 }
